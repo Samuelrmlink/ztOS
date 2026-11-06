@@ -12032,7 +12032,7 @@ static void pointer_destroy(struct wl_listener *listener, void *data) {
 /*
  * $XDG_RUNTIME_DIR/ztmetro.ctl takes one command per line, in points:
  *
- *     down ID X Y | move ID X Y | up ID | tap X Y | screen off | screen on | state
+ *     down ID X Y | move ID X Y | up ID | cancel ID | tap X Y | screen off | screen on | state
  *
  * It goes through the same code as the touchscreen, which is what makes the
  * shell testable over ssh.
@@ -12047,6 +12047,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 		touch_update(server, 1000 + id, x, y, t);
 	} else if (sscanf(line, "up %d", &id) == 1) {
 		touch_end(server, 1000 + id, t, false);
+	} else if (sscanf(line, "cancel %d", &id) == 1) {
+		touch_end(server, 1000 + id, t, true);
 	} else if (sscanf(line, "tap %lf %lf", &x, &y) == 2) {
 		touch_begin(server, 1999, x, y, t);
 		touch_end(server, 1999, t + 30, false);
