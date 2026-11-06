@@ -9,8 +9,11 @@
 # sequence does instead: key, 7A 00, key. It stays off across sleeps, so with this done
 # the panel can really sleep (panel_sleep=Y), which is about 157 mA of the idle draw.
 #
-# Only writes are sent: a DCS read disturbs this panel. Each is sent three times,
-# because a long packet is now and then not taken.
+# Only writes are sent: a DCS read disturbs this panel, so nothing can confirm it took.
+# A long packet is now and then not taken, and these race the frames going out, so the
+# whole sequence is sent several times, spread over a few frames. The timer sends it
+# again later: if every send at boot were lost, the bands would stay until a reboot.
+import glob
 import mmap
 import os
 import struct
@@ -28,11 +31,16 @@ def wr(o, v):
     struct.pack_into("<I", m, o, v)
 
 
+busy = 0
+
+
 def idle():                                   # the header FIFO is empty
+    global busy
     for _ in range(5000):
         if rd(FIFOSTAT) & 0x400:
             return
         time.sleep(0.00002)
+    busy += 1
 
 
 def cmd(*b):                                  # one DCS write
@@ -49,8 +57,15 @@ def cmd(*b):                                  # one DCS write
     time.sleep(0.001)
 
 
-for _ in range(3):
+SENDS = 6
+for _ in range(SENDS):
     cmd(0xF0, 0x5A, 0x5A)                     # level 2 key
     cmd(0x7A, 0x00)                           # self mask off
     cmd(0xF0, 0xA5, 0xA5)
-    time.sleep(0.03)
+    time.sleep(0.05)
+
+screen = "?"
+for path in glob.glob("/sys/class/drm/card*-*/enabled"):
+    with open(path) as f:
+        screen = f.read().strip()
+print(f"ztos-panel-selfmask: sent {SENDS} times, screen {screen}, FIFO still busy {busy} times", flush=True)

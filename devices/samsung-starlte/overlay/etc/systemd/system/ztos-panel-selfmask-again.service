@@ -1,0 +1,7 @@
+[Unit]
+Description=ztOS: send the panel's self mask off again, in case every send at boot was lost
+After=ztos-panel-selfmask.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ztos-panel-selfmask

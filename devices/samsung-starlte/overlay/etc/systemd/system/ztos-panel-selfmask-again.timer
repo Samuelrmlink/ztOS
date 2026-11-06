@@ -1,0 +1,10 @@
+[Unit]
+Description=ztOS: send the panel's self mask off again after boot
+
+[Timer]
+# twice, at these two times, and not again
+OnBootSec=45s
+OnBootSec=105s
+
+[Install]
+WantedBy=timers.target
