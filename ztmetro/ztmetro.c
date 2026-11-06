@@ -35,6 +35,7 @@
 #include "retro/dm-launcher.h"
 #include "retro/dm-chrome.h"
 #include "demoloop/stop-key.h"
+#include "power/power-key.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -882,6 +883,8 @@ struct zt_server {
 	int hwkey_held;			/* the nav button whose own key is down; -1: none */
 	bool hwkey_long;		/* ... and held long enough to count as a long press */
 	struct wl_event_source *hwkey_timer;
+	struct power_key power_key;
+	struct wl_event_source *power_key_timer;
 
 	/* on-screen keyboard */
 	struct wlr_keyboard vkbd;
@@ -10182,7 +10185,11 @@ static void dialog_handle_action(struct zt_server *server, const char *act) {
         auth_finish(server); return;
     }
 	wlr_log(WLR_INFO, "dialog: executing action '%s'", act);
-	if (strcmp(act, "reboot_recovery") == 0) {
+	if (strcmp(act, "power_off") == 0) {
+		run_detached("/bin/sh", "-c", "sudo -n /usr/bin/systemctl poweroff 2>/dev/null || systemctl poweroff", NULL);
+	} else if (strcmp(act, "reboot") == 0) {
+		run_detached("/bin/sh", "-c", "sudo -n /usr/bin/systemctl reboot 2>/dev/null || systemctl reboot", NULL);
+	} else if (strcmp(act, "reboot_recovery") == 0) {
 		pipe_tell("/run/ztoscsf.ctl", "reboot_recovery\n");
 		run_detached("reboot", "recovery", NULL, NULL);
 		run_detached("systemctl", "reboot", NULL, NULL);
@@ -12537,18 +12544,51 @@ static bool hardware_nav_keys(void) {
 	}
 	return back && home;
 }
+static void power_key_apply(struct zt_server *server, enum power_key_action action) {
+	switch (action) {
+	case POWER_KEY_WAKE:
+		screen_set(server, true);
+		activity(server);
+		break;
+	case POWER_KEY_SLEEP:
+		screen_set(server, false);
+		break;
+	case POWER_KEY_OPEN_MENU:
+		/* These screens take every touch, so its buttons couldn't be tapped.
+		 * A longer hold still reaches logind's HandlePowerKeyLongPress. */
+		if (server->splash || server->sensorhub_fail_screen) break;
+		activity(server);
+		dialog_show(server, "Power", "Tap below or press the power button to cancel.",
+			"power off", "power_off", "reboot", "reboot");
+		break;
+	case POWER_KEY_CLOSE_MENU:
+		dialog_close(server);
+		activity(server);
+		break;
+	case POWER_KEY_NOTHING:
+		break;
+	}
+}
+
+static int power_key_held(void *data) {
+	struct zt_server *server = data;
+	power_key_apply(server, power_key_hold_elapsed(&server->power_key));
+	return 0;
+}
+
 
 static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	struct zt_keyboard *keyboard = wl_container_of(listener, keyboard, key);
 	struct zt_server *server = keyboard->server;
 	struct wlr_keyboard_key_event *event = data;
 	if (event->keycode == KEY_POWER) {
-		/* the power key sleeps and wakes the screen, and goes no further */
+		/* the power key is the shell's alone: see power/power-key.h */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-			screen_set(server, !server->screen_on);
-			if (server->screen_on) {
-				activity(server);
-			}
+			power_key_apply(server, power_key_pressed(&server->power_key, server->screen_on));
+			wl_event_source_timer_update(server->power_key_timer, POWER_HOLD_MS);
+		} else {
+			wl_event_source_timer_update(server->power_key_timer, 0);
+			power_key_apply(server, power_key_released(&server->power_key, server->dialog_open));
 		}
 		return;
 	}
@@ -14540,6 +14580,7 @@ int main(int argc, char *argv[]) {
 	wlr_seat_set_keyboard(server.seat, &server.vkbd);
 
 	server.long_press_timer = wl_event_loop_add_timer(server.loop, long_press_fired, &server);
+	server.power_key_timer = wl_event_loop_add_timer(server.loop, power_key_held, &server);
 	server.hwkey_timer = wl_event_loop_add_timer(server.loop, hwkey_held_fired, &server);
 	server.press_timer = wl_event_loop_add_timer(server.loop, press_fired, &server);
 	server.key_repeat_timer = wl_event_loop_add_timer(server.loop, key_repeat_fired, &server);
