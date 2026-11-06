@@ -1932,6 +1932,11 @@ static void bt_parse(char *text) {
 	}
 }
 
+/* What the user asked for while a scan was running: it runs when that ends, so
+ * a tap on a device is never lost. A scan is only ever skipped, not queued. */
+static char bt_pending[600];
+static void bt_refresh(const char *first);
+
 static void bt_ready(int fd, void *data) {
 	ssize_t n = read(fd, bt_buf + bt_len, sizeof(bt_buf) - 1 - bt_len);
 	if (n > 0) {
@@ -1946,6 +1951,12 @@ static void bt_ready(int fd, void *data) {
 	bt.loading = false;
 	zmc_busy(false);
 	zmc_redraw();
+	if (bt_pending[0]) {
+		char next[sizeof(bt_pending)];
+		snprintf(next, sizeof(next), "%s", bt_pending);
+		bt_pending[0] = 0;
+		bt_refresh(next);
+	}
 }
 
 /* Ask again, after running `first` (a shell command, or NULL). */
@@ -1960,6 +1971,15 @@ static void bt_refresh(const char *first) {
 	zmc_watch_fd(fileno(bt_pipe), bt_ready, NULL);
 	if (zmc.page == PAGE_BLUETOOTH) {
 		zmc_busy(true);	/* (the hub's line fills in by itself) */
+	}
+}
+
+/* A user's own action: now, or as soon as the running command ends. */
+static void bt_request(const char *command) {
+	if (bt_pipe) {
+		snprintf(bt_pending, sizeof(bt_pending), "%s", command);
+	} else {
+		bt_refresh(command);
 	}
 }
 
@@ -2058,9 +2078,18 @@ static double draw_bluetooth(cairo_t *cr) {
 }
 
 /* While the page is open: look again every 15 s (8 s of searching). */
+/* Discoverable only while the page is open. BlueZ's own timeout ends it if
+ * Settings goes away without leaving the page, so the tick renews it. */
+static bool bt_discoverable;
+
 static void bt_tick(void) {
-	if (zmc.page == PAGE_BLUETOOTH && bt.on && bt_menu < 0) {
-		bt_refresh("bluetoothctl --timeout 8 scan on >/dev/null 2>&1");
+	if (zmc.page != PAGE_BLUETOOTH || bt_menu >= 0 || bt_pending[0]) return;
+	if (bt.on) {
+		bt_refresh("bluetoothctl discoverable on >/dev/null 2>&1; "
+			"bluetoothctl --timeout 8 scan on >/dev/null 2>&1");
+	} else {
+		/* opened before bluetoothd was up, or switched on elsewhere: notice */
+		bt_refresh(NULL);
 	}
 }
 
@@ -3208,7 +3237,8 @@ static void activate(int action, int arg) {
 	case ACT_BT_POWER:
 		bt.on = !bt.on;
 		bt.status[0] = 0;
-		bt_refresh(bt.on ? "bluetoothctl power on >/dev/null 2>&1; bluetoothctl discoverable on >/dev/null 2>&1; "
+		bt_request(bt.on ? "bluetoothctl power on >/dev/null 2>&1; bluetoothctl pairable on >/dev/null 2>&1; "
+			"bluetoothctl discoverable on >/dev/null 2>&1; "
 			"bluetoothctl --timeout 8 scan on >/dev/null 2>&1" :
 			"bluetoothctl power off >/dev/null 2>&1");
 		break;
@@ -3224,7 +3254,7 @@ static void activate(int action, int arg) {
 	}
 	case ACT_BT_SCAN:
 		snprintf(bt.status, sizeof(bt.status), "searching for 10 seconds…");
-		bt_refresh("bluetoothctl --timeout 10 scan on >/dev/null 2>&1");
+		bt_request("bluetoothctl --timeout 10 scan on >/dev/null 2>&1");
 		zmc_redraw();
 		break;
 	case ACT_BT_DEVICE:
@@ -3248,7 +3278,7 @@ static void activate(int action, int arg) {
 				d->mac, d->mac, d->mac);
 			snprintf(bt.status, sizeof(bt.status), "pairing with %.60s…", d->name);
 		}
-		bt_refresh(cmd);
+		bt_request(cmd);
 		zmc_redraw();
 		break;
 	}
@@ -3820,6 +3850,12 @@ static bool back(void) {
 
 static void arrived(int page) {
 	if (page != PAGE_AUDIO) ringtone_stop();
+	if (page != PAGE_BLUETOOTH && bt_discoverable) {
+		bt_discoverable = false;
+		if (system("bluetoothctl discoverable off >/dev/null 2>&1 &") != 0) {
+			fprintf(stderr, "ztsettings: could not end Bluetooth discovery\n");
+		}
+	}
     if (page == PAGE_DATE) { date_focus = -1; date_job(false); }
 	if (page == PAGE_MAIN || page == PAGE_APPS) {
 		hub_tab = page;	/* swiped to: where back returns to from under it */
@@ -3835,7 +3871,11 @@ static void arrived(int page) {
 		/* found by others while it is open, and looking for them */
 		bt.status[0] = 0;
 		bt_menu = -1;
-		bt_refresh("bluetoothctl discoverable on >/dev/null 2>&1; bluetoothctl --timeout 8 scan on >/dev/null 2>&1");
+		bt_discoverable = true;
+		/* the real state first: the switch must not read Off through a scan */
+		bt_refresh(NULL);
+		bt_request("bluetoothctl pairable on >/dev/null 2>&1; bluetoothctl discoverable on >/dev/null 2>&1; "
+			"bluetoothctl --timeout 8 scan on >/dev/null 2>&1");
 		zmc_every(15000, bt_tick);
 	} else if (page == PAGE_MAIN) {
 		bt_refresh(NULL);	/* the hub's line says whether it is on */
