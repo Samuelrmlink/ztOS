@@ -12543,6 +12543,7 @@ static bool hardware_nav_keys(void) {
 	}
 	return back && home;
 }
+
 static void power_key_apply(struct zt_server *server, enum power_key_action action) {
 	switch (action) {
 	case POWER_KEY_WAKE:
@@ -12574,7 +12575,6 @@ static int power_key_held(void *data) {
 	power_key_apply(server, power_key_hold_elapsed(&server->power_key));
 	return 0;
 }
-
 
 static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	struct zt_keyboard *keyboard = wl_container_of(listener, keyboard, key);
@@ -14579,8 +14579,8 @@ int main(int argc, char *argv[]) {
 	wlr_seat_set_keyboard(server.seat, &server.vkbd);
 
 	server.long_press_timer = wl_event_loop_add_timer(server.loop, long_press_fired, &server);
-	server.power_key_timer = wl_event_loop_add_timer(server.loop, power_key_held, &server);
 	server.hwkey_timer = wl_event_loop_add_timer(server.loop, hwkey_held_fired, &server);
+	server.power_key_timer = wl_event_loop_add_timer(server.loop, power_key_held, &server);
 	server.press_timer = wl_event_loop_add_timer(server.loop, press_fired, &server);
 	server.key_repeat_timer = wl_event_loop_add_timer(server.loop, key_repeat_fired, &server);
 	server.repeat_index = -1;
