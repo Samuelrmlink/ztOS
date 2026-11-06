@@ -6839,6 +6839,9 @@ static int boot_check_sensorhub(void *data) {
 			wl_event_source_remove(server->boot_check_timer);
 			server->boot_check_timer = NULL;
 		}
+		/* moving on by itself: without this the warning's buttons stay live,
+		 * unseen, under the lock screen and take every touch */
+		server->sensorhub_fail_screen = false;
 		boot_anim_start(server);
 		return 0;
 	}
