@@ -129,7 +129,8 @@ below. Nothing is written to EFS.
 keeps `umts_ipc0`/`umts_rfs0` open, and writes `/run/zrn-modem/status`
 (sim, operator, bars 0..5, registered, tech, airplane, data, wifi_bars),
 poking the shell's control pipe ("modem") on any change. It takes
-`airplane on|off`, `data on|off` and `sms NUMBER TEXT` on
+`airplane on|off` (kept across restarts in
+`/var/lib/ztoscorenetworking/airplane`), `data on|off` and `sms NUMBER TEXT` on
 `/run/zrn-modem.ctl`. ztMETRO draws the bars, the data type beside them and
 the operator's name from that file.
 

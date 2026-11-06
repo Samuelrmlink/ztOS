@@ -7986,17 +7986,11 @@ static void shade_activate(struct zt_server *server, int index) {
 	case 100 + Q_LOCATION:
 	case 100 + Q_NONE:
 		break;	/* nothing behind them yet: see shade_tile_draw */
-	case 100 + Q_AIRPLANE: /* the modem's radio (ztoscorenetworkingd) and Wi-Fi */
+	case 100 + Q_AIRPLANE: /* the modem's radio only: Wi-Fi and Bluetooth keep their own tiles */
 		hap(server, HAP_CLICK, HG_SYSTEM);
 		server->shade_airplane = !server->shade_airplane;
 		server->cell_airplane = server->shade_airplane;
 		modem_tell(server->shade_airplane ? "airplane on\n" : "airplane off\n");
-		server->shade_wifi = !server->shade_airplane;
-		run_detached("nmcli", "radio", "wifi", server->shade_airplane ? "off" : "on");
-		if (!server->shade_wifi) {
-			server->wifi_bars = -1;
-			server->wifi_read_ms = now_ms();
-		}
 		draw_shade(server);
 		draw_status(server);
 		damage(server);

@@ -422,7 +422,8 @@ actions four across (each its own quad, leaning under the finger like a tile),
 CLEAR ALL and COLLAPSE, the notifications, and a bar in the accent colour to
 push it back up by. Its contents do not travel: they sit at the top and the
 bar comes down under the finger uncovering them, while what is behind goes
-dim. It is only redrawn when a toggle changes. Wi-Fi and airplane mode go through `nmcli`; rotation lock,
+dim. It is only redrawn when a toggle changes. Wi-Fi goes through `nmcli`. Airplane mode turns off only the modem's radio and
+stays on across restarts; Wi-Fi and Bluetooth keep their own tiles. Rotation lock,
 flashlight, location and brightness only keep their state, as the kernel has
 nothing behind them yet, and there is no notification service.
 

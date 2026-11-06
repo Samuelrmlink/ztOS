@@ -1023,6 +1023,23 @@ static void at_readable(void)
 #define DATA_WISH	"/var/lib/ztoscorenetworking/data_on"
 #define DATA_MARK	"/var/lib/ztoscorenetworking/data_trying"	/* see data_keep */
 #define APN_FILE	"/etc/ztoscorenetworking/apn"
+#define AIRPLANE_WISH	"/var/lib/ztoscorenetworking/airplane"	/* kept across restarts */
+
+static void airplane_set(bool on)
+{
+	airplane_asked = on;
+	if (on) {
+		int fd = open(AIRPLANE_WISH, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+		if (fd >= 0)
+			close(fd);
+		else
+			fprintf(stderr, "ztoscorenetworkingd: airplane: cannot keep the setting: %s\n", strerror(errno));
+	} else {
+		unlink(AIRPLANE_WISH);
+	}
+	queue_at(on ? "AT+CFUN=4" : "AT+CFUN=1");
+	queue_at("AT+CFUN?");
+}
 
 static void data_wish(bool on, bool say)
 {
@@ -2012,16 +2029,10 @@ static void command(char *l)
 		return;
 	}
 	if (!strncmp(l, "fake_", 5)) return;
-	if (!strcmp(l, "airplane on"))
-		airplane_asked = true;
-	else if (!strcmp(l, "airplane off"))
-		airplane_asked = false;
 	if (!strcmp(l, "airplane on")) {
-		queue_at("AT+CFUN=4");
-		queue_at("AT+CFUN?");
+		airplane_set(true);
 	} else if (!strcmp(l, "airplane off")) {
-		queue_at("AT+CFUN=1");
-		queue_at("AT+CFUN?");
+		airplane_set(false);
 	} else if (!strcmp(l, "data on")) {
 		data_wish(true, true);
 	} else if (!strcmp(l, "data off")) {
@@ -2229,6 +2240,10 @@ static void at_setup(void)
 	queue_at("AT+CGREG=2");
 	queue_at("AT+CEREG=2");
 	queue_at("AT+CNMI=2,1,0,0,0");	/* new messages reported */
+	if (airplane_asked) {
+		queue_at("AT+CFUN=4");	/* after a restart too */
+		queue_at("AT+CFUN?");
+	}
 	queue_at("AT+CLIP=1");		/* and who is calling */
 	queue_at("AT+CMGF=0");
 	queue_at("AT+CMGL=4");		/* whatever came while nobody was listening */
@@ -2311,6 +2326,7 @@ int main(int argc, char **argv)
 	chmod(CTL, 0666);
 	ctl_fd = open(CTL, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 
+	airplane_asked = access(AIRPLANE_WISH, F_OK) == 0;
 	at_setup();
 	poll_state();
 	next_poll = ms() + PERIOD_S * 1000;
