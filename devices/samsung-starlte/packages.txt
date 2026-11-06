@@ -8,3 +8,7 @@ bluez-utils
 # Charger type from the MUIC over I2C (zrn-charge): without i2cget it exits and the
 # input stays at the driver default, so a wall charger charged at USB speed.
 i2c-tools
+
+# The speaker and microphone limiters in /etc/pipewire/pipewire.conf.d: without
+# this, PipeWire stops at startup and the phone has no audio at all.
+lsp-plugins-ladspa
