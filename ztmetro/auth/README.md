@@ -21,6 +21,66 @@ permissions remain with polkit. The agent builds against polkit and GLib,
 already provided by the base package set; it does not need Python GI bindings.
 It starts with the compositor and exits when its parent exits.
 
+## Bluetooth pairing
+
+`ztos-bt-agent` (rootfs/overlay/usr/local/bin, a user service) is BlueZ's default
+agent, with capability KeyboardDisplay. It registers again whenever bluetoothd
+restarts. Settings pairs with plain `bluetoothctl pair`, which uses it.
+
+The agent asks through a sheet (`auth/btpair.c`). The sheet is the password sheet
+with another field. While it shows, `auth_active` is set too, so its keys take
+the same path and no other dialog or touch gets past it. Polkit's prompt is told
+BUSY while the sheet is up; if polkit got there first, the request waits for it.
+
+| BlueZ asks | Sheet | Buttons |
+|---|---|---|
+| RequestConfirmation | a number: does the other device show it? | yes, no |
+| RequestPinCode | type a PIN (1 to 16 letters and digits, starts on the digits page) | pair, cancel |
+| RequestPasskey | type a passkey (6 digits, on a keypad) | pair, cancel |
+| DisplayPinCode, DisplayPasskey | a number to type on the other device | cancel |
+| RequestAuthorization | pairing with no code: allow it? | pair, cancel |
+| AuthorizeService | a paired device wants to use a service | allow, deny |
+
+A typed PIN is shown, not starred: it is short and copied from the other device,
+and it has no use once paired. It stays out of logs and is wiped from the shell
+on answer, cancel and sleep.
+
+**When it asks:** only while the adapter is discoverable, which Settings keeps on
+while its Bluetooth page is open. BlueZ doesn't say which side started a pairing,
+so everything else is refused with no sheet. A pairing started in a terminal
+needs `bluetoothctl discoverable on`.
+
+**Never by itself:** nothing answers yes without a person, with one exception:
+AuthorizeService is allowed for a device whose `Trusted` is set. The agent looks
+twice, 1.5 s apart, because Settings trusts a device just after pairing it and a
+speaker may connect back before that. Paired alone isn't enough.
+
+**How it ends:** the agent ends a question at 55 s, before bluetoothd's 60 s, and
+a number at 60 s. Refusing raises `org.bluez.Error.Rejected`; BlueZ's Cancel and
+the timeout raise `org.bluez.Error.Canceled`. A number on the screen has no reply
+to wait for, so the agent watches the device and closes when it's `Paired` or no
+longer `Connected`. Its cancel button calls `CancelPairing`, then `Disconnect`
+(a pairing from the other side has nothing to cancel). It never does this to a
+device that's already paired, because `CancelPairing` removes the bond if no pairing
+is in progress. If the agent dies, the shell closes the sheet 5 s after its time
+is up.
+
+**Locked or asleep:** a request wakes the screen but doesn't show over the lock:
+a note says to unlock, and the sheet appears on unlocking if the request is still
+open. The sheet isn't left on a screen going to sleep. Typing is lost then, but
+the question comes back. While the sheet is up the screen doesn't time out.
+
+**The channel:** requests are lines on the control pipe (0600), answers are
+connections to `$XDG_RUNTIME_DIR/ztos-bt-agent.sock` (0600, peer UID checked by
+both). Device names come over the air, so both ends clean them: UTF-8 only, no
+controls, no bidirectional or zero-width marks, `|` becomes `/`, at most 96 bytes.
+`auth/btpair-proto.h` has the format. Answers can only reach BlueZ if they fit
+the mode; a request that doesn't parse shows nothing.
+
+Host tests: `make check-bt-pair`. On the phone: `make check-bt-pair-sheet`, and
+`tests/bt-agent-call.py` calls the agent as BlueZ would, with sudo, since BlueZ's
+bus policy lets only root call `org.bluez.Agent1`. The agent checks that too.
+
 Settings → date + region exposes automatic time, manual date/time, IANA time
 zone, regional formats, NTP servers, and sync now. Choosing a region suggests
 its country pool; the server field remains editable. Sync now enables NTP,

@@ -37,6 +37,7 @@
 #include "demoloop/stop-key.h"
 #include "power/power-key.h"
 #include "audio-sync.h"
+#include "auth/btpair-proto.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -692,6 +693,14 @@ struct zt_server {
     struct wl_event_source *auth_source;
     char auth_password[512], auth_status[160], auth_read[1024];
     size_t auth_len, auth_read_len;
+	struct bt_pair {		/* auth/btpair.c */
+		bool active, shown, noted, osk_was_visible, osk_was_terminal;
+		struct bt_pair_request req;
+		int entered;
+		char entry[BT_PAIR_PIN_MAX + 1], status[64];
+		size_t entry_len;
+		struct wl_event_source *deadline;
+	} bt_pair;
 	bool dialog_open;
 	float dialog_y;			/* 0 shown, -dialog_h out of sight */
 	double dialog_h;
@@ -893,6 +902,7 @@ struct zt_server {
 	bool osk_visible;
 	bool osk_terminal;		/* extra row for terminals */
 	bool osk_symbols;
+	bool osk_numeric;		/* digits only: a Bluetooth passkey */
 	bool osk_emoji;
 	int key_height;
 	bool key_sound;
@@ -954,6 +964,15 @@ static void auth_input(struct zt_server *, uint32_t, const char *);
 static void auth_submit(struct zt_server *);
 static void auth_finish(struct zt_server *);
 static void draw_dialog(struct zt_server *);
+static void screen_set(struct zt_server *, bool);
+static void activity(struct zt_server *);
+static void bt_pair_input(struct zt_server *, uint32_t, const char *);
+static void bt_pair_sync(struct zt_server *);
+static void bt_pair_hide(struct zt_server *);
+static bool bt_pair_action(struct zt_server *, const char *);
+static double bt_pair_field_h(struct zt_server *);
+static void bt_pair_draw(struct zt_server *, cairo_t *, double, double, double);
+static void bt_pair_ctl(struct zt_server *, char *);
 static void ftrace_mark(struct zt_server *server, const char *what, double ms);
 static double ftrace_clock(void);
 static void run_detached(const char *, const char *, const char *, const char *);
@@ -7004,7 +7023,17 @@ static void osk_layout(struct zt_server *server) {
 		osk_row(server, term, 8, y, TERM_ROW_H, 0);
 		y += TERM_ROW_H;
 	}
-	if (server->osk_emoji) {
+	if (server->osk_numeric) {
+		static const struct osk_key n1[] = { K("1", KEY_1), K("2", KEY_2), K("3", KEY_3) };
+		static const struct osk_key n2[] = { K("4", KEY_4), K("5", KEY_5), K("6", KEY_6) };
+		static const struct osk_key n3[] = { K("7", KEY_7), K("8", KEY_8), K("9", KEY_9) };
+		static const struct osk_key n4[] = { { NULL, "backspace", KEY_BACKSPACE, false, ACT_CHAR, 1 },
+			K("0", KEY_0), { NULL, "enter", KEY_ENTER, false, ACT_CHAR, 1 } };
+		osk_row(server, n1, 3, y, server->key_height, 0);
+		osk_row(server, n2, 3, y + server->key_height, server->key_height, 0);
+		osk_row(server, n3, 3, y + 2 * server->key_height, server->key_height, 0);
+		osk_row(server, n4, 3, y + 3 * server->key_height, server->key_height, 0);
+	} else if (server->osk_emoji) {
         struct osk_key row[8];
         for (int r = 0; r < 3; r++) {
             for (int i = 0; i < 8; i++) {
@@ -10119,7 +10148,8 @@ static void draw_dialog(struct zt_server *server) {
 	double btn_h = 40.0;
 	double btn_y = text_y + th + 20.0;
     double auth_y = btn_y;
-    if (server->auth_active) btn_y += 90;
+    if (server->bt_pair.shown) btn_y += bt_pair_field_h(server);
+    else if (server->auth_active) btn_y += 90;
 
 	bool stack_buttons = false;
 	if (server->dialog_btn2[0]) {
@@ -10195,7 +10225,9 @@ static void draw_dialog(struct zt_server *server) {
 		draw_text(cr, server->dialog_btn1, FONT_REGULAR, 15.0, pad, btn_y, content_w, btn_h, true);
 	}
 
-    if (server->auth_active) {
+    if (server->bt_pair.shown) {
+        bt_pair_draw(server, cr, pad, auth_y, content_w);
+    } else if (server->auth_active) {
         cairo_set_source_rgb(cr, .3, .3, .3);
         cairo_rectangle(cr, pad, auth_y, content_w, 42); cairo_fill(cr);
         char masked[100]; int count = 0;
@@ -10221,6 +10253,7 @@ static void dialog_close(struct zt_server *server) {
 
 static void dialog_handle_action(struct zt_server *server, const char *act) {
 	if (!act || !act[0]) return;
+    if (bt_pair_action(server, act)) return;
     if (!strcmp(act, "auth_submit")) { auth_submit(server); return; }
     if (!strcmp(act, "auth_cancel")) {
         send(server->auth_fd, "CANCEL\n", 7, MSG_NOSIGNAL);
@@ -10269,6 +10302,7 @@ static void dialog_show(struct zt_server *server, const char *title, const char 
 }
 
 #include "auth/prompt.c"
+#include "auth/btpair.c"
 
 /* Remove user SDK/Android apps locally, or ask the authenticated package
  * manager to remove a Linux package that owns the app's desktop entry. */
@@ -10431,6 +10465,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		wlr_log(WLR_INFO, "nested: the screen stays on");
 		return;
 	}
+	if (!on) bt_pair_hide(server);	/* (it comes back: bt_pair_sync) */
 	if (!on && server->auth_active) auth_finish(server);
 	bool demoloop = demoloop_active();
 	/* Freeze completes before the display-off transition can let zrn-sleepd
@@ -10506,6 +10541,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		draw_status(server);	/* the clock moved on while it slept */
 		shade_set_open(server, false);
 		lock(server);
+		bt_pair_sync(server);
 		damage(server);
 	}
 }
@@ -10543,6 +10579,12 @@ static bool waydroid_keeps_screen_on(struct zt_server *server) {
 static int idle_fired(void *data) {
 	struct zt_server *server = data;
 	if (server->screen_timeout > 0) {
+		/* the pairing sheet: someone is reading the other device. The agent
+		 * ends the request within a minute. */
+		if (server->screen_on && server->bt_pair.shown) {
+			wl_event_source_timer_update(server->idle_timer, 15000);
+			return 0;
+		}
 		if (server->screen_on && waydroid_keeps_screen_on(server)) {
 			/* look again soon: the screen sleeps once the app lets go */
 			wl_event_source_timer_update(server->idle_timer, 15000);
@@ -11778,6 +11820,7 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		}
 		if (dm_swiped || (!retro_on(server) && !cancelled && p->y - p->y0 < -server->height / 5.0)) {
 			server->locked = false;
+			bt_pair_sync(server);
 			if (!server->boot_logo_done) {
 				char marker[256];
 				if (access(runtime_file(marker, sizeof(marker), "ztmetro-logo-unlocked"), F_OK) == 0) server->boot_logo_done = true;
@@ -12446,6 +12489,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (strncmp(line, "screen on", 9) == 0) {
 		screen_set(server, true);
 		activity(server);
+	} else if (strncmp(line, "bt-pair", 7) == 0) {
+		bt_pair_ctl(server, line);
 	} else if (strncmp(line, "dialog_sensorhub", 16) == 0) {
 		dialog_show(server, "ztOSCoreSensorFramework",
 			"Sensor hub failed to initialize, please boot into twrp, go to reboot, and select system to hot-boot the sensor hub.",

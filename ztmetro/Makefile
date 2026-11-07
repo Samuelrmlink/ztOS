@@ -37,7 +37,7 @@ RETRO_DEPS = $(RETRO) core/zrnboard.h retro/dotmatrix.h retro/dm-launcher.h retr
 DM_WRAP = retro/dm-wrap.c
 DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
 
-ztmetro: ztmetro.c auth/prompt.c xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+ztmetro: ztmetro.c auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -274,6 +274,21 @@ check-auth: xdg-shell-protocol.h
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
 		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(shell pkg-config --libs $(PKGS)) -lm
 	/tmp/ztmetro-auth-test
+
+# what the Bluetooth agent asks the shell, and the agent itself (no D-Bus, no phone)
+.PHONY: check-bt-pair
+check-bt-pair:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-pair-test tests/bt-pair-proto.c
+	/tmp/ztmetro-bt-pair-test
+	python3 tests/bt-agent.py
+
+# the sheet itself, on the phone: as check-auth
+.PHONY: check-bt-pair-sheet
+check-bt-pair-sheet: xdg-shell-protocol.h
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
+		$(IAL_FLAGS) -o /tmp/ztmetro-bt-pair-sheet-test tests/bt-pair-sheet.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) \
+		$(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+	/tmp/ztmetro-bt-pair-sheet-test
 
 .PHONY: check-bt-list
 check-bt-list:

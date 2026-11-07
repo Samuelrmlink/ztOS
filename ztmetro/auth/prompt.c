@@ -4,14 +4,16 @@ static void auth_finish(struct zt_server *server) {
     server->auth_source = NULL;
     if (server->auth_fd >= 0) close(server->auth_fd);
     server->auth_fd = -1;
-    bool was_active = server->auth_active;
-    server->auth_active = false;
+    /* (with the pairing sheet up, auth_active is the sheet's) */
+    bool was_active = server->auth_active && !server->bt_pair.shown;
+    if (was_active) server->auth_active = false;
     explicit_bzero(server->auth_password, sizeof(server->auth_password));
     server->auth_len = server->auth_read_len = 0;
     if (was_active) {
         dialog_close(server);
         osk_show(server, server->auth_osk_was_visible);
     }
+    bt_pair_sync(server);    /* it may have been waiting for this sheet */
 }
 
 static void auth_submit(struct zt_server *server) {
@@ -32,6 +34,7 @@ static void auth_submit(struct zt_server *server) {
 }
 
 static void auth_input(struct zt_server *server, uint32_t keycode, const char *text) {
+    if (server->bt_pair.shown) { bt_pair_input(server, keycode, text); return; }
     if (keycode == KEY_ESC) {
         send(server->auth_fd, "CANCEL\n", 7, MSG_NOSIGNAL);
         auth_finish(server); return;
@@ -58,7 +61,7 @@ static void auth_input(struct zt_server *server, uint32_t keycode, const char *t
 
 static void auth_line(struct zt_server *server, char *line) {
     if (!strncmp(line, "PROMPT\t", 7)) {
-        if (server->locked || server->splash) {
+        if (server->locked || server->splash || server->bt_pair.shown) {
             send(server->auth_fd, "CANCEL\n", 7, MSG_NOSIGNAL);
             auth_finish(server); return;
         }
@@ -122,7 +125,7 @@ static int auth_accept(int fd, uint32_t mask, void *data) {
     if (getsockopt(peer, SOL_SOCKET, SO_PEERCRED, &cred, &size) || cred.uid != getuid()) {
         close(peer); return 0;
     }
-    if (server->auth_source) {
+    if (server->auth_source || server->bt_pair.shown) {
         send(peer, "BUSY\n", 5, MSG_NOSIGNAL); close(peer); return 0;
     }
     server->auth_fd = peer;
