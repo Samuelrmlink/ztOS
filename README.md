@@ -461,9 +461,10 @@ holds both clusters and the GPU at their lowest operating points (measured:
 cannot be brought back without a reboot** (`CPUn: failed to come online`).
 
 **Settings**: Wi-Fi is asked of NetworkManager in the background with the
-loading dots running; new pages *performance* and *developer tests* (demo
-tiles on Start, slow motion x5, show touches, lock screen on or off: config
-keys `demo_tiles`, `slow_motion`, `show_touches`, `lock`).
+loading dots running. *developer* has demo tiles on Start and show touches
+(config keys `demo_tiles`, `show_touches`); slow motion x5 and the animation
+speed are under customization > animation speeds (`slow_motion`, `menu_speed`),
+and lock on wake under customization > Lock Screen (`lock`).
 
 **Sound**: the speakers work, through `snd-zrn-abox` (see `audio/README.md`):
 Samsung's audio DSP firmware started from a loadable module, one ALSA playback
@@ -532,8 +533,25 @@ all). Going back, both pages turn from the bottom up. The title stays put and
 the list scrolls under it from a cached drawing: it coasts when let go, pulls
 past either end at 0.4 of the finger and springs back. Sliders follow the
 finger. The hub's rows arrive like that at launch and leave like that on close. It writes `~/.config/ztmetro/config` and sends the
-compositor SIGHUP, which re-reads it and redraws on the spot. Back (Escape)
-goes up a page, and quits from the first one. Not built yet: entering a
+compositor SIGHUP, which re-reads it and redraws on the spot. It writes only the
+keys changed in this run, so other lines in the file stay as they are. Back
+(Escape) goes up a page, and quits from the first one. The pages form a tree, at
+most three levels below "all settings", with each page's parent in
+`settings/page-tree.h`:
+
+    connections            Wi-Fi (network, sign in), Bluetooth, cellular + SIM (access point)
+    customization          accent colour, animation speeds, shell style,
+                           Tiles Shell (background), Lock Screen (background),
+                           navigation bar, quick tiles
+    display
+    sound + touch          ringtones + sounds, haptics
+    battery + performance  battery, performance, Dynamic Boost System,
+                           processor, graphics, virtual memory
+    apps                   an app
+    system                 date + region, keyboard, developer, about
+
+`ztsettings NAME` opens a page directly and back goes up the tree from it;
+`ztsettings --list-pages` prints the names. Not built yet: entering a
 password for a new network, brightness (this kernel exposes no backlight
 device), date and time, sound.
 `/etc/polkit-1/rules.d/50-zboot-nm.rules` (set on the phone by hand) lets the
