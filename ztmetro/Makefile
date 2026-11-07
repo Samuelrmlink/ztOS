@@ -37,7 +37,7 @@ RETRO_DEPS = $(RETRO) core/zrnboard.h retro/dotmatrix.h retro/dm-launcher.h retr
 DM_WRAP = retro/dm-wrap.c
 DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
 
-ztmetro: ztmetro.c auth/prompt.c xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+ztmetro: ztmetro.c audio-state.h audio-sync.h auth/prompt.c xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -284,6 +284,11 @@ check-bt-list:
 check-audio-sync:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-audio-sync-test tests/audio-sync.c
 	/tmp/ztmetro-audio-sync-test
+
+.PHONY: check-audio-state
+check-audio-state:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-audio-state-test tests/audio-state.c
+	/tmp/ztmetro-audio-state-test
 
 .PHONY: check-audiod
 check-audiod:

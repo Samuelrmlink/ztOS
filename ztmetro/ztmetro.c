@@ -37,6 +37,7 @@
 #include "demoloop/stop-key.h"
 #include "power/power-key.h"
 #include "audio-sync.h"
+#include "audio-state.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -454,6 +455,7 @@ enum touch_role {
 	ROLE_BOARD,	/* while the app list's letters are up */
 	ROLE_HYPER,	/* on Hyperscan, the search over everything */
 	ROLE_RETRO,	/* on a ztRetrofit style's home (the DotMatrix launcher) */
+	ROLE_AUDIO,	/* in the audio modal: a row (index), or the slider (index -1) */
 };
 
 struct touch_point {
@@ -901,6 +903,18 @@ struct zt_server {
 	bool volume_is_media;
 	bool audio_active, audio_known;
 	uint32_t volume_key_ms;	/* when a key last moved the media volume */
+	/* the audio tile and its modal: what ztos-audiod last said (audio-state.h) */
+	struct audio_state audio_state;
+	bool audio_state_ok;
+	bool audio_modal_open;
+	float audio_modal_y;		/* 0 shown, -audio_modal_h out of sight */
+	double audio_modal_h, audio_track_y;
+	struct zt_layer audio_modal_layer;
+	char audio_pending[sizeof(((struct audio_output *)0)->name)];	/* a swap on its way */
+	uint32_t audio_pending_ms;
+	struct audio_slider audio_slider;
+	char audio_row_down[sizeof(((struct audio_output *)0)->name)];	/* the row under a finger */
+	struct wl_event_source *audio_timer;
 	int key_sound_fd;
 	bool osk_shift, osk_ctrl, osk_alt;
 	struct osk_key keys[MAX_KEYS];
@@ -954,6 +968,8 @@ static void auth_input(struct zt_server *, uint32_t, const char *);
 static void auth_submit(struct zt_server *);
 static void auth_finish(struct zt_server *);
 static void draw_dialog(struct zt_server *);
+static void audio_modal_show(struct zt_server *);
+static void audio_modal_close(struct zt_server *);
 static void ftrace_mark(struct zt_server *server, const char *what, double ms);
 static double ftrace_clock(void);
 static void run_detached(const char *, const char *, const char *, const char *);
@@ -2115,6 +2131,20 @@ static void draw_icon_vector(cairo_t *cr, const char *name, double cx, double cy
 		cairo_fill(cr);
 		cairo_arc(cr, u * 0.45, -u * 0.32, u * 0.13, 0, 2 * M_PI);
 		cairo_fill(cr);
+	} else if (strcmp(name, "speaker") == 0) {
+		cairo_move_to(cr, -u * 0.85, -u * 0.3);
+		cairo_line_to(cr, -u * 0.4, -u * 0.3);
+		cairo_line_to(cr, u * 0.1, -u * 0.8);
+		cairo_line_to(cr, u * 0.1, u * 0.8);
+		cairo_line_to(cr, -u * 0.4, u * 0.3);
+		cairo_line_to(cr, -u * 0.85, u * 0.3);
+		cairo_close_path(cr);
+		cairo_fill(cr);
+		cairo_set_line_width(cr, fmax(1.3, s * 0.085));
+		cairo_arc(cr, u * 0.1, 0, u * 0.42, -M_PI / 4, M_PI / 4);
+		cairo_stroke(cr);
+		cairo_arc(cr, u * 0.1, 0, u * 0.78, -M_PI / 4, M_PI / 4);
+		cairo_stroke(cr);
 	} else if (strcmp(name, "music") == 0) {
 		cairo_arc(cr, -u * 0.4, u * 0.55, u * 0.28, 0, 2 * M_PI);
 		cairo_fill(cr);
@@ -2455,17 +2485,18 @@ static char *trim(char *s) {
  * actions puts one in each of the eight places; `quick` in the config). */
 enum quick {
 	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_ROTATION, Q_FLASHLIGHT, Q_LOCATION,
-	Q_BRIGHTNESS, Q_SETTINGS, Q_VIBRATE, Q_NONE, Q_COUNT,
+	Q_BRIGHTNESS, Q_SETTINGS, Q_VIBRATE, Q_AUDIO, Q_NONE, Q_COUNT,
 };
 static const struct { const char *id, *icon, *label; } QUICK[Q_COUNT] = {
 	{ "wifi", "wifi", "WI-FI" }, { "data", "", "MOBILE DATA" },
 	{ "bluetooth", "bluetooth", "BLUETOOTH" }, { "airplane", "airplane", "AIRPLANE MODE" },
 	{ "rotation", "rotation", "ROTATION LOCK" }, { "flashlight", "flashlight", "FLASHLIGHT" },
 	{ "location", "location", "LOCATION" }, { "brightness", "brightness", "BRIGHTNESS" },
-	{ "settings", "gear", "ALL SETTINGS" }, { "vibrate", "", "VIBRATION" }, { "none", "", "" },
+	{ "settings", "gear", "ALL SETTINGS" }, { "vibrate", "", "VIBRATION" },
+	{ "audio", "", "" }, { "none", "", "" },	/* the audio tile's come from audio-state.h */
 };
 static const int QUICK_DEFAULT[8] = {
-	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_ROTATION, Q_FLASHLIGHT, Q_BRIGHTNESS, Q_SETTINGS,
+	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_AUDIO, Q_FLASHLIGHT, Q_BRIGHTNESS, Q_SETTINGS,
 };
 
 /* "wifi,data,airplane,...": up to eight, the rest as they come by default. */
@@ -2519,6 +2550,32 @@ static void config_keep(const char *key, int value) {
 	char text[24];
 	snprintf(text, sizeof(text), "%d", value);
 	config_keep_text(key, text);
+}
+
+/* The audio tile came after people had saved a `quick` list (Settings saves it with
+ * any setting, so one says little about a choice). Once only, it takes the place of
+ * Rotation Lock, which does nothing yet, and everything else stays where it was.
+ * A list without Rotation Lock was chosen: it stays, and the tile is in the
+ * Settings page's choices. The key makes it once: picking Rotation Lock later stays. */
+#define QUICK_AUDIO_DONE "quick_audio_added"
+static void quick_add_audio(struct zt_server *server) {
+	int place = -1;
+	bool has = false;
+	for (int i = 0; i < 8; i++) {
+		has = has || server->quick[i] == Q_AUDIO;
+		if (place < 0 && server->quick[i] == Q_ROTATION) place = i;
+	}
+	if (!has && place >= 0) {
+		char list[200] = "";
+		server->quick[place] = Q_AUDIO;
+		for (int i = 0; i < 8; i++) {
+			size_t at = strlen(list);
+			snprintf(list + at, sizeof(list) - at, "%s%s", i ? "," : "", QUICK[server->quick[i]].id);
+		}
+		config_keep_text("quick", list);
+		wlr_log(WLR_INFO, "quick: the audio tile took Rotation Lock's place (place %d)", place);
+	}
+	config_keep(QUICK_AUDIO_DONE, 1);
 }
 
 /*
@@ -3021,9 +3078,11 @@ static void load_config(struct zt_server *server) {
 	server->dm_cfg = (struct dm_config){ .launch_delay = 800, .sys_stats = true, .event_banners = true };
 	FILE *f = fopen(path, "r");
 	if (!f) {
+		quick_add_audio(server);
 		return;
 	}
 	char line[256];
+	bool quick_audio_done = false;
 	while (fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
 		if (line[0] == '#' || !eq) {
@@ -3031,7 +3090,9 @@ static void load_config(struct zt_server *server) {
 		}
 		*eq = 0;
 		char *key = trim(line), *value = trim(eq + 1);
-		if (strcmp(key, "start_wallpaper") == 0) {
+		if (strcmp(key, QUICK_AUDIO_DONE) == 0) {
+			quick_audio_done = true;
+		} else if (strcmp(key, "start_wallpaper") == 0) {
 			snprintf(server->start_wall_path, sizeof(server->start_wall_path), "%s", value);
 		} else if (strcmp(key, "lock_wallpaper") == 0) {
 			snprintf(server->lock_wall_path, sizeof(server->lock_wall_path), "%s", value);
@@ -3130,6 +3191,9 @@ static void load_config(struct zt_server *server) {
 		}
 	}
 	fclose(f);
+	if (!quick_audio_done) {
+		quick_add_audio(server);
+	}
 	if (demoloop_active()) {
 		server->demo_saved_timeout = server->screen_timeout;
 		server->screen_timeout = 0;
@@ -6317,6 +6381,25 @@ static int shade_hit(struct zt_server *server, double x, double y) {
 	return -1;
 }
 
+/* Whether ztos-audiod is there: a state file outlives a daemon that crashed. A
+ * datagram socket's connect sends nothing and doesn't wait. */
+static bool audio_daemon_alive(void) {
+	struct sockaddr_un a = { .sun_family = AF_UNIX };
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	snprintf(a.sun_path, sizeof(a.sun_path), "%s/ztos-audio.sock", runtime ? runtime : "/tmp");
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) return false;
+	bool alive = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0;
+	close(fd);
+	return alive;
+}
+
+static const struct audio_output *audio_active_output(struct zt_server *server) {
+	if (!server->audio_state_ok || !audio_daemon_alive()) return NULL;
+	int i = audio_current(&server->audio_state);
+	return i < 0 ? NULL : &server->audio_state.out[i];
+}
+
 /* One quick action, drawn with its top left corner at the origin. */
 static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double w, double h) {
 	int q = server->quick[i];
@@ -6336,6 +6419,11 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 		q == Q_DATA ? server->cell_data_on : q == Q_VIBRATE ? server->haptics_enabled :
 		q == Q_FLASHLIGHT ? server->shade_torch : q == Q_BLUETOOTH ? server->shade_bt :
 		q == Q_BRIGHTNESS;
+	const struct audio_output *audio = q == Q_AUDIO ? audio_active_output(server) : NULL;
+	if (q == Q_AUDIO) {
+		on = audio != NULL;
+		missing = !audio;
+	}
 	/* on: the accent colour; off: a dark grey block */
 	if (on) {
 		set_rgb(cr, server->accent);
@@ -6365,8 +6453,19 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 			cairo_line_to(cr, x + d, 8 + 11);
 			cairo_stroke(cr);
 		}
+	} else if (q == Q_AUDIO) {
+		draw_icon(cr, audio ? audio_type_of(audio)->icon : "speaker", 8 + 9, 8 + 9, 18);
 	} else {
 		draw_icon(cr, QUICK[q].icon, 8 + 9, 8 + 9, 18);
+	}
+	if (q == Q_AUDIO) {
+		/* the type, and below it the device */
+		char type[32];
+		audio_label_caps(type, sizeof(type), audio ? audio_type_of(audio)->label : "Audio");
+		draw_text(cr, type, FONT_SEMIBOLD, 7.6, 7, h - 26, w - 10, 0, false);
+		draw_text(cr, audio ? audio->desc : server->audio_state_ok && audio_daemon_alive() ? "No output" : "Unavailable",
+			FONT_REGULAR, 8, 7, h - 15, w - 10, 0, false);
+		return;
 	}
 	char label[32];
 	if (q == Q_BRIGHTNESS) {
@@ -8008,6 +8107,9 @@ static void shade_activate(struct zt_server *server, int index) {
 		run_detached("bluetoothctl", "power", server->shade_bt ? "on" : "off", NULL);
 		draw_shade(server);
 		damage(server);
+		break;
+	case 100 + Q_AUDIO:
+		audio_modal_show(server);
 		break;
 	case 100 + Q_ROTATION:
 	case 100 + Q_LOCATION:
@@ -9692,6 +9794,12 @@ static int press_fired(void *data) {
 
 /* A nav button, or the phone's own key for it, pressed and let go. */
 static void nav_activate(struct zt_server *server, int index) {
+	if (server->audio_modal_open) {
+		audio_modal_close(server);
+		if (index == NAV_BACK) {
+			return;		/* only the modal: the action centre is still under it */
+		}
+	}
 	if (server->switcher) {
 		switcher_close(server);	/* any button: back to where we were */
 		return;
@@ -10268,6 +10376,373 @@ static void dialog_show(struct zt_server *server, const char *title, const char 
 	damage(server);
 }
 
+/* The audio tile's modal: which output, and its volume. It looks as the dialog does
+ * and reads only what ztos-audiod last wrote (audio-state.h), so nothing here waits
+ * on PipeWire. inotify says when the file is replaced. Outputs are always addressed
+ * by name, and a row is found again by name when the finger lifts: the list can
+ * change under it. Selecting an output makes it the global one. */
+#define AUDIO_ROW_TOP	80.0	/* the dialog's title and the gap under it */
+#define AUDIO_ROW_H	50.0
+#define AUDIO_ROW_GAP	8.0
+#define AUDIO_PAD	24.0
+
+static bool audio_ready(struct zt_server *server) {
+	return server->audio_state_ok && audio_daemon_alive();
+}
+
+static void draw_audio_modal(struct zt_server *server) {
+	if (server->width <= 0) return;
+	double w = server->width, content_w = w - 2 * AUDIO_PAD, y = AUDIO_ROW_TOP;
+	const struct audio_state *st = &server->audio_state;
+	bool ready = audio_ready(server);
+	int selected = ready ? audio_selected(st, server->audio_pending) : -1;
+	int rows = ready ? st->n : 0;
+	bool has_slider = selected >= 0;
+	double track_y = y + rows * (AUDIO_ROW_H + AUDIO_ROW_GAP) + 44;
+	double total_h = has_slider ? track_y + 34 : y + (rows ? rows * (AUDIO_ROW_H + AUDIO_ROW_GAP) : 40) + 12;
+	server->audio_modal_h = total_h;
+	server->audio_track_y = track_y;
+
+	cairo_t *cr;
+	struct zt_buffer *buffer = zt_buffer_create(server, (int)w, (int)total_h, &cr);
+	cairo_set_source_rgb(cr, 31.0 / 255.0, 31.0 / 255.0, 31.0 / 255.0);
+	cairo_rectangle(cr, 0, 0, w, total_h);
+	cairo_fill(cr);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	draw_text(cr, "Audio output", FONT_SEMIBOLD, 20.0, AUDIO_PAD, 40.0, content_w, 0, false);
+	if (!rows) {
+		draw_text(cr, ready ? "No outputs right now." : "The audio service isn't running.",
+			FONT_REGULAR, 15.0, AUDIO_PAD, y, content_w, 0, false);
+	}
+	for (int i = 0; i < rows; i++, y += AUDIO_ROW_H + AUDIO_ROW_GAP) {
+		const struct audio_output *o = &st->out[i];
+		bool waiting = i == selected && !o->current && server->audio_pending[0];
+		if (i == selected) {
+			set_rgb(cr, server->accent);
+			cairo_rectangle(cr, AUDIO_PAD, y, content_w, AUDIO_ROW_H);
+			cairo_fill(cr);
+		} else if (!strcmp(o->name, server->audio_row_down)) {
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.15);
+			cairo_rectangle(cr, AUDIO_PAD, y, content_w, AUDIO_ROW_H);
+			cairo_fill(cr);
+		}
+		cairo_set_line_width(cr, 2.0);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		cairo_rectangle(cr, AUDIO_PAD, y, content_w, AUDIO_ROW_H);
+		cairo_stroke(cr);
+		draw_icon(cr, audio_type_of(o)->icon, AUDIO_PAD + 24, y + AUDIO_ROW_H / 2, 20);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		draw_text(cr, o->desc[0] ? o->desc : o->name, FONT_REGULAR, 15.0, AUDIO_PAD + 46, y + 7, content_w - 56, 0, false);
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.75);
+		draw_text(cr, waiting ? "Switching…" : audio_type_of(o)->label, FONT_REGULAR, 12.0,
+			AUDIO_PAD + 46, y + 27, content_w - 56, 0, false);
+	}
+	if (has_slider) {
+		const struct audio_output *o = &st->out[selected];
+		char value[16] = "—";
+		if (o->percent >= 0) snprintf(value, sizeof(value), "%d%%", o->percent);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		draw_text(cr, "Volume", FONT_REGULAR, 15.0, AUDIO_PAD, track_y - 34, content_w / 2, 0, false);
+		if (o->mute && o->percent >= 0) snprintf(value, sizeof(value), "muted");
+		double vw = text_width(value, FONT_REGULAR, 15.0);
+		draw_text(cr, value, FONT_REGULAR, 15.0, w - AUDIO_PAD - vw, track_y - 34, 0, 0, false);
+		/* the banner's bar, with a thumb to take hold of */
+		double level = o->percent < 0 ? 0 : o->percent / 100.0;
+		cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
+		cairo_rectangle(cr, AUDIO_PAD, track_y - 1.5, content_w, 3);
+		cairo_fill(cr);
+		if (o->percent >= 0) {
+			if (o->mute) {
+				cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);
+			} else {
+				set_rgb(cr, server->accent);
+			}
+			cairo_rectangle(cr, AUDIO_PAD, track_y - 1.5, content_w * level, 3);
+			cairo_fill(cr);
+			cairo_set_source_rgb(cr, 1, 1, 1);
+			cairo_rectangle(cr, AUDIO_PAD + content_w * level - 4, track_y - 12, 8, 24);
+			cairo_fill(cr);
+		}
+	}
+	zt_buffer_show(server, &server->audio_modal_layer, buffer, cr, (int)w, (int)total_h);
+}
+
+static void audio_modal_redraw(struct zt_server *server) {
+	if (server->audio_modal_open) {
+		draw_audio_modal(server);
+		damage(server);
+	}
+}
+
+/* The next thing the timer has to do: the slider's next send, or a swap giving up. */
+static void audio_timer_arm(struct zt_server *server) {
+	uint32_t now = now_ms();
+	int wait = audio_slider_due(&server->audio_slider, now);
+	if (!server->audio_slider.dragging) wait = -1;
+	if (server->audio_pending[0]) {
+		uint32_t since = now - server->audio_pending_ms;
+		int left = since >= AUDIO_SWITCH_WAIT_MS ? 1 : (int)(AUDIO_SWITCH_WAIT_MS - since);
+		wait = wait < 0 || left < wait ? left : wait;
+	}
+	wl_event_source_timer_update(server->audio_timer, wait < 0 ? 0 : wait == 0 ? 1 : wait);
+}
+
+static void audio_slider_send(struct zt_server *server, uint32_t now) {
+	struct audio_slider *s = &server->audio_slider;
+	char line[200];
+	audio_slider_mark_sent(s, now);
+	if (audio_cmd_volume(line, sizeof(line), s->percent, s->name) && audio_tell(line)) {
+		int i = audio_find(&server->audio_state, s->name);
+		if (i >= 0 && server->audio_state.out[i].current) {
+			/* where the keys go on from, and their echo is this one's too */
+			server->volume = audio_level_of_percent(s->percent, VOLUME_MAX);
+			server->volume_key_ms = now;
+		}
+	}
+}
+
+static int audio_timer_fired(void *data) {
+	struct zt_server *server = data;
+	uint32_t now = now_ms();
+	if (server->audio_slider.dragging && audio_slider_due(&server->audio_slider, now) == 0) {
+		audio_slider_send(server, now);
+	}
+	if (server->audio_pending[0] && now - server->audio_pending_ms >= AUDIO_SWITCH_WAIT_MS) {
+		/* it never came: show where the sound still is */
+		wlr_log(WLR_INFO, "audio: no swap to %s yet", server->audio_pending);
+		server->audio_pending[0] = 0;
+		audio_modal_redraw(server);
+	}
+	audio_timer_arm(server);
+	return 0;
+}
+
+/* The file again, whoever changed it. Last good state stands if this one is bad. */
+static void audio_state_read(struct zt_server *server) {
+	static char text[AUDIO_STATE_MAX_BYTES + 1];
+	char path[256];
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	snprintf(path, sizeof(path), "%s/ztos-audio-state.json", runtime ? runtime : "/tmp");
+	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+	if (fd < 0) {
+		server->audio_state_ok = false;
+		return;
+	}
+	size_t len = 0;
+	ssize_t n;
+	while (len < sizeof(text) && (n = read(fd, text + len, sizeof(text) - len)) > 0) {
+		len += (size_t)n;
+	}
+	close(fd);
+	if (audio_state_parse(text, len, &server->audio_state)) {
+		server->audio_state_ok = true;
+	} else {
+		wlr_log(WLR_ERROR, "audio: %s isn't readable; keeping the last state", path);
+	}
+}
+
+/* The file changed: take it in, keep what the slider holds, and show it. */
+static void audio_state_changed(struct zt_server *server) {
+	audio_state_read(server);
+	uint32_t now = now_ms();
+	struct audio_state *st = &server->audio_state;
+	audio_state_hold(st, &server->audio_slider, now);
+	if (server->audio_pending[0] && audio_pending_over(st, server->audio_pending)) {
+		server->audio_pending[0] = 0;
+		audio_timer_arm(server);
+	}
+	/* the sound moved to another output while the slider was held for the old one */
+	int selected = audio_selected(st, server->audio_pending);
+	if (server->audio_slider.dragging &&
+	    (selected < 0 || strcmp(st->out[selected].name, server->audio_slider.name) != 0)) {
+		server->audio_slider.dragging = false;
+	}
+	/* the tile only shows who, not how loud: it isn't redrawn for a volume */
+	static char tile_shows[160];
+	char now_shows[sizeof(tile_shows)];
+	const struct audio_output *a = audio_active_output(server);
+	snprintf(now_shows, sizeof(now_shows), "%s|%s|%s", a ? a->desc : "", a ? a->kind : "", a ? a->detail : "");
+	if (strcmp(tile_shows, now_shows) != 0) {
+		snprintf(tile_shows, sizeof(tile_shows), "%s", now_shows);
+		if (server->shade_open || server->shade_h > 0.1f) {
+			draw_shade(server);
+			damage(server);
+		}
+	}
+	audio_modal_redraw(server);
+}
+
+static int audio_watch_readable(int fd, uint32_t mask, void *data) {
+	char buf[2048];
+	bool ours = false;
+	ssize_t n;
+	while ((n = read(fd, buf, sizeof(buf))) > 0) {
+		for (char *at = buf; at < buf + n; ) {
+			struct inotify_event *event = (struct inotify_event *)at;
+			ours = ours || (event->len && (strcmp(event->name, "ztos-audio-state.json") == 0 ||
+				strcmp(event->name, "ztos-audio.sock") == 0));	/* the daemon came or went */
+			at += sizeof(*event) + event->len;
+		}
+	}
+	if (ours) {
+		audio_state_changed(data);
+	}
+	return 0;
+}
+
+/* The daemon replaces the file whole, so its directory is what to watch. */
+static void audio_watch_start(struct zt_server *server) {
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	server->audio_timer = wl_event_loop_add_timer(server->loop, audio_timer_fired, server);
+	audio_state_read(server);
+	int fd = runtime ? inotify_init1(IN_NONBLOCK | IN_CLOEXEC) : -1;
+	if (fd < 0) {
+		return;
+	}
+	if (inotify_add_watch(fd, runtime, IN_MOVED_TO | IN_CREATE | IN_DELETE) < 0) {
+		close(fd);
+		return;
+	}
+	wl_event_loop_add_fd(server->loop, fd, WL_EVENT_READABLE, audio_watch_readable, server);
+}
+
+static void audio_modal_show(struct zt_server *server) {
+	if (server->width <= 0 || server->audio_modal_open) return;
+	hap(server, HAP_TAP, HG_SYSTEM);
+	audio_state_read(server);
+	audio_state_hold(&server->audio_state, &server->audio_slider, now_ms());
+	audio_tell("refresh");	/* it answers through the file, if anything is different */
+	server->audio_row_down[0] = 0;
+	draw_audio_modal(server);
+	server->audio_modal_open = true;
+	server->audio_modal_y = (float)-server->audio_modal_h;
+	animate(server, &server->audio_modal_y, 0.0f, 260, 0, false);
+	damage(server);
+}
+
+/* Where the slider came to rest goes out now, whatever the wait. */
+static void audio_slider_finish(struct zt_server *server) {
+	struct audio_slider *s = &server->audio_slider;
+	if (!s->dragging) return;
+	s->dragging = false;
+	if (s->percent != s->sent) {
+		audio_slider_send(server, now_ms());
+	}
+	audio_timer_arm(server);
+}
+
+static void audio_modal_close(struct zt_server *server) {
+	if (!server->audio_modal_open) return;
+	audio_slider_finish(server);
+	server->audio_modal_open = false;
+	animate(server, &server->audio_modal_y, (float)-server->audio_modal_h, 170, 0, false);
+	damage(server);
+}
+
+static void audio_slider_to(struct zt_server *server, double x) {
+	struct audio_slider *s = &server->audio_slider;
+	int percent = audio_slider_percent(x, AUDIO_PAD, server->width - 2 * AUDIO_PAD);
+	if (percent == s->percent && s->sent >= 0) return;
+	s->percent = percent;
+	uint32_t now = now_ms();
+	audio_state_hold(&server->audio_state, s, now);
+	if (audio_slider_due(s, now) == 0) {
+		audio_slider_send(server, now);
+	}
+	audio_timer_arm(server);
+	audio_modal_redraw(server);
+}
+
+static void audio_modal_pick(struct zt_server *server, const char *name) {
+	struct audio_state *st = &server->audio_state;
+	int i = audio_find(st, name);
+	if (i < 0) return;	/* it went while the finger was down */
+	hap(server, HAP_TAP, HG_SYSTEM);
+	if (st->out[i].current) {
+		server->audio_pending[0] = 0;	/* back to the one that never left */
+	} else {
+		char line[200];
+		if (!audio_cmd_output(line, sizeof(line), name) || !audio_tell(line)) {
+			audio_modal_redraw(server);	/* it may have stopped: the modal says so */
+			return;
+		}
+		snprintf(server->audio_pending, sizeof(server->audio_pending), "%s", name);
+		server->audio_pending_ms = now_ms();
+	}
+	audio_timer_arm(server);
+	audio_modal_redraw(server);
+}
+
+static void audio_modal_touch_begin(struct zt_server *server, struct touch_point *p, double x, double y) {
+	struct audio_state *st = &server->audio_state;
+	p->role = ROLE_NONE;
+	if (y > server->audio_modal_y + server->audio_modal_h) {
+		hap(server, HAP_TAP, HG_SYSTEM);	/* outside it, as with the dialog */
+		audio_modal_close(server);
+		return;
+	}
+	if (server->audio_slider.dragging || !audio_ready(server)) {
+		return;		/* one finger on the slider is enough */
+	}
+	double dy = y - server->audio_modal_y;
+	int selected = audio_selected(st, server->audio_pending);
+	if (selected >= 0 && st->out[selected].percent >= 0 && fabs(dy - server->audio_track_y) <= 24) {
+		p->role = ROLE_AUDIO;
+		p->index = -1;
+		audio_slider_begin(&server->audio_slider, st->out[selected].name, st->out[selected].percent);
+		audio_slider_to(server, x);
+		return;
+	}
+	double at = dy - AUDIO_ROW_TOP;
+	int row = at < 0 ? -1 : (int)(at / (AUDIO_ROW_H + AUDIO_ROW_GAP));
+	if (row >= 0 && row < st->n && at - row * (AUDIO_ROW_H + AUDIO_ROW_GAP) <= AUDIO_ROW_H &&
+	    x >= AUDIO_PAD && x <= server->width - AUDIO_PAD) {
+		p->role = ROLE_AUDIO;
+		p->index = row;
+		snprintf(server->audio_row_down, sizeof(server->audio_row_down), "%s", st->out[row].name);
+		audio_modal_redraw(server);
+	}
+}
+
+static void audio_modal_touch_move(struct zt_server *server, struct touch_point *p, double x) {
+	if (p->index < 0) {
+		if (server->audio_slider.dragging) audio_slider_to(server, x);
+	} else if (p->moved && server->audio_row_down[0]) {
+		server->audio_row_down[0] = 0;	/* a drag isn't a choice */
+		audio_modal_redraw(server);
+	}
+}
+
+static void audio_modal_touch_end(struct zt_server *server, struct touch_point *p, bool cancelled) {
+	if (p->index < 0) {
+		audio_slider_finish(server);
+		return;
+	}
+	char name[sizeof(server->audio_row_down)];
+	snprintf(name, sizeof(name), "%s", server->audio_row_down);
+	server->audio_row_down[0] = 0;
+	if (!cancelled && !p->moved && name[0] && server->audio_modal_open) {
+		audio_modal_pick(server, name);
+	} else {
+		audio_modal_redraw(server);
+	}
+}
+
+/* A volume key while the modal is up: the slider shows it, and its echo is ignored
+ * as the slider's own is. Only the active output's, which is what the key moves. */
+static void audio_modal_key(struct zt_server *server, int percent) {
+	if (!server->audio_modal_open || server->audio_slider.dragging) return;
+	int i = audio_current(&server->audio_state);
+	if (i < 0) return;
+	struct audio_slider *s = &server->audio_slider;
+	snprintf(s->name, sizeof(s->name), "%s", server->audio_state.out[i].name);
+	s->percent = percent;
+	audio_slider_mark_sent(s, now_ms());
+	audio_state_hold(&server->audio_state, s, now_ms());
+	audio_modal_redraw(server);
+}
+
+
 #include "auth/prompt.c"
 
 /* Remove user SDK/Android apps locally, or ask the authenticated package
@@ -10358,7 +10833,8 @@ static void audio_volume_report(struct zt_server *server, int percent, bool exte
 static void volume_step(struct zt_server *server, int by) {
     /* the stream is chosen on the first press; repeats keep it */
     if (!server->volume_repeat_by)
-        server->volume_is_media = server->audio_known ? server->audio_active : server->media_playing;
+        server->volume_is_media = server->audio_modal_open ||	/* its slider is what's on the screen */
+            (server->audio_known ? server->audio_active : server->media_playing);
     int *level = server->volume_is_media ? &server->volume : &server->ring_volume;
     int previous = *level, to = previous + by;
     *level = to < 0 ? 0 : to > VOLUME_MAX ? VOLUME_MAX : to;
@@ -10374,6 +10850,7 @@ static void volume_step(struct zt_server *server, int by) {
         char line[32];
         snprintf(line, sizeof(line), "volume %d", audio_percent_of_level(*level, VOLUME_MAX));
         server->volume_key_ms = now_ms();
+        audio_modal_key(server, audio_percent_of_level(*level, VOLUME_MAX));
         if (!audio_tell(line))
             run_detached("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", percent);
     }
@@ -10432,6 +10909,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		return;
 	}
 	if (!on && server->auth_active) auth_finish(server);
+	if (!on && server->audio_modal_open) audio_modal_close(server);
 	bool demoloop = demoloop_active();
 	/* Freeze completes before the display-off transition can let zrn-sleepd
 	 * enter SoC sleep. The configured keep_awake list is honored by the helper. */
@@ -11120,6 +11598,10 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		p->role = ROLE_NONE;
 		return;
 	}
+	if (server->audio_modal_open && server->audio_modal_y > (float)-server->audio_modal_h + 10.0f) {
+		audio_modal_touch_begin(server, p, x, y);
+		return;
+	}
 	if (server->volume_y > -10.0f && y < banner_h(server) && !server->locked) {
 		/* the volume banner: its three buttons work the player */
 		if (server->media && y >= VOLUME_H && y < VOLUME_H + MEDIA_H) {
@@ -11435,6 +11917,9 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 		p->moved = true;
 	}
 	switch (p->role) {
+	case ROLE_AUDIO:
+		audio_modal_touch_move(server, p, x);
+		break;
 	case ROLE_RETRO:
 		if (server->dm) {
 			/* three fingers pushed up together: the launcher's settings */
@@ -11692,6 +12177,9 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		return;
 	}
 	switch (p->role) {
+	case ROLE_AUDIO:
+		audio_modal_touch_end(server, p, cancelled);
+		break;
 	case ROLE_RETRO:
 		if (server->dm) {
 			dm_launcher_touch(server->dm, cancelled ? DM_TOUCH_CANCEL : DM_TOUCH_UP,
@@ -12434,7 +12922,9 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (strcmp(line, "back") == 0) {
 		/* what the nav bar's back does to an app in front (for testing
 		 * transitions without a finger on the glass) */
-		if (server->shown) {
+		if (server->audio_modal_open) {
+			audio_modal_close(server);
+		} else if (server->shown) {
 			vkbd_send(server, KEY_ESC, false);
 		}
 	} else if (strcmp(line, "restart") == 0) {
@@ -13869,6 +14359,14 @@ static void render_frame(struct zt_server *server) {
 	if (server->toast_y > 0.02f && server->toast_layer.tex) {
 		layer_draw_swivel(server, &server->toast_layer, server->toast_y);
 	}
+	if (server->audio_modal_y > 1.0f - (float)server->audio_modal_h && server->audio_modal_layer.tex) {
+		float t = (server->audio_modal_y + (float)server->audio_modal_h) / (float)server->audio_modal_h;
+		float m[16];
+		mat_identity(m);
+		mat_scale(m, server->width, server->height);
+		quad(server, GL_TEXTURE_2D, server->black_tex, m, 0.627f * fminf(1.0f, t), false, false, 1.0f, 1.0f);
+		layer_draw(server, &server->audio_modal_layer, 0, server->audio_modal_y, 1.0f);
+	}
 	if (server->dialog_y > 1.0f - (float)server->dialog_h && server->dialog_layer.tex) {
 		float t = (server->dialog_y + (float)server->dialog_h) / (float)server->dialog_h;
 		if (t > 0.01f) {
@@ -14738,6 +15236,7 @@ int main(int argc, char *argv[]) {
 	run_detached("/usr/local/bin/ztos-sounds", NULL, NULL, NULL);
 	/* WirePlumber keeps each device's own volume: ask what it is, don't impose one */
 	audio_tell("hello");
+	audio_watch_start(&server);
 	{
 		/* zrnperfd puts the shell first in line for the CPU (see there) */
 		char line[32];
