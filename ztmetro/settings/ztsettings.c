@@ -6,7 +6,7 @@
  * Designed in the authentic Windows Phone 8.1 Metro aesthetic.
  * All settings pages feature 60 FPS turnstile/slide page transitions,
  * animated toggle switches, interactive sliders, and live hardware telemetry
- * for the Samsung Galaxy S9 (SM-G960N starlte, Exynos 9810, Mali-G72).
+ * for the Samsung Galaxy S9 (SM-G960 starlte, Exynos 9810, Mali-G72).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -3013,6 +3013,22 @@ static double draw_quick(cairo_t *cr) {
 	return y + 20;
 }
 
+/* ztos-variant.service publishes the real model; a tree shared by the F and
+ * the N can't say which it is. Without an answer, name no letter. */
+static void phone_name(char *out, size_t size) {
+	char model[32] = "";
+	FILE *f = fopen("/run/ztos-variant", "r");
+	if (f) {
+		if (!fgets(model, sizeof model, f))
+			model[0] = 0;
+		fclose(f);
+		model[strcspn(model, "\n")] = 0;
+	}
+	if (strncmp(model, "SM-G960", 7) != 0)
+		strcpy(model, "SM-G960");
+	snprintf(out, size, "Samsung Galaxy S9 (%s starlte)", model);
+}
+
 static double draw_about(cairo_t *cr) {
 	char value[256];
 	double y = zmc_header(cr, "about");
@@ -3020,7 +3036,8 @@ static double draw_about(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Phone", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	y += zmc_text(cr, "Samsung Galaxy S9 (SM-G960N starlte)", FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
+	phone_name(value, sizeof value);
+	y += zmc_text(cr, value, FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Operating System", FONT_REGULAR, 13, MARGIN, y, 0);

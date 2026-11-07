@@ -19,6 +19,9 @@
 #     --pm-debug                 suspend stage tests and device PM diagnostics
 #     --lockup                   soft/hard lockup detectors that panic (backtrace in ramoops)
 #     --cmdline "..."            extra kernel command line (zboot.rescue=1 ...)
+#     --wifi-nvram FILE          Wi-Fi calibration to build in, for --wlan (default:
+#                                firmware/nvram.txt_r02a_b2, the G960N's; see
+#                                docs/g960f-differences.md for the G960F's)
 #
 # Output: out/<name>.img (+ .config, .dts, .sha256). Runs unprivileged; the
 # toolchain, kernel tree and busybox live under build/.
@@ -36,6 +39,7 @@ shift
 FALLBACK=boot
 DTS_FLAGS=()
 EXTRA=
+WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
 UFS=1 ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP=
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -51,6 +55,7 @@ while [ $# -gt 0 ]; do
 	--acpm) ACPM=1 ;;
 	--cpufreq) CPUFREQ=1; ACPM=1 ;;
 	--cmdline) EXTRA=$2; shift ;;
+	--wifi-nvram) WIFI_NVRAM=$2; shift ;;
 	*) echo "unknown option $1" >&2; exit 2 ;;
 	esac
 	shift
@@ -229,10 +234,12 @@ fi
 if [ -n "$WLAN" ]; then
 	# The firmware is this phone's own, out of its VENDOR partition, renamed
 	# the way brcmfmac asks for it; the nvram names itself "STAR1 KR", so it
-	# is the S9's calibration and not the S9+'s.
-	for f in bcmdhd_sta.bin_b2 nvram.txt_r02a_b2 bcmdhd_clm.blob; do
+	# is the S9's calibration and not the S9+'s. The firmware and CLM are the
+	# same on a G960F; its calibration is not (--wifi-nvram).
+	for f in bcmdhd_sta.bin_b2 bcmdhd_clm.blob; do
 		[ -s "$ROOT/firmware/$f" ] || { echo "missing firmware/$f" >&2; exit 1; }
 	done
+	[ -s "$WIFI_NVRAM" ] || { echo "missing $WIFI_NVRAM" >&2; exit 1; }
 	cfg --enable PCI
 	cfg --enable PCIE_DW
 	cfg --enable PCIE_DW_HOST
@@ -246,7 +253,7 @@ if [ -n "$WLAN" ]; then
 	FW=$B/firmware
 	mkdir -p "$FW/brcm"
 	cp "$ROOT/firmware/bcmdhd_sta.bin_b2" "$FW/brcm/brcmfmac4361-pcie.bin"
-	cp "$ROOT/firmware/nvram.txt_r02a_b2" "$FW/brcm/brcmfmac4361-pcie.txt"
+	cp "$WIFI_NVRAM" "$FW/brcm/brcmfmac4361-pcie.txt"
 	cp "$ROOT/firmware/bcmdhd_clm.blob" "$FW/brcm/brcmfmac4361-pcie.clm_blob"
 	sed -i 's/\r$//' "$FW/brcm/brcmfmac4361-pcie.txt"
 	cp "$PORT/firmware/regulatory.db" "$PORT/firmware/regulatory.db.p7s" "$FW/"

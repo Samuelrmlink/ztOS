@@ -28,6 +28,7 @@ HOST=${HOST:-172.16.42.2}
 PORT=${PORT:-5557}
 PSH=${PSH:-$ROOT/scripts/psh.py}
 DRAIN_WAIT=${DRAIN_WAIT:-30}	# seconds for the listener to finish once the phone's dd is gone
+. "$ROOT/scripts/lib-partlabel.sh"
 TMP=$(mktemp -d)
 LOG=$TMP/socat.log
 server=
@@ -98,6 +99,7 @@ SIZE=$(stat -c %s "$IMG")
 N=$(( SIZE / (CHUNK * 1048576) ))
 echo "image $IMG: $SIZE bytes, $N chunks of ${CHUNK}M -> $PART"
 
+require_part_label USERDATA "$PART" "$PSH" -t 20 || exit 1
 psize=$("$PSH" -t 20 "blockdev --getsize64 $PART" | tr -dc 0-9)
 [ -n "$psize" ] && [ "$psize" -ge "$SIZE" ] ||
 	{ echo "partition too small or unreachable ($psize)" >&2; exit 1; }

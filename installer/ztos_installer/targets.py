@@ -231,6 +231,11 @@ def install_phone(root_image: Path, ask) -> None:
         raise Fail("stopped: the boot image is written, the user data is untouched (Android will not start "
                    "until ztOS is installed or the stock BOOT image is written back)")
     say("clearing old/partial filesystem header from USERDATA...")
+    # the partition's label first: this erases whatever sda25 is
+    label = subprocess.run(["adb", "shell", "cat /sys/class/block/sda25/uevent"],
+                           capture_output=True, text=True).stdout
+    if "PARTNAME=USERDATA" not in label.split():
+        raise Fail("stopped: sda25 is not labelled USERDATA on this phone; nothing was erased")
     subprocess.run(["adb", "shell", "dd if=/dev/zero of=/dev/block/sda25 bs=1M count=20 conv=fsync"], check=True)
     say("rebooting phone into ztOS rescue shell...")
     subprocess.run(["adb", "reboot"], check=True)

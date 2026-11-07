@@ -1,0 +1,13 @@
+[Unit]
+Description=Galaxy S9: note which model this is, for Settings
+After=ztoscorenetworking-modem.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=90
+# Publishes only under /run. Reads EFS and VENDOR, writes neither.
+ExecStart=/bin/sh -c '/usr/local/sbin/ztos-variant --wait 60 > /run/ztos-variant.new; mv /run/ztos-variant.new /run/ztos-variant'
+
+[Install]
+WantedBy=multi-user.target

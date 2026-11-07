@@ -13,10 +13,14 @@ IMG=${1:?image}
 PART=/dev/sda10          # BOOT
 PORT=5559
 . "$ROOT/scripts/phone-lib.sh"
+. "$ROOT/scripts/lib-partlabel.sh"
 
 [ "$(head -c 8 "$IMG")" = "ANDROID!" ] || { echo "not an Android boot image" >&2; exit 1; }
 SIZE=$(stat -c %s "$IMG")
 SUM=$(sha256sum "$IMG" | cut -d' ' -f1)
+
+require_part_label BOOT "$PART" "$PHONE_DO" || exit 1
+require_part_label RECOVERY /dev/sda11 "$PHONE_DO" || exit 1
 
 # RECOVERY has to hold a bootable TWRP before BOOT is overwritten.
 rec=$("$PHONE_DO" --root 'head -c 8 /dev/sda11' | tail -1)
