@@ -56,13 +56,15 @@ def reboot_from_rescue() -> None:
 
 # --- QEMU ----------------------------------------------------------------------
 
+MIRROR_PORT = 27183             # ztmirror (ztmetro/mirror/), for ztos mirror --target qemu
 QEMU_SCREEN = (540, 1110)       # a phone's shape; ztMETRO draws it at 1.5 px a point
 EGL_HEADLESS = Path("/usr/lib/qemu/ui-egl-headless.so").exists()
 
 
 def qemu_command(disk: Path, headless: bool = False, monitor: Path | None = None, gl: bool = False) -> list:
     """The emulated phone: the "virt" machine, a virtio GPU, a pointer it takes
-    as a finger, a keyboard, and the network (ssh to it on localhost:2222).
+    as a finger, a keyboard, and the network (ssh to it on localhost:2222, and
+    ztmirror on localhost:27183).
 
     By default nothing of the host's graphics is used: ztMETRO draws with
     software OpenGL in the guest (slower, but it works on any computer). With
@@ -80,7 +82,7 @@ def qemu_command(disk: Path, headless: bool = False, monitor: Path | None = None
            "-device", "virtio-blk-pci,drive=disk",
            "-device", f"{'virtio-gpu-gl-pci' if gl and not headless else 'virtio-gpu-pci'},xres={w},yres={h}",
            "-device", "virtio-tablet-pci", "-device", "virtio-keyboard-pci",
-           "-netdev", "user,id=net,hostfwd=tcp:127.0.0.1:2222-:22",
+           "-netdev", f"user,id=net,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:{MIRROR_PORT}-:{MIRROR_PORT}",
            "-device", "virtio-net-pci,netdev=net",
            "-device", "virtio-rng-pci",
            "-audiodev", "none,id=snd"]

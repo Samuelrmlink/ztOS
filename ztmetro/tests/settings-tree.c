@@ -16,7 +16,7 @@ int main(void) {
 		{ PAGE_AUDIO, PAGE_SOUND_TOUCH }, { PAGE_HAPTICS, PAGE_SOUND_TOUCH },
 		{ PAGE_BATTERY, PAGE_POWER }, { PAGE_PERF, PAGE_POWER }, { PAGE_BOOST, PAGE_POWER },
 		{ PAGE_CPU, PAGE_POWER }, { PAGE_GPU, PAGE_POWER }, { PAGE_VM, PAGE_POWER },
-		{ PAGE_APP_DETAIL, PAGE_INSTALLED_APPS },
+		{ PAGE_APP_DETAIL, PAGE_INSTALLED_APPS }, { PAGE_APP_SCALE, PAGE_INSTALLED_APPS },
 		{ PAGE_DATE, PAGE_SYSTEM }, { PAGE_KEYBOARD, PAGE_SYSTEM }, { PAGE_DEV, PAGE_SYSTEM }, { PAGE_ABOUT, PAGE_SYSTEM },
 	};
 	for (size_t i = 0; i < sizeof(tree) / sizeof(tree[0]); i++) {
@@ -59,7 +59,7 @@ int main(void) {
 	/* what the shell's search and people's scripts already use */
 	static const char *const old[] = { "date", "main", "apps", "installed-apps", "theme", "accents",
 		"wallpapers", "display", "wifi", "bluetooth", "mobile", "audio", "battery", "cpu", "vm", "gpu",
-		"keyboard", "about", "perf", "boost", "dev", "haptics", "quick", "apn", "wifijoin", "wifinet" };
+		"keyboard", "about", "perf", "boost", "dev", "haptics", "quick", "apn", "wifijoin", "wifinet", "app-scale" };
 	for (size_t i = 0; i < sizeof(old) / sizeof(old[0]); i++) {
 		int found = 0;
 		for (int n = 0; n < N_PAGE_NAMES; n++) found += !strcmp(PAGE_NAMES[n].name, old[i]);

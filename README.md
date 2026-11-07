@@ -547,7 +547,7 @@ most three levels below "all settings", with each page's parent in
     sound + touch          ringtones + sounds, haptics
     battery + performance  battery, performance, Dynamic Boost System,
                            processor, graphics, virtual memory
-    apps                   an app
+    apps                   an app, app scaling
     system                 date + region, keyboard, developer, about
 
 `ztsettings NAME` opens a page directly and back goes up the tree from it;

@@ -42,6 +42,7 @@ enum page {
 	PAGE_STYLE,	/* the shell's style: chosen, then applied with a warning */
 	PAGE_TILES,	/* Tiles Shell: the start screen's columns and background */
 	PAGE_LOCK,	/* Lock Screen: its photo, and whether waking shows it */
+	PAGE_APP_SCALE,	/* app scaling: a size for each app */
 	N_PAGES
 };
 
@@ -68,6 +69,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_DEV] = PAGE_SYSTEM,
 	[PAGE_INSTALLED_APPS] = PAGE_MAIN,
 	[PAGE_APP_DETAIL] = PAGE_INSTALLED_APPS,
+	[PAGE_APP_SCALE] = PAGE_INSTALLED_APPS,
 	[PAGE_HAPTICS] = PAGE_SOUND_TOUCH,
 	[PAGE_QUICK] = PAGE_THEME,
 	[PAGE_APN] = PAGE_MOBILE,
@@ -92,6 +94,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "installed-apps", PAGE_INSTALLED_APPS },
 	{ "apps", PAGE_INSTALLED_APPS },	/* an old name: there was a tab called that */
 	{ "app", PAGE_APP_DETAIL },
+	{ "app-scale", PAGE_APP_SCALE },
 	{ "customization", PAGE_THEME },
 	{ "theme", PAGE_THEME },	/* its old name */
 	{ "accents", PAGE_ACCENTS },
