@@ -29,13 +29,15 @@ connection: the build downloads Arch Linux ARM and about 2 GB of packages. On
 Arch Linux:
 
 ```
-sudo pacman -S --needed util-linux libarchive dosfstools mtools e2fsprogs \
-    qemu-user-static qemu-user-static-binfmt qemu-system-aarch64 edk2-aarch64 \
+sudo pacman -S --needed python util-linux libarchive dosfstools mtools e2fsprogs \
+    curl gnupg tar xz qt6-base qemu-user-static qemu-user-static-binfmt qemu-system-aarch64 edk2-aarch64 \
     qemu-hw-display-virtio-gpu qemu-hw-display-virtio-gpu-gl \
     qemu-hw-display-virtio-gpu-pci qemu-hw-display-virtio-gpu-pci-gl qemu-ui-gtk qemu-ui-opengl
 ```
 
 On Fedora, Rocky, Alma or RHEL, see [Host setup for the Red Hat family](../docs/host-setup-rhel.md).
+
+`installer/ztos doctor` checks all of this, by running it where it can.
 
 The build never needs `sudo`. It runs in a user namespace, so your account
 needs a subordinate ID range in `/etc/subuid` and `/etc/subgid` (most

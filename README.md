@@ -313,9 +313,9 @@ Everything runs unprivileged on the build host; nothing needs sudo.
 | `kernel/uniloader-failsafe.py` | patch the watchdog + fallback-target writes into uniLoader's first board hook |
 
 Build inputs live in `build/` (kernel tree, toolchain, busybox, the ALARM
-tarball) and are not in the repository. The ALARM tarball's GPG signature was
-verified against the Arch Linux ARM build key `68B3 537F 39A3 13B3 E574 D067
-7719 3F15 2BDB E6A6`.
+tarball) and are not in the repository. The installer checks the ALARM tarball's
+GPG signature against the Arch Linux ARM build key `68B3 537F 39A3 13B3 E574 D067
+7719 3F15 2BDB E6A6`, kept in `installer/keys/`.
 
 ## Build switches
 

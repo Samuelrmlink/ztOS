@@ -37,6 +37,7 @@ PACKAGES = {
     "mcopy": ("mtools", "mtools", "mtools"),
     "mke2fs": ("e2fsprogs", "e2fsprogs", "e2fsprogs"),
     "curl": ("curl", "curl", "curl"),
+    "gpg": ("gnupg", "gnupg2", "gnupg"),
     "tar": ("tar", "tar", "tar"),
     "xz": ("xz", "xz", "xz-utils"),
     "gzip": ("gzip", "gzip", "gzip"),
@@ -54,7 +55,7 @@ PACKAGES = {
     "qemu-window": ("qemu-ui-gtk qemu-ui-opengl", "qemu-ui-gtk qemu-ui-opengl", "qemu-system-gui"),
 }
 BUILD_TOOLS = ("unshare", "newuidmap", "newgidmap", "bsdtar", "mkfs.fat", "mcopy", "mmd", "sfdisk",
-               "curl", "tar", "xz")
+               "curl", "gpg", "tar", "xz")
 PHONE_TOOLS = ("adb", "socat", "gzip", "ping")
 PROVIDED_BY = {"newgidmap": "newuidmap", "mmd": "mcopy"}
 

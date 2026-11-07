@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,10 @@ OS = ROOT / "os"
 WORK = ROOT / "build" / "ztos"
 TARBALL = ROOT / "build" / "alarm.tar.gz"
 TARBALL_URL = "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+# "Arch Linux ARM Build System", who signs the tarballs
+TARBALL_KEY = ROOT / "installer" / "keys" / "archlinuxarm-build-system.asc"
+TARBALL_FINGERPRINT = "68B3537F39A313B3E574D06777193F152BDBE6A6"
+TARBALL_MIN_SIZE = 100_000_000      # smaller is a download that stopped early
 SDK = ROOT / "sdk"
 PKGCACHE = ROOT / "build" / "pkg-cache"
 # Where QEMU_EFI.fd is: Arch's and Fedora's edk2-aarch64, then Debian's and
@@ -88,14 +93,64 @@ def check_host():
                    "\n  ".join(host.describe(c) for c in failed))
 
 
+def signature_problem(path: Path, sig: Path, key: Path = TARBALL_KEY, fingerprint: str = TARBALL_FINGERPRINT):
+    """Why this signature does not prove the file came from Arch Linux ARM, or None.
+    The key is the copy in this repository, read in a keyring made just for this,
+    and the signing key must be that very one: anything else in gpg's answer is
+    not looked at, so the keys and the trust settings of this computer play no part."""
+    with tempfile.TemporaryDirectory(prefix="ztos-gpg-") as home:
+        gpg = ["gpg", "--homedir", home, "--batch", "--quiet", "--no-autostart"]
+        imported = subprocess.run([*gpg, "--import", str(key)], capture_output=True, text=True)
+        if imported.returncode != 0:
+            return f"gpg could not read {key}: {imported.stderr.strip()[:300]}"
+        run = subprocess.run([*gpg, "--status-fd", "1", "--verify", str(sig), str(path)],
+                             capture_output=True, text=True)
+    for line in run.stdout.splitlines():
+        words = line.split()
+        # [GNUPG:] VALIDSIG <key> <date> <time> <expires> <ver> <reserved> <algo> <hash> <class> <primary key>
+        if words[:2] == ["[GNUPG:]", "VALIDSIG"] and fingerprint in (words[2], words[-1]):
+            return None
+    return (run.stderr.strip()[:300] or "no valid signature") + f" (expected key {fingerprint})"
+
+
+def fetch(url: str, dest: Path) -> None:
+    try:
+        subprocess.run(["curl", "-L", "--fail", "--retry", "3", "-o", str(dest), url], check=True)
+    except subprocess.CalledProcessError as e:
+        dest.unlink(missing_ok=True)
+        raise Fail(f"could not download {url} (curl exit status {e.returncode})") from None
+
+
 def fetch_tarball():
-    if TARBALL.exists() and TARBALL.stat().st_size > 100_000_000:
-        return
-    say(f"downloading Arch Linux ARM ({TARBALL_URL})")
+    """The Arch Linux ARM tarball, checked against its signature. The mirrors are plain
+    HTTP only, so that signature, and our copy of the key, are what make it safe."""
     TARBALL.parent.mkdir(parents=True, exist_ok=True)
-    tmp = TARBALL.with_suffix(".part")
-    subprocess.run(["curl", "-L", "--fail", "-o", str(tmp), TARBALL_URL], check=True)
+    sig = TARBALL.with_name(TARBALL.name + ".sig")
+    if TARBALL.exists() and TARBALL.stat().st_size > TARBALL_MIN_SIZE:
+        if not sig.exists():        # from before the signature was checked
+            fetch(TARBALL_URL + ".sig", sig)
+        problem = signature_problem(TARBALL, sig)
+        if problem is None:
+            say("Arch Linux ARM tarball: signature good")
+            return
+        # most likely a newer tarball was published after this one was saved
+        say(f"the saved tarball does not match its signature, so it is being downloaded again ({problem})")
+        sig.unlink(missing_ok=True)
+    say(f"downloading Arch Linux ARM ({TARBALL_URL})")
+    tmp, tmp_sig = TARBALL.with_suffix(".part"), sig.with_suffix(".part")
+    fetch(TARBALL_URL + ".sig", tmp_sig)
+    fetch(TARBALL_URL, tmp)
+    problem = signature_problem(tmp, tmp_sig)
+    if problem is not None:
+        tmp.unlink(missing_ok=True)
+        tmp_sig.unlink(missing_ok=True)
+        raise Fail("the downloaded Arch Linux ARM tarball failed its signature check, so it was deleted:\n  "
+                   f"{problem}\nA new tarball may have come out during the download: try again. If it keeps "
+                   "failing, do not work around it: the download may have been altered, or the project may "
+                   f"have changed its key ({TARBALL_KEY.relative_to(ROOT)}).")
+    say("Arch Linux ARM tarball: signature good")
     tmp.replace(TARBALL)
+    tmp_sig.replace(sig)
 
 
 def build_apps(stage: Path):

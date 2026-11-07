@@ -44,7 +44,7 @@ No EPEL or CRB is needed to build.
 ```sh
 sudo dnf -y --setopt=install_weak_deps=False install \
     git-core bsdtar dosfstools mtools e2fsprogs python3 util-linux shadow-utils \
-    curl tar xz qt6-qtbase-devel
+    curl gnupg2 tar xz qt6-qtbase-devel
 
 # qemu-user is not in EL10 (see below): take this one package from Fedora, signature checked
 sudo dnf -y --setopt=install_weak_deps=False \
@@ -101,7 +101,7 @@ it again with CodeReady Builder enabled.
 ```sh
 sudo dnf -y --setopt=install_weak_deps=False install \
     git-core bsdtar dosfstools mtools e2fsprogs python3 util-linux shadow-utils \
-    curl tar xz qemu-user-static-aarch64 qt6-qtbase-devel
+    curl gnupg2 tar xz qemu-user-static-aarch64 qt6-qtbase-devel
 ```
 
 The Fedora 45 cloud image already had `qemu-user-static` with binfmt active, and
@@ -157,7 +157,8 @@ third-party EL10 rebuilds installed with `--nogpgcheck`.
 | `mke2fs` 1.47 or later | `e2fsprogs` | `-O ^orphan_file` at `build.py:374` needs it (read from code). 1.47.1 and 1.47.4 work; older was not tried |
 | Python 3.11 or later | `python3` | The SDK imports `tomllib` (read from code). 3.12 and 3.15 work; older was not tried |
 | `uic` | `qt6-qtbase-devel`, or `pyside6-tools` | Build failed without one on Rocky and Fedora |
-| `curl` | `curl` | Downloads the Arch Linux ARM tarball (`build.py:110`) |
+| `curl` | `curl` | Downloads the Arch Linux ARM tarball |
+| `gpg` | `gnupg2` | Checks the tarball's signature. Added after the build tests |
 | `tar`, `xz` | `tar`, `xz` | Unpack `ztos-media` (`build.py:238`) |
 
 **A compiler is not needed on the host.** `qt6-qtbase-devel` pulls in `gcc`, `make`
@@ -297,8 +298,9 @@ for this on a Rocky host; that was not repeated here.
   the binary gone, restarting `systemd-binfmt` fails and the entry disappears (tested on
   Rocky), and a reboot should do the same (not tested). `doctor` warns about this: "the
   qemu interpreter is installed: warning".
-- **The tarball is not verified.** It comes over plain HTTP with no checksum
-  (`build.py:27`, `build.py:110`).
+- **The tarball comes over plain HTTP**, because the project's mirrors have no HTTPS. Its
+  signature is checked against the key in `installer/keys/`, each time, and a tarball that
+  fails is deleted. A saved tarball that has since been replaced upstream is downloaded again.
 - **Images differ slightly by host.** Fedora's `mke2fs` adds `metadata_csum_seed`, which
   Rocky's does not. Inode counts match and block counts nearly do, but neither image
   was booted, so this difference is untested on the phone.

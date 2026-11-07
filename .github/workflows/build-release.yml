@@ -42,6 +42,7 @@ jobs:
             dosfstools \
             e2fsprogs \
             flex \
+            gnupg \
             libarchive-tools \
             libelf-dev \
             libssl-dev \
