@@ -2813,6 +2813,17 @@ static double page_y(double y) {
 }
 
 static int32_t app_touch_id = -1;	/* a finger the app took (zmc_app.touch) */
+/* zmc_app.multitouch: further fingers that came down while it held that one */
+#define APP_MORE_FINGERS 4
+static int32_t app_more[APP_MORE_FINGERS];
+static int app_more_n;
+
+static int app_more_at(int32_t id) {
+	for (int i = 0; i < app_more_n; i++) {
+		if (app_more[i] == id) return i;
+	}
+	return -1;
+}
 
 static void touch_down(void *data, struct wl_touch *touch, uint32_t serial, uint32_t time,
 		struct wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y) {
@@ -2823,6 +2834,14 @@ static void touch_down(void *data, struct wl_touch *touch, uint32_t serial, uint
 		/* a finger does not wait for the page to finish gliding in */
 		zmc.anim_start = now_ms() - zmc.anim_total;
 		present();
+	}
+	/* a finger more on the app's territory: the app's too (a pinch) */
+	if (zmc.app->multitouch && app_touch_id >= 0) {
+		if (app_more_n < APP_MORE_FINGERS) {
+			app_more[app_more_n++] = id;
+			zmc.app->touch(0, id, wl_fixed_to_double(x), wl_fixed_to_double(y), time);
+		}
+		return;
 	}
 	/* the app's own territory: it takes the finger whole */
 	if (zmc.app->touch && !zmc.anim_active && !zmc.touching && app_touch_id < 0 &&
@@ -2899,7 +2918,17 @@ static void touch_up(void *data, struct wl_touch *touch, uint32_t serial, uint32
 		return;
 	}
 	if (id == app_touch_id) {
-		app_touch_id = -1;
+		/* the territory stays the app's until its last finger has lifted */
+		app_touch_id = app_more_n > 0 ? app_more[0] : -1;
+		if (app_more_n > 0) {
+			memmove(app_more, app_more + 1, sizeof(app_more[0]) * (size_t)--app_more_n);
+		}
+		zmc.app->touch(2, id, 0, 0, time);
+		return;
+	}
+	int more_at = app_more_at(id);
+	if (more_at >= 0) {
+		memmove(app_more + more_at, app_more + more_at + 1, sizeof(app_more[0]) * (size_t)(--app_more_n - more_at));
 		zmc.app->touch(2, id, 0, 0, time);
 		return;
 	}
@@ -2982,7 +3011,7 @@ static void touch_motion(void *data, struct wl_touch *touch, uint32_t time, int3
 	if (board_touch_motion(id, wl_fixed_to_double(x), wl_fixed_to_double(y))) {
 		return;
 	}
-	if (id == app_touch_id) {
+	if (id == app_touch_id || app_more_at(id) >= 0) {
 		zmc.app->touch(1, id, wl_fixed_to_double(x), wl_fixed_to_double(y), time);
 		return;
 	}
@@ -3050,6 +3079,9 @@ static void touch_cancel(void *data, struct wl_touch *touch) {
 		int32_t id = app_touch_id;
 		app_touch_id = -1;
 		zmc.app->touch(3, id, 0, 0, 0);
+		while (app_more_n > 0) {
+			zmc.app->touch(3, app_more[--app_more_n], 0, 0, 0);
+		}
 	}
 	zmc.touching = false;
 	if (zmc.press_to > 0) {
