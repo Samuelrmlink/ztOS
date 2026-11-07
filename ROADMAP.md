@@ -155,6 +155,7 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 | 7.27 | **Finished downloads and exact progress.** Leave a "finished" notification when a download ends, which needs telling a finished one from an abandoned one. An exact percent means connecting to Grayjay's local WebSocket. Check whether an active download still pulses the dock icon. | M | The estimate is in place. |
 | 7.28 | **Decide on AirPods auto-pause on ear removal**, and try "Connect automatically" (hidden until it's been tried). | S | From the AirPods track. |
 | 7.29 | **Tidying found on 2026-11-07.** Align licence headers (new files GPL-3.0-or-later, older `ztmetro/` files GPL-2.0-or-later, README 3.0). Remove the upstream phone's Bluetooth address from docs and logs (it stays in git history). Decide on Waydroid's `SM-G960N` model string. Remove the unused `ztoscorenetworking-wifi`. Give `scripts/build-arch-root.sh` the tarball signature check. Fix `sensors/test-sensorhub-watch.py`'s path. `test-flash-root.sh` failed once, unexplained, then passed three times. | S | Each small; none urgent. |
+| 7.30 | **Setting: tabs loop or stop at the ends.** A Settings toggle for apps with tabs across the top. Looping: swiping keeps going round all the tabs. Not looping: swiping stops at the first and last tab, and you swipe back the other way to return. Applies to the whole kit, not per app. | S | Depends on the two-way tab fix, under way on `track-pivot-fix`. The default isn't decided; looping is today's behaviour. |
 
 ### Building these in parallel
 
