@@ -1,6 +1,7 @@
 /* Exercise CSF recovery exhaustion without services, sysfs writes, or delays:
  * make -C ztmetro check-csf
  */
+#define CSF_CTL "/tmp/test-csf-failure.ctl"
 #define main csf_main
 #define system mock_system
 #define access mock_access
@@ -51,7 +52,8 @@ int mock_access(const char *path, int mode) {
 }
 DIR *mock_opendir(const char *path) { return NULL; }
 FILE *mock_fopen(const char *path, const char *mode) {
-	assert(!strcmp(path, "/sys/class/sec/sensorhub/ready"));
+	if (strcmp(path, "/sys/class/sec/sensorhub/ready"))	/* the phone's user.conf: none here */
+		return NULL;
 	FILE *stream = tmpfile();
 	assert(stream);
 	fputs(ready_now ? "1\n" : "0\n", stream);
@@ -127,5 +129,13 @@ int main(int argc, char **argv) {
 	hub_unit_there = true;
 	puts("CSF: no hub check on a device without the hub.");
 
+	/* The control pipe: the phone's user and root, nobody else. */
+	int fd = ctl_open();
+	struct stat st;
+	assert(fd >= 0 && lstat(CSF_CTL, &st) == 0);
+	assert((st.st_mode & 07777) == 0620 && S_ISFIFO(st.st_mode));
+	close(fd);
+	unlink(CSF_CTL);
+	puts("CSF: control pipe is 0620.");
 	return 0;
 }

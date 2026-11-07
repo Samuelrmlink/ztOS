@@ -62,7 +62,7 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 | 3.10 | `ztmetro.c:10753` sends `reboot_recovery`, but `ztoscsf` only handles `stop_sensorhub`. | S | Review |
 | 3.11 | `zrn-android-root:28-34` has unchecked mounts, so it can report success with a broken root. | S | Review |
 | 3.12 | `ztoscsf` runs the hub check on devices without that hub, and its retries block the main loop. Fixed in the source: no check where `ztoscsf-sensorhub.service` is not installed, and a recovery now runs a step a second, so the control pipe and other checks keep going. `make check-csf`; not yet on the phone. | S | Review; fixed, host test only |
-| 3.13 | `/run/ztoscsf.ctl` is mode 0666, so any local user can stop the hub. | S | Review |
+| 3.13 | `/run/ztoscsf.ctl` was mode 0666, so any local user could stop the hub. Now 0620, owned by root and the group of the phone's user (`/etc/ztos/user.conf`). Host test only; not yet on the phone. `/run/ztoscorenetworking.ctl`, `/run/zrnperfd.ctl` and `/run/ztoscsf-sensord.ctl` are still 0666 and have the same weakness. | S | Review; fixed, host test only |
 
 ## 4. Build and install
 

@@ -53,13 +53,16 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "../ztos-user.h"
 
 #define NAME		"ztOSCoreSensorFramework"
 #define COMPONENTS	"/etc/ztoscoresensorframework/components"
 #define MARKS		"/var/lib/ztoscsf"
 #define RUN_DIR		"/run/ztoscsf"
 #define STATUS		RUN_DIR "/status"
+#ifndef CSF_CTL
 #define CSF_CTL		"/run/ztoscsf.ctl"
+#endif
 #define PERIOD_S	60	/* (every look runs a program or two: not more often than this) */
 #define QUIET_S		600	/* one report per piece in this long */
 #define START_GRACE_S	100	/* how long a unit may take to come up at first */
@@ -626,6 +629,22 @@ static void ctl_handle(const char *cmd)
 	}
 }
 
+/* The shell's way in: its "stop sensor hub" button runs as the phone's user.
+ * Only that user may write here, so no other local account can stop the hub.
+ * If the group can't be set it stays root's alone, and the button still stops
+ * the units through its sudo rule (99-ztos-shell). */
+static int ctl_open(void)
+{
+	unlink(CSF_CTL);
+	if (mkfifo(CSF_CTL, 0600) == 0) {
+		if (chown(CSF_CTL, -1, ztos_user()->gid) == 0)
+			chmod(CSF_CTL, 0620);
+		else
+			say("%s: cannot give it to the phone's user: %s", CSF_CTL, strerror(errno));
+	}
+	return open(CSF_CTL, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+}
+
 static void look(bool first)
 {
 	units_look(first);
@@ -741,11 +760,7 @@ int main(int argc, char **argv)
 	say("%s: %d components", NAME, n_parts);
 	start_all();
 
-	unlink(CSF_CTL);
-	if (mkfifo(CSF_CTL, 0666) == 0) {
-		chmod(CSF_CTL, 0666);
-	}
-	int ctl_fd = open(CSF_CTL, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+	int ctl_fd = ctl_open();
 
 	sleep(3);
 	look(true);
