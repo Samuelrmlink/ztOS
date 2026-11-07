@@ -1,0 +1,12 @@
+[Unit]
+Description=zrn-ledd: the one owner of the front LED
+After=systemd-tmpfiles-setup.service
+
+[Service]
+ExecStart=/usr/local/sbin/zrn-ledd
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

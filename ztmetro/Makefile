@@ -18,7 +18,7 @@ ifneq ($(FOREIGN),)
 $(info removed programs built for another machine, to build them here: $(FOREIGN))
 endif
 
-all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
+all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
 	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror
 
@@ -84,7 +84,7 @@ JPEG_LIBS := $(shell pkg-config --exists libjpeg 2>/dev/null && pkg-config --lib
 gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 	$(APP_BUILD) $(JPEG_FLAGS) -o $@ gallery/ztgallery.c $(CORE) $(APP_LIBS) $(JPEG_LIBS) -lpthread
 
-settings/ztsettings: settings/ztsettings.c settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h $(CORE_DEPS)
+settings/ztsettings: settings/ztsettings.c settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ settings/ztsettings.c $(CORE) $(APP_LIBS)
 
 devtest/zrndevtest: devtest/zrndevtest.c $(CORE_DEPS)
@@ -124,6 +124,9 @@ modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c
 	$(CC) $(CFLAGS) $(WARN) -o $@ modemd/ztoscorenetworkingd.c
 
 # notifications from other programs, what is playing, and push
+ledd/zrn-ledd: ledd/zrn-ledd.c ledd/led-policy.h ztos-user.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ ledd/zrn-ledd.c
+
 notifyd/ztnotifyd: notifyd/ztnotifyd.c
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd) -o $@ notifyd/ztnotifyd.c \
 		$(shell pkg-config --libs libsystemd)
@@ -251,6 +254,8 @@ install: check-arch
 	install -Dm644 store/data/ztstore.svg /usr/local/share/icons/hicolor/scalable/apps/ztstore.svg
 	install -Dm755 perfd/zrnperfd /usr/local/sbin/zrnperfd
 	install -Dm644 perfd/zrnperfd.service /etc/systemd/system/zrnperfd.service
+	install -Dm755 ledd/zrn-ledd /usr/local/sbin/zrn-ledd
+	install -Dm644 ledd/zrn-ledd.service /etc/systemd/system/zrn-ledd.service
 	install -Dm755 touchkeyd/ztos-touchkeyd /usr/local/sbin/ztos-touchkeyd
 	install -Dm644 touchkeyd/ztos-touchkeyd.service /etc/systemd/system/ztos-touchkeyd.service
 	install -Dm755 sensord/ztoscsf-sensord /usr/local/sbin/ztoscsf-sensord
@@ -274,7 +279,7 @@ install: check-arch
 	install -Dm644 csf/ztoscoresensorframework.service /etc/systemd/system/ztoscoresensorframework.service
 
 clean:
-	rm -f sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
+	rm -f sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h
 
@@ -328,6 +333,13 @@ check-bt-list:
 check-settings-config:
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-settings-config-test tests/settings-config.c
 	/tmp/ztmetro-settings-config-test
+
+.PHONY: check-led
+check-led: ledd/zrn-ledd
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-led-policy-test tests/led-policy.c
+	/tmp/ztmetro-led-policy-test
+	sh tests/led-daemon.sh ledd/zrn-ledd
+	sh tests/led-charge.sh ../devices/samsung-starlte/overlay/usr/local/sbin/zrn-charge
 
 .PHONY: check-settings-tree
 check-settings-tree:

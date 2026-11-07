@@ -43,6 +43,7 @@
 #include "../background-apps.h"
 #include "config-merge.h"
 #include "page-tree.h"
+#include "../ledd/led-policy.h"
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -133,6 +134,10 @@ enum action {
 	ACT_ABOUT_REPO,
 	ACT_IB_MODE,		/* arg: 0 off, 1 shadow, 2 on */
 	ACT_IB_ENGINE,		/* arg: 0 the processor, 1 SCORE */
+	ACT_LED_MASTER,
+	ACT_LED_SWITCH,		/* then one for each source */
+	ACT_LED_SWITCH_LAST = ACT_LED_SWITCH + N_LED_SOURCES - 1,
+	ACT_LED_COLOUR,		/* arg: source * 16 + place in the palette */
 	ACT_QUICK_SLOT,		/* then one for each of the eight places */
 	ACT_QUICK_LAST = ACT_QUICK_SLOT + 7,
 	ACT_APP_SCALE_SLOT,	/* then one for each app listed */
@@ -215,6 +220,7 @@ static struct {
 	int ring_vol;
 	bool vibrate_ring;
 	bool vibrate_silent;
+	struct led_config led;
 
 	char cpu_gov[32];
 	int swappiness;
@@ -316,6 +322,7 @@ static double picker(cairo_t *cr, double y, const char *caption, const char *con
 static void config_load(void) {
 	char path[512], line[256];
 	config_path(path, sizeof(path));
+	led_config_defaults(&app.led);
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
@@ -344,6 +351,8 @@ static void config_load(void) {
 		} else if (strcmp(key, "key_height") == 0) {
             int n = atoi(val);
             app.key_height = n < 42 ? 42 : n > 72 ? 72 : n;
+        } else if (led_config_line(&app.led, key, val)) {
+            /* the front LED's: zrn-ledd reads the same keys */
         } else if (strcmp(key, "volume_media_controls") == 0) {
             app.volume_media = strcmp(val, "on") == 0;
         } else if (strcmp(key, "key_sound") == 0) {
@@ -537,7 +546,7 @@ static void auto_load(void) {
 }
 
 /* Every key Settings can write, as it would write it now. */
-enum { N_CONFIG_KEYS = 25 + N_HAPTIC_GROUPS };
+enum { N_CONFIG_KEYS = 25 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };
 static struct config_key config_keys[N_CONFIG_KEYS];
 
 static struct config_key *config_key_named(const char *name) {
@@ -587,6 +596,11 @@ static void config_format(void) {
 	static const int fs_bars_secs[] = { 2, 3, 5, 10 };
 	KEY("fullscreen_bars_secs", "%d", fs_bars_secs[app.fs_bars_idx]);
 	KEY("volume_media_controls", "%s", app.volume_media ? "on" : "off");
+	KEY(LED_MASTER_KEY, "%s", app.led.enabled ? "on" : "off");
+	for (int i = 0; i < N_LED_SOURCES; i++) {
+		KEY(LED_LOOKS[i].key, "%s", app.led.on[i] ? "on" : "off");
+		if (LED_LOOKS[i].colour_key) KEY(LED_LOOKS[i].colour_key, "%06x", app.led.colour[i]);
+	}
 #undef KEY
 }
 
@@ -3141,7 +3155,62 @@ static double draw_sound_touch(cairo_t *cr) {
 			on, N_HAPTIC_GROUPS);
 	}
 	y = zmc_entry(cr, y, "haptics", detail, ACT_OPEN_PAGE, PAGE_HAPTICS);
+
+	if (access(LED_SYS_DIR "/red:status", F_OK) == 0) {
+		int on = 0;
+		for (int i = 0; i < N_LED_SOURCES; i++) on += app.led.on[i];
+		if (app.led.enabled) snprintf(detail, sizeof(detail), "on, %d of %d kinds", on, N_LED_SOURCES);
+		else snprintf(detail, sizeof(detail), "off");
+		y = zmc_entry(cr, y, "notification light", detail, ACT_OPEN_PAGE, PAGE_LED);
+	}
 	return y + 20;
+}
+
+/* The colours of one kind of light, a row of squares; the chosen one is ringed.
+ * A colour set by hand in the config rings none. */
+static double led_swatches(cairo_t *cr, double y, int source) {
+	double gap = 8, side = (zmc.width - 2 * MARGIN - gap * (LED_N_PALETTE - 1)) / LED_N_PALETTE;
+	if (side > 44) side = 44;
+	for (int c = 0; c < LED_N_PALETTE; c++) {
+		double x = MARGIN + c * (side + gap);
+		unsigned rgb = LED_PALETTE[c];
+		cairo_set_source_rgb(cr, (rgb >> 16 & 255) / 255.0, (rgb >> 8 & 255) / 255.0, (rgb & 255) / 255.0);
+		cairo_rectangle(cr, x, y, side, side);
+		cairo_fill(cr);
+		if (app.led.colour[source] == rgb) {
+			cairo_set_source_rgb(cr, 1, 1, 1);
+			cairo_set_line_width(cr, 3);
+			cairo_rectangle(cr, x - 3, y - 3, side + 6, side + 6);
+			cairo_stroke(cr);
+		}
+		zmc_add_hit(x - gap / 2, y - 4, side + gap, side + 8, ACT_LED_COLOUR, source * 16 + c);
+	}
+	return y + side + 22;
+}
+
+static double draw_led(cairo_t *cr) {
+	double y = zmc_header(cr, "notification light");
+	y = zmc_switch(cr, y, "Notification light", app.led.enabled, ACT_LED_MASTER);
+	if (!app.led.enabled) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, "The light stays off, whatever happens.", FONT_REGULAR, 13, MARGIN, y, zmc.width - 2 * MARGIN);
+		return y + 40;
+	}
+	/* in the order they win when more than one wants the light */
+	for (int i = 0; i < N_LED_SOURCES; i++) {
+		y = zmc_switch(cr, y, LED_LOOKS[i].title, app.led.on[i], ACT_LED_SWITCH + i);
+		if (LED_LOOKS[i].colour_key && app.led.on[i]) y = led_swatches(cr, y, i);
+	}
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "The indicator blinks white at the top boost rung. It is not a fault.",
+		FONT_REGULAR, 13, MARGIN, y, zmc.width - 2 * MARGIN);
+	return y + 40;
+}
+
+/* The config has changed: zrn-ledd looks when this file is closed. */
+static void led_tell(void) {
+	int fd = open(LED_USER_DIR "/" LED_POKE_SETTINGS, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0664);
+	if (fd >= 0) close(fd);
 }
 
 static double draw_power(cairo_t *cr) {
@@ -3283,6 +3352,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_KEYBOARD: return draw_keyboard(cr);
 	case PAGE_ABOUT: return draw_about(cr);
 	case PAGE_HAPTICS: return draw_haptics(cr);
+	case PAGE_LED: return draw_led(cr);
 	case PAGE_QUICK: return draw_quick(cr);
 	case PAGE_APN: return draw_apn(cr);
 	case PAGE_WIFI_JOIN: return draw_wifi_join(cr);
@@ -3863,6 +3933,21 @@ static void activate(int action, int arg) {
 	case ACT_VIBE_PREVIEW:
 		ringtone_stop();
 		vibe_preview_play(true);
+		break;
+	case ACT_LED_MASTER:
+		app.led.enabled = !app.led.enabled;
+		config_save();
+		led_tell();
+		break;
+	case ACT_LED_SWITCH ... ACT_LED_SWITCH_LAST:
+		app.led.on[action - ACT_LED_SWITCH] = !app.led.on[action - ACT_LED_SWITCH];
+		config_save();
+		led_tell();
+		break;
+	case ACT_LED_COLOUR:
+		app.led.colour[arg / 16] = LED_PALETTE[arg % 16];
+		config_save();
+		led_tell();
 		break;
 	case ACT_VIBRATE_RING:
 		app.vibrate_ring = !app.vibrate_ring;

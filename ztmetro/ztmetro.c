@@ -663,6 +663,7 @@ struct zt_server {
 		char who[96];		/* whose it is, as the sender said (note_key) */
 		time_t at;
 		bool expanded;		/* tapped in the action centre: all of its text */
+		bool quiet;		/* came without alerting: does not light the LED */
 	} notes[MAX_NOTES];
 	int n_notes;
 	/* The action centre's list scrolls. Each notification (with its app's
@@ -6194,7 +6195,34 @@ static void lock_lift_sync(struct zt_server *server, bool animated) {
 }
 
 /* The notifications changed (one arrived, or they were cleared). */
+/* The front LED (zrn-ledd): lit while a notification that alerted is pending.
+ * Only told when that changes, and only by the running session (see ctl_init):
+ * not by --render, whose notifications are pretend. */
+static bool led_notes_live;
+static void led_notes_sync(struct zt_server *server) {
+	static int told = -1;
+	if (!led_notes_live) {
+		return;
+	}
+	int pending = 0;
+	for (int k = 0; k < server->n_notes; k++) {
+		pending |= !server->notes[k].quiet;
+	}
+	if (pending == told) {
+		return;
+	}
+	told = pending;
+	int fd = open("/run/zrn-led/user/notify", O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0664);
+	if (fd >= 0) {
+		if (write(fd, pending ? "1\n" : "0\n", 2) < 0) {
+			wlr_log(WLR_ERROR, "telling zrn-ledd: %s", strerror(errno));
+		}
+		close(fd);
+	}
+}
+
 static void lock_notes_changed(struct zt_server *server) {
+	led_notes_sync(server);
 	if (server->width == 0 || retro_on(server) || !server->lock_layer.tex) {
 		return;
 	}
@@ -8708,6 +8736,7 @@ static const struct { const char *page, *title, *words; } HYPER_SETTINGS[] = {
 	{ "battery", "battery", "power charge voltage" },
 	{ "keyboard", "keyboard", "typing key height key sound" },
 	{ "haptics", "haptics", "vibration feedback" },
+	{ "led", "notification light", "led charging battery notifications boost colour" },
 	{ "quick", "quick tiles", "quick actions action centre notifications" },
 	{ "date", "date + region", "clock time zone language" },
 	{ "about", "about", "phone version software information" },
@@ -10564,10 +10593,12 @@ static void note_quiet(struct zt_server *server, const char *who, const char *ap
 		snprintf(server->notes[0].app, sizeof(server->notes[0].app), "%s", app);
 		snprintf(server->notes[0].title, sizeof(server->notes[0].title), "%s", title);
 		server->notes[0].at = time(NULL);
+		server->notes[0].quiet = true;
 		if (server->n_notes < MAX_NOTES) {
 			server->n_notes++;
 		}
 	}
+	led_notes_sync(server);
 	snprintf(server->notes[i].who, sizeof(server->notes[i].who), "%s", who);
 	snprintf(server->notes[i].text, sizeof(server->notes[i].text), "%s", text);
 	server->notes_dirty = true;
@@ -10594,6 +10625,7 @@ static void note_add_from(struct zt_server *server, const char *who, const char 
 		server->n_notes++;
 	}
 	wlr_log(WLR_INFO, "notification: %s: %s", title, text);
+	led_notes_sync(server);
 	ui_sound(server, UIS_NOTIFY);
 	if (server->width == 0) {
 		return;	/* no screen yet: it is in the list when there is one */
@@ -13905,6 +13937,9 @@ static int ctl_readable(int fd, uint32_t mask, void *data) {
 static void ctl_init(struct zt_server *server) {
 	char path[300];
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	/* a new session has no notifications, whatever the last one left lit */
+	led_notes_live = true;
+	led_notes_sync(server);
 	snprintf(path, sizeof(path), "%s/ztmetro.ctl", runtime ? runtime : "/tmp");
 	unlink(path);
 	if (mkfifo(path, 0600) < 0) {

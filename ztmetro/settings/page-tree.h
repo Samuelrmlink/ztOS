@@ -43,6 +43,7 @@ enum page {
 	PAGE_TILES,	/* Tiles Shell: the start screen's columns and background */
 	PAGE_LOCK,	/* Lock Screen: its photo, and whether waking shows it */
 	PAGE_APP_SCALE,	/* app scaling: a size for each app */
+	PAGE_LED,	/* the front LED: what lights it, and in what colour */
 	N_PAGES
 };
 
@@ -71,6 +72,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_APP_DETAIL] = PAGE_INSTALLED_APPS,
 	[PAGE_APP_SCALE] = PAGE_INSTALLED_APPS,
 	[PAGE_HAPTICS] = PAGE_SOUND_TOUCH,
+	[PAGE_LED] = PAGE_SOUND_TOUCH,
 	[PAGE_QUICK] = PAGE_THEME,
 	[PAGE_APN] = PAGE_MOBILE,
 	[PAGE_WIFI_JOIN] = PAGE_WIFI,
@@ -116,6 +118,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "sound", PAGE_SOUND_TOUCH },
 	{ "audio", PAGE_AUDIO },
 	{ "haptics", PAGE_HAPTICS },
+	{ "led", PAGE_LED },
 	{ "power", PAGE_POWER },
 	{ "battery", PAGE_BATTERY },
 	{ "perf", PAGE_PERF },
