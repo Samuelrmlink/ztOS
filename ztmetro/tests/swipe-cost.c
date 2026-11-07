@@ -178,6 +178,7 @@ int app_main(int argc, char **argv);
 
 int main(int argc, char **argv) {
 	static char *args[] = { "app", "apps", NULL };
+	if (getenv("SWIPE_ARGS_AS_GIVEN")) return app_main(argc, argv);	/* (--render, with no display) */
 	const char *dir = getenv("SWIPE_DIR");
 	const char *apps = getenv("SWIPE_APPS");
 	if (!dir) dir = "/tmp";

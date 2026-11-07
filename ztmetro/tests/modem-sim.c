@@ -5,6 +5,16 @@
 #include <assert.h>
 
 int main(void) {
+	/* mobile data: a fresh install starts on */
+	assert(data_at_start(false, false, false));
+	/* and what someone said stays said */
+	assert(!data_at_start(true, false, false));
+	assert(!data_at_start(true, false, true));
+	assert(data_at_start(false, true, true));
+	assert(data_at_start(false, true, false));
+	/* from before DATA_OFF: off was only the other file's absence */
+	assert(!data_at_start(false, false, true));
+
 	assert(!strcmp(sim_from_cpin("READY"), "ready"));
 	assert(!strcmp(sim_from_cpin("SIM PIN"), "pin"));
 	assert(!strcmp(sim_from_cpin("SIM PUK"), "puk"));

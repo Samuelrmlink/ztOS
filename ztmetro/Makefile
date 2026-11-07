@@ -37,7 +37,7 @@ RETRO_DEPS = $(RETRO) core/zrnboard.h retro/dotmatrix.h retro/dm-launcher.h retr
 DM_WRAP = retro/dm-wrap.c
 DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
 
-ztmetro: ztmetro.c pods/pods-bar.h pods/pods-bar-state.h airplane-radios.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+ztmetro: ztmetro.c pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -84,16 +84,19 @@ JPEG_LIBS := $(shell pkg-config --exists libjpeg 2>/dev/null && pkg-config --lib
 gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 	$(APP_BUILD) $(JPEG_FLAGS) -o $@ gallery/ztgallery.c $(CORE) $(APP_LIBS) $(JPEG_LIBS) -lpthread
 
-settings/ztsettings: settings/ztsettings.c pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(CORE_DEPS)
-	$(APP_BUILD) -o $@ settings/ztsettings.c $(CORE) $(APP_LIBS)
+# Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
+EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c
+EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h devtest/devtest-pages.h audio-apps.h audio-state.h audio-sync.h
+settings/ztsettings: settings/ztsettings.c pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
+	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
-devtest/zrndevtest: devtest/zrndevtest.c $(CORE_DEPS)
-	$(APP_BUILD) -o $@ devtest/zrndevtest.c $(CORE) $(APP_LIBS)
+devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ devtest/zrndevtest.c devtest/devtest-pages.c $(CORE) $(APP_LIBS)
 
 # Devices and Services: what is running, crashed or missing
 # ztSound: the equalizer and effects (the engine, ztos-soundd, ships in rootfs/overlay/usr/local/bin)
-sound/ztsound: sound/ztsound.c audio-apps.h audio-state.h audio-sync.h $(CORE_DEPS)
-	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ sound/ztsound.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
+sound/ztsound: sound/ztsound.c sound/sound-pages.c sound/sound-pages.h audio-apps.h audio-state.h audio-sync.h $(CORE_DEPS)
+	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ sound/ztsound.c sound/sound-pages.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devices/ztdevices: devices/ztdevices.c $(CORE_DEPS)
 	$(APP_BUILD) -o $@ devices/ztdevices.c $(CORE) $(APP_LIBS)
@@ -137,8 +140,8 @@ pods/ztos-podsd: pods/ztos-podsd.c $(PODS_DEPS)
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd) -o $@ pods/ztos-podsd.c \
 		$(shell pkg-config --libs libsystemd)
 
-pods/ztpods: pods/ztpods.c $(CORE_DEPS)
-	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ pods/ztpods.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
+pods/ztpods: pods/ztpods.c pods/pods-pages.c pods/pods-pages.h $(CORE_DEPS)
+	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ pods/ztpods.c pods/pods-pages.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 # the phone's own three: calls, messages, people (comm.h is what they share)
 phone/ztphone: phone/ztphone.c comm/comm.h $(CORE_DEPS)
@@ -338,11 +341,6 @@ check-modem-sim:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c
 	/tmp/ztmetro-modem-sim-test
 
-.PHONY: check-airplane-radios
-check-airplane-radios:
-	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-airplane-radios-test tests/airplane-radios.c
-	/tmp/ztmetro-airplane-radios-test
-
 .PHONY: check-csf
 check-csf:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -o /tmp/ztmetro-csf-test ../sensors/test-csf-failure.c
@@ -386,7 +384,8 @@ check-slider-touch:
 check-swipe-cost:
 	mkdir -p /tmp/ztmetro-swipe-cost
 	$(SWIPE_BUILD) -Dmain=app_main -c -o /tmp/ztmetro-swipe-app.o sound/ztsound.c
-	$(SWIPE_BUILD) -o /tmp/ztmetro-swipe-cost-test tests/swipe-cost.c /tmp/ztmetro-swipe-app.o $(SWIPE_CORE) $(SWIPE_LIBS)
+	$(SWIPE_BUILD) -c -o /tmp/ztmetro-swipe-pages.o sound/sound-pages.c
+	$(SWIPE_BUILD) -o /tmp/ztmetro-swipe-cost-test tests/swipe-cost.c /tmp/ztmetro-swipe-app.o /tmp/ztmetro-swipe-pages.o $(SWIPE_CORE) $(SWIPE_LIBS)
 	SWIPE_DIR=/tmp/ztmetro-swipe-cost /tmp/ztmetro-swipe-cost-test apps
 
 .PHONY: check-settings-tree
