@@ -211,6 +211,13 @@ if [ -n "$CPUFREQ" ]; then
 	cfg --enable ARM_S9P_CPUFREQ
 else
 	cfg --disable CPU_FREQ
+	# only the vendor-table driver: the generic ones defconfig pulls in (and
+	# their extra governors) are not in the image the phones run
+	for sym in CPUFREQ_DT CPUFREQ_DT_PLATDEV ARM_SCMI_CPUFREQ ARM_SCPI_CPUFREQ \
+		CPU_FREQ_GOV_ONDEMAND CPU_FREQ_GOV_USERSPACE CPU_FREQ_GOV_CONSERVATIVE \
+		CPU_FREQ_GOV_POWERSAVE; do
+		cfg --disable "$sym"
+	done
 	cfg --disable ARM_S9P_CPUFREQ
 fi
 if [ -n "$GPU" ]; then
