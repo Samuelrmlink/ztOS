@@ -129,8 +129,11 @@ as they come up, with the hub working.
 
 `MCU_RESP` isn't a health signal. On good and failed hubs alike it reads high, and
 stays high with the chip in standby and LDO37 off for over a minute, and a weak
-pull-down takes it low. So `hub_power_sequence`'s "the chip did not reset" is
-misleading, and its longer holds only cost boot time (ROADMAP 1.1).
+pull-down takes it low. So `hub_power_sequence` no longer acts on it: it parks the
+lines and holds the chip in standby once for `standby_ms` (1000 ms), at every probe
+and through the `reset` file, and only logs MCU_RESP. The 3 s and 9 s repeats and the
+"the chip did not reset" warning are gone (ROADMAP 1.1). If a warm reboot ever needs
+a longer hold, set `standby_ms` and write `reset`.
 
 ### Cold-boot start: verified
 

@@ -2,6 +2,12 @@
 
 > **Superseded for the power-off failure (2026-11-07):** the cause was LDO9 on the
 > S2MPB02, not a running chip. See "After a full power-off" in `README.md`.
+>
+> **MCU_RESP is no longer checked (2026-11-07):** it reads high on good boots too, so
+> sections 3 and 4's escalating holds and their "the chip did not reset" message are
+> gone. `hub_power_sequence` now does one parked hold of `standby_ms` (1000 ms, at
+> every probe and reset), and only logs MCU_RESP. The parking, the hold and the
+> `standby_ms` and `supply_cut` parameters are unchanged.
 
 The stock firmware does not run a reset sequence that our driver is missing.
 Samsung's kernel never cuts the hub supply and never resets the chip. lhd does
