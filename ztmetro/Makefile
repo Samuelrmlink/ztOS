@@ -20,7 +20,7 @@ endif
 
 all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
-	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror
+	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods
 
 sounds/ztos-sounds: sounds/ztos-sounds.c
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libpulse) -o $@ $< $(shell pkg-config --libs libpulse) -lm
@@ -37,7 +37,7 @@ RETRO_DEPS = $(RETRO) core/zrnboard.h retro/dotmatrix.h retro/dm-launcher.h retr
 DM_WRAP = retro/dm-wrap.c
 DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
 
-ztmetro: ztmetro.c audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+ztmetro: ztmetro.c pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -84,7 +84,7 @@ JPEG_LIBS := $(shell pkg-config --exists libjpeg 2>/dev/null && pkg-config --lib
 gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 	$(APP_BUILD) $(JPEG_FLAGS) -o $@ gallery/ztgallery.c $(CORE) $(APP_LIBS) $(JPEG_LIBS) -lpthread
 
-settings/ztsettings: settings/ztsettings.c settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h $(CORE_DEPS)
+settings/ztsettings: settings/ztsettings.c pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ settings/ztsettings.c $(CORE) $(APP_LIBS)
 
 devtest/zrndevtest: devtest/zrndevtest.c $(CORE_DEPS)
@@ -127,6 +127,15 @@ modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c
 notifyd/ztnotifyd: notifyd/ztnotifyd.c
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd) -o $@ notifyd/ztnotifyd.c \
 		$(shell pkg-config --libs libsystemd)
+
+# AirPods: the daemon, and the app that shows it (pods/README.md)
+PODS_DEPS = pods/pods-aes.h pods/pods-proto.h pods/pods-model.h
+pods/ztos-podsd: pods/ztos-podsd.c $(PODS_DEPS)
+	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd) -o $@ pods/ztos-podsd.c \
+		$(shell pkg-config --libs libsystemd)
+
+pods/ztpods: pods/ztpods.c $(CORE_DEPS)
+	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ pods/ztpods.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 # the phone's own three: calls, messages, people (comm.h is what they share)
 phone/ztphone: phone/ztphone.c comm/comm.h $(CORE_DEPS)
@@ -233,6 +242,10 @@ install: check-arch
 	install -Dm755 sound/ztsound /usr/local/bin/ztsound
 	install -Dm644 sound/ztsound.desktop /usr/local/share/applications/ztsound.desktop
 	install -Dm644 sound/ztsound.svg /usr/local/share/icons/hicolor/scalable/apps/ztsound.svg
+	install -Dm755 pods/ztos-podsd /usr/local/bin/ztos-podsd
+	install -Dm755 pods/ztpods /usr/local/bin/ztpods
+	install -Dm644 pods/ztpods.desktop /usr/local/share/applications/ztpods.desktop
+	install -Dm644 pods/ztpods.svg /usr/local/share/icons/hicolor/scalable/apps/ztpods.svg
 	install -Dm755 power/ztpower /usr/local/bin/ztpower
 	install -Dm755 osial/ztosial /usr/local/bin/ztosial
 	install -Dm644 osial/ztosial.desktop /usr/local/share/applications/ztosial.desktop
@@ -274,7 +287,7 @@ install: check-arch
 	install -Dm644 csf/ztoscoresensorframework.service /etc/systemd/system/ztoscoresensorframework.service
 
 clean:
-	rm -f sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
+	rm -f pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h
 
@@ -359,6 +372,12 @@ check-audiod:
 check-pods:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-pods-test tests/pods-proto.c
 	/tmp/ztmetro-pods-test
+
+# the daemon itself against a pretend bluetoothd on a private bus, and pretend pods on a
+# unix socket: touches neither the real BlueZ nor the radio. Needs pods/ztos-podsd built.
+.PHONY: check-podsd
+check-podsd: pods/ztos-podsd
+	python3 tests/podsd-e2e.py
 
 .PHONY: check-power-key
 check-power-key:

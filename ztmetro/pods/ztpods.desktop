@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=AirPods
+Comment=Batteries, listening modes and settings
+Exec=ztpods
+Terminal=false
+Type=Application
+Icon=ztpods
+Categories=AudioVideo;Audio;Settings;

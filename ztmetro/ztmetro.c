@@ -39,6 +39,7 @@
 #include "audio-sync.h"
 #include "auth/btpair-proto.h"
 #include "audio-state.h"
+#include "pods/pods-bar.h"
 #include "osk-numeric.h"
 #include <dirent.h>
 #include <errno.h>
@@ -768,6 +769,7 @@ struct zt_server {
 	char bt_name[64];
 	int bt_battery;			/* percent, -1 unknown */
 	bool bt_apple;			/* Apple's: AirPods get their own status icon, not the meter */
+	struct pods_bar pods_bar;	/* that icon: ztos-podsd's $XDG_RUNTIME_DIR/ztos-pods */
 	bool shade_torch;
 	bool shade_rotation;
 	bool shade_airplane;
@@ -5679,7 +5681,9 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	/* the connected device's charge, if it tells: one thin bar hard against the
 	 * icon, filling from the bottom, and steady while the icon beside it blinks.
 	 * Left out rather than run into the battery on a screen too narrow for it. */
-	if (server->bt_on && server->bt_name[0] && !server->bt_apple &&
+	if (server->bt_on && server->bt_name[0] && server->pods_bar.link) {
+		pods_bar_draw(cr, &server->pods_bar, x + cell * 1.25 * 0.55 + 1.5, base, cell, bx - cell * 0.5);
+	} else if (server->bt_on && server->bt_name[0] && !server->bt_apple &&
 	    server->bt_battery >= 0 && server->bt_battery <= 100) {
 		double bar_w = cell * 0.2, bar_h = cell * 1.05;
 		double bar_x = x + cell * 1.25 * 0.55 + 1.5, bar_y = base - bar_h;
@@ -6363,6 +6367,9 @@ static int net_tick(void *data) {
 	server->net_bytes = bytes ? bytes : 1;
 	server->net_active = active;
 
+	if (pods_bar_read(&server->pods_bar)) {
+		redraw = true;
+	}
 	if (bt_state_read(server)) {
 		redraw = true;
 		if (server->shade_open || server->shade_h > 0.1f) {
@@ -15917,6 +15924,8 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	g_dump_name = "android-compiling";
 	prepare_compiling(server);
 	g_dump_name = "status";
+	bt_state_read(server);
+	pods_bar_read(&server->pods_bar);
 	draw_status(server);
 	/* ZTMETRO_WALL=photo: the lock screen and Start's photo with it */
 	const char *wall = getenv("ZTMETRO_WALL");
