@@ -25,13 +25,13 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 
 | # | Item | Size | Evidence |
 |---|---|---|---|
-| 2.1 | Add variant detection (F vs. N). Nothing in the code distinguishes them. | M | Review |
-| 2.2 | Report the real model. The device tree hardcodes `SM-G960N`, so the F shows the wrong name. | S | Confirmed |
-| 2.3 | Use F-appropriate Wi-Fi data. The NVRAM is `STAR1 KR` with `ccode=KR`, built into the kernel. Check for an F calibration file and set the regulatory domain by region. | M | Review; effect Unknown |
-| 2.4 | Check modem values on the F: board revision `0xae`, `system_rev`, `hw_rev`. A wrong revision caused LTE drops to 2G on the N. | M | Review; effect Unknown |
-| 2.5 | Check the hub patch `G960NKSU5FVA2` against the F's vendor `lhd`. Lower priority for now, because the hub fails before a patch is sent. | S | Unknown |
-| 2.6 | Confirm partition numbers `sda10`, `sda11`, `sda25` on the F. Flash scripts should also check the partition label before writing. | S | Review |
-| 2.7 | Record dual-SIM and band differences between models. | M | Unknown |
+| 2.1 | **Variant detection (code done).** `ztos-variant` reads the factory record in EFS, then VENDOR, then SYSTEM; read-only. Says `SM-G960F` on this phone. The service isn't installed yet. See `docs/g960f-differences.md`. | M | Confirmed on the F; N by review |
+| 2.2 | **Report the real model (code done).** Settings shows the detected model, and the device tree names no letter. Not installed; the tree needs a new boot image. | S | Confirmed |
+| 2.3 | **F Wi-Fi data (identified, not applied).** Firmware and CLM match the F's. The built-in NVRAM is the Korean tuning: other power limits, SAR and calibration. The factory record names the module, so the F's file is VENDOR's `nvram.txt_r02a_b2`. `ccode=KR` lasts only until the first association. `build-boot.sh --wifi-nvram` is ready; it needs a new boot image and a phone test. No link to 1.7 or 3.7 established. | M | Confirmed; effect Unknown |
+| 2.4 | **Modem values on the F (partly checked).** `hw_rev`, `system_rev` and the revision pin list fit. `0xae` itself is not yet read on the F: run `modem/ril/hwrev.py`, a phone test. | M | Confirmed, except `0xae` |
+| 2.5 | **Hub patch against the F's `lhd` (differs).** The built-in patch isn't the one in the F's stock kernel of the same build as `lhd`. It loads; whether it contributes to `ESW:CRASHED` is unknown. | S | Confirmed difference; effect Unknown |
+| 2.6 | **Partitions confirmed on the F; scripts check labels (done).** `sda10`, `sda11` and `sda25` are BOOT, RECOVERY and USERDATA. All flash scripts and the installer check before writing. Not yet exercised in a real flash. | S | Confirmed |
+| 2.7 | **Dual SIM and bands (partly done).** This F is single SIM, per its factory record. Bands can't be read without modem commands, and no reliable G960N list was found, so no comparison is claimed. | M | SIM Confirmed; bands Unknown |
 
 ## 3. Other phone bugs
 
@@ -44,7 +44,7 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 | 3.0a5 | **Bluetooth list order (fixed).** Rows keep their places while the page is open, and a tap acts on the device drawn in that row. Consider also asking before pairing with unnamed devices, since tapping one pairs at once. The "Not in range" row hasn't been seen on the phone yet. | S | Confirmed; host test and 5 scans |
 | 3.0a7 | **PIN entry and pairing questions for Bluetooth.** `ztos-bt-agent` answers BlueZ through a sheet in the shell: confirm a number, type a PIN or passkey, show a PIN or passkey, allow a pairing or a service. It asks only while the phone is discoverable. Every sheet, the lock behaviour and the timeout tested on the phone against a pretend bluetoothd, and registration against the real one. No real device has paired through it yet, and the UE MINI BOOM flow is still to confirm. | M | Partly confirmed |
 | 3.0a2 | Pairing started from another device: `ztos-bt-agent` now answers it (3.0a7), untried with a real device. `Pairable` starting as `no` still needs checking. Settings also says "ztOS Bluetooth Device", but the phone's name is `ztos`. | S | Confirmed (code) |
-| 3.0a3 | No Bluetooth address found in EFS on this G960F, so it uses the chip's default. Check whether the F stores it elsewhere. Read EFS only. | S | Unknown |
+| 3.0a3 | **Bluetooth address on the G960F (answered; the earlier note was wrong).** It's in EFS at `bluetooth/bt_addr`, and the running controller already uses it through `zrn-bluetooth-addr`. Nothing to change. | S | Confirmed |
 | 3.0a1 | Bluetooth acceptance tests on the G960F: scan finds devices; the phone is discoverable while the Bluetooth page is open; a speaker pairs, connects and plays audio. AirPods Pro 2 follow in a later phase. | M | New |
 | 3.0b | **Fully power down the modem.** Airplane mode now turns the radio off (`AT+CFUN=4`), but `cbd` and the modem processor keep running. Add a "modem off" state that doesn't start them, and handle `ztoscsf`, which restarts stopped units. `modem/README.md` warns a restarted modem may stop answering. | M | Confirmed (gap) |
 | 3.0c | Add an option for airplane mode to also turn off Wi-Fi and Bluetooth. Off by default. | S | New |
