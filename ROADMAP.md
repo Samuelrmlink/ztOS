@@ -109,3 +109,34 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 - **Wire format:** scrcpy's framing and touch messages where they fit. The scrcpy client itself probably can't connect, because it expects adb and an Android server.
 - **Encoding:** software x264 at reduced resolution first, because `ffmpeg` and `x264` are on the phone and no `/dev/video*` encoder is visible. Check that the viewer's decoder is available on RHEL-family hosts.
 - **Limits:** no frames arrive while the screen is off. Capture cost on the phone needs measuring.
+
+## 7. New features
+
+| # | Item | Size | Starting point |
+|---|---|---|---|
+| 7.1 | **Bluetooth device battery in the status bar**, next to the Bluetooth icon, when the connected device reports it through the standard Bluetooth battery mechanism. | S | The shell already reads `battery=` from `ztos-bt-state`, and Settings shows it ("battery 100%"). Mostly drawing work. |
+| 7.2 | **Audio tile in the pull-down menu.** Label is the output type: Phone Speaker, A2DP, 3.5mm AUX (TRS), 3.5mm Headset (TRRS, with mic and play/pause), USB AUX, USB Headset (Apple adapter to TRS or TRRS). The current device name goes below it. Tapping opens a modal to switch device and set that device's volume. | L | Phone speaker and A2DP work. The jack needs codec work (`audio/README.md` lists headphones under the CS47L93). USB audio needs `SND_USB`, which `audio/build.sh` disables, and USB host mode. Needs 3.0a6 for per-device volume. |
+| 7.3 | **Investigate force press.** A harder press near the bottom centre acts as the button there, with a short vibration, even when the button is hidden. | M, research | No support found in the repo. First find out how the stock kernel reads the pressure sensor (`stock/BOOT.img`), and whether the mainline touch driver can reach it. |
+| 7.4 | **Investigate Always-On Display.** White on black at low brightness, with elements shifted every couple of hours to avoid burn-in. May be its own app. | L, research | No AOD found in the shell or Settings. Needs the panel's low-power mode without full sleep, and a way to update it while the SoC sleeps. Related: panel self mask (1.1b), sleep (3.9). |
+| 7.5 | **Edit quick tiles in place.** A pencil button next to ALL SETTINGS reveals an unused-tiles section. Drag to rearrange, or drag into unused to hide. Any number of tiles, from none upward; the panel scrolls or grows to fit. Replaces the Settings page. | M | Tiles are a `quick` config list capped at eight (`PAGE_QUICK`, `QUICK_IDS`), so that cap has to go. |
+| 7.6 | **Per-application audio.** Volume and output device per app through PipeWire, with Default following the global output. Must persist across shell restarts, app restarts and reboots. | L | `ztos-soundd` and `sound/ztsound.c` handle output-wide sound profiles. Check whether WirePlumber's stream restore can do the persistence. Shares device-switching with 7.2. |
+| 7.7 | **Reorganize Settings into a tree.** Today it is flat under "system" and "applications". Sections such as Connections (Wi-Fi, Bluetooth, ...) and Customization, with sub-pages. Starts as a written plan to approve. | M, plan first | About 45 pages in `settings/ztsettings.c`, a large single file. Keep deep links such as `ztsettings bluetooth` working. |
+
+### Building these in parallel
+
+Items that edit the same code can't run in parallel without conflicts. Two files are the bottleneck: `ztmetro/ztmetro.c` (status bar, pull-down menu) and `settings/ztsettings.c`.
+
+| Track | Items | Main files | Notes |
+|---|---|---|---|
+| A: research only | 7.3, 7.4 | Read only | Can run at any time. Nothing to merge. |
+| B: audio backend | 3.0a6, then 7.6 | `ztos-soundd`, WirePlumber config | Mostly outside the shell. Settles the API that 7.2 uses. |
+| C: pull-down menu | 7.1, then 7.5, then 7.2 UI | `ztmetro.c` | One after another: all three change the same drawing and touch code. 7.2 UI waits for B. |
+| D: Settings | 7.7 | `ztsettings.c` | Plan first. Hold other Settings changes while pages move. 7.5 removes `PAGE_QUICK`, so agree the order with C. |
+| E: audio hardware | 3.5mm and USB output detection for 7.2 | Audio driver, kernel config | Independent. Rebuilt with `scripts/build-bt-modules.sh`. The kernel side may need a new boot image, which is now allowed; see below. |
+
+A, B, C, D and E can start together, each in its own worktree. Only one track can test on the phone at a time, so phone testing has to take turns.
+
+### Decisions (2026-11-06)
+
+- **A new boot image is allowed** when a change needs one, because USB has been stable since the port was cleaned and the DHCP loop fixed. Check the partition table on the G960F and confirm `stock/` backups before any flash (2.6).
+- **Quick tiles:** any number, including none (7.5).
