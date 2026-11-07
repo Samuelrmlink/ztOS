@@ -376,12 +376,12 @@ check-slider-gesture:
 # the real core, with Wayland and GL as stubs that count (tests/swipe-cost/)
 SWIPE_BUILD = $(CC) -std=gnu11 -O1 -g -w -Itests/swipe-cost -Icore -Iretro $(shell pkg-config --cflags $(APP_PKGS) json-c)
 SWIPE_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs cairo pangocairo gdk-pixbuf-2.0 xkbcommon json-c) -lm -lpthread
-SWIPE_CORE = core/zrnmetrogpu.c retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
+SWIPE_CORE = core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
 .PHONY: check-slider-touch check-swipe-cost
-check-slider-touch:
+check-slider-touch: $(CORE_DEPS)
 	$(SWIPE_BUILD) -o /tmp/ztmetro-slider-touch-test tests/slider-touch.c $(SWIPE_CORE) $(SWIPE_LIBS)
 	/tmp/ztmetro-slider-touch-test
-check-swipe-cost:
+check-swipe-cost: $(CORE_DEPS)
 	mkdir -p /tmp/ztmetro-swipe-cost
 	$(SWIPE_BUILD) -Dmain=app_main -c -o /tmp/ztmetro-swipe-app.o sound/ztsound.c
 	$(SWIPE_BUILD) -c -o /tmp/ztmetro-swipe-pages.o sound/sound-pages.c

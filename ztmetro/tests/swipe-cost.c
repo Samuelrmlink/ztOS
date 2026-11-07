@@ -59,11 +59,14 @@ static void report(void) {
 		f, f ? (gl_draws - gl_draws_at) / f : 0, cpu - cpu_at, rss_kb() / 1024.0);
 	frames_at = frames;
 	gl_draws_at = gl_draws;
-	if (swipe_at == 4) {	/* every tab has been seen by now */
-		held_first = gl_live;
-		tex_held_first = gl_tex_live;
+	if (swipe_at < 4) {	/* once round the tabs: the most any of them holds */
+		if (gl_live > held_first) {
+			held_first = gl_live;
+			tex_held_first = gl_tex_live;
+		}
+	} else if (gl_live > held_peak) {
+		held_peak = gl_live;
 	}
-	if (swipe_at > 4 && gl_live > held_peak) held_peak = gl_live;
 	renders_at = renders;
 	uploaded_at = gl_uploaded;
 	cpu_at = cpu;
@@ -190,9 +193,9 @@ int main(int argc, char **argv) {
 	if (argc > 1) args[1] = argv[1];
 	write_state(dir, apps ? atoi(apps) : 6);
 	int status = app_main(2, args);
-	printf("after the first five swipes: %.1f MB held in %u textures; the most after that: %.1f MB\n",
+	printf("once round the tabs: at most %.1f MB held in %u textures; the most after that: %.1f MB\n",
 		held_first / 1048576.0, tex_held_first, held_peak / 1048576.0);
-	if (held_peak > held_first + (held_first >> 3)) {
+	if (held_peak > held_first) {
 		printf("FAIL: what is held keeps growing with the swipes\n");
 		failures++;
 	}

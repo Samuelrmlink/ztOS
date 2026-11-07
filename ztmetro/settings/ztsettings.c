@@ -3457,7 +3457,6 @@ static void page_prepare(int page) {
 	if (page == PAGE_INSTALLED_APPS || page == PAGE_APP_DETAIL || page == PAGE_APP_SCALE) installed_load();
 	if (page == PAGE_STYLE) app.style_pending = app.style;	/* what was left unapplied is forgotten */
 	if (page == PAGE_APP_SCALE) app_scale_load();
-	if (page == PAGE_WIFI) wifi_load();
 	if (page_is_sound(page)) sound_pages_setup(PAGE_SOUND_EQ, true, rendering_to_file, page);
 	if (page_is_pods(page)) pods_show(NULL);
 	if (page_is_devtest(page)) devtest_pages_setup(PAGE_DEVTEST, getenv("ZT_ANIM") ? atoi(getenv("ZT_ANIM")) : -1, 0);
@@ -4476,6 +4475,7 @@ static int render_to_file(const char *name, const char *path) {
 	}
 	rendering_to_file = true;
 	page_prepare(page);
+	if (page == PAGE_WIFI) wifi_load();
 	if (page == PAGE_BOOST) ib_render_prepare();
 	/* ZT_BT_SAMPLE="yes~@devices~MAC|name|yes|yes|icon~...": the Bluetooth page's list, for reviews */
 	if (page == PAGE_BLUETOOTH && getenv("ZT_BT_SAMPLE")) {
@@ -4529,6 +4529,7 @@ int main(int argc, char **argv) {
 	}
 	int first = argc == 2 ? page_named(argv[1]) : PAGE_MAIN;
 	page_prepare(first);	/* (back goes through a page's list) */
+	if (first == PAGE_WIFI) wifi_load();	/* (once running, arrived() asks in the background) */
 	instance_listen();
 	return zmc_run(&settings, first);
 }
