@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- a picture: its frame, with a sun and two hills cut out of it -->
+  <path fill="#fff" fill-rule="evenodd" d="M5 9h38v30H5z
+    M9 13v17.5l9-9 7 7 5-5 9 9V13z
+    M31.5 16a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/>
+</svg>

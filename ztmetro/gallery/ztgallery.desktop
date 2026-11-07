@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Photos
+Comment=Your photos and albums
+Exec=ztgallery %f
+Terminal=false
+Type=Application
+Icon=ztgallery
+Categories=Graphics;Photography;Viewer;
+MimeType=image/jpeg;image/png;image/webp;image/gif;

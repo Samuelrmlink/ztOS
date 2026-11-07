@@ -32,6 +32,8 @@ pango
 librsvg
 pixman
 gdk-pixbuf2
+# ztGallery decodes JPEGs with it, shrunk (without it, whole, through gdk-pixbuf)
+libjpeg-turbo
 playerctl
 noto-fonts
 noto-fonts-emoji

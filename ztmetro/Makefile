@@ -20,7 +20,7 @@ endif
 
 all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
-	store/ztstore power/ztpower camera/ztcamera sound/ztsound osial/ztosial mirror/ztmirror
+	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror
 
 sounds/ztos-sounds: sounds/ztos-sounds.c
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libpulse) -o $@ $< $(shell pkg-config --libs libpulse) -lm
@@ -75,6 +75,14 @@ mirror/ztmirror: mirror/ztmirror.c mirror/wlr-screencopy.c mirror/wlr-screencopy
 # for why its viewfinder runs against a source that is not a sensor)
 camera/ztcamera: camera/ztcamera.c $(CORE_DEPS)
 	$(APP_BUILD) -o $@ camera/ztcamera.c $(CORE) $(APP_LIBS)
+
+# ztGallery: the photos, and the picker other programs call (gallery/README.md).
+# libjpeg, when there is one, decodes JPEGs shrunk, where gdk-pixbuf has to decode
+# them whole first; without it everything goes through gdk-pixbuf.
+JPEG_FLAGS := $(shell pkg-config --exists libjpeg 2>/dev/null && echo -DHAVE_LIBJPEG $$(pkg-config --cflags libjpeg))
+JPEG_LIBS := $(shell pkg-config --exists libjpeg 2>/dev/null && pkg-config --libs libjpeg)
+gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
+	$(APP_BUILD) $(JPEG_FLAGS) -o $@ gallery/ztgallery.c $(CORE) $(APP_LIBS) $(JPEG_LIBS) -lpthread
 
 settings/ztsettings: settings/ztsettings.c settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ settings/ztsettings.c $(CORE) $(APP_LIBS)
@@ -234,6 +242,9 @@ install: check-arch
 	install -Dm755 camera/ztcamera /usr/local/bin/ztcamera
 	install -Dm644 camera/ztcamera.desktop /usr/local/share/applications/ztcamera.desktop
 	install -Dm644 camera/ztcamera.svg /usr/local/share/icons/hicolor/scalable/apps/ztcamera.svg
+	install -Dm755 gallery/ztgallery /usr/local/bin/ztgallery
+	install -Dm644 gallery/ztgallery.desktop /usr/local/share/applications/ztgallery.desktop
+	install -Dm644 gallery/ztgallery.svg /usr/local/share/icons/hicolor/scalable/apps/ztgallery.svg
 	install -Dm755 store/ztstore /usr/local/bin/ztstore
 	install -Dm644 store/data/sections /etc/ztstore/sections
 	install -Dm644 store/data/ztstore.desktop /usr/local/share/applications/ztstore.desktop
@@ -264,7 +275,7 @@ install: check-arch
 
 clean:
 	rm -f sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
-		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera core/viewporter-protocol.c core/viewporter-client-protocol.h \
+		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h
 
 # Uses a private Wayland seat; does not touch the running compositor or display.
@@ -315,6 +326,12 @@ check-settings-config:
 check-settings-tree:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-settings-tree-test tests/settings-tree.c
 	/tmp/ztmetro-settings-tree-test
+
+# ztGallery's parsing and arithmetic; no display, no libraries
+.PHONY: check-gallery
+check-gallery:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-gallery-test tests/gallery.c -lm
+	/tmp/ztmetro-gallery-test
 
 .PHONY: check-audio-sync
 check-audio-sync:

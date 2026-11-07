@@ -79,6 +79,7 @@ android/atl/packages/*/*.tar.gz
 android/atl/packages/android_translation_layer/apksig-8.9.1.jar
 android/atl/packages/art_standalone/r8-*.jar
 ztmetro/files/ztfiles
+ztmetro/gallery/ztgallery
 ztmetro/sound/ztsound
 score/tools/scoremm
 ztmetro/osial/ztosial

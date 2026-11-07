@@ -84,6 +84,9 @@ struct zmc_app {
 	 * the lift). Return true on down to own that touch: zmc then sends its
 	 * moves and lift here and does nothing else with it. */
 	bool (*touch)(int phase, int id, double x, double y, uint32_t time);
+	/* while it holds a finger, further fingers come to .touch too (phase 0, the
+	 * return ignored), each with its own id, whatever lifts first: for a pinch */
+	bool multitouch;
 	/* the page never scrolls or rubber-bands under a drag */
 	bool fixed;
 	/* the overlay may cover the header: draw the cached header before overlay */
