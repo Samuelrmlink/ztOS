@@ -124,7 +124,7 @@ modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c
 	$(CC) $(CFLAGS) $(WARN) -o $@ modemd/ztoscorenetworkingd.c
 
 # notifications from other programs, what is playing, and push
-notifyd/ztnotifyd: notifyd/ztnotifyd.c
+notifyd/ztnotifyd: notifyd/ztnotifyd.c notifyd/download-watch.h
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd) -o $@ notifyd/ztnotifyd.c \
 		$(shell pkg-config --libs libsystemd)
 
@@ -363,6 +363,20 @@ check-power-key:
 check-osk-numeric:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-osk-numeric-test tests/osk-numeric.c -lm
 	/tmp/ztmetro-osk-numeric-test
+
+# what a swipe on a notification decides, the lines that change one in place, and
+# following an app's downloads (no D-Bus, no phone)
+.PHONY: check-notify
+check-notify:
+	$(CC) -std=c11 -g -Wall -Wextra -Werror -o /tmp/ztmetro-note-logic-test tests/note-logic.c -lm
+	/tmp/ztmetro-note-logic-test
+	$(CC) -std=c11 -g -Wall -Wextra -Werror -Wno-format-truncation -o /tmp/ztmetro-download-watch-test tests/download-watch.c
+	/tmp/ztmetro-download-watch-test
+
+# the daemon itself, on a private bus and a fake $$HOME: touches no running session
+.PHONY: check-notify-daemon
+check-notify-daemon: notifyd/ztnotifyd
+	sh tests/notifyd-private.sh notifyd/ztnotifyd
 
 .PHONY: check-demoloop-stop
 check-demoloop-stop:

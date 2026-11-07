@@ -30,10 +30,13 @@
  *
  *     SIGHUP reads the file again (Settings sends it).
  *
+ *  4. App downloads. Apps that download without saying so are watched through
+ *     their own files (download-watch.h) and shown as a progress notification.
+ *
  * Everything goes to the shell as lines down its control pipe
- * ($XDG_RUNTIME_DIR/ztmetro.ctl): "notifyh ICON|APP|TITLE|TEXT" (ICON says
- * whose picture to draw: the sender's desktop entry, else its icon name, and
- * "notifyqh" is the same without alerting), "media
+ * ($XDG_RUNTIME_DIR/ztmetro.ctl): "notekey KEY|FLAGS|PERCENT|WHO|APP|TITLE|TEXT"
+ * and "noteclose KEY" (see note-logic.h: a program's notifications change in
+ * place by their id), "notify APP|TITLE|TEXT" for push, "media
  * STATE|TITLE|ARTIST|PLAYER". Its own state is in $XDG_RUNTIME_DIR/ztnotifyd.status.
  */
 #define _GNU_SOURCE
@@ -51,6 +54,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <systemd/sd-bus.h>
+#include "download-watch.h"
 
 static const char *runtime_dir;
 static sd_bus *bus;
@@ -112,9 +116,12 @@ static int method_notify(sd_bus_message *m, void *userdata, sd_bus_error *error)
 	/* Of the hints: whose notification it is (Waydroid says "waydroid.<package>"
 	 * and leaves the icon empty), and what says not to alert: an app that asked
 	 * for no sound, a progress bar, or a quick update of the same notification
-	 * (a download's percent; Android only alerts once for those) */
-	bool quiet = false;
-	const char *entry = NULL;
+	 * (a download's percent; Android only alerts once for those). Then how far
+	 * along it is ("value", 0..100), and a name to replace by for senders with
+	 * no id to hand ("x-canonical-private-synchronous": notify-send in scripts) */
+	bool quiet = false, progress = false, has_value = false;
+	int done = 0;
+	const char *entry = NULL, *sync = NULL;
 	if (sd_bus_message_skip(m, "as") >= 0 && sd_bus_message_enter_container(m, 'a', "{sv}") > 0) {
 		while (sd_bus_message_enter_container(m, 'e', "sv") > 0) {
 			const char *key = NULL, *type = NULL;
@@ -127,7 +134,13 @@ static int method_notify(sd_bus_message *m, void *userdata, sd_bus_error *error)
 				quiet = quiet || on;
 			} else if (key && type && !strcmp(key, "category") && !strcmp(type, "s")) {
 				sd_bus_message_read(m, "v", "s", &value);
-				quiet = quiet || (value && !strcmp(value, "progress"));
+				progress = progress || (value && !strcmp(value, "progress"));
+			} else if (key && type && !strcmp(key, "x-canonical-private-synchronous") && !strcmp(type, "s")) {
+				sd_bus_message_read(m, "v", "s", &sync);
+			} else if (key && type && !strcmp(key, "value") && (!strcmp(type, "i") || !strcmp(type, "u"))) {
+				/* (both are the same size; the spec says i, some send u) */
+				sd_bus_message_read(m, "v", type, &done);
+				has_value = true;
 			} else if (key && type && !strcmp(key, "desktop-entry") && !strcmp(type, "s")) {
 				sd_bus_message_read(m, "v", "s", &entry);
 			} else {
@@ -136,6 +149,14 @@ static int method_notify(sd_bus_message *m, void *userdata, sd_bus_error *error)
 			sd_bus_message_exit_container(m);
 		}
 		sd_bus_message_exit_container(m);
+	}
+	/* A bar while there is a number short of the end. At the end, or with no
+	 * number, there is no bar, but it is still that same piece of work: whatever
+	 * the sender says next changes it in place. */
+	int percent = -1;
+	if (progress || has_value) {
+		percent = has_value && done >= 0 && done < 100 ? done : -2;
+		quiet = true;
 	}
 	static uint32_t last_id;
 	static time_t last_at;
@@ -146,20 +167,39 @@ static int method_notify(sd_bus_message *m, void *userdata, sd_bus_error *error)
 		last_id = replaces;
 		last_at = now;
 	}
-	char a[40], s[100], b[400], who[120];
+	char a[40], s[100], b[400], who[120], key[72];
+	uint32_t id = replaces ? replaces : next_id++;
 	clean(a, sizeof(a), app && app[0] ? app : "Notification");
 	clean(who, sizeof(who), entry && entry[0] ? entry : icon);
 	clean(s, sizeof(s), summary);
 	clean(b, sizeof(b), body);
 	if (a[0] >= 'a' && a[0] <= 'z')
 		a[0] -= 32;	/* "firefox" reads better as "Firefox" */
-	fprintf(stderr, "ztnotifyd: %s: %s\n", a, s);
-	shell_tell("%s %s|%s|%s|%s", quiet ? "notifyqh" : "notifyh", who, a, s[0] ? s : b, s[0] ? b : "");
-	return sd_bus_reply_method_return(m, "u", replaces ? replaces : next_id++);
+	if (sync && sync[0]) {
+		char name[60];
+		clean(name, sizeof(name), sync);
+		snprintf(key, sizeof(key), "sync:%s", name);
+	} else {
+		snprintf(key, sizeof(key), "bus:%u", id);
+	}
+	/* (not each percent of a download in the log) */
+	if (percent == -1)
+		fprintf(stderr, "ztnotifyd: %s: %s\n", a, s);
+	shell_tell("notekey %s|%s|%d|%s|%s|%s|%s", key, quiet ? "q" : "-", percent, who, a,
+		s[0] ? s : b, s[0] ? b : "");
+	return sd_bus_reply_method_return(m, "u", id);
 }
 
+/* The sender takes it back. (One replacing by name, not id, isn't found by this.) */
 static int method_close(sd_bus_message *m, void *userdata, sd_bus_error *error)
 {
+	uint32_t id = 0;
+	int r = sd_bus_message_read(m, "u", &id);
+	if (r < 0)
+		return r;
+	shell_tell("noteclose bus:%u", id);
+	sd_bus_emit_signal(bus, "/org/freedesktop/Notifications", "org.freedesktop.Notifications",
+		"NotificationClosed", "uu", id, (uint32_t)3);
 	return sd_bus_reply_method_return(m, "");
 }
 
@@ -653,10 +693,16 @@ int main(void)
 	}
 	push_config();
 	push_open();
+	static struct dl_watch downloads[DL_N_SOURCES];
+	const char *home = getenv("HOME");
+	for (size_t i = 0; i < DL_N_SOURCES && home; i++)
+		dl_start(&downloads[i], &dl_sources[i], home, shell_tell);
 
 	for (;;) {
 		if (resend) {
 			resend = 0;
+			for (size_t i = 0; i < DL_N_SOURCES && home; i++)
+				dl_resend(&downloads[i], now_ms());
 			media_told[0] = 0;
 			for (int i = 0; i < MAX_PLAYERS; i++)
 				told[i].sent[0] = 0;
@@ -688,10 +734,15 @@ int main(void)
 			wait = media_poll_at - now;
 		if (!push_pipe && push_topic[0] && push_retry_at - now < wait)
 			wait = push_retry_at - now;
+		for (size_t i = 0; i < DL_N_SOURCES && home; i++) {
+			long due = dl_tick(&downloads[i], now);
+			if (due >= 0 && due < wait)
+				wait = due;
+		}
 		if (wait < 0)
 			wait = 0;
-		struct pollfd fds[2];
-		int n = 0, bus_at = -1, push_at = -1;
+		struct pollfd fds[2 + DL_N_SOURCES];
+		int n = 0, bus_at = -1, push_at = -1, dl_at = -1;
 		if (bus) {
 			uint64_t until = 0;
 			bus_at = n;
@@ -713,8 +764,17 @@ int main(void)
 			fds[n].events = POLLIN;
 			fds[n++].revents = 0;
 		}
+		dl_at = n;
+		for (size_t i = 0; i < DL_N_SOURCES && home; i++) {
+			fds[n].fd = downloads[i].fd;
+			fds[n].events = POLLIN;
+			fds[n++].revents = 0;
+		}
 		if (poll(fds, (nfds_t)n, (int)wait) < 0 && errno != EINTR)
 			break;
+		for (size_t i = 0; i < DL_N_SOURCES && home; i++)
+			if (fds[dl_at + (int)i].revents & POLLIN)
+				dl_readable(&downloads[i], now_ms());
 		if (push_at >= 0 && (fds[push_at].revents & (POLLIN | POLLHUP | POLLERR)))
 			push_readable();
 		(void)bus_at;
