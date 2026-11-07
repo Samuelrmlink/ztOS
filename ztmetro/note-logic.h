@@ -65,6 +65,22 @@ static inline bool note_swipe_step(double *x, double to, double dt, double tau, 
 }
 
 /* It fades as it goes, and is still faintly there at the edge. */
+/* CLEAR ALL: each visible one slides off to the right, from the top down, each
+ * starting a little after the one above it. */
+#define NOTE_CLEAR_STAGGER_MS 45.0
+#define NOTE_CLEAR_SLIDE_MS 220.0
+/* How far along row `row` is, `ms` after the press, 0 at rest to `width` gone. */
+static inline double note_clear_x(double ms, int row, double width) {
+	double t = (ms - row * NOTE_CLEAR_STAGGER_MS) / NOTE_CLEAR_SLIDE_MS;
+	if (t <= 0) return 0;
+	if (t >= 1) return width;
+	return width * t * t;	/* easing in: it picks up speed as it goes */
+}
+/* When the last of `rows` has gone. */
+static inline double note_clear_total_ms(int rows) {
+	return rows > 0 ? (rows - 1) * NOTE_CLEAR_STAGGER_MS + NOTE_CLEAR_SLIDE_MS : 0;
+}
+
 static inline float note_swipe_alpha(double x, double width) {
 	double t = width > 0 ? fabs(x) / width : 0;
 	return (float)(t >= 1 ? 0.3 : 1.0 - 0.7 * t);

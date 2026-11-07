@@ -8,6 +8,14 @@
 
 static void test_which_gesture(void) {
 	/* plainly sideways, either way */
+	/* CLEAR ALL goes from the top down */
+	assert(note_clear_x(0, 0, 360) == 0);
+	assert(note_clear_x(NOTE_CLEAR_SLIDE_MS, 0, 360) == 360);
+	assert(note_clear_x(NOTE_CLEAR_STAGGER_MS, 1, 360) == 0);
+	assert(note_clear_x(100, 0, 360) > note_clear_x(100, 1, 360));
+	assert(note_clear_x(100, 1, 360) > note_clear_x(100, 2, 360));
+	assert(note_clear_x(note_clear_total_ms(4), 3, 360) == 360);
+	assert(note_clear_total_ms(0) == 0);
 	assert(note_swipe_wants(12, 0, true, true, true));
 	assert(note_swipe_wants(-12, 3, true, true, true));
 	/* plainly up or down: the list's scroll or the panel's close, untouched */

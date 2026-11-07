@@ -682,6 +682,9 @@ struct zt_server {
 	double note_swipe_x;		/* how far from where it rests, points */
 	double note_swipe_to;		/* where it is going when let go */
 	bool note_swipe_flying;		/* off the edge, and then gone */
+	bool note_clearing;		/* CLEAR ALL: all of them on their way off */
+	uint32_t note_clear_at;		/* when it was pressed */
+	int note_clear_rows;		/* how many of them were in the window */
 	/* a gap closing where one went: places from this one on are this far down */
 	int note_close_slot;
 	float note_close_h;
@@ -5158,6 +5161,7 @@ static bool scroll_held(struct zt_server *server, bool list) {
 }
 
 static bool note_swipe_physics(struct zt_server *server, float dt);
+static bool note_clear_physics(struct zt_server *server);
 
 /* Whether a finger has hold of the action centre's list. */
 static bool note_held(struct zt_server *server) {
@@ -5197,6 +5201,7 @@ static bool physics_step(struct zt_server *server, uint32_t now) {
 		moving |= scroll_step(&server->note_scroll, &server->note_v, server->note_max, dt);
 	}
 	moving |= note_swipe_physics(server, dt);
+	moving |= note_clear_physics(server);
 	if (server->switch_moving) {
 		/* the switcher's row let go: the same spring as the pages, from
 		 * the speed the finger left it with */
@@ -6335,6 +6340,8 @@ static void ui_sound(struct zt_server *server, enum ui_sound sound) {
 }
 
 static const char *app_name(struct zt_toplevel *toplevel);
+static void note_clear_finish(struct zt_server *server);
+static void note_clear_start(struct zt_server *server);
 
 /* Tell each app whether it can be seen. It isn't drawn while hidden either way,
  * and gets no frame callbacks; this is what lets one stop the work behind them: a
@@ -8657,15 +8664,7 @@ static void shade_activate(struct zt_server *server, int index) {
 				note_muted_add(&server->note_muted, server->notes[i].key);
 			}
 		}
-		server->n_notes = 0;
-		server->note_swipe_uid = 0;
-		server->note_close_h = 0;
-		server->notes_dirty = true;
-		server->note_scroll = 0;
-		server->note_v = 0;
-		lock_notes_changed(server);
-		draw_shade(server);
-		damage(server);
+		note_clear_start(server);
 		break;
 	case 9: /* ALL SETTINGS */
 		shade_set_open(server, false);
@@ -8675,7 +8674,7 @@ static void shade_activate(struct zt_server *server, int index) {
 		shade_set_open(server, false);
 		break;
 	default:
-		if (index >= 20 && index - 20 < server->n_notes) {
+		if (index >= 20 && index - 20 < server->n_notes && !server->note_clearing) {
 			/* a notification: opened to all of its text, or shut again */
 			server->notes[index - 20].expanded = !server->notes[index - 20].expanded;
 			server->notes_dirty = true;
@@ -10699,6 +10698,7 @@ static int toast_hide(void *data) {
 /* An update that should not alert (a download's progress): the app's note with
  * this title changes in place, or a new one is kept; no sound, banner or buzz. */
 static void note_quiet(struct zt_server *server, const char *who, const char *app, const char *title, const char *text) {
+	note_clear_finish(server);
 	int i = 0;
 	while (i < server->n_notes && (strcmp(server->notes[i].app, app) || strcmp(server->notes[i].title, title)))
 		i++;
@@ -10730,6 +10730,7 @@ static void note_quiet(struct zt_server *server, const char *who, const char *ap
 }
 
 static void note_add_from(struct zt_server *server, const char *who, const char *app, const char *title, const char *text) {
+	note_clear_finish(server);
 	memmove(&server->notes[1], &server->notes[0], sizeof(server->notes[0]) * (MAX_NOTES - 1));
 	server->notes_dirty = true;
 	memset(&server->notes[0], 0, sizeof(server->notes[0]));
@@ -10790,6 +10791,7 @@ static void note_remove_at(struct zt_server *server, int i) {
  * what changed gets drawn. A download updates every few seconds for as long as it
  * lasts, so with the panel away this draws nothing and wakes nothing. */
 static void note_keyed(struct zt_server *server, const struct note_line *note) {
+	note_clear_finish(server);
 	if (note_muted_drops(&server->note_muted, note->key, note->percent)) {
 		return;
 	}
@@ -10887,6 +10889,7 @@ static void note_keyed(struct zt_server *server, const struct note_line *note) {
 /* Its sender has finished with it. Whoever dismissed it, it is over: the next
  * one of that name is a new one. */
 static void note_closed(struct zt_server *server, const char *key) {
+	note_clear_finish(server);
 	note_muted_forget(&server->note_muted, key);
 	int i = note_find_key(server, key);
 	if (i < 0 || !key[0]) {
@@ -10960,6 +10963,63 @@ static bool note_swipe_physics(struct zt_server *server, float dt) {
 		server->note_swipe_x = 0;
 	}
 	return false;
+}
+
+/* CLEAR ALL's slide is over, or something changed the list: they are gone. */
+static void note_clear_finish(struct zt_server *server) {
+	if (!server->note_clearing) {
+		return;
+	}
+	server->note_clearing = false;
+	server->n_notes = 0;
+	server->note_swipe_uid = 0;
+	server->note_close_h = 0;
+	server->notes_dirty = true;
+	server->note_scroll = 0;
+	server->note_v = 0;
+	lock_notes_changed(server);
+	if (server->shade_open || server->shade_h > 0.1f) {
+		draw_shade(server);
+	}
+	damage(server);
+}
+
+static void note_clear_start(struct zt_server *server) {
+	if (server->note_clearing) {
+		return;
+	}
+	server->note_clearing = true;
+	server->note_swipe_uid = 0;
+	server->note_swipe_flying = false;
+	server->note_swipe_x = 0;
+	server->note_v = 0;
+	server->note_clear_at = now_ms();
+	/* only those in view take part, or a long list would keep the panel waiting */
+	server->note_clear_rows = 0;
+	for (int k = 0; k < server->n_notes; k++) {
+		double y = server->note_ty[k] - server->note_scroll;
+		if (y < server->note_view && y + server->note_th[k] > 0) {
+			server->note_clear_rows++;
+		}
+	}
+	/* (the style without note textures has nothing to slide; nor a panel not in view) */
+	if (!server->note_clear_rows || retro_on(server) || !(server->shade_open || server->shade_h > 0.1f)) {
+		note_clear_finish(server);
+		return;
+	}
+	damage(server);
+}
+
+/* Returns whether it still moves. */
+static bool note_clear_physics(struct zt_server *server) {
+	if (!server->note_clearing) {
+		return false;
+	}
+	if (now_ms() - server->note_clear_at >= (uint32_t)note_clear_total_ms(server->note_clear_rows)) {
+		note_clear_finish(server);
+		return false;
+	}
+	return true;
 }
 
 /* The finger on one lets go of it. */
@@ -15620,10 +15680,18 @@ static void render_frame(struct zt_server *server) {
 		double win_top = server->note_top, win_end = fmin(server->note_top + server->note_view, cover);
 		if (win_end > win_top) {
 			glScissor(0, (int)(win_top * server->scale), px_w, (int)ceil((win_end - win_top) * server->scale));
+			int clear_row = 0;
 			for (int k = 0; k < server->n_notes; k++) {
 				struct zt_layer *layer = &server->note_layer[k];
 				double y = server->note_top + server->note_ty[k] - server->note_scroll;
 				if (!layer->tex || y >= win_end || y + server->note_th[k] <= win_top) {
+					continue;
+				}
+				if (server->note_clearing) {
+					double x = note_clear_x(now_ms() - server->note_clear_at, clear_row++, server->width);
+					if (x < server->width) {
+						layer_draw(server, layer, (float)x, (float)y, 1.0f);
+					}
 					continue;
 				}
 				if (server->note_close_h > 0 && k >= server->note_close_slot) {
