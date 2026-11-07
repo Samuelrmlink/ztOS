@@ -16,7 +16,10 @@ This daemon adds what WirePlumber doesn't do:
   - sends an app back to its chosen output when that output returns.
     WirePlumber restores a target only if it exists as the stream starts;
   - holds changes for apps that aren't running, because WirePlumber only saves
-    what it sees on a live stream. They apply when the app next plays.
+    what it sees on a live stream. They apply when the app next plays;
+  - names apps. WirePlumber's key is whatever the app calls itself, and Grayjay
+    (CEF, in a flatpak) calls itself Chromium, so the name shown comes from the
+    flatpak id or the binary, and is remembered for when the app isn't running.
 
 Volumes are percent on the same scale as wpctl: 100 is unity, and PipeWire
 keeps the cube of it as the linear gain.
@@ -44,6 +47,7 @@ STATE: $XDG_RUNTIME_DIR/ztos-audio-state.json, replaced whole on any change:
      "outputs": [{"name", "desc", "kind", "percent", "mute", "current"}],
      "apps": [{"key", "name", "running", "streams": [node ids], "percent", "mute",
                "output": "default" or OUTPUT,
+               "output_desc": its name for people, known even while it's away,
                "output_present": bool,
                "playing_on": OUTPUT or null}]}
 
@@ -81,6 +85,13 @@ EQ_SINK = "ztos-eq"            # ztos-soundd's chain: never an output of its own
 STREAM_KEYS = ("application.id", "application.name", "media.name", "node.name")
 RECONNECT_GAP = 10.0           # away this long, an output coming back has connected
 SETTLE = 1.0                   # after a command, when to report the final level
+APP_SETTLE = 0.4               # an app's slider moving: look again once it stops
+# what apps call themselves that says nothing about which app it is
+GENERIC_APP_NAMES = {"chromium", "playback", "audio stream", "sdl application", "pulseaudio"}
+# sound tools, not apps: listed while they play, not remembered afterwards
+TOOL_APP_NAMES = {"pw-play", "pw-cat", "paplay", "aplay", "speaker-test", "gst-launch-1.0"}
+FLATPAK_EXPORTS = ("/var/lib/flatpak/exports/share/applications",
+                   os.path.join(HOME, ".local/share/flatpak/exports/share/applications"))
 TOOL_TIMEOUT = 5
 
 
@@ -155,6 +166,52 @@ def app_name_of_key(key):
 def is_app_key(key):
     """Only keys that name an app: filter chains are saved by media or node name."""
     return key.startswith(("Output/Audio:application.id:", "Output/Audio:application.name:"))
+
+
+# ---- what to call an app ---------------------------------------------------
+def desktop_entry_name(text):
+    """The Name= of a .desktop file's main section, or None."""
+    section = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            section = line
+        elif section == "[Desktop Entry]" and line.startswith("Name="):
+            return line[5:].strip() or None
+    return None
+
+
+_flatpak_names = {}
+
+
+def flatpak_title(app_id, dirs=FLATPAK_EXPORTS):
+    """What a flatpak calls itself in the app list, else the end of its id."""
+    if app_id not in _flatpak_names:
+        name = None
+        # the id comes from outside and names a file here: no paths in it
+        if "/" not in app_id:
+            for d in dirs:
+                try:
+                    with open(os.path.join(d, app_id + ".desktop"), encoding="utf-8", errors="replace") as f:
+                        name = desktop_entry_name(f.read())
+                except OSError:
+                    continue
+                if name:
+                    break
+        _flatpak_names[app_id] = name or app_id.rsplit(".", 1)[-1].rsplit("/", 1)[-1]
+    return _flatpak_names[app_id]
+
+
+def app_title(props, flatpak=flatpak_title):
+    """The name to show for a stream. Only this: the key stays WirePlumber's."""
+    if props.get("pipewire.access.portal.app_id"):
+        return flatpak(props["pipewire.access.portal.app_id"])
+    name = props.get("application.name")
+    binary = props.get("application.process.binary")
+    if name and binary and binary.lower() != name.lower() and \
+            (name.lower() in GENERIC_APP_NAMES or name.lower().startswith("alsa plug-in")):
+        return binary
+    return name or binary
 
 
 # ---- reading the graph -----------------------------------------------------
@@ -255,7 +312,7 @@ def read_graph(dump):
             vols = _props_of(info).get("channelVolumes") or []
             g["streams"].append({
                 "id": o["id"], "key": form_key(p),
-                "name": p.get("application.name") or app_name_of_key(form_key(p)),
+                "name": app_title(p) or app_name_of_key(form_key(p)),
                 "state": info.get("state"),
                 "percent": percent_of_gain(vols[0]) if vols else None,
                 "mute": bool(_props_of(info).get("mute", False)),
@@ -300,22 +357,28 @@ def playing_on(stream_id, links, sink_ids, chains):
     return None
 
 
-def build_apps(streams, stored, intents, sinks, on):
+def build_apps(streams, stored, intents, sinks, on, names=None, output_descs=None):
     """Everything known about apps: what is running, and what WirePlumber or a
     held change remembers. A running stream's own values beat the saved ones."""
+    names = names or {}
+    output_descs = output_descs or {}
     apps = {}
     for s in streams:
         a = apps.setdefault(s["key"], {"key": s["key"], "name": s["name"], "running": True, "streams": [],
                                        "percent": s["percent"], "mute": s["mute"], "playing_on": None})
         a["streams"].append(s["id"])
         a["playing_on"] = a["playing_on"] or on.get(s["id"])
+        # two apps can call themselves the same, and WirePlumber then has one setting
+        # for both: say so rather than show one of them
+        if s["name"] not in a["name"].split(" + "):
+            a["name"] = " + ".join(sorted(a["name"].split(" + ") + [s["name"]]))
     for key, v in stored.items():
-        if key not in apps and is_app_key(key):
-            apps[key] = {"key": key, "name": app_name_of_key(key), "running": False, "streams": [],
+        if key not in apps and is_app_key(key) and app_name_of_key(key) not in TOOL_APP_NAMES:
+            apps[key] = {"key": key, "name": names.get(key) or app_name_of_key(key), "running": False, "streams": [],
                          "percent": v["percent"], "mute": v["mute"], "playing_on": None}
     for key in intents:
         if key not in apps:
-            apps[key] = {"key": key, "name": app_name_of_key(key), "running": False, "streams": [],
+            apps[key] = {"key": key, "name": names.get(key) or app_name_of_key(key), "running": False, "streams": [],
                          "percent": None, "mute": False, "playing_on": None}
     for key, a in apps.items():
         i = intents.get(key, {})
@@ -326,7 +389,27 @@ def build_apps(streams, stored, intents, sinks, on):
         out = i.get("output") or (stored.get(key) or {}).get("target") or "default"
         a["output"] = out
         a["output_present"] = out == "default" or out in sinks
+        if out in sinks:
+            a["output_desc"] = sinks[out]["desc"]
+        elif out != "default":
+            a["output_desc"] = output_descs.get(out) or out
     return sorted(apps.values(), key=lambda a: (not a["running"], a["name"].lower(), a["key"]))
+
+
+def remember_names(names, apps):
+    """names (key: name) with the running apps' names in, when the key alone wouldn't
+    say. True if that changed it."""
+    changed = False
+    for a in apps:
+        if not a["running"]:
+            continue
+        if a["name"] != app_name_of_key(a["key"]):
+            if names.get(a["key"]) != a["name"]:
+                names[a["key"]] = a["name"]
+                changed = True
+        elif names.pop(a["key"], None) is not None:
+            changed = True
+    return changed
 
 
 def target_actions(streams, targets, stored, intents, sinks):
@@ -390,12 +473,15 @@ def parse_wpctl_volume(text):
 class Daemon:
     def __init__(self):
         self.intents = {}
+        self.names = {}              # app key: the name to show, where the key says otherwise
+        self.output_descs = {}       # output name: its description, for when it's away
         self.load()
         self.sock = None
         self.sub = None
         self.running = True
         self.eval_at = 0.0
         self.settle_at = 0.0
+        self.app_settle_at = 0.0
         self.last_eval = 0.0
         self.commanded_at = 0.0
         self.graph = None
@@ -414,6 +500,10 @@ class Daemon:
                 v = json.load(f)
             if isinstance(v, dict) and isinstance(v.get("apps"), dict):
                 self.intents = {k: i for k, i in v["apps"].items() if isinstance(i, dict)}
+            if isinstance(v, dict):
+                for field, into in (("names", self.names), ("outputs", self.output_descs)):
+                    if isinstance(v.get(field), dict):
+                        into.update((k, n) for k, n in v[field].items() if isinstance(n, str))
         except (OSError, ValueError):
             pass
 
@@ -421,7 +511,7 @@ class Daemon:
         os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
         tmp = CONFIG + ".new"
         with open(tmp, "w") as f:
-            json.dump({"version": 1, "apps": self.intents}, f, indent=1)
+            json.dump({"version": 1, "apps": self.intents, "names": self.names, "outputs": self.output_descs}, f, indent=1)
         os.replace(tmp, CONFIG)
 
     # ---- tools
@@ -537,7 +627,17 @@ class Daemon:
         active = next((o for o in outputs if o["current"]), None)
         sink_ids = {s["id"]: s["name"] for s in g["sinks"].values()}
         on = {s["id"]: playing_on(s["id"], g["links"], sink_ids, g["chains"]) for s in g["streams"]}
-        apps = build_apps(g["streams"], self.stored, self.intents, g["sinks"], on)
+        changed = remember_names(self.names, build_apps(g["streams"], {}, {}, g["sinks"], on))
+        for s in g["sinks"].values():
+            if self.output_descs.get(s["name"]) != s["desc"]:
+                self.output_descs[s["name"]] = s["desc"]
+                changed = True
+        if changed:
+            try:
+                self.save()
+            except OSError as e:
+                log("save failed", e)
+        apps = build_apps(g["streams"], self.stored, self.intents, g["sinks"], on, self.names, self.output_descs)
         state = {"version": 1, "active": active and {k: active[k] for k in ("name", "desc", "kind", "percent", "mute")},
                  "outputs": outputs, "apps": apps}
         text = json.dumps(state)
@@ -602,8 +702,11 @@ class Daemon:
             self.eval_at = time.time()
         else:
             getattr(self, "cmd_" + cmd.replace("-", "_"))(*args)
-            # a volume key can repeat every 90 ms: those are looked at once, on settling
-            if cmd not in ("volume", "mute"):
+            # a volume key can repeat every 90 ms: those are looked at once, on settling.
+            # An app's slider the same: each look runs pw-dump and wpctl.
+            if cmd in ("app-volume", "app-mute"):
+                self.app_settle_at = time.time() + APP_SETTLE
+            elif cmd not in ("volume", "mute"):
                 self.eval_at = time.time()
 
     def find_output(self, name):
@@ -664,21 +767,18 @@ class Daemon:
         self.check_app_key(key)
         p = clamp_percent(percent)
         self.find_graph()
-        streams = self.streams_of(key)
-        if not streams:
+        # the list of streams can be a moment old: if none took it, the next look does it
+        done = [self.tool("wpctl", "set-volume", str(s["id"]), "%d%%" % p) for s in self.streams_of(key)]
+        if not any(done):
             self.hold(key, "percent", p)
-        for s in streams:
-            self.tool("wpctl", "set-volume", str(s["id"]), "%d%%" % p)
 
     def cmd_app_mute(self, key, value):
         self.check_app_key(key)
         m = parse_bool(value)
         self.find_graph()
-        streams = self.streams_of(key)
-        if not streams:
+        done = [self.tool("wpctl", "set-mute", str(s["id"]), "1" if m else "0") for s in self.streams_of(key)]
+        if not any(done):
             self.hold(key, "mute", m)
-        for s in streams:
-            self.tool("wpctl", "set-mute", str(s["id"]), "1" if m else "0")
 
     def cmd_app_output(self, key, name):
         self.check_app_key(key)
@@ -747,7 +847,7 @@ class Daemon:
             return
         # never on the clients this daemon's own tools come and go as
         if " on sink" in data or " on card" in data or " on server" in data:
-            if not self.settle_at:
+            if not self.settle_at and not self.app_settle_at:
                 self.eval_at = self.eval_at or time.time() + 0.1
 
     def run(self):
@@ -762,7 +862,7 @@ class Daemon:
                 fds.append(self.sub.stdout)
             now = time.time()
             timeout = 2.0 if not self.sub else 60.0
-            for t in (self.eval_at, self.settle_at):
+            for t in (self.eval_at, self.settle_at, self.app_settle_at):
                 if t:
                     timeout = min(timeout, max(0.0, t - now))
             try:
@@ -778,6 +878,9 @@ class Daemon:
             if self.settle_at and now >= self.settle_at:
                 self.settle_at = 0.0
                 self.force_push = True       # the key's echo was ignored: say where it came to rest
+                self.eval_at = self.eval_at or now
+            if self.app_settle_at and now >= self.app_settle_at:
+                self.app_settle_at = 0.0
                 self.eval_at = self.eval_at or now
             if self.eval_at and now >= self.eval_at and now - self.last_eval >= 0.12:
                 self.eval_at = 0.0

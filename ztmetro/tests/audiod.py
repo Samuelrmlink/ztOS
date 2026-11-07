@@ -126,6 +126,63 @@ assert apps[0]["output_present"] and apps[0]["playing_on"] == "ztos-speaker" and
 assert not apps[1]["running"] and apps[1]["percent"] == 20 and apps[1]["output_present"]
 assert apps[2]["output"] == BT and not apps[2]["output_present"]
 
+# naming: what real apps report (captured on the phone, in a private PipeWire)
+BRAVE = {"application.name": "Brave", "application.process.binary": "brave", "application.icon-name": "brave-browser",
+         "media.class": "Stream/Output/Audio", "media.name": "Playback", "node.name": "Brave", "node.latency": "512/48000"}
+GRAYJAY = {"application.name": "Chromium", "application.process.binary": "justcefnative",
+           "application.icon-name": "chromium-browser", "media.class": "Stream/Output/Audio", "media.name": "Playback",
+           "node.name": "Chromium", "node.latency": "512/48000", "pipewire.access.portal.app_id": "app.grayjay.Grayjay",
+           "pipewire.client.access": "flatpak"}
+assert a.form_key(BRAVE) == "Output/Audio:application.name:Brave"
+assert a.form_key(GRAYJAY) == "Output/Audio:application.name:Chromium"
+assert a.is_app_stream(BRAVE) and a.is_app_stream(GRAYJAY)
+assert a.app_title(BRAVE) == "Brave"
+assert a.app_title(GRAYJAY, lambda i: i) == "app.grayjay.Grayjay"
+assert a.app_title({"application.name": "Chromium", "application.process.binary": "justcefnative"}) == "justcefnative"
+assert a.app_title({"application.name": "Chromium", "application.process.binary": "chromium"}) == "Chromium"
+assert a.app_title({"application.name": "ALSA plug-in [foo]", "application.process.binary": "foo"}) == "foo"
+assert a.app_title({"application.name": "Music"}) == "Music"
+assert a.app_title({"application.process.binary": "foo"}) == "foo"
+assert a.app_title({}) is None
+assert a.desktop_entry_name("[Other]\nName=No\n[Desktop Entry]\nName[de]=Nein\nName=Grayjay\n[Action]\nName=x\n") == "Grayjay"
+assert a.desktop_entry_name("[Action]\nName=x\n") is None
+assert a.flatpak_title("no.such.App", ()) == "App"
+assert a.flatpak_title("../../etc/passwd", ("/",)) == "passwd"
+
+KG = "Output/Audio:application.name:Chromium"
+def sg(i, name): return {"id": i, "key": KG, "name": name, "percent": 100, "mute": False}
+# the name is remembered, so the app is still itself once it stops
+names = {}
+ap = a.build_apps([sg(1, "Grayjay")], {}, {}, sinks, {})
+assert ap[0]["name"] == "Grayjay" and ap[0]["key"] == KG
+assert a.remember_names(names, ap) and names == {KG: "Grayjay"}
+assert not a.remember_names(names, ap)
+ap = a.build_apps([], {KG: {"percent": 40, "mute": False, "target": None}}, {}, sinks, {}, names)
+assert ap[0]["name"] == "Grayjay" and not ap[0]["running"] and ap[0]["percent"] == 40
+assert not a.remember_names(names, ap)
+# an app whose key says it needs nothing remembered, and gets over a stale name
+assert a.remember_names(names, a.build_apps([dict(sg(1, "Chromium"))], {}, {}, sinks, {})) and names == {}
+# two apps under one key share WirePlumber's one setting: the row says so
+ap = a.build_apps([sg(1, "Grayjay"), sg(2, "Other"), sg(3, "Grayjay")], {}, {}, sinks, {})
+assert len(ap) == 1 and ap[0]["name"] == "Grayjay + Other" and ap[0]["streams"] == [1, 2, 3]
+# sound tools aren't kept in the list once they stop, unless something is held for them
+TK = "Output/Audio:application.name:pw-play"
+quiet = {"percent": 100, "mute": False, "target": None}
+assert a.build_apps([], {TK: quiet}, {}, sinks, {}) == []
+assert [x["key"] for x in a.build_apps([], {TK: quiet}, {TK: {"percent": 5}}, sinks, {})] == [TK]
+# an output's name for people, there or away
+ap = a.build_apps(streams, {KEY: {"percent": 50, "mute": False, "target": BT}}, {}, sinks, {})
+assert ap[0]["output_desc"] == "UE MINI BOOM" and ap[0]["output_present"]
+ap = a.build_apps(streams, {KEY: {"percent": 50, "mute": False, "target": BT}}, {}, away, {}, {}, {BT: "UE MINI BOOM"})
+assert ap[0]["output_desc"] == "UE MINI BOOM" and not ap[0]["output_present"]
+ap = a.build_apps(streams, {KEY: {"percent": 50, "mute": False, "target": BT}}, {}, away, {})
+assert ap[0]["output_desc"] == BT
+assert "output_desc" not in a.build_apps(streams, {}, {}, sinks, {})[0]
+
+# what the Sound app sends (tests/audio-apps.c) is what the daemon reads
+assert a.shlex.split("app-volume 'Output/Audio:application.name:Bob'\\''s Player' '5'") == \
+    ["app-volume", "Output/Audio:application.name:Bob's Player", "5"]
+
 # small parsers
 assert a.parse_wpctl_volume("Volume: 0.40\n") == (40, False)
 assert a.parse_wpctl_volume("Volume: 0.25 [MUTED]\n") == (25, True)
