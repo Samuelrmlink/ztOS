@@ -8,7 +8,7 @@
 
 enum page {
 	PAGE_MAIN,
-	PAGE_THEME,
+	PAGE_THEME,	/* customization */
 	PAGE_DISPLAY,
 	PAGE_WIFI,
 	PAGE_MOBILE,
@@ -21,7 +21,6 @@ enum page {
 	PAGE_ABOUT,
 	PAGE_PERF,
 	PAGE_DEV,
-	PAGE_APPS,	/* the second tab of the hub */
 	PAGE_INSTALLED_APPS,
 	PAGE_APP_DETAIL,
 	PAGE_HAPTICS,
@@ -43,24 +42,22 @@ enum page {
 };
 
 #define PAGE_NO_PARENT	(-1)	/* the top of the tree: back leaves the app */
-#define PAGE_HUB_TAB	(-2)	/* whichever tab of the hub was last shown */
 
 static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_MAIN] = PAGE_NO_PARENT,
-	[PAGE_APPS] = PAGE_NO_PARENT,
-	[PAGE_THEME] = PAGE_HUB_TAB,
-	[PAGE_DISPLAY] = PAGE_HUB_TAB,
-	[PAGE_CONNECTIONS] = PAGE_HUB_TAB,
+	[PAGE_THEME] = PAGE_MAIN,
+	[PAGE_DISPLAY] = PAGE_MAIN,
+	[PAGE_CONNECTIONS] = PAGE_MAIN,
 	[PAGE_WIFI] = PAGE_CONNECTIONS,
 	[PAGE_MOBILE] = PAGE_CONNECTIONS,
-	[PAGE_SOUND_TOUCH] = PAGE_HUB_TAB,
+	[PAGE_SOUND_TOUCH] = PAGE_MAIN,
 	[PAGE_AUDIO] = PAGE_SOUND_TOUCH,
-	[PAGE_POWER] = PAGE_HUB_TAB,
+	[PAGE_POWER] = PAGE_MAIN,
 	[PAGE_BATTERY] = PAGE_POWER,
 	[PAGE_CPU] = PAGE_POWER,
 	[PAGE_VM] = PAGE_POWER,
 	[PAGE_GPU] = PAGE_POWER,
-	[PAGE_SYSTEM] = PAGE_HUB_TAB,
+	[PAGE_SYSTEM] = PAGE_MAIN,
 	[PAGE_KEYBOARD] = PAGE_SYSTEM,
 	[PAGE_ABOUT] = PAGE_SYSTEM,
 	[PAGE_PERF] = PAGE_POWER,
@@ -68,7 +65,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_INSTALLED_APPS] = PAGE_MAIN,
 	[PAGE_APP_DETAIL] = PAGE_INSTALLED_APPS,
 	[PAGE_HAPTICS] = PAGE_SOUND_TOUCH,
-	[PAGE_QUICK] = PAGE_HUB_TAB,
+	[PAGE_QUICK] = PAGE_THEME,
 	[PAGE_APN] = PAGE_MOBILE,
 	[PAGE_WIFI_JOIN] = PAGE_WIFI,
 	[PAGE_WIFI_NET] = PAGE_WIFI,
@@ -76,7 +73,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_BLUETOOTH] = PAGE_CONNECTIONS,
 	[PAGE_ACCENTS] = PAGE_THEME,
 	[PAGE_WALLS] = PAGE_THEME,
-	[PAGE_NAVIGATION] = PAGE_HUB_TAB,
+	[PAGE_NAVIGATION] = PAGE_THEME,
 	[PAGE_BOOST] = PAGE_POWER,
 };
 
@@ -84,10 +81,11 @@ static const int PAGE_PARENTS[N_PAGES] = {
  * and --list-pages for a script that wants them all. */
 static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "main", PAGE_MAIN },
-	{ "apps", PAGE_APPS },
 	{ "installed-apps", PAGE_INSTALLED_APPS },
+	{ "apps", PAGE_INSTALLED_APPS },	/* an old name: there was a tab called that */
 	{ "app", PAGE_APP_DETAIL },
-	{ "theme", PAGE_THEME },
+	{ "customization", PAGE_THEME },
+	{ "theme", PAGE_THEME },	/* its old name */
 	{ "accents", PAGE_ACCENTS },
 	{ "wallpapers", PAGE_WALLS },
 	{ "navigation", PAGE_NAVIGATION },
@@ -119,9 +117,8 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 #define N_PAGE_NAMES (int)(sizeof(PAGE_NAMES) / sizeof(PAGE_NAMES[0]))
 
 /* Where back goes from a page. */
-static inline int page_parent(int page, int hub_tab) {
-	int up = page >= 0 && page < N_PAGES ? PAGE_PARENTS[page] : PAGE_NO_PARENT;
-	return up == PAGE_HUB_TAB ? hub_tab : up;
+static inline int page_parent(int page) {
+	return page >= 0 && page < N_PAGES ? PAGE_PARENTS[page] : PAGE_NO_PARENT;
 }
 
 #endif

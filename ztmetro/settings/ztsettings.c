@@ -308,9 +308,6 @@ static void perf_load(void);
 static void auto_load(void);
 static void config_remember_loaded(void);
 
-/* The hub tab last shown: PAGE_MAIN (system) or PAGE_APPS (applications). */
-static int hub_tab;
-
 /* The list picker that is open, by its action; 0 when none is. */
 static int open_picker;
 
@@ -1040,12 +1037,6 @@ static double draw_app_detail(cairo_t *cr) {
 	return y;
 }
 
-/* The hub's second tab: what belongs to the system's own programs. */
-static double draw_apps(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "applications", "system", ACT_OPEN_PAGE, PAGE_MAIN);
-	return y + 20;
-}
-
 /* ---- wallpapers: the photos to choose from ---------------------------------- */
 
 /* The photos ship in /usr/local/share/backgrounds/ztos, one folder per
@@ -1658,7 +1649,7 @@ static void accent_board_open(void) {
 }
 
 static double draw_theme(cairo_t *cr) {
-	double y = zmc_header(cr, "theme");
+	double y = zmc_header(cr, "customization");
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, zmc.style == ZMC_STYLE_DOTMATRIX ? "Palette" : "Accent colour", FONT_REGULAR, 13.5, MARGIN, y, 0);
 	/* Windows Phone's list picker, collapsed: the box shows the choice and
@@ -1726,7 +1717,13 @@ static double draw_theme(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Changing it restarts the shell and closes open apps", FONT_REGULAR, 12, MARGIN, y + 42, zmc.width - 2 * MARGIN);
 	y += 20;
-	return draw_wall_row(cr, y + 60);	/* under the style row (36 high, 24 below) */
+	y = draw_wall_row(cr, y + 60);	/* under the style row (36 high, 24 below) */
+	y = zmc_entry(cr, y, "navigation bar", "choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
+	char detail[128];
+	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
+		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
+	y = zmc_entry(cr, y, "quick tiles", detail, ACT_OPEN_PAGE, PAGE_QUICK);
+	return y + 20;
 }
 
 /* The brightness as it is now, in percent (the shell or sensord may have
@@ -2882,7 +2879,7 @@ static double draw_haptics(cairo_t *cr) {
 
 /* The action centre's eight quick actions: which one stands in each place. */
 static double draw_quick(cairo_t *cr) {
-	double y = zmc_header(cr, "notifications + actions");
+	double y = zmc_header(cr, "quick tiles");
 	for (int i = 0; i < 8; i++) {
 		char caption[32];
 		snprintf(caption, sizeof(caption), "Row %d, place %d", i / 4 + 1, i % 4 + 1);
@@ -3079,14 +3076,21 @@ static double draw_system(cairo_t *cr) {
 	return y + 20;
 }
 
+/* The top of the tree. Every line is cheap: the core draws this page again at
+ * idle beneath whatever is open, ready for the way back. */
 static double draw_main(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "system", "applications", ACT_OPEN_PAGE, PAGE_APPS);
+	double y = zmc_header(cr, "all settings");
 	char detail[128];
 
-	snprintf(detail, sizeof(detail), "accent: %s, %d columns",
-		ACCENTS[app.accent].name, app.columns);
-	y = zmc_entry(cr, y, "theme", detail, ACT_OPEN_PAGE, PAGE_THEME);
-	y = zmc_entry(cr, y, "navigation bar", "choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
+	connections_line(detail, sizeof(detail));
+	y = zmc_entry(cr, y, "connections", detail, ACT_OPEN_PAGE, PAGE_CONNECTIONS);
+
+	if (app.style) {
+		snprintf(detail, sizeof(detail), "palette: %s, DotMatrix", dm_palette_names[app.palette]);
+	} else {
+		snprintf(detail, sizeof(detail), "accent: %s, Metro", ACCENTS[app.accent].name);
+	}
+	y = zmc_entry(cr, y, "customization", detail, ACT_OPEN_PAGE, PAGE_THEME);
 
 	/* the screen's real level: the config's is only where it last started,
 	 * and auto brightness moves on from it */
@@ -3096,15 +3100,8 @@ static double draw_main(cairo_t *cr) {
 		timeout_text(timeout, sizeof(timeout), app.timeout_s));
 	y = zmc_entry(cr, y, "display", detail, ACT_OPEN_PAGE, PAGE_DISPLAY);
 
-	connections_line(detail, sizeof(detail));
-	y = zmc_entry(cr, y, "connections", detail, ACT_OPEN_PAGE, PAGE_CONNECTIONS);
-
 	snprintf(detail, sizeof(detail), "media %d%%, ring %d%%", app.media_vol, app.ring_vol);
 	y = zmc_entry(cr, y, "sound + touch", detail, ACT_OPEN_PAGE, PAGE_SOUND_TOUCH);
-
-	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
-		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
-	y = zmc_entry(cr, y, "notifications + actions", detail, ACT_OPEN_PAGE, PAGE_QUICK);
 
 	static const char *const profiles[] = { "Power saver", "Balanced", "Performance" };
 	char bat_buf[32];
@@ -3130,7 +3127,6 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_SOUND_TOUCH: return draw_sound_touch(cr);
 	case PAGE_POWER: return draw_power(cr);
 	case PAGE_SYSTEM: return draw_system(cr);
-	case PAGE_APPS: return draw_apps(cr);
 	case PAGE_INSTALLED_APPS: return draw_installed_apps(cr);
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);
 	case PAGE_THEME: return draw_theme(cr);
@@ -3308,9 +3304,6 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_OPEN_PAGE:
 		if (arg == PAGE_INSTALLED_APPS) installed_load();
-		if (arg == PAGE_MAIN || arg == PAGE_APPS) {
-			hub_tab = arg;	/* where back returns to from a page under it */
-		}
 		if (arg == PAGE_WALLS) {
 			wall_cat_open = -1;	/* opens on the categories */
 			wall_leave_at = 0;
@@ -3978,9 +3971,9 @@ static bool back(void) {
 		zmc_redraw();
 		return true;
 	}
-	int up = page_parent(zmc.page, hub_tab);
+	int up = page_parent(zmc.page);
 	if (up == PAGE_NO_PARENT) {
-		return false;	/* either tab of the hub: back leaves the app */
+		return false;	/* the top of the tree: back leaves the app */
 	}
 	/* What leaving a page takes, before going up; some backs only put something away. */
 	if (zmc.page == PAGE_WALLS && wall_cat_open >= 0) {
@@ -4032,9 +4025,6 @@ static void arrived(int page) {
 		}
 	}
     if (page == PAGE_DATE) { date_focus = -1; date_job(false); }
-	if (page == PAGE_MAIN || page == PAGE_APPS) {
-		hub_tab = page;	/* swiped to: where back returns to from under it */
-	}
 	if (page == PAGE_MOBILE) {
 		cell_load();
 		zmc_every(3000, cell_tick);	/* "connecting" becomes "connected" by itself */
