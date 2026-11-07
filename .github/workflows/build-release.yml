@@ -49,6 +49,7 @@ jobs:
             mtools \
             qemu-user-static \
             binfmt-support \
+            qt6-base-dev-tools \
             util-linux \
             xz-utils \
             zstd \
@@ -66,6 +67,9 @@ jobs:
         run: |
           sudo systemctl restart systemd-binfmt.service || true
           cat /proc/sys/fs/binfmt_misc/qemu-aarch64 || true
+
+      - name: Check this runner can build ztOS
+        run: sudo python3 installer/ztos doctor
 
       - name: Build ztOS for Samsung Galaxy S9 (starlte)
         run: |
