@@ -17,14 +17,14 @@ installer/ztos doctor               is this computer ready?
 installer/ztos build --target gsi   the generic system image alone (for ztConflo)
 ```
 
-> **Default Credentials:**
+> **Default credentials of the release images** (a build asks you for your own):
 > - **Username:** `zerone`
 > - **Password:** `toor` (has full `sudo` privileges)
 
 
 ## What you need
 
-A Linux computer (x86-64 or ARM), about 15 GB free, and an internet
+A Linux computer (x86-64 or ARM), about 20 GB free, and an internet
 connection: the build downloads Arch Linux ARM and about 2 GB of packages. On
 Arch Linux:
 

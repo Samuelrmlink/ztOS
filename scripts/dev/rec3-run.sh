@@ -1,5 +1,5 @@
 #!/bin/bash
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../.." || exit 1
 ROOT=$PWD
 . scripts/phone-lib.sh
 audio/push.sh build/rec3.sh

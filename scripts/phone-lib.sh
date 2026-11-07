@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Who and where the phone is, for scripts on this computer. Source it from a bash
 # script, once $ROOT is the repository, then run commands with scripts/phone-do.sh,
 # which `timeout` can wrap:

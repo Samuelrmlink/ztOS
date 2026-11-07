@@ -1,6 +1,6 @@
 #!/bin/bash
 # push the ztmetro sources and the build script, start the build on the phone, install Notes
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../.." || exit 1
 ROOT=$PWD
 . scripts/phone-lib.sh
 tar cf build/ztm.tar -C ztmetro --exclude=ref .

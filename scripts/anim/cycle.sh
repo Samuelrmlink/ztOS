@@ -1,6 +1,6 @@
 #!/bin/bash
 # cycle.sh NAME [on|off]: build ztmetro on the phone, install, restart, record a launch and return, fetch
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../.." || exit 1
 S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$PWD
 . scripts/phone-lib.sh

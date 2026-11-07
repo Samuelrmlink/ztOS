@@ -147,19 +147,19 @@ third-party EL10 rebuilds installed with `--nogpgcheck`.
 | --- | --- | --- |
 | `git` | `git-core` | Clone failed without it on Rocky and Fedora; also absent from the Alma image |
 | `bsdtar` | `bsdtar` | `doctor` failed without it on Rocky and Fedora; also absent from the Alma image |
-| `mkfs.fat` | `dosfstools` | `doctor` failed without it on Fedora. Only the `qemu` target uses it (`build.py:476`) |
+| `mkfs.fat` | `dosfstools` | `doctor` failed without it on Fedora. Only the `qemu` target uses it |
 | `mcopy`, `mmd` | `mtools` | `doctor` failed without them on Rocky. Only the `qemu` target uses them |
-| `sfdisk` | `util-linux` | Checked by `doctor`. Only the `qemu` target uses it (`build.py:500`) |
+| `sfdisk` | `util-linux` | Checked by `doctor`. Only the `qemu` target uses it |
 | `unshare --map-auto` | `util-linux` | Used by the build; works with 2.40 (EL10) and 2.42 (Fedora) |
 | `newuidmap`, `newgidmap` | `shadow-utils` | Used through `--map-auto` |
 | subuid and subgid | account | Removing either made `unshare` fail |
 | qemu binfmt with F | `qemu-user-static-aarch64` | Without F the build fails at "setting up package signing keys" |
-| `mke2fs` 1.47 or later | `e2fsprogs` | `-O ^orphan_file` at `build.py:374` needs it (read from code). 1.47.1 and 1.47.4 work; older was not tried |
+| `mke2fs` 1.47 or later | `e2fsprogs` | `-O ^orphan_file` needs it (read from code). 1.47.1 and 1.47.4 work; older was not tried |
 | Python 3.11 or later | `python3` | The SDK imports `tomllib` (read from code). 3.12 and 3.15 work; older was not tried |
 | `uic` | `qt6-qtbase-devel`, or `pyside6-tools` | Build failed without one on Rocky and Fedora |
 | `curl` | `curl` | Downloads the Arch Linux ARM tarball |
 | `gpg` | `gnupg2` | Checks the tarball's signature. Added after the build tests |
-| `tar`, `xz` | `tar`, `xz` | Unpack `ztos-media` (`build.py:238`) |
+| `tar`, `xz` | `tar`, `xz` | Unpack `ztos-media` |
 
 **A compiler is not needed on the host.** `qt6-qtbase-devel` pulls in `gcc`, `make`
 and `cmake`, but the Rocky cold build removed them all first (`rpm -e --nodeps`) and
@@ -188,7 +188,7 @@ firewall**. The host listens and the phone connects to it:
 
 | Script | Port |
 | --- | --- |
-| `scripts/flash-root.sh` (line 69) | 5557 |
+| `scripts/flash-root.sh` | 5557 |
 | `scripts/flash-from-rescue.sh` | 5558 |
 | `scripts/flash-boot-from-arch.sh` | 5559 |
 | Development tools | 5561, 5576, 5581, 5583, 5596, 8080 |
@@ -283,7 +283,7 @@ exists.
 
 ### Rebuilding kernel modules (not tested)
 
-`scripts/build-bt-modules.sh`, on the `feature/power-menu` branch, needs the following.
+`scripts/build-bt-modules.sh` needs the following.
 The packages resolve on Alma 10 and Fedora 45 (dry run only); nothing was compiled in
 these tests.
 

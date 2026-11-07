@@ -66,11 +66,11 @@ out=$(ZT_USER=anyone ZT_PW=secret timeout 20 "$DO" --root "echo 'it'\\''s quoted
 check "quotes survive the trip" "it's quoted" "$out"
 
 : > "$LOG"
-out=$(ZT_USER=" " ZT_PW= ZT_SSH='-i ~/key me@phone' SUDO_NOPASSWD=1 timeout 20 "$DO" --root 'echo "key:$IS_ROOT"' < /dev/null 2>&1)
+out=$(ZT_USER=" " ZT_PW='' ZT_SSH='-i ~/key me@phone' SUDO_NOPASSWD=1 timeout 20 "$DO" --root 'echo "key:$IS_ROOT"' < /dev/null 2>&1)
 check "a key: no password, sudo -n" "key:yes" "$out"
 check "a key: ~ is worked out" "login me@phone" "$(cat "$LOG")"
 
-out=$(ZT_USER=anyone ZT_PW= timeout 20 "$DO" 'true' < /dev/null 2>&1)
+out=$(ZT_USER=anyone ZT_PW='' timeout 20 "$DO" 'true' < /dev/null 2>&1)
 check "no password and no terminal: says what to set" "set ZT_PW" "$out"
 
 out=$(env -u ZT_USER ZT_PW=secret timeout 20 "$DO" 'true' < /dev/null 2>&1; cat "$LOG")
