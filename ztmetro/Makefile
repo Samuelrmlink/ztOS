@@ -314,6 +314,12 @@ check-bt-pair-sheet: xdg-shell-protocol.h
 
 # a settings reload keeps the scale; the hub warning lets go of the screen
 .PHONY: check-reload-hub
+# what the modem daemon reports of the SIM and the signal; no modem
+.PHONY: check-modem-sim
+check-modem-sim:
+	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c
+	/tmp/ztmetro-modem-sim-test
+
 .PHONY: check-csf
 check-csf:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -o /tmp/ztmetro-csf-test ../sensors/test-csf-failure.c

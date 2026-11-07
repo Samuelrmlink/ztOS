@@ -117,6 +117,40 @@ static void tell_shell(const char *line)
 static long ms(void);
 static double ipc_last_rx;	/* boot time (s) of the last frame from the CP on umts_ipc0 */
 
+/* What the status file says of the signal. Not on a network, there's none to
+ * report, whatever was last measured: with no SIM and the radio off this said 5. */
+static int status_bars(int bars, int reg)
+{
+	if (reg != 1 && reg != 5)
+		return 0;
+	return bars <= 0 ? 3 : bars;
+}
+
+/* The answer to AT+CPIN?, as "+CPIN: WHAT". */
+static const char *sim_from_cpin(const char *what)
+{
+	if (!strcmp(what, "READY"))
+		return "ready";
+	if (strcasestr(what, "NOT INSERTED") || strcasestr(what, "ABSENT") || strcasestr(what, "REMOVED") ||
+	    strcasestr(what, "NO SIM"))
+		return "absent";
+	return strstr(what, "PUK") ? "puk" : strstr(what, "PIN") ? "pin" : "error";
+}
+
+/* The same question refused, as "+CME ERROR: ...": a word or, in numeric mode,
+ * 27.007's code. NULL when it says nothing about the SIM, as "SIM busy" doesn't. */
+static const char *sim_from_cme(const char *line)
+{
+	const char *what = line + strlen("+CME ERROR");
+	what += strspn(what, ": ");
+	if (strcasestr(what, "not inserted") || !strcmp(what, "10"))
+		return "absent";
+	if (strcasestr(what, "failure") || strcasestr(what, "wrong") || !strcmp(what, "13") || !strcmp(what, "15"))
+		return "error";
+	return NULL;
+}
+
+
 /* Written when something the shell shows changes; and, at most once a
  * minute and without poking the shell, when only ipc_last_rx moved. */
 static void publish(void)
@@ -132,9 +166,7 @@ static void publish(void)
 		return;
 	int reg = now.eps_reg == 1 || now.eps_reg == 5 ? now.eps_reg :
 		now.cs_reg ? now.cs_reg : now.ps_reg;
-	int bars = now.bars;
-	if (bars <= 0 && (reg == 1 || reg == 5))
-		bars = 3;
+	int bars = status_bars(now.bars, reg);
 	fprintf(f, "call_result=%s\n", call_result);
 	fprintf(f, "call=%s\ncall_number=%s\n", now.call[0] ? now.call : "idle", now.call_number);
 	fprintf(f, "sim=%s\noperator=%s\nbars=%d\nregistered=%s\ntech=%s\nairplane=%d\ndata=%d\ndata_on=%d\n"
@@ -859,6 +891,8 @@ static void on_line(char *l)
 		}
 		if (strcmp(l, "OK") && !strncmp(sent, "ATD", 3))
 			call_set("", "");
+		if (!strncmp(sent, "AT+CPIN", 7) && !strncmp(l, "+CME ERROR", 10) && sim_from_cme(l))
+			snprintf(now.sim, sizeof(now.sim), "%s", sim_from_cme(l));
 		if (strcmp(l, "OK"))
 			fprintf(stderr, "ztoscorenetworkingd: %s -> %s\n", sent, l);
 		if (!strcmp(l, "OK") && !strncmp(sent, "AT+CMGS", 7) && sms_parts) {
@@ -871,8 +905,13 @@ static void on_line(char *l)
 	}
 	if (!strncmp(l, "+CPIN:", 6)) {
 		const char *s = l + 6 + strspn(l + 6, " ");
-		snprintf(now.sim, sizeof(now.sim), "%s", !strcmp(s, "READY") ? "ready" :
-			strstr(s, "PUK") ? "puk" : strstr(s, "PIN") ? "pin" : "error");
+		snprintf(now.sim, sizeof(now.sim), "%s", sim_from_cpin(s));
+		/* an answer not known yet: said once, so it can be added */
+		static char told[32];
+		if (!strcmp(now.sim, "error") && strncmp(told, s, sizeof(told) - 1)) {
+			snprintf(told, sizeof(told), "%s", s);
+			fprintf(stderr, "ztoscorenetworkingd: AT+CPIN? said \"%s\": taken as a SIM error\n", told);
+		}
 		if (!strcmp(s, "READY") && !net_set)
 			queue_at("AT+CIMI");	/* the SIM's network, for net_configure */
 	} else if (!strncmp(sent, "AT+CIMI", 7) && strlen(l) >= 6 && strspn(l, "0123456789") == strlen(l)) {
