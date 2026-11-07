@@ -56,7 +56,7 @@ fi
 echo "=== modules ==="
 cp "$BASE/vmlinux.symvers" "$OB/vmlinux.symvers"
 make -s -j"$JOBS" O="$OB" KBUILD_MODPOST_WARN=1 modules 2>&1 | grep -E ' error |\*\*\*|undefined' || true
-for d in "$ROOT/bluetooth/driver" "$ROOT/sensors/driver"; do
+for d in "$ROOT/bluetooth/driver" "$ROOT/sensors/driver" "$ROOT/leds"; do
 	make -s -j"$JOBS" O="$OB" M="$d" modules 2>&1 |
 		grep -E ' error |\*\*\*|undefined' || true
 done
@@ -83,7 +83,7 @@ for f in "$OS"/sound/soundcore.ko "$OS"/sound/core/snd{,-timer,-pcm}.ko \
 done
 for f in "$OB"/crypto/{kpp,ecc,ecdh_generic,cmac,aes}.ko "$OB"/net/bluetooth/bluetooth.ko \
 	"$OB"/net/bluetooth/rfcomm/rfcomm.ko "$OB"/drivers/bluetooth/{hci_uart,btbcm}.ko \
-	"$ROOT"/bluetooth/driver/zrn-bt.ko "$ROOT"/sensors/driver/zrn-bbd.ko; do
+	"$ROOT"/bluetooth/driver/zrn-bt.ko "$ROOT"/sensors/driver/zrn-bbd.ko "$ROOT"/leds/zrn-flash.ko; do
 	if [ -f "$f" ]; then cp "$f" "$OUT/"; else echo "(not built: $f)"; fi
 done
 cp "$BASE/Module.symvers" "$OUT/Module.symvers"

@@ -6,10 +6,6 @@
 EFS=/run/android/mnt/vendor/efs/bluetooth/bt_addr
 KEEP=/var/lib/zrn-bluetooth/bt_addr
 mkdir -p "$(dirname "$KEEP")"
-if [ -r "$EFS" ]; then
-	tr -d '\n\r' < "$EFS" > "$KEEP.new" && mv "$KEEP.new" "$KEEP"
-fi
-addr=$(cat "$KEEP" 2>/dev/null)
 # The controller is registered once its firmware is in (about 10 s after
 # attaching). Nothing may talk to it before that: management requests during
 # setup leave it stuck, never registered. So wait passively, on the kernel
@@ -28,6 +24,12 @@ i=0
 until btmgmt info 2>/dev/null | grep -q "^hci0:"; do
 	i=$((i + 1)); [ $i -gt 20 ] && { echo "zrn-bluetooth-addr: hci0 not registered"; exit 1; }; sleep 1
 done
+# Read only now: the modem mounts EFS after this service has started, and the
+# wait above outlasts that. (Reading first found nothing on a fresh install.)
+if [ -r "$EFS" ]; then
+	tr -d '\n\r' < "$EFS" > "$KEEP.new" && mv "$KEEP.new" "$KEEP"
+fi
+addr=$(cat "$KEEP" 2>/dev/null)
 case "$addr" in
 ??:??:??:??:??:??)
 	btmgmt -i hci0 power off >/dev/null

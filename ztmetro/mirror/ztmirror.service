@@ -1,0 +1,9 @@
+[Unit]
+Description=ztmirror: the screen and touch over USB, for a viewer on a PC
+# Off unless asked for: "ztos mirror" starts and stops it. Deliberately no
+# [Install] section, so it can't be enabled by accident.
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ztmirror
+Restart=no

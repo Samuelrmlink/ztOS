@@ -38,6 +38,7 @@
 #include "power/power-key.h"
 #include "audio-sync.h"
 #include "auth/btpair-proto.h"
+#include "audio-state.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -90,6 +91,7 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
+#include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_idle_notify_v1.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
@@ -143,6 +145,8 @@ static int nav_h = NAV_BAR_H;
 #define TOP_PAD		14	/* Start: above the first row */
 #define MAX_UNITS	8	/* Start: the most small tiles a row can hold */
 #define EDGE		18	/* how close to the glass edge a system gesture starts */
+#define FS_EDGE		28	/* the same for bringing back a full-screen app's bars */
+#define FS_SWIPE	24	/* and how far in the finger has to come */
 #define SWIPE		56	/* how far a system gesture has to travel */
 #define SLOP		8	/* movement that turns a tap into a drag */
 #define LONG_PRESS_MS	450
@@ -186,9 +190,8 @@ static int nav_h = NAV_BAR_H;
 #define MENU_H		62
 #define MAX_TOUCH	10
 #define MAX_CARDS	8	/* apps in the switcher */
-#define VOLUME_H	58
-#define MEDIA_H		74	/* what is playing, and its buttons, under the volume */
-#define OUTPUT_H	44	/* where the sound goes, at the banner's foot: tap for the next */
+#define MEDIA_H		74	/* what is playing, and its buttons, in the audio modal */
+#define MEDIA_PROGRESS_H	16	/* how far through it is, when the player knows */
 #define TOAST_H		58	/* a notification's banner, where the volume's goes */
 #define TOAST_MS	4500
 #define MAX_NOTES	12
@@ -365,6 +368,10 @@ struct zt_toplevel {
 	bool awaiting;
 	uint32_t awaiting_since;
 	int sent_h;		/* the height it was last asked to take */
+	int sent_w;		/* and the width */
+	float zoom;		/* its own scale from Settings; 0 until looked up */
+	bool fullscreen;	/* it asked for the whole screen, and has it */
+	struct wl_listener request_fullscreen;
 	struct wl_listener map, unmap, commit, destroy;
 };
 
@@ -411,6 +418,14 @@ struct zt_keyboard {
 	struct wl_listener modifiers, key, destroy;
 };
 
+#define CTL_FINGERS 12
+#define CTL_TRAIL 120		/* points kept of each finger's path */
+#define CTL_TRAIL_MS 1000	/* how much of its travel the trail shows */
+#define CTL_DOT_STAY_MS 750	/* the dot and its trail, after the finger lifts */
+#define CTL_DOT_FADE_MS 200	/* the last of that, fading */
+#define CTL_DOT_D 30		/* points across */
+#define CTL_TRAIL_D 5
+
 struct zt_touch_device {
 	struct zt_server *server;
 	struct wlr_touch *touch;
@@ -455,6 +470,9 @@ enum touch_role {
 	ROLE_BOARD,	/* while the app list's letters are up */
 	ROLE_HYPER,	/* on Hyperscan, the search over everything */
 	ROLE_RETRO,	/* on a ztRetrofit style's home (the DotMatrix launcher) */
+	ROLE_AUDIO,	/* in the audio modal: a row (index), or the slider (index -1) */
+	ROLE_LEVEL,	/* on the slider of the flashlight's or the brightness's modal */
+	ROLE_FS_EDGE,	/* at the top (index 1) or bottom (-1) of a full-screen app, its bars away */
 };
 
 struct touch_point {
@@ -678,12 +696,20 @@ struct zt_server {
 	int demo_saved_timeout;
 	/* the volume keys' banner */
 	int volume;			/* 0..30, as the phone counts it */
-	float volume_y;			/* 0 shown, minus its height out of sight */
-	/* what is playing, as ztnotifyd reports it: carried by the volume banner */
+	/* what is playing, as ztnotifyd reports it: shown in the audio modal */
 	bool media;			/* there is a player */
 	bool media_playing;
 	char media_title[100], media_artist[80];
-	struct zt_layer volume_layer;
+	double media_pos, media_len;	/* seconds; media_len 0: the player does not say */
+	uint32_t media_pos_ms;		/* when media_pos was true */
+	struct wl_event_source *media_tick_timer;
+	/* an app that asked for the whole screen: its bars slide away, and a swipe
+	 * in from the top or bottom brings them back for fs_bars_ms */
+	float fs_bars;			/* 1 the bars are there, 0 out of sight */
+	float fs_want;
+	bool fs_reveal;
+	int fs_bars_ms;
+	struct wl_event_source *fs_timer;
 	struct wl_event_source *volume_timer;
 	struct wl_event_source *volume_repeat_timer, *volume_pip_timer;
 	int volume_repeat_by;	/* +1 or -1 while a volume key is held, else 0 */
@@ -718,7 +744,14 @@ struct zt_server {
 	GLuint tone_tex;
 	bool tone_dirty;
 	struct wlr_idle_notifier_v1 *idle_notifier;	/* for hypridle and the like */
+	struct wlr_idle_inhibit_manager_v1 *idle_inhibit;	/* a video asking the screen to stay on */
+	bool idle_inhibit_logged;
+	/* Settings > app scaling: ~/.config/ztmetro/app-scale, "APP_ID = 1.25" */
+	struct { char id[96]; float zoom; } app_scales[32];
+	int n_app_scales;
 	uint32_t wifi_read_ms;
+	uint32_t wifi_off_ms;		/* when the tile switched Wi-Fi off: reports just after are stale */
+	uint32_t bt_tile_ms;		/* when the tile changed Bluetooth: the state file is behind it */
 	bool wifi_suspend;
 	bool wifi_suspended_by_sleep;
 	float lock_y;			/* 0 covering the screen, -height pushed off the top */
@@ -894,6 +927,15 @@ struct zt_server {
 	int hwkey_held;			/* the nav button whose own key is down; -1: none */
 	bool hwkey_long;		/* ... and held long enough to count as a long press */
 	struct wl_event_source *hwkey_timer;
+	struct ctl_finger {
+		bool used, down;
+		int id;
+		float x, y;
+		uint32_t up_ms;
+		struct { float x, y; uint32_t ms; } trail[CTL_TRAIL];
+		int head, n;
+	} ctl_fingers[CTL_FINGERS];
+	struct zt_layer ctl_dot_layer, ctl_trail_layer;
 	struct power_key power_key;
 	struct wl_event_source *power_key_timer;
 
@@ -911,6 +953,32 @@ struct zt_server {
 	bool volume_is_media;
 	bool audio_active, audio_known;
 	uint32_t volume_key_ms;	/* when a key last moved the media volume */
+	/* the audio tile and its modal: what ztos-audiod last said (audio-state.h) */
+	struct audio_state audio_state;
+	bool audio_state_ok;
+	/* held on the flashlight's or the brightness's tile: a modal with a slider */
+	bool level_open;
+	int level_kind;		/* LEVEL_TORCH or LEVEL_BRIGHT */
+	float level_y;
+	double level_h, level_track_y, level_row_y;
+	struct zt_layer level_layer;
+	int level_auto;		/* the light sensor: 1 on, 0 off, -1 there is none */
+	int torch_level;	/* 1..TORCH_LEVEL: what the tile switches on */
+	int torch_level_was;	/* before this drag: it passes every level on its way to off */
+	bool audio_modal_open;
+	bool audio_modal_auto;		/* the volume keys opened it: it goes by itself */
+	bool media_on_volume;		/* and the player's controls come with it (Settings); always from the tile */
+	bool audio_modal_ring;		/* the ringer's level, for when nothing is playing */
+	bool audio_ring_drag;
+	double audio_media_y;		/* what is playing, under the slider */
+	float audio_modal_y;		/* 0 shown, -audio_modal_h out of sight */
+	double audio_modal_h, audio_track_y;
+	struct zt_layer audio_modal_layer;
+	char audio_pending[sizeof(((struct audio_output *)0)->name)];	/* a swap on its way */
+	uint32_t audio_pending_ms;
+	struct audio_slider audio_slider;
+	char audio_row_down[sizeof(((struct audio_output *)0)->name)];	/* the row under a finger */
+	struct wl_event_source *audio_timer;
 	int key_sound_fd;
 	bool osk_shift, osk_ctrl, osk_alt;
 	struct osk_key keys[MAX_KEYS];
@@ -973,6 +1041,12 @@ static bool bt_pair_action(struct zt_server *, const char *);
 static double bt_pair_field_h(struct zt_server *);
 static void bt_pair_draw(struct zt_server *, cairo_t *, double, double, double);
 static void bt_pair_ctl(struct zt_server *, char *);
+enum { LEVEL_TORCH, LEVEL_BRIGHT };
+static void level_modal_show(struct zt_server *, int);
+static void level_modal_close(struct zt_server *);
+static bool torch_write(int);
+static void audio_modal_show(struct zt_server *);
+static void audio_modal_close(struct zt_server *);
 static void ftrace_mark(struct zt_server *server, const char *what, double ms);
 static double ftrace_clock(void);
 static void run_detached(const char *, const char *, const char *, const char *);
@@ -2134,6 +2208,20 @@ static void draw_icon_vector(cairo_t *cr, const char *name, double cx, double cy
 		cairo_fill(cr);
 		cairo_arc(cr, u * 0.45, -u * 0.32, u * 0.13, 0, 2 * M_PI);
 		cairo_fill(cr);
+	} else if (strcmp(name, "speaker") == 0) {
+		cairo_move_to(cr, -u * 0.85, -u * 0.3);
+		cairo_line_to(cr, -u * 0.4, -u * 0.3);
+		cairo_line_to(cr, u * 0.1, -u * 0.8);
+		cairo_line_to(cr, u * 0.1, u * 0.8);
+		cairo_line_to(cr, -u * 0.4, u * 0.3);
+		cairo_line_to(cr, -u * 0.85, u * 0.3);
+		cairo_close_path(cr);
+		cairo_fill(cr);
+		cairo_set_line_width(cr, fmax(1.3, s * 0.085));
+		cairo_arc(cr, u * 0.1, 0, u * 0.42, -M_PI / 4, M_PI / 4);
+		cairo_stroke(cr);
+		cairo_arc(cr, u * 0.1, 0, u * 0.78, -M_PI / 4, M_PI / 4);
+		cairo_stroke(cr);
 	} else if (strcmp(name, "music") == 0) {
 		cairo_arc(cr, -u * 0.4, u * 0.55, u * 0.28, 0, 2 * M_PI);
 		cairo_fill(cr);
@@ -2474,17 +2562,18 @@ static char *trim(char *s) {
  * actions puts one in each of the eight places; `quick` in the config). */
 enum quick {
 	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_ROTATION, Q_FLASHLIGHT, Q_LOCATION,
-	Q_BRIGHTNESS, Q_SETTINGS, Q_VIBRATE, Q_NONE, Q_COUNT,
+	Q_BRIGHTNESS, Q_SETTINGS, Q_VIBRATE, Q_AUDIO, Q_NONE, Q_COUNT,
 };
 static const struct { const char *id, *icon, *label; } QUICK[Q_COUNT] = {
 	{ "wifi", "wifi", "WI-FI" }, { "data", "", "MOBILE DATA" },
 	{ "bluetooth", "bluetooth", "BLUETOOTH" }, { "airplane", "airplane", "AIRPLANE MODE" },
 	{ "rotation", "rotation", "ROTATION LOCK" }, { "flashlight", "flashlight", "FLASHLIGHT" },
 	{ "location", "location", "LOCATION" }, { "brightness", "brightness", "BRIGHTNESS" },
-	{ "settings", "gear", "ALL SETTINGS" }, { "vibrate", "", "VIBRATION" }, { "none", "", "" },
+	{ "settings", "gear", "ALL SETTINGS" }, { "vibrate", "", "VIBRATION" },
+	{ "audio", "", "" }, { "none", "", "" },	/* the audio tile's come from audio-state.h */
 };
 static const int QUICK_DEFAULT[8] = {
-	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_ROTATION, Q_FLASHLIGHT, Q_BRIGHTNESS, Q_SETTINGS,
+	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_AUDIO, Q_FLASHLIGHT, Q_BRIGHTNESS, Q_SETTINGS,
 };
 
 /* "wifi,data,airplane,...": up to eight, the rest as they come by default. */
@@ -2538,6 +2627,32 @@ static void config_keep(const char *key, int value) {
 	char text[24];
 	snprintf(text, sizeof(text), "%d", value);
 	config_keep_text(key, text);
+}
+
+/* The audio tile came after people had saved a `quick` list (Settings saves it with
+ * any setting, so one says little about a choice). Once only, it takes the place of
+ * Rotation Lock, which does nothing yet, and everything else stays where it was.
+ * A list without Rotation Lock was chosen: it stays, and the tile is in the
+ * Settings page's choices. The key makes it once: picking Rotation Lock later stays. */
+#define QUICK_AUDIO_DONE "quick_audio_added"
+static void quick_add_audio(struct zt_server *server) {
+	int place = -1;
+	bool has = false;
+	for (int i = 0; i < 8; i++) {
+		has = has || server->quick[i] == Q_AUDIO;
+		if (place < 0 && server->quick[i] == Q_ROTATION) place = i;
+	}
+	if (!has && place >= 0) {
+		char list[200] = "";
+		server->quick[place] = Q_AUDIO;
+		for (int i = 0; i < 8; i++) {
+			size_t at = strlen(list);
+			snprintf(list + at, sizeof(list) - at, "%s%s", i ? "," : "", QUICK[server->quick[i]].id);
+		}
+		config_keep_text("quick", list);
+		wlr_log(WLR_INFO, "quick: the audio tile took Rotation Lock's place (place %d)", place);
+	}
+	config_keep(QUICK_AUDIO_DONE, 1);
 }
 
 /*
@@ -3040,9 +3155,11 @@ static void load_config(struct zt_server *server) {
 	server->dm_cfg = (struct dm_config){ .launch_delay = 800, .sys_stats = true, .event_banners = true };
 	FILE *f = fopen(path, "r");
 	if (!f) {
+		quick_add_audio(server);
 		return;
 	}
 	char line[256];
+	bool quick_audio_done = false;
 	while (fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
 		if (line[0] == '#' || !eq) {
@@ -3050,7 +3167,9 @@ static void load_config(struct zt_server *server) {
 		}
 		*eq = 0;
 		char *key = trim(line), *value = trim(eq + 1);
-		if (strcmp(key, "start_wallpaper") == 0) {
+		if (strcmp(key, QUICK_AUDIO_DONE) == 0) {
+			quick_audio_done = true;
+		} else if (strcmp(key, "start_wallpaper") == 0) {
 			snprintf(server->start_wall_path, sizeof(server->start_wall_path), "%s", value);
 		} else if (strcmp(key, "lock_wallpaper") == 0) {
 			snprintf(server->lock_wall_path, sizeof(server->lock_wall_path), "%s", value);
@@ -3060,6 +3179,14 @@ static void load_config(struct zt_server *server) {
 			} else if (strcmp(value, "off") == 0) {
 				nav_h = 0;
 			}
+		} else if (strcmp(key, "torch_level") == 0) {
+			int n = atoi(value);
+			server->torch_level = n < 1 ? 1 : n > TORCH_LEVEL ? TORCH_LEVEL : n;
+		} else if (strcmp(key, "volume_media_controls") == 0) {
+			server->media_on_volume = strcmp(value, "on") == 0;
+		} else if (strcmp(key, "fullscreen_bars_secs") == 0) {
+			int n = atoi(value);
+			server->fs_bars_ms = (n < 1 ? 1 : n > 30 ? 30 : n) * 1000;
 		} else if (strcmp(key, "nav_center_icon") == 0) {
 			int n = atoi(value);
 			server->nav_center_icon = n < 0 ? 0 : n > 4 ? 4 : n;
@@ -3149,6 +3276,9 @@ static void load_config(struct zt_server *server) {
 		}
 	}
 	fclose(f);
+	if (!quick_audio_done) {
+		quick_add_audio(server);
+	}
 	if (demoloop_active()) {
 		server->demo_saved_timeout = server->screen_timeout;
 		server->screen_timeout = 0;
@@ -5371,8 +5501,14 @@ static void status_pop_end(cairo_t *cr, float t) {
  * Asked of the driver when the status row is drawn anyway (the minute, a
  * power event, the action centre) and kept for a few seconds, as the row is
  * drawn in three places; nothing wakes up to ask. */
+#define WIFI_OFF_HOLD_MS 12000
+
 static int wifi_bars(struct zt_server *server) {
 	uint32_t now = now_ms();
+	if (server->wifi_off_ms && now - server->wifi_off_ms < WIFI_OFF_HOLD_MS) {
+		server->wifi_bars = -1;
+		return -1;
+	}
 	/* If ztoscorenetworkingd reported active bars, use it */
 	if (server->wifi_read_ms && now - server->wifi_read_ms < 40000 && server->wifi_bars >= 0) {
 		return server->wifi_bars;
@@ -6168,7 +6304,9 @@ static bool bt_state_read(struct zt_server *server) {
 	bool changed = on != server->bt_on || streaming != server->bt_streaming ||
 		battery != server->bt_battery || apple != server->bt_apple || strcmp(name, server->bt_name) != 0;
 	server->bt_on = on;
-	server->shade_bt = on;
+	if (!server->bt_tile_ms || now_ms() - server->bt_tile_ms > 4000) {
+		server->shade_bt = on;
+	}
 	server->bt_streaming = streaming;
 	server->bt_battery = battery;
 	server->bt_apple = apple;
@@ -6221,6 +6359,9 @@ static int net_tick(void *data) {
 
 	if (bt_state_read(server)) {
 		redraw = true;
+		if (server->shade_open || server->shade_h > 0.1f) {
+			draw_shade(server);	/* its tile follows */
+		}
 	}
 	live_tick(server);
 	if (server->bt_streaming) {
@@ -6336,6 +6477,25 @@ static int shade_hit(struct zt_server *server, double x, double y) {
 	return -1;
 }
 
+/* Whether ztos-audiod is there: a state file outlives a daemon that crashed. A
+ * datagram socket's connect sends nothing and doesn't wait. */
+static bool audio_daemon_alive(void) {
+	struct sockaddr_un a = { .sun_family = AF_UNIX };
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	snprintf(a.sun_path, sizeof(a.sun_path), "%s/ztos-audio.sock", runtime ? runtime : "/tmp");
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) return false;
+	bool alive = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0;
+	close(fd);
+	return alive;
+}
+
+static const struct audio_output *audio_active_output(struct zt_server *server) {
+	if (!server->audio_state_ok || !audio_daemon_alive()) return NULL;
+	int i = audio_current(&server->audio_state);
+	return i < 0 ? NULL : &server->audio_state.out[i];
+}
+
 /* One quick action, drawn with its top left corner at the origin. */
 static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double w, double h) {
 	int q = server->quick[i];
@@ -6355,6 +6515,11 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 		q == Q_DATA ? server->cell_data_on : q == Q_VIBRATE ? server->haptics_enabled :
 		q == Q_FLASHLIGHT ? server->shade_torch : q == Q_BLUETOOTH ? server->shade_bt :
 		q == Q_BRIGHTNESS;
+	const struct audio_output *audio = q == Q_AUDIO ? audio_active_output(server) : NULL;
+	if (q == Q_AUDIO) {
+		on = audio != NULL;
+		missing = !audio;
+	}
 	/* on: the accent colour; off: a dark grey block */
 	if (on) {
 		set_rgb(cr, server->accent);
@@ -6384,8 +6549,19 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 			cairo_line_to(cr, x + d, 8 + 11);
 			cairo_stroke(cr);
 		}
+	} else if (q == Q_AUDIO) {
+		draw_icon(cr, audio ? audio_type_of(audio)->icon : "speaker", 8 + 9, 8 + 9, 18);
 	} else {
 		draw_icon(cr, QUICK[q].icon, 8 + 9, 8 + 9, 18);
+	}
+	if (q == Q_AUDIO) {
+		/* the type, and below it the device */
+		char type[32];
+		audio_label_caps(type, sizeof(type), audio ? audio_type_of(audio)->label : "Audio");
+		draw_text(cr, type, FONT_SEMIBOLD, 7.6, 7, h - 26, w - 10, 0, false);
+		draw_text(cr, audio ? audio->desc : server->audio_state_ok && audio_daemon_alive() ? "No output" : "Unavailable",
+			FONT_REGULAR, 8, 7, h - 15, w - 10, 0, false);
+		return;
 	}
 	char label[32];
 	if (q == Q_BRIGHTNESS) {
@@ -7207,9 +7383,20 @@ static void draw_osk(struct zt_server *server) {
 /* ---- which app is in front, and how much room it gets -------------------- */
 
 static bool is_terminal(struct zt_toplevel *toplevel);
+
+/* Where an app's window starts: under the status bar, or for one that has the
+ * whole screen at the very top. */
+static int app_top(const struct zt_toplevel *toplevel) {
+	return toplevel && toplevel->fullscreen ? 0 : STATUS_H;
+}
+
 static double app_height(struct zt_server *server) {
 	bool make_room = server->osk_visible && server->shown &&
 		(is_terminal(server->shown) || server->shown->android_runtime);
+	if (server->shown && server->shown->fullscreen) {
+		/* the keyboard brings the nav bar back with it */
+		return server->height - (make_room ? NAV_H + server->osk_h : 0);
+	}
 	return server->height - STATUS_H - NAV_H - (make_room ? server->osk_h : 0);
 }
 
@@ -7222,7 +7409,7 @@ static void osk_lift(struct zt_server *server) {
 	if (server->osk_visible && server->shown && !is_terminal(server->shown) &&
 			!server->shown->android_runtime && server->osk_box_bottom >= 0) {
 		double keyboard_top = server->height - NAV_H - server->osk_h;
-		double box = STATUS_H + server->osk_box_bottom + 10;
+		double box = app_top(server->shown) + server->osk_box_bottom + 10;
 		lift = box > keyboard_top ? (float)(box - keyboard_top) : 0;
 		if (lift > server->osk_h) {
 			lift = server->osk_h;
@@ -7235,19 +7422,143 @@ static void osk_lift(struct zt_server *server) {
  * points or so). Such a window is shown smaller, so that all of it is there. */
 static double app_fit(struct zt_server *server, struct zt_toplevel *toplevel) {
 	int w = toplevel->xdg_toplevel->base->geometry.width;
+	if (toplevel->zoom > 0 && toplevel->zoom != 1.0f) {
+		/* a scale of its own: whatever width it is, it fills the screen's */
+		return w > 0 ? (double)server->width / w : toplevel->zoom;
+	}
 	return w > server->width ? (double)server->width / w : 1.0;
+}
+
+/* The scale Settings gives this app: it is told it has less room (or more) and
+ * is drawn larger (or smaller) to fill the screen. The Android runtimes size
+ * themselves their own way, and keep 1. */
+static float app_zoom_for(struct zt_server *server, struct zt_toplevel *toplevel) {
+	const char *id = toplevel->xdg_toplevel->app_id;
+	if (!id || toplevel->android_runtime || !strncmp(id, "waydroid.", 9)) {
+		return 1.0f;
+	}
+	for (int i = 0; i < server->n_app_scales; i++) {
+		if (!strcmp(server->app_scales[i].id, id)) {
+			return server->app_scales[i].zoom;
+		}
+	}
+	return 1.0f;
+}
+
+static void app_scales_load(struct zt_server *server) {
+	char path[512], line[160];
+	const char *home = getenv("HOME");
+	snprintf(path, sizeof(path), "%s/.config/ztmetro/app-scale", home ? home : "");
+	server->n_app_scales = 0;
+	FILE *f = fopen(path, "r");
+	while (f && fgets(line, sizeof(line), f) && server->n_app_scales < 32) {
+		char id[96];
+		float zoom;
+		if (sscanf(line, "%95s = %f", id, &zoom) == 2 && zoom >= 0.5f && zoom <= 2.0f) {
+			snprintf(server->app_scales[server->n_app_scales].id, sizeof(server->app_scales[0].id), "%s", id);
+			server->app_scales[server->n_app_scales++].zoom = zoom;
+		}
+	}
+	if (f) fclose(f);
+}
+
+/* Render at the screen's own pixels, so that a scaled app is not blurred. */
+static void app_surface_scale(struct wlr_surface *surface, int sx, int sy, void *data) {
+	(void)sx; (void)sy;
+	float scale = *(float *)data;
+	wlr_surface_set_preferred_buffer_scale(surface, (int32_t)ceilf(scale));
+	wlr_fractional_scale_v1_notify_scale(surface, scale);
+}
+
+static void app_tell_scale(struct zt_server *server, struct zt_toplevel *toplevel) {
+	float scale = server->scale * (toplevel->zoom > 0 ? toplevel->zoom : 1.0f);
+	wlr_xdg_surface_for_each_surface(toplevel->xdg_toplevel->base, app_surface_scale, &scale);
 }
 
 /* Ask an app for the room it has. Shown smaller, it has to be taller by as
  * much to reach the bottom. */
 static void app_configure(struct zt_server *server, struct zt_toplevel *toplevel) {
 	double room = toplevel == server->shown ? app_height(server) :
-		server->height - STATUS_H - NAV_H;
-	int h = (int)(room / app_fit(server, toplevel));
-	if (h != toplevel->sent_h && toplevel->xdg_toplevel->base->initialized) {
+		toplevel->fullscreen ? server->height : server->height - STATUS_H - NAV_H;
+	float zoom = toplevel->zoom > 0 ? toplevel->zoom : 1.0f;
+	int w = (int)lround(server->width / zoom);
+	/* one that will not go that narrow is shown smaller still */
+	int at = toplevel->xdg_toplevel->base->geometry.width;
+	double fit = at > w ? (double)server->width / at : zoom;
+	int h = (int)(room / fit);
+	if ((h != toplevel->sent_h || w != toplevel->sent_w) && toplevel->xdg_toplevel->base->initialized) {
 		toplevel->sent_h = h;
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, server->width, h);
+		toplevel->sent_w = w;
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, w, h);
 	}
+}
+
+/* ---- an app with the whole screen ---------------------------------------- */
+
+static bool fs_on(struct zt_server *server) {
+	return server->shown && server->shown->fullscreen && !server->locked && !server->switcher;
+}
+
+/* How much of the bars to show: all of them over anything of the shell's that
+ * hangs from them. */
+static float fs_bars_t(struct zt_server *server) {
+	if (!fs_on(server) || server->shade_open || server->shade_h > 0.1f || server->osk_visible ||
+			server->hyper) {
+		return 1.0f;
+	}
+	return server->fs_bars;
+}
+
+static float fs_status_y(struct zt_server *server) {
+	return server->audio_modal_open || server->level_open ? 0.0f : -STATUS_H * (1.0f - fs_bars_t(server));
+}
+
+static void fs_sync(struct zt_server *server) {
+	float want = fs_on(server) && !server->fs_reveal ? 0.0f : 1.0f;
+	if (want != server->fs_want) {
+		server->fs_want = want;
+		animate(server, &server->fs_bars, want, 180, 0, false);
+	}
+}
+
+static int fs_hide(void *data) {
+	struct zt_server *server = data;
+	server->fs_reveal = false;
+	fs_sync(server);
+	return 0;
+}
+
+/* A swipe in from an edge, or a finger on a bar: they stay for a while yet. */
+static void fs_reveal_bars(struct zt_server *server) {
+	if (!fs_on(server)) {
+		return;
+	}
+	server->fs_reveal = true;
+	fs_sync(server);
+	wl_event_source_timer_update(server->fs_timer, server->fs_bars_ms);
+}
+
+static void fs_apply(struct zt_server *server, struct zt_toplevel *toplevel, bool on) {
+	if (!toplevel->xdg_toplevel->base->initialized) {
+		return;		/* its first commit looks at what it asked for */
+	}
+	wlr_log(WLR_INFO, "fullscreen %s: %s", on ? "on" : "off",
+		toplevel->xdg_toplevel->app_id ? toplevel->xdg_toplevel->app_id : "?");
+	toplevel->fullscreen = on;
+	wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, on);
+	app_configure(server, toplevel);
+	if (toplevel == server->shown) {
+		server->fs_reveal = false;
+		wl_event_source_timer_update(server->fs_timer, 0);
+		fs_sync(server);
+	}
+	damage(server);
+}
+
+static void xdg_toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, request_fullscreen);
+	fs_apply(toplevel->server, toplevel, toplevel->xdg_toplevel->requested.fullscreen);
 }
 
 static void osk_show(struct zt_server *server, bool visible) {
@@ -7489,6 +7800,8 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 	}
 	wl_event_source_timer_update(server->launch_timer, 0);
 	server->shown = toplevel;
+	server->fs_reveal = false;
+	fs_sync(server);
 	waydroid_rewaking = false;
 	const char *runtime_app_id = toplevel && toplevel->xdg_toplevel ?
 		toplevel->xdg_toplevel->app_id : NULL;
@@ -7996,6 +8309,7 @@ static void shade_activate(struct zt_server *server, int index) {
 		hap(server, HAP_TAP, HG_SYSTEM);
 		server->shade_wifi = !server->shade_wifi;
 		run_detached("nmcli", "radio", "wifi", server->shade_wifi ? "on" : "off");
+		server->wifi_off_ms = server->shade_wifi ? 0 : now_ms();
 		if (!server->shade_wifi) {
 			/* gone now, whatever was last measured */
 			server->wifi_bars = -1;
@@ -8015,14 +8329,11 @@ static void shade_activate(struct zt_server *server, int index) {
 		break;
 	case 100 + Q_FLASHLIGHT: {
 		/* the rear flash LED at a torch's current (leds/zrn-flash.ko) */
-		FILE *f = fopen(TORCH_PATH, "w");
-		if (!f) {
+		if (!torch_write(server->shade_torch ? 0 : server->torch_level)) {
 			break;	/* not loaded: the tile is drawn faint */
 		}
 		hap(server, HAP_TAP, HG_SYSTEM);
 		server->shade_torch = !server->shade_torch;
-		fprintf(f, "%d\n", server->shade_torch ? TORCH_LEVEL : 0);
-		fclose(f);
 		draw_shade(server);
 		damage(server);
 		break;
@@ -8034,9 +8345,14 @@ static void shade_activate(struct zt_server *server, int index) {
 		}
 		hap(server, HAP_TAP, HG_SYSTEM);
 		server->shade_bt = !server->shade_bt;
+		server->bt_tile_ms = now_ms();
 		run_detached("bluetoothctl", "power", server->shade_bt ? "on" : "off", NULL);
 		draw_shade(server);
 		damage(server);
+		break;
+	case 100 + Q_AUDIO:
+		server->audio_modal_auto = server->audio_modal_ring = false;
+		audio_modal_show(server);
 		break;
 	case 100 + Q_ROTATION:
 	case 100 + Q_LOCATION:
@@ -8762,6 +9078,25 @@ static int key_repeat_fired(void *data) {
 
 /* ---- xdg-shell ----------------------------------------------------------- */
 
+/* The apps that are open, for Settings > app scaling to offer. */
+static void apps_running_write(struct zt_server *server) {
+	char path[256], tmp[264];
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	snprintf(path, sizeof(path), "%s/ztmetro-apps", runtime ? runtime : "/tmp");
+	snprintf(tmp, sizeof(tmp), "%s.new", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f) return;
+	struct zt_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		const char *id = t->xdg_toplevel->app_id;
+		if (t->mapped && id && !t->android_runtime && strncmp(id, "waydroid.", 9) != 0) {
+			fprintf(f, "%s\n", id);
+		}
+	}
+	fclose(f);
+	rename(tmp, path);
+}
+
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 	char proc[64], executable[512];
@@ -8801,6 +9136,16 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 		return;
 	}
 	toplevel->mapped = true;
+	{
+		/* (android_runtime is known by now) */
+		float zoom = app_zoom_for(server, toplevel);
+		if (zoom != toplevel->zoom) {
+			toplevel->zoom = zoom;
+			app_tell_scale(server, toplevel);
+			app_configure(server, toplevel);
+		}
+	}
+	apps_running_write(server);
     bool matches = true;
     if (app_id && !strncmp(app_id, "waydroid.", 9)) {
         android_window_command(server, app_id + 9, "waydroid",
@@ -8871,6 +9216,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		draw_status(server);
 	}
 	toplevel->mapped = false;
+	apps_running_write(server);
 	if (toplevel->waydroid_ime) {
 		if (server->shown && server->shown->xdg_toplevel->app_id &&
 				!strncmp(server->shown->xdg_toplevel->app_id, "waydroid.", 9)) {
@@ -8920,14 +9266,22 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	if (toplevel->xdg_toplevel->base->initial_commit) {
 		/* Every app gets the whole app area, and is told it is maximised so
 		 * it draws no shadows or resize borders. */
-		toplevel->sent_h = server->height - STATUS_H - NAV_H;
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, server->width, toplevel->sent_h);
+		toplevel->fullscreen = toplevel->xdg_toplevel->requested.fullscreen;
+		toplevel->zoom = app_zoom_for(server, toplevel);
+		toplevel->sent_w = (int)lround(server->width / toplevel->zoom);
+		toplevel->sent_h = (int)((toplevel->fullscreen ? server->height : server->height - STATUS_H - NAV_H) / toplevel->zoom);
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, toplevel->sent_w, toplevel->sent_h);
+		app_tell_scale(server, toplevel);
+		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, toplevel->fullscreen);
 		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
 		wlr_xdg_toplevel_set_tiled(toplevel->xdg_toplevel,
 			WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
 		apply_decoration(server, toplevel->xdg_toplevel);
 	} else {
 		/* it may have come out wider than it was asked to be */
+		if (toplevel->zoom > 0 && toplevel->zoom != 1.0f) {
+			app_tell_scale(server, toplevel);	/* new subsurfaces: a video's, say */
+		}
 		app_configure(server, toplevel);
 	}
 }
@@ -8945,7 +9299,9 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->unmap.link);
 	wl_list_remove(&toplevel->commit.link);
 	wl_list_remove(&toplevel->destroy.link);
+	wl_list_remove(&toplevel->request_fullscreen.link);
 	wl_list_remove(&toplevel->link);
+	apps_running_write(server);
 	free(toplevel);
 }
 
@@ -8965,6 +9321,8 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_toplevel->base->surface->events.commit, &toplevel->commit);
 	toplevel->destroy.notify = xdg_toplevel_destroy;
 	wl_signal_add(&xdg_toplevel->events.destroy, &toplevel->destroy);
+	toplevel->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
+	wl_signal_add(&xdg_toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
 }
 
 static void xdg_popup_commit(struct wl_listener *listener, void *data) {
@@ -9124,7 +9482,7 @@ static struct touch_point *touch_find(struct zt_server *server, int32_t id, bool
 static void app_origin(struct zt_toplevel *toplevel, double *x, double *y) {
 	struct wlr_box *geo = &toplevel->xdg_toplevel->base->geometry;
 	*x = -geo->x;
-	*y = STATUS_H - geo->y;
+	*y = app_top(toplevel) - geo->y;
 }
 
 static struct wlr_surface *surface_at(struct zt_server *server, double x, double y,
@@ -9136,9 +9494,10 @@ static struct wlr_surface *surface_at(struct zt_server *server, double x, double
 		return NULL;	/* still behind "Loading...": nothing of it to touch */
 	}
 	double ox, oy, fit = app_fit(server, server->shown);
+	int top = app_top(server->shown);
 	app_origin(server->shown, &ox, &oy);
 	return wlr_xdg_surface_surface_at(server->shown->xdg_toplevel->base,
-		x / fit - ox, (y + server->app_lift - STATUS_H) / fit + STATUS_H - oy, sx, sy);
+		x / fit - ox, (y + server->app_lift - top) / fit + top - oy, sx, sy);
 }
 
 static int tile_at(struct zt_server *server, double x, double y) {
@@ -9172,6 +9531,11 @@ static void tile_press(struct zt_server *server, int index, double x, double y) 
 
 /* The action centre's quick actions answer a finger the same way. `y` is in
  * the panel's own coordinates. */
+/* The action centre's tiles that do something else when held. */
+static bool quick_holds(int q) {
+	return q == Q_FLASHLIGHT || q == Q_BRIGHTNESS || q == Q_WIFI || q == Q_BLUETOOTH;
+}
+
 static void shade_tile_press(struct zt_server *server, int index, double x, double y) {
 	double tx, ty, tw, th;
 	shade_tile_rect(server, index, &tx, &ty, &tw, &th);
@@ -9721,6 +10085,18 @@ static int press_fired(void *data) {
 
 /* A nav button, or the phone's own key for it, pressed and let go. */
 static void nav_activate(struct zt_server *server, int index) {
+	if (server->level_open) {
+		level_modal_close(server);
+		if (index == NAV_BACK) {
+			return;		/* only the modal: the action centre is still under it */
+		}
+	}
+	if (server->audio_modal_open) {
+		audio_modal_close(server);
+		if (index == NAV_BACK) {
+			return;		/* only the modal: the action centre is still under it */
+		}
+	}
 	if (server->switcher) {
 		switcher_close(server);	/* any button: back to where we were */
 		return;
@@ -9728,6 +10104,11 @@ static void nav_activate(struct zt_server *server, int index) {
 	if (index == NAV_SEARCH && server->osk_visible) {
 		wlr_log(WLR_INFO, "nav: search while the keyboard is up (keyboard dismissed)");
 		osk_show(server, false);
+		return;
+	}
+	if (index == NAV_START && (server->shade_open || server->shade_h > 10.0f)) {
+		wlr_log(WLR_INFO, "nav: start closes the action centre");
+		shade_set_open(server, false);	/* only that: the app under it stays */
 		return;
 	}
 	bool closed_hyper = false;
@@ -9755,6 +10136,11 @@ static void nav_activate(struct zt_server *server, int index) {
 		wlr_log(WLR_INFO, "nav: back");
 		if (server->shade_open || server->shade_h > 10.0f) {
 			shade_set_open(server, false);
+			return;
+		}
+		if (server->shown && server->shown->fullscreen) {
+			/* out of the whole screen first: the next Back is the app's */
+			fs_apply(server, server->shown, false);
 			return;
 		}
 		if (server->shown && server->shown->android_runtime && server->osk_visible) {
@@ -9832,6 +10218,23 @@ static int long_press_fired(void *data) {
             draw_osk(server);
             continue;
         }
+		if (p->used && p->role == ROLE_SHADE && server->shade_open && !p->moved && !p->long_pressed &&
+				p->index >= 0 && p->index < 8 && now - p->down_ms >= LONG_PRESS_MS - 30 &&
+				quick_holds(server->quick[p->index])) {
+			int q = server->quick[p->index];
+			hap(server, HAP_HEAVY, HG_SYSTEM);
+			shade_tile_release(server, p->index);
+			server->shade_pressed = -1;
+			p->long_pressed = true;
+			p->role = ROLE_NONE;
+			if (q == Q_WIFI || q == Q_BLUETOOTH) {
+				shade_set_open(server, false);
+				launch(server, q == Q_WIFI ? "ztsettings wifi" : "ztsettings bluetooth");
+			} else {
+				level_modal_show(server, q == Q_BRIGHTNESS ? LEVEL_BRIGHT : LEVEL_TORCH);
+			}
+			continue;
+		}
 		if (p->used && p->role == ROLE_SHADE && !server->shade_open && !p->moved &&
 				!p->long_pressed && p->y0 <= STATUS_H + 12 && now - p->down_ms >= PEEK_HOLD_MS - 30) {
 			/* resting on the status bar: its second line comes down */
@@ -9887,17 +10290,6 @@ static void perf_tell(const char *command) {
 	pipe_tell("/run/zrnperfd.ctl", command);
 }
 
-/* The volume keys: a banner drops from the top with the level, as a count
- * out of thirty, and goes again two seconds after the last press. */
-/* The audio outputs, for the banner's last row. pactl is asked in the
- * background, into $XDG_RUNTIME_DIR/ztos-outputs ("*|name|description" for the
- * default, "-|..." for the others), and the banner only reads that file, so
- * drawing never waits on PipeWire. */
-#define OUTPUTS_SH \
-	"d=$(pactl get-default-sink 2>/dev/null); f=$XDG_RUNTIME_DIR/ztos-outputs; " \
-	"pactl list sinks 2>/dev/null | awk -v d=\"$d\" '/^\\tName:/ { n = $2 } " \
-	"/^\\tDescription:/ { sub(/^\\tDescription: /, \"\"); print (n == d ? \"*\" : \"-\") \"|\" n \"|\" $0 }' " \
-	"> \"$f.new\" && mv \"$f.new\" \"$f\""
 /* ztos-audiod owns the volume of whichever device is active, and answers on the
  * control pipe. False if it isn't there, so the caller can do without it. */
 static bool audio_tell(const char *line) {
@@ -9911,140 +10303,83 @@ static bool audio_tell(const char *line) {
 	return sent;
 }
 
-static void outputs_refresh(void) {
-	if (!audio_tell("refresh")) run_detached("sh", "-c", OUTPUTS_SH, NULL);
+static bool media_row_shown(struct zt_server *server) {
+	return server->media && (!server->audio_modal_auto || server->media_on_volume);
 }
 
-#define MAX_OUTPUTS 8
-struct output_entry { bool current; char name[160], desc[96]; };
-static int outputs_read(struct output_entry *out) {
-	char path[256], line[320];
-	const char *runtime = getenv("XDG_RUNTIME_DIR");
-	snprintf(path, sizeof(path), "%s/ztos-outputs", runtime ? runtime : "/tmp");
-	FILE *f = fopen(path, "r");
-	int n = 0;
-	while (f && n < MAX_OUTPUTS && fgets(line, sizeof(line), f)) {
-		line[strcspn(line, "\n")] = 0;
-		char *a = strchr(line, '|'), *b = a ? strchr(a + 1, '|') : NULL;
-		if (!a || !b) continue;
-		*a = *b = 0;
-		out[n].current = line[0] == '*';
-		snprintf(out[n].name, sizeof(out[n].name), "%s", a + 1);
-		snprintf(out[n].desc, sizeof(out[n].desc), "%s", b + 1);
-		n++;
-	}
-	if (f) fclose(f);
-	return n;
+static double media_row_h(struct zt_server *server) {
+	return MEDIA_H + (server->media_len > 0 ? MEDIA_PROGRESS_H : 0);
 }
 
-/* The next output: made the default, and what plays now moved to it. The name
- * reaches the shell as $0, never inside the command. */
-static void output_next(struct zt_server *server) {
-	struct output_entry out[MAX_OUTPUTS];
-	int n = outputs_read(out), cur = 0;
-	if (n < 2) {
-		outputs_refresh();
-		return;
+/* Players say where they are now and then; between times the clock does. */
+static double media_pos_now(struct zt_server *server) {
+	double pos = server->media_pos;
+	if (server->media_playing) {
+		pos += (double)(uint32_t)(now_ms() - server->media_pos_ms) / 1000.0;
 	}
-	for (int i = 0; i < n; i++) {
-		if (out[i].current) cur = i;
-	}
-	const char *to = out[(cur + 1) % n].name;
-	char line[200];
-	snprintf(line, sizeof(line), "output '%s'", to);
-	/* Only the default moves: what follows it comes along, and an app sent to
-	 * its own output stays there. Node names have no quotes in them. */
-	if (strchr(to, '\'') || !audio_tell(line))
-		run_detached("sh", "-c", "pactl set-default-sink \"$0\"; " OUTPUTS_SH, to);
-	/* the file says so in a moment; the banner says so now */
-	char path[256];
-	const char *runtime = getenv("XDG_RUNTIME_DIR");
-	snprintf(path, sizeof(path), "%s/ztos-outputs", runtime ? runtime : "/tmp");
-	FILE *f = fopen(path, "w");
-	for (int i = 0; f && i < n; i++) {
-		fprintf(f, "%c|%s|%s\n", i == (cur + 1) % n ? '*' : '-', out[i].name, out[i].desc);
-	}
-	if (f) fclose(f);
-	wlr_log(WLR_INFO, "audio output: %s", out[(cur + 1) % n].desc);
+	return pos < 0 ? 0 : pos > server->media_len ? server->media_len : pos;
 }
 
-static double banner_h(struct zt_server *server) {
-	return VOLUME_H + (server->media ? MEDIA_H : 0) + OUTPUT_H;
+static void media_time(char *out, size_t size, double seconds) {
+	int t = (int)seconds;
+	if (t >= 3600) {
+		snprintf(out, size, "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60);
+	} else {
+		snprintf(out, size, "%d:%02d", t / 60, t % 60);
+	}
 }
 
-static void draw_volume(struct zt_server *server) {
-	cairo_t *cr;
-	double height = banner_h(server);
-	struct zt_buffer *buffer = zt_buffer_create(server, server->width, height, &cr);
-	cairo_set_source_rgb(cr, 0.12, 0.12, 0.12);
-	cairo_paint(cr);
-	char text[16];
-	int level = server->volume_is_media ? server->volume : server->ring_volume;
-	snprintf(text, sizeof(text), "%02d/%d", level, VOLUME_MAX);
+static void draw_media_row(struct zt_server *server, cairo_t *cr, double y) {
+	/* What is playing, as the phone has it under the volume: the track
+	 * and who it is by, and to the right back, play or pause, on. */
+	double bw = 46, bx = server->width - 16 - 3 * bw, cy = y + 30;
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	draw_text(cr, text, FONT_SEMILIGHT, 26, 16, 8, 0, 0, false);
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	draw_text(cr, server->volume_is_media ? "media + apps" : (level ? "ringer + notifications" : "vibrate"), FONT_REGULAR, 12, 108, 20, 0, 0, false);
-	cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
-	cairo_rectangle(cr, 16, VOLUME_H - 9, server->width - 32, 3);
-	cairo_fill(cr);
-	set_rgb(cr, server->accent);
-	cairo_rectangle(cr, 16, VOLUME_H - 9, (server->width - 32) * level / (double)VOLUME_MAX, 3);
-	cairo_fill(cr);
-	if (server->media) {
-		/* What is playing, as the phone has it under the volume: the track
-		 * and who it is by, and to the right back, play or pause, on. */
-		double y = VOLUME_H, bw = 46, bx = server->width - 16 - 3 * bw, cy = y + 30;
-		cairo_set_source_rgb(cr, 1, 1, 1);
-		draw_text(cr, server->media_title[0] ? server->media_title : "Unknown", FONT_SEMIBOLD, 14.5,
-			16, y + 10, bx - 28, 0, false);
-		cairo_set_source_rgb(cr, 0.62, 0.62, 0.62);
-		draw_text(cr, server->media_artist, FONT_REGULAR, 12.5, 16, y + 31, bx - 28, 0, false);
-		cairo_set_source_rgb(cr, 1, 1, 1);
-		for (int k = 0; k < 3; k++) {
-			double cx = bx + bw * k + bw / 2;
-			if (k == 1 && server->media_playing) {
-				cairo_rectangle(cr, cx - 7, cy - 9, 5, 18);
-				cairo_rectangle(cr, cx + 2, cy - 9, 5, 18);
-			} else if (k == 1) {
-				cairo_move_to(cr, cx - 6, cy - 10);
-				cairo_line_to(cr, cx + 9, cy);
-				cairo_line_to(cr, cx - 6, cy + 10);
+	draw_text(cr, server->media_title[0] ? server->media_title : "Unknown", FONT_SEMIBOLD, 14.5,
+		16, y + 10, bx - 28, 0, false);
+	cairo_set_source_rgb(cr, 0.62, 0.62, 0.62);
+	draw_text(cr, server->media_artist, FONT_REGULAR, 12.5, 16, y + 31, bx - 28, 0, false);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	for (int k = 0; k < 3; k++) {
+		double cx = bx + bw * k + bw / 2;
+		if (k == 1 && server->media_playing) {
+			cairo_rectangle(cr, cx - 7, cy - 9, 5, 18);
+			cairo_rectangle(cr, cx + 2, cy - 9, 5, 18);
+		} else if (k == 1) {
+			cairo_move_to(cr, cx - 6, cy - 10);
+			cairo_line_to(cr, cx + 9, cy);
+			cairo_line_to(cr, cx - 6, cy + 10);
+			cairo_close_path(cr);
+		} else {
+			/* two triangles and a bar: back to the left, on to the right */
+			double d = k == 0 ? -1 : 1;
+			for (int j = 0; j < 2; j++) {
+				double x0 = cx - d * 9 + d * j * 8;
+				cairo_move_to(cr, x0, cy - 7);
+				cairo_line_to(cr, x0 + d * 8, cy);
+				cairo_line_to(cr, x0, cy + 7);
 				cairo_close_path(cr);
-			} else {
-				/* two triangles and a bar: back to the left, on to the right */
-				double d = k == 0 ? -1 : 1;
-				for (int j = 0; j < 2; j++) {
-					double x0 = cx - d * 9 + d * j * 8;
-					cairo_move_to(cr, x0, cy - 7);
-					cairo_line_to(cr, x0 + d * 8, cy);
-					cairo_line_to(cr, x0, cy + 7);
-					cairo_close_path(cr);
-				}
-				cairo_rectangle(cr, cx + d * 8 - 1, cy - 7, 2, 14);
 			}
-			cairo_fill(cr);
+			cairo_rectangle(cr, cx + d * 8 - 1, cy - 7, 2, 14);
 		}
+		cairo_fill(cr);
 	}
-	/* where it plays: the output's name, and the way to the next one */
-	struct output_entry out[MAX_OUTPUTS];
-	int n_out = outputs_read(out);
-	const char *where = "phone";
-	for (int i = 0; i < n_out; i++) {
-		if (out[i].current) where = out[i].desc;
-	}
-	double oy = height - OUTPUT_H;
-	cairo_set_source_rgb(cr, 0.2, 0.2, 0.2);
-	cairo_rectangle(cr, 16, oy, server->width - 32, 1);
-	cairo_fill(cr);
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	draw_icon(cr, "music", 16 + 9, oy + OUTPUT_H / 2, 16);
-	draw_text(cr, where, FONT_REGULAR, 13.5, 40, oy + 13, server->width - 40 - 96, 0, false);
-	if (n_out > 1) {
+	if (server->media_len > 0) {
+		double pos = media_pos_now(server), box = 50, ty = y + 60;
+		double bar_x = 16 + box, bar_w = server->width - 32 - 2 * box;
+		char text[16];
+		cairo_set_source_rgb(cr, 0.62, 0.62, 0.62);
+		media_time(text, sizeof(text), pos);
+		draw_text(cr, text, FONT_REGULAR, 11.5, 16, ty, box, 14, true);
+		text[0] = '-';
+		media_time(text + 1, sizeof(text) - 1, server->media_len - pos);
+		draw_text(cr, text, FONT_REGULAR, 11.5, server->width - 16 - box, ty, box, 14, true);
+		cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
+		cairo_rectangle(cr, bar_x, ty + 6, bar_w, 3);
+		cairo_fill(cr);
 		set_rgb(cr, server->accent);
-		draw_text(cr, "change ›", FONT_SEMIBOLD, 13.5, server->width - 16 - 70, oy + 13, 70, 0, false);
+		cairo_rectangle(cr, bar_x, ty + 6, bar_w * pos / server->media_len, 3);
+		cairo_fill(cr);
 	}
-	zt_buffer_show(server, &server->volume_layer, buffer, cr, server->width, height);
 }
 
 /* A notification: a banner in the accent colour drops from the top, as the
@@ -10301,6 +10636,657 @@ static void dialog_show(struct zt_server *server, const char *title, const char 
 	damage(server);
 }
 
+/* The audio tile's modal: which output, and its volume. It looks as the dialog does
+ * and reads only what ztos-audiod last wrote (audio-state.h), so nothing here waits
+ * on PipeWire. inotify says when the file is replaced. Outputs are always addressed
+ * by name, and a row is found again by name when the finger lifts: the list can
+ * change under it. Selecting an output makes it the global one. */
+#define AUDIO_AUTO_CLOSE_MS 3000
+#define AUDIO_ROW_TOP	80.0	/* the dialog's title and the gap under it */
+#define AUDIO_ROW_H	50.0
+#define AUDIO_ROW_GAP	8.0
+#define AUDIO_PAD	24.0
+
+static bool audio_ready(struct zt_server *server) {
+	return server->audio_state_ok && audio_daemon_alive();
+}
+
+static void draw_audio_modal(struct zt_server *server) {
+	if (server->width <= 0) return;
+	double w = server->width, content_w = w - 2 * AUDIO_PAD, y = AUDIO_ROW_TOP;
+	const struct audio_state *st = &server->audio_state;
+	bool ring = server->audio_modal_ring;
+	bool ready = audio_ready(server);
+	int selected = ready && !ring ? audio_selected(st, server->audio_pending) : -1;
+	int rows = ready && !ring ? st->n : 0;
+	bool has_slider = selected >= 0 || ring;
+	double track_y = y + rows * (AUDIO_ROW_H + AUDIO_ROW_GAP) + 44;
+	double total_h = has_slider ? track_y + 34 : y + (rows ? rows * (AUDIO_ROW_H + AUDIO_ROW_GAP) : 40) + 12;
+	server->audio_media_y = total_h;
+	if (media_row_shown(server)) {
+		total_h += media_row_h(server);
+	}
+	server->audio_modal_h = total_h;
+	server->audio_track_y = track_y;
+
+	cairo_t *cr;
+	struct zt_buffer *buffer = zt_buffer_create(server, (int)w, (int)total_h, &cr);
+	cairo_set_source_rgb(cr, 31.0 / 255.0, 31.0 / 255.0, 31.0 / 255.0);
+	cairo_rectangle(cr, 0, 0, w, total_h);
+	cairo_fill(cr);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	draw_text(cr, ring ? "Ringer + notifications" : "Audio output", FONT_SEMIBOLD, 20.0, AUDIO_PAD, 40.0, content_w, 0, false);
+	if (!rows && !ring) {
+		draw_text(cr, ready ? "No outputs right now." : "The audio service isn't running.",
+			FONT_REGULAR, 15.0, AUDIO_PAD, y, content_w, 0, false);
+	}
+	for (int i = 0; i < rows; i++, y += AUDIO_ROW_H + AUDIO_ROW_GAP) {
+		const struct audio_output *o = &st->out[i];
+		bool waiting = i == selected && !o->current && server->audio_pending[0];
+		if (i == selected) {
+			set_rgb(cr, server->accent);
+			cairo_rectangle(cr, AUDIO_PAD, y, content_w, AUDIO_ROW_H);
+			cairo_fill(cr);
+		} else if (!strcmp(o->name, server->audio_row_down)) {
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.15);
+			cairo_rectangle(cr, AUDIO_PAD, y, content_w, AUDIO_ROW_H);
+			cairo_fill(cr);
+		}
+		cairo_set_line_width(cr, 2.0);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		cairo_rectangle(cr, AUDIO_PAD, y, content_w, AUDIO_ROW_H);
+		cairo_stroke(cr);
+		draw_icon(cr, audio_type_of(o)->icon, AUDIO_PAD + 24, y + AUDIO_ROW_H / 2, 20);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		draw_text(cr, o->desc[0] ? o->desc : o->name, FONT_REGULAR, 15.0, AUDIO_PAD + 46, y + 7, content_w - 56, 0, false);
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.75);
+		draw_text(cr, waiting ? "Switching…" : audio_type_of(o)->label, FONT_REGULAR, 12.0,
+			AUDIO_PAD + 46, y + 27, content_w - 56, 0, false);
+	}
+	if (has_slider) {
+		int percent = ring ? audio_percent_of_level(server->ring_volume, VOLUME_MAX) : st->out[selected].percent;
+		bool mute = !ring && st->out[selected].mute;
+		char value[16] = "—";
+		if (percent >= 0) snprintf(value, sizeof(value), "%d%%", percent);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		draw_text(cr, "Volume", FONT_REGULAR, 15.0, AUDIO_PAD, track_y - 34, content_w / 2, 0, false);
+		if (mute && percent >= 0) snprintf(value, sizeof(value), "muted");
+		double vw = text_width(value, FONT_REGULAR, 15.0);
+		draw_text(cr, value, FONT_REGULAR, 15.0, w - AUDIO_PAD - vw, track_y - 34, 0, 0, false);
+		/* the banner's bar, with a thumb to take hold of */
+		double level = percent < 0 ? 0 : percent / 100.0;
+		cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
+		cairo_rectangle(cr, AUDIO_PAD, track_y - 1.5, content_w, 3);
+		cairo_fill(cr);
+		if (percent >= 0) {
+			if (mute) {
+				cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);
+			} else {
+				set_rgb(cr, server->accent);
+			}
+			cairo_rectangle(cr, AUDIO_PAD, track_y - 1.5, content_w * level, 3);
+			cairo_fill(cr);
+			cairo_set_source_rgb(cr, 1, 1, 1);
+			cairo_rectangle(cr, AUDIO_PAD + content_w * level - 4, track_y - 12, 8, 24);
+			cairo_fill(cr);
+		}
+	}
+	if (media_row_shown(server)) {
+		draw_media_row(server, cr, server->audio_media_y);
+	}
+	zt_buffer_show(server, &server->audio_modal_layer, buffer, cr, (int)w, (int)total_h);
+}
+
+static void audio_modal_redraw(struct zt_server *server) {
+	if (server->audio_modal_open) {
+		draw_audio_modal(server);
+		damage(server);
+	}
+}
+
+/* ---- the flashlight's and the brightness's modal ------------------------- */
+
+static bool torch_write(int level) {
+	FILE *f = fopen(TORCH_PATH, "w");
+	if (!f) {
+		return false;
+	}
+	fprintf(f, "%d\n", level);
+	fclose(f);
+	return true;
+}
+
+static int level_auto_read(void) {
+	char line[64];
+	int on = -1;
+	FILE *f = fopen("/run/ztoscsf-sensors/status", "r");
+	if (!f) f = fopen("/run/zrn-sensors/status", "r");
+	if (!f) return -1;
+	on = 0;
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "auto=", 5) == 0) {
+			on = strncmp(line + 5, "on", 2) == 0;
+		}
+	}
+	fclose(f);
+	return on;
+}
+
+/* A slider's track, thumb and, if it has detents, a mark at each place it can
+ * stop. detents is how many steps from end to end; 0: as fine as a finger. */
+static void draw_slider(struct zt_server *server, cairo_t *cr, double x, double w, double y,
+		double frac, int detents) {
+	cairo_set_source_rgb(cr, 0.3, 0.3, 0.3);
+	cairo_rectangle(cr, x, y - 1.5, w, 3);
+	cairo_fill(cr);
+	set_rgb(cr, server->accent);
+	cairo_rectangle(cr, x, y - 1.5, w * frac, 3);
+	cairo_fill(cr);
+	for (int k = 0; k <= detents && detents > 0; k++) {
+		double at = (double)k / detents;
+		if (at <= frac + 1e-6) {
+			set_rgb(cr, server->accent);
+		} else {
+			cairo_set_source_rgb(cr, 0.45, 0.45, 0.45);
+		}
+		cairo_rectangle(cr, x + w * at - 1, y - 7, 2, 14);
+		cairo_fill(cr);
+	}
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	cairo_rectangle(cr, x + w * frac - 4, y - 12, 8, 24);
+	cairo_fill(cr);
+}
+
+/* Where a finger at x puts a slider: 0..1, on a detent if it has them. */
+static double slider_frac(double x, double left, double w, int detents) {
+	double frac = (x - left) / w;
+	frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
+	return detents > 0 ? round(frac * detents) / detents : frac;
+}
+
+#define TORCH_DETENTS TORCH_LEVEL	/* off, then each level */
+
+static void draw_level_modal(struct zt_server *server) {
+	if (server->width <= 0) return;
+	double w = server->width, content_w = w - 2 * AUDIO_PAD;
+	bool bright = server->level_kind == LEVEL_BRIGHT;
+	double text_y = AUDIO_ROW_TOP, track_y = text_y + 56, row_y = track_y + 28, row_h = 56;
+	double total_h = bright ? row_y + row_h + 14 : track_y + 34;
+	server->level_h = total_h;
+	server->level_track_y = track_y;
+	server->level_row_y = row_y;
+	cairo_t *cr;
+	struct zt_buffer *buffer = zt_buffer_create(server, (int)w, (int)total_h, &cr);
+	cairo_set_source_rgb(cr, 31.0 / 255.0, 31.0 / 255.0, 31.0 / 255.0);
+	cairo_rectangle(cr, 0, 0, w, total_h);
+	cairo_fill(cr);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	draw_text(cr, bright ? "Brightness" : "Flashlight", FONT_SEMIBOLD, 20.0, AUDIO_PAD, 40.0, content_w, 0, false);
+	char value[32];
+	double frac;
+	if (bright) {
+		snprintf(value, sizeof(value), "%d%%", server->shade_brightness);
+		frac = (server->shade_brightness - 1) / 99.0;
+	} else {
+		int level = server->shade_torch ? server->torch_level : 0;
+		if (level) {
+			snprintf(value, sizeof(value), "Level %d of %d", level, TORCH_LEVEL);
+		} else {
+			snprintf(value, sizeof(value), "Off");
+		}
+		frac = level / (double)TORCH_DETENTS;
+	}
+	frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
+	cairo_set_source_rgb(cr, 0.72, 0.72, 0.72);
+	draw_text(cr, value, FONT_REGULAR, 15.0, AUDIO_PAD, text_y, content_w, 0, false);
+	draw_slider(server, cr, AUDIO_PAD, content_w, track_y, frac, bright ? 0 : TORCH_DETENTS);
+	if (bright) {
+		/* the light sensor's switch */
+		bool usable = server->level_auto >= 0, on = server->level_auto > 0;
+		double sw = 50, sh = 24, sx = w - AUDIO_PAD - sw, sy = row_y + (row_h - sh) / 2;
+		double ink = usable ? 1 : 0.45, edge = usable ? 0.75 : 0.35;
+		cairo_set_source_rgb(cr, ink, ink, ink);
+		draw_text(cr, usable ? "Automatic brightness" : "Automatic brightness (no sensor)",
+			FONT_REGULAR, 15.0, AUDIO_PAD, row_y + 18, content_w - sw - 12, 0, false);
+		if (on) {
+			set_rgb(cr, server->accent);
+			cairo_rectangle(cr, sx, sy, sw, sh);
+			cairo_fill(cr);
+		} else {
+			cairo_set_source_rgb(cr, edge, edge, edge);
+			cairo_set_line_width(cr, 2);
+			cairo_rectangle(cr, sx + 1, sy + 1, sw - 2, sh - 2);
+			cairo_stroke(cr);
+		}
+		cairo_set_source_rgb(cr, ink, ink, ink);
+		cairo_rectangle(cr, on ? sx + sw - 14 : sx + 4, sy + 4, 10, sh - 8);
+		cairo_fill(cr);
+	}
+	zt_buffer_show(server, &server->level_layer, buffer, cr, (int)w, (int)total_h);
+}
+
+static void level_modal_redraw(struct zt_server *server) {
+	if (server->level_open) {
+		draw_level_modal(server);
+		damage(server);
+	}
+}
+
+static void level_modal_show(struct zt_server *server, int kind) {
+	if (server->width <= 0 || server->level_open) return;
+	server->level_kind = kind;
+	server->level_auto = kind == LEVEL_BRIGHT ? level_auto_read() : -1;
+	draw_level_modal(server);
+	server->level_open = true;
+	server->level_y = (float)-server->level_h;
+	animate(server, &server->level_y, 0.0f, 260, 0, false);
+	damage(server);
+}
+
+static void level_modal_close(struct zt_server *server) {
+	if (!server->level_open) return;
+	server->level_open = false;
+	animate(server, &server->level_y, (float)-server->level_h, 170, 0, false);
+	if (server->shade_open || server->shade_h > 0.1f) {
+		draw_shade(server);	/* its tile says the level */
+	}
+	damage(server);
+}
+
+static void level_slider_to(struct zt_server *server, double x) {
+	double w = server->width - 2 * AUDIO_PAD;
+	if (server->level_kind == LEVEL_BRIGHT) {
+		int percent = 1 + (int)lround(slider_frac(x, AUDIO_PAD, w, 0) * 99);
+		if (percent == server->shade_brightness) return;
+		server->shade_brightness = percent;
+		if (server->level_auto > 0) {
+			backlight_manual();	/* a hand on it: the light sensor steps back */
+			server->level_auto = 0;
+		}
+		if (bl.mode == BL_TABLE) {
+			ramp_goal(percent, 0.0, false);
+		} else {
+			backlight_set(percent);
+		}
+	} else {
+		/* far left is off; the tile switches back on at the last level used */
+		int level = (int)lround(slider_frac(x, AUDIO_PAD, w, TORCH_DETENTS) * TORCH_DETENTS);
+		if (level == (server->shade_torch ? server->torch_level : 0)) return;
+		if (!torch_write(level)) return;
+		server->shade_torch = level > 0;
+		if (level > 0) {
+			server->torch_level = level;
+		}
+		hap(server, HAP_TICK, HG_SYSTEM);	/* felt as it reaches each mark */
+	}
+	level_modal_redraw(server);
+}
+
+static void level_modal_touch_begin(struct zt_server *server, struct touch_point *p, double x, double y) {
+	p->role = ROLE_NONE;
+	if (y > server->level_y + server->level_h) {
+		hap(server, HAP_TAP, HG_SYSTEM);
+		level_modal_close(server);
+		return;
+	}
+	double dy = y - server->level_y;
+	if (fabs(dy - server->level_track_y) <= 24) {
+		p->role = ROLE_LEVEL;
+		server->torch_level_was = server->torch_level;
+		level_slider_to(server, x);
+	} else if (server->level_kind == LEVEL_BRIGHT && dy >= server->level_row_y) {
+		if (server->level_auto < 0) return;
+		server->level_auto = !server->level_auto;
+		pipe_tell("/run/ztoscsf-sensord.ctl", server->level_auto ? "auto on\n" : "auto off\n");
+		pipe_tell("/run/zrn-sensord.ctl", server->level_auto ? "auto on\n" : "auto off\n");
+		hap(server, HAP_TAP, HG_SYSTEM);
+		level_modal_redraw(server);
+	}
+}
+
+static void level_modal_touch_end(struct zt_server *server) {
+	if (server->level_kind == LEVEL_BRIGHT) {
+		config_keep("brightness", server->shade_brightness);
+	} else {
+		if (!server->shade_torch) {
+			server->torch_level = server->torch_level_was;
+		}
+		config_keep("torch_level", server->torch_level);
+	}
+}
+
+/* The clock in the media row, once a second while there is one to see. */
+static void media_tick_arm(struct zt_server *server) {
+	bool on = server->audio_modal_open && media_row_shown(server) && server->media_playing && server->media_len > 0;
+	wl_event_source_timer_update(server->media_tick_timer, on ? 1000 : 0);
+}
+
+static int media_tick(void *data) {
+	struct zt_server *server = data;
+	audio_modal_redraw(server);
+	media_tick_arm(server);
+	return 0;
+}
+
+/* The next thing the timer has to do: the slider's next send, or a swap giving up. */
+static void audio_timer_arm(struct zt_server *server) {
+	uint32_t now = now_ms();
+	int wait = audio_slider_due(&server->audio_slider, now);
+	if (!server->audio_slider.dragging) wait = -1;
+	if (server->audio_pending[0]) {
+		uint32_t since = now - server->audio_pending_ms;
+		int left = since >= AUDIO_SWITCH_WAIT_MS ? 1 : (int)(AUDIO_SWITCH_WAIT_MS - since);
+		wait = wait < 0 || left < wait ? left : wait;
+	}
+	wl_event_source_timer_update(server->audio_timer, wait < 0 ? 0 : wait == 0 ? 1 : wait);
+}
+
+static void audio_slider_send(struct zt_server *server, uint32_t now) {
+	struct audio_slider *s = &server->audio_slider;
+	char line[200];
+	audio_slider_mark_sent(s, now);
+	if (audio_cmd_volume(line, sizeof(line), s->percent, s->name) && audio_tell(line)) {
+		int i = audio_find(&server->audio_state, s->name);
+		if (i >= 0 && server->audio_state.out[i].current) {
+			/* where the keys go on from, and their echo is this one's too */
+			server->volume = audio_level_of_percent(s->percent, VOLUME_MAX);
+			server->volume_key_ms = now;
+		}
+	}
+}
+
+static int audio_timer_fired(void *data) {
+	struct zt_server *server = data;
+	uint32_t now = now_ms();
+	if (server->audio_slider.dragging && audio_slider_due(&server->audio_slider, now) == 0) {
+		audio_slider_send(server, now);
+	}
+	if (server->audio_pending[0] && now - server->audio_pending_ms >= AUDIO_SWITCH_WAIT_MS) {
+		/* it never came: show where the sound still is */
+		wlr_log(WLR_INFO, "audio: no swap to %s yet", server->audio_pending);
+		server->audio_pending[0] = 0;
+		audio_modal_redraw(server);
+	}
+	audio_timer_arm(server);
+	return 0;
+}
+
+/* The file again, whoever changed it. Last good state stands if this one is bad. */
+static void audio_state_read(struct zt_server *server) {
+	static char text[AUDIO_STATE_MAX_BYTES + 1];
+	char path[256];
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	snprintf(path, sizeof(path), "%s/ztos-audio-state.json", runtime ? runtime : "/tmp");
+	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+	if (fd < 0) {
+		server->audio_state_ok = false;
+		return;
+	}
+	size_t len = 0;
+	ssize_t n;
+	while (len < sizeof(text) && (n = read(fd, text + len, sizeof(text) - len)) > 0) {
+		len += (size_t)n;
+	}
+	close(fd);
+	if (audio_state_parse(text, len, &server->audio_state)) {
+		server->audio_state_ok = true;
+	} else {
+		wlr_log(WLR_ERROR, "audio: %s isn't readable; keeping the last state", path);
+	}
+}
+
+/* The file changed: take it in, keep what the slider holds, and show it. */
+static void audio_state_changed(struct zt_server *server) {
+	audio_state_read(server);
+	uint32_t now = now_ms();
+	struct audio_state *st = &server->audio_state;
+	audio_state_hold(st, &server->audio_slider, now);
+	if (server->audio_pending[0] && audio_pending_over(st, server->audio_pending)) {
+		server->audio_pending[0] = 0;
+		audio_timer_arm(server);
+	}
+	/* the sound moved to another output while the slider was held for the old one */
+	int selected = audio_selected(st, server->audio_pending);
+	if (server->audio_slider.dragging &&
+	    (selected < 0 || strcmp(st->out[selected].name, server->audio_slider.name) != 0)) {
+		server->audio_slider.dragging = false;
+	}
+	/* the tile only shows who, not how loud: it isn't redrawn for a volume */
+	static char tile_shows[160];
+	char now_shows[sizeof(tile_shows)];
+	const struct audio_output *a = audio_active_output(server);
+	snprintf(now_shows, sizeof(now_shows), "%s|%s|%s", a ? a->desc : "", a ? a->kind : "", a ? a->detail : "");
+	if (strcmp(tile_shows, now_shows) != 0) {
+		snprintf(tile_shows, sizeof(tile_shows), "%s", now_shows);
+		if (server->shade_open || server->shade_h > 0.1f) {
+			draw_shade(server);
+			damage(server);
+		}
+	}
+	audio_modal_redraw(server);
+}
+
+static int audio_watch_readable(int fd, uint32_t mask, void *data) {
+	char buf[2048];
+	bool ours = false;
+	ssize_t n;
+	while ((n = read(fd, buf, sizeof(buf))) > 0) {
+		for (char *at = buf; at < buf + n; ) {
+			struct inotify_event *event = (struct inotify_event *)at;
+			ours = ours || (event->len && (strcmp(event->name, "ztos-audio-state.json") == 0 ||
+				strcmp(event->name, "ztos-audio.sock") == 0));	/* the daemon came or went */
+			at += sizeof(*event) + event->len;
+		}
+	}
+	if (ours) {
+		audio_state_changed(data);
+	}
+	return 0;
+}
+
+/* The daemon replaces the file whole, so its directory is what to watch. */
+static void audio_watch_start(struct zt_server *server) {
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	server->audio_timer = wl_event_loop_add_timer(server->loop, audio_timer_fired, server);
+	audio_state_read(server);
+	int fd = runtime ? inotify_init1(IN_NONBLOCK | IN_CLOEXEC) : -1;
+	if (fd < 0) {
+		return;
+	}
+	if (inotify_add_watch(fd, runtime, IN_MOVED_TO | IN_CREATE | IN_DELETE) < 0) {
+		close(fd);
+		return;
+	}
+	wl_event_loop_add_fd(server->loop, fd, WL_EVENT_READABLE, audio_watch_readable, server);
+}
+
+static void audio_modal_show(struct zt_server *server) {
+	if (server->width <= 0 || server->audio_modal_open) return;
+	if (!server->audio_modal_auto) {
+		hap(server, HAP_TAP, HG_SYSTEM);
+	}
+	audio_state_read(server);
+	audio_state_hold(&server->audio_state, &server->audio_slider, now_ms());
+	audio_tell("refresh");	/* it answers through the file, if anything is different */
+	server->audio_row_down[0] = 0;
+	draw_audio_modal(server);
+	server->audio_modal_open = true;
+	server->audio_modal_y = (float)-server->audio_modal_h;
+	animate(server, &server->audio_modal_y, 0.0f, 260, 0, false);
+	media_tick_arm(server);
+	damage(server);
+}
+
+/* Where the slider came to rest goes out now, whatever the wait. */
+static void audio_slider_finish(struct zt_server *server) {
+	struct audio_slider *s = &server->audio_slider;
+	if (!s->dragging) return;
+	s->dragging = false;
+	if (s->percent != s->sent) {
+		audio_slider_send(server, now_ms());
+	}
+	audio_timer_arm(server);
+}
+
+static void audio_modal_close(struct zt_server *server) {
+	if (!server->audio_modal_open) return;
+	audio_slider_finish(server);
+	server->audio_modal_open = false;
+	animate(server, &server->audio_modal_y, (float)-server->audio_modal_h, 170, 0, false);
+	damage(server);
+}
+
+static void audio_slider_to(struct zt_server *server, double x) {
+	struct audio_slider *s = &server->audio_slider;
+	int percent = audio_slider_percent(x, AUDIO_PAD, server->width - 2 * AUDIO_PAD);
+	if (percent == s->percent && s->sent >= 0) return;
+	s->percent = percent;
+	uint32_t now = now_ms();
+	audio_state_hold(&server->audio_state, s, now);
+	if (audio_slider_due(s, now) == 0) {
+		audio_slider_send(server, now);
+	}
+	audio_timer_arm(server);
+	audio_modal_redraw(server);
+}
+
+static void audio_modal_pick(struct zt_server *server, const char *name) {
+	struct audio_state *st = &server->audio_state;
+	int i = audio_find(st, name);
+	if (i < 0) return;	/* it went while the finger was down */
+	hap(server, HAP_TAP, HG_SYSTEM);
+	if (st->out[i].current) {
+		server->audio_pending[0] = 0;	/* back to the one that never left */
+	} else {
+		char line[200];
+		if (!audio_cmd_output(line, sizeof(line), name) || !audio_tell(line)) {
+			audio_modal_redraw(server);	/* it may have stopped: the modal says so */
+			return;
+		}
+		snprintf(server->audio_pending, sizeof(server->audio_pending), "%s", name);
+		server->audio_pending_ms = now_ms();
+	}
+	audio_timer_arm(server);
+	audio_modal_redraw(server);
+}
+
+/* The ringer's slider: the same level the keys move when nothing plays. */
+static void audio_ring_to(struct zt_server *server, double x) {
+	int percent = audio_slider_percent(x, AUDIO_PAD, server->width - 2 * AUDIO_PAD);
+	server->ring_volume = audio_level_of_percent(percent, VOLUME_MAX);
+	config_keep("ring_volume", (server->ring_volume * 100 + VOLUME_MAX - 1) / VOLUME_MAX);
+	audio_modal_redraw(server);
+}
+
+static void audio_modal_touch_begin(struct zt_server *server, struct touch_point *p, double x, double y) {
+	struct audio_state *st = &server->audio_state;
+	p->role = ROLE_NONE;
+	if (y > server->audio_modal_y + server->audio_modal_h) {
+		hap(server, HAP_TAP, HG_SYSTEM);	/* outside it, as with the dialog */
+		audio_modal_close(server);
+		return;
+	}
+	double dy = y - server->audio_modal_y;
+	if (server->audio_modal_auto) {
+		wl_event_source_timer_update(server->volume_timer, AUDIO_AUTO_CLOSE_MS);
+	}
+	if (media_row_shown(server) && dy >= server->audio_media_y) {
+		if (dy >= server->audio_media_y + MEDIA_H) {
+			return;		/* the progress line: nothing to press yet */
+		}
+		double bw = 46, bx = server->width - 16 - 3 * bw;
+		int k = x < bx ? -1 : (int)((x - bx) / bw);
+		if (k >= 0 && k <= 2) {
+			static const char *const what[] = { "previous", "play-pause", "next" };
+			hap(server, HAP_TAP, HG_SYSTEM);
+			run_detached("playerctl", what[k], NULL, NULL);
+			if (k == 1) {
+				server->media_playing = !server->media_playing;	/* until it says so itself */
+				audio_modal_redraw(server);
+			}
+		}
+		return;
+	}
+	if (server->audio_modal_ring) {
+		if (fabs(dy - server->audio_track_y) <= 24 && !server->audio_ring_drag) {
+			p->role = ROLE_AUDIO;
+			p->index = -2;
+			server->audio_ring_drag = true;
+			audio_ring_to(server, x);
+		}
+		return;
+	}
+	if (server->audio_slider.dragging || !audio_ready(server)) {
+		return;		/* one finger on the slider is enough */
+	}
+	int selected = audio_selected(st, server->audio_pending);
+	if (selected >= 0 && st->out[selected].percent >= 0 && fabs(dy - server->audio_track_y) <= 24) {
+		p->role = ROLE_AUDIO;
+		p->index = -1;
+		audio_slider_begin(&server->audio_slider, st->out[selected].name, st->out[selected].percent);
+		audio_slider_to(server, x);
+		return;
+	}
+	double at = dy - AUDIO_ROW_TOP;
+	int row = at < 0 ? -1 : (int)(at / (AUDIO_ROW_H + AUDIO_ROW_GAP));
+	if (row >= 0 && row < st->n && at - row * (AUDIO_ROW_H + AUDIO_ROW_GAP) <= AUDIO_ROW_H &&
+	    x >= AUDIO_PAD && x <= server->width - AUDIO_PAD) {
+		p->role = ROLE_AUDIO;
+		p->index = row;
+		snprintf(server->audio_row_down, sizeof(server->audio_row_down), "%s", st->out[row].name);
+		audio_modal_redraw(server);
+	}
+}
+
+static void audio_modal_touch_move(struct zt_server *server, struct touch_point *p, double x) {
+	if (p->index == -2) {
+		audio_ring_to(server, x);
+	} else if (p->index < 0) {
+		if (server->audio_slider.dragging) audio_slider_to(server, x);
+	} else if (p->moved && server->audio_row_down[0]) {
+		server->audio_row_down[0] = 0;	/* a drag isn't a choice */
+		audio_modal_redraw(server);
+	}
+}
+
+static void audio_modal_touch_end(struct zt_server *server, struct touch_point *p, bool cancelled) {
+	if (server->audio_modal_auto) {
+		wl_event_source_timer_update(server->volume_timer, AUDIO_AUTO_CLOSE_MS);
+	}
+	if (p->index == -2) {
+		server->audio_ring_drag = false;
+		wl_event_source_timer_update(server->volume_pip_timer, 250);	/* one pip at its new level */
+		return;
+	}
+	if (p->index < 0) {
+		audio_slider_finish(server);
+		return;
+	}
+	char name[sizeof(server->audio_row_down)];
+	snprintf(name, sizeof(name), "%s", server->audio_row_down);
+	server->audio_row_down[0] = 0;
+	if (!cancelled && !p->moved && name[0] && server->audio_modal_open) {
+		audio_modal_pick(server, name);
+	} else {
+		audio_modal_redraw(server);
+	}
+}
+
+/* A volume key while the modal is up: the slider shows it, and its echo is ignored
+ * as the slider's own is. Only the active output's, which is what the key moves. */
+static void audio_modal_key(struct zt_server *server, int percent) {
+	if (!server->audio_modal_open || server->audio_slider.dragging) return;
+	int i = audio_current(&server->audio_state);
+	if (i < 0) return;
+	struct audio_slider *s = &server->audio_slider;
+	snprintf(s->name, sizeof(s->name), "%s", server->audio_state.out[i].name);
+	s->percent = percent;
+	audio_slider_mark_sent(s, now_ms());
+	audio_state_hold(&server->audio_state, s, now_ms());
+	audio_modal_redraw(server);
+}
+
+
 #include "auth/prompt.c"
 #include "auth/btpair.c"
 
@@ -10351,7 +11337,14 @@ static void uninstall_item(struct zt_server *server, int index) {
 
 static int volume_hide(void *data) {
 	struct zt_server *server = data;
-	animate(server, &server->volume_y, (float)-(VOLUME_H + MEDIA_H + OUTPUT_H), 180, 0, false);
+	if (server->audio_modal_open && server->audio_modal_auto) {
+		if (server->audio_slider.dragging || server->audio_ring_drag) {
+			wl_event_source_timer_update(server->volume_timer, 1000);	/* a finger is on it */
+		} else {
+			audio_modal_close(server);
+		}
+		return 0;
+	}
 	return 0;
 }
 
@@ -10369,6 +11362,23 @@ static int volume_pip(void *data) {
 
 /* ztos-audiod: the active output's volume, moved by its own buttons or because
  * another output took over. external says to show it. */
+/* The volume keys, and a device's own buttons, show the audio modal; it goes by
+ * itself a moment after they stop. Opened from its tile, it stays until closed. */
+static void volume_modal_up(struct zt_server *server) {
+    if (!server->audio_modal_open) {
+        server->audio_modal_auto = true;
+        server->audio_modal_ring = !server->volume_is_media;
+        audio_modal_show(server);
+    } else if (server->audio_modal_auto) {
+        server->audio_modal_ring = !server->volume_is_media;
+        audio_modal_redraw(server);
+    }
+    if (server->audio_modal_auto) {
+        wl_event_source_timer_update(server->volume_timer, AUDIO_AUTO_CLOSE_MS);
+    }
+    damage(server);
+}
+
 static void audio_volume_report(struct zt_server *server, int percent, bool external) {
     uint32_t now = now_ms();
     if (audio_sync_quiet(now, server->volume_key_ms))
@@ -10380,34 +11390,28 @@ static void audio_volume_report(struct zt_server *server, int percent, bool exte
         return;
     if (external && moved) {
         server->volume_is_media = true;
-        draw_volume(server);
-        animate(server, &server->volume_y, 0.0f, 140, 0, false);
-        wl_event_source_timer_update(server->volume_timer, server->media ? 4000 : 2000);
-    } else if (server->volume_y > -10.0f) {
-        draw_volume(server);
-        damage(server);
+        volume_modal_up(server);
     }
 }
 
 static void volume_step(struct zt_server *server, int by) {
     /* the stream is chosen on the first press; repeats keep it */
     if (!server->volume_repeat_by)
-        server->volume_is_media = server->audio_known ? server->audio_active : server->media_playing;
+        server->volume_is_media = server->audio_modal_open ||	/* its slider is what's on the screen */
+            (server->audio_known ? server->audio_active : server->media_playing);
     int *level = server->volume_is_media ? &server->volume : &server->ring_volume;
     int previous = *level, to = previous + by;
     *level = to < 0 ? 0 : to > VOLUME_MAX ? VOLUME_MAX : to;
     config_keep(server->volume_is_media ? "media_volume" : "ring_volume",
         (*level * 100 + VOLUME_MAX - 1) / VOLUME_MAX);
-    outputs_refresh();	/* a headset may have come or gone: for the next look */
-    draw_volume(server);
-    animate(server, &server->volume_y, 0.0f, 140, 0, false);
-    wl_event_source_timer_update(server->volume_timer, server->media ? 4000 : 2000);
+    volume_modal_up(server);
     if (server->volume_is_media) {
         char percent[16];
         snprintf(percent, sizeof(percent), "%d%%", audio_percent_of_level(*level, VOLUME_MAX));
         char line[32];
         snprintf(line, sizeof(line), "volume %d", audio_percent_of_level(*level, VOLUME_MAX));
         server->volume_key_ms = now_ms();
+        audio_modal_key(server, audio_percent_of_level(*level, VOLUME_MAX));
         if (!audio_tell(line))
             run_detached("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", percent);
     }
@@ -10452,6 +11456,8 @@ static void tone_rgb(int kelvin, float rgb[3]) {
 
 /* Switch the display itself off or on. Off, nothing is drawn and no frames
  * are scheduled; the power key brings it back. */
+static void state_file_write(struct zt_server *server);
+
 static void screen_set(struct zt_server *server, bool on) {
 	if (!on) {
 		server->dm_hidden = 1;	/* the DotMatrix home boots again when it is next seen */
@@ -10467,6 +11473,8 @@ static void screen_set(struct zt_server *server, bool on) {
 	}
 	if (!on) bt_pair_hide(server);	/* (it comes back: bt_pair_sync) */
 	if (!on && server->auth_active) auth_finish(server);
+	if (!on && server->audio_modal_open) audio_modal_close(server);
+	if (!on) level_modal_close(server);
 	bool demoloop = demoloop_active();
 	/* Freeze completes before the display-off transition can let zrn-sleepd
 	 * enter SoC sleep. The configured keep_awake list is honored by the helper. */
@@ -10504,6 +11512,7 @@ static void screen_set(struct zt_server *server, bool on) {
 	}
 	wlr_output_state_finish(&state);
 	server->screen_on = on;
+	state_file_write(server);
 	if (demoloop_active()) {
 		char path[256];
 		FILE *state = fopen(runtime_file(path, sizeof(path), "ztos-demoloop.screen"), "w");
@@ -10576,6 +11585,23 @@ static bool waydroid_keeps_screen_on(struct zt_server *server) {
 	return age >= 0 && age < 40;
 }
 
+/* An app asks the screen to stay on (idle-inhibit, as a playing video does). It
+ * only counts for the app in front: one left running behind the others, or
+ * behind the lock screen, keeps nothing awake. */
+static bool app_keeps_screen_on(struct zt_server *server) {
+	if (!server->idle_inhibit || !server->shown || !server->shown->mapped || server->locked) {
+		return false;
+	}
+	struct wlr_surface *root = server->shown->xdg_toplevel->base->surface;
+	struct wlr_idle_inhibitor_v1 *inhibitor;
+	wl_list_for_each(inhibitor, &server->idle_inhibit->inhibitors, link) {
+		if (wlr_surface_get_root_surface(inhibitor->surface) == root) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static int idle_fired(void *data) {
 	struct zt_server *server = data;
 	if (server->screen_timeout > 0) {
@@ -10585,7 +11611,12 @@ static int idle_fired(void *data) {
 			wl_event_source_timer_update(server->idle_timer, 15000);
 			return 0;
 		}
-		if (server->screen_on && waydroid_keeps_screen_on(server)) {
+		bool app = server->screen_on && app_keeps_screen_on(server);
+		if (app != server->idle_inhibit_logged) {
+			server->idle_inhibit_logged = app;
+			wlr_log(WLR_INFO, "screen: %s", app ? "kept on by the app in front" : "the app let go");
+		}
+		if (app || (server->screen_on && waydroid_keeps_screen_on(server))) {
 			/* look again soon: the screen sleeps once the app lets go */
 			wl_event_source_timer_update(server->idle_timer, 15000);
 			return 0;
@@ -11162,31 +12193,12 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		p->role = ROLE_NONE;
 		return;
 	}
-	if (server->volume_y > -10.0f && y < banner_h(server) && !server->locked) {
-		/* the volume banner: its three buttons work the player */
-		if (server->media && y >= VOLUME_H && y < VOLUME_H + MEDIA_H) {
-			double bw = 46, bx = server->width - 16 - 3 * bw;
-			int k = x < bx ? -1 : (int)((x - bx) / bw);
-			if (k >= 0 && k <= 2) {
-				static const char *const what[] = { "previous", "play-pause", "next" };
-				hap(server, HAP_TAP, HG_SYSTEM);
-				run_detached("playerctl", what[k], NULL, NULL);
-				if (k == 1) {
-					server->media_playing = !server->media_playing;	/* until it says so itself */
-					draw_volume(server);
-					damage(server);
-				}
-			}
-		}
-		if (y >= banner_h(server) - OUTPUT_H) {
-			/* the output row: on to the next one */
-			hap(server, HAP_TAP, HG_SYSTEM);
-			output_next(server);
-			draw_volume(server);
-			damage(server);
-		}
-		wl_event_source_timer_update(server->volume_timer, 4000);
-		p->role = ROLE_NONE;
+	if (server->level_open && server->level_y > (float)-server->level_h + 10.0f) {
+		level_modal_touch_begin(server, p, x, y);
+		return;
+	}
+	if (server->audio_modal_open && server->audio_modal_y > (float)-server->audio_modal_h + 10.0f) {
+		audio_modal_touch_begin(server, p, x, y);
 		return;
 	}
 	if (server->toast_y > 0.5f && y < TOAST_H) {
@@ -11245,6 +12257,11 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		server->shade_pressed = p->index;
 		if (p->index >= 0 && p->index < 8) {
 			shade_tile_press(server, p->index, x, panel_y);
+			if (quick_holds(server->quick[p->index])) {
+				/* held: its modal, or its page of Settings */
+				p->down_ms = now_ms();
+				wl_event_source_timer_update(server->long_press_timer, LONG_PRESS_MS);
+			}
 		}
 		p->scroll0 = server->shade_h;
 		/* a drag that starts over the notifications scrolls them (see
@@ -11268,7 +12285,16 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		damage(server);
 		return;
 	}
-	if (!server->shade_open && y <= STATUS_H + 12) {
+	bool bars_away = !server->shade_open && fs_bars_t(server) < 0.5f;
+	if (bars_away && (y <= FS_EDGE || y >= server->height - FS_EDGE)) {
+		p->role = ROLE_FS_EDGE;
+		p->index = y <= FS_EDGE ? 1 : -1;
+		return;
+	}
+	if (fs_on(server) && !bars_away) {
+		fs_reveal_bars(server);		/* a finger on the screen: not while it is busy */
+	}
+	if (!bars_away && !server->shade_open && y <= STATUS_H + 12) {
 		/* pulling it down: bring its contents up to date once, now */
 		p->role = ROLE_SHADE;
 		p->index = -1;
@@ -11290,7 +12316,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		return;
 	}
 
-	if (y >= server->height - NAV_H) {
+	if (!bars_away && y >= server->height - NAV_H) {
 		p->role = ROLE_NAV;
 		p->index = (int)(x / (server->width / 3.0));
 		if (p->index > NAV_SEARCH) {
@@ -11436,7 +12462,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		wlr_seat_touch_notify_down(server->seat, surface, time, id, sx, sy);
 		wlr_seat_touch_notify_frame(server->seat);
 		server->client_tap_ms = now_ms();
-		server->client_tap_y = y + server->app_lift - STATUS_H;
+		server->client_tap_y = y + server->app_lift - app_top(server->shown);
 		if (server->osk_pending) {
 			/* a field the page focused by itself: now the user is in it */
 			server->osk_pending = false;
@@ -11477,6 +12503,9 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 		p->moved = true;
 	}
 	switch (p->role) {
+	case ROLE_AUDIO:
+		audio_modal_touch_move(server, p, x);
+		break;
 	case ROLE_RETRO:
 		if (server->dm) {
 			/* three fingers pushed up together: the launcher's settings */
@@ -11665,6 +12694,15 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 		damage(server);
 		break;
 	}
+	case ROLE_LEVEL:
+		level_slider_to(server, x);
+		break;
+	case ROLE_FS_EDGE:
+		if ((y - p->y0) * p->index > FS_SWIPE) {
+			p->role = ROLE_NONE;
+			fs_reveal_bars(server);
+		}
+		break;
 	case ROLE_CLIENT:
 		/* Coordinates stay relative to the surface the finger went down on. */
 		wlr_seat_touch_notify_motion(server->seat, time, id,
@@ -11734,6 +12772,9 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		return;
 	}
 	switch (p->role) {
+	case ROLE_AUDIO:
+		audio_modal_touch_end(server, p, cancelled);
+		break;
 	case ROLE_RETRO:
 		if (server->dm) {
 			dm_launcher_touch(server->dm, cancelled ? DM_TOUCH_CANCEL : DM_TOUCH_UP,
@@ -12045,6 +13086,22 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		wlr_seat_touch_notify_up(server->seat, time, id);
 		wlr_seat_touch_notify_frame(server->seat);
 		break;
+	case ROLE_LEVEL:
+		level_modal_touch_end(server);
+		break;
+	case ROLE_FS_EDGE: {
+		/* no swipe: a tap on the app that happened to be near the edge */
+		double sx, sy;
+		struct wlr_surface *surface = fabs(p->x - p->x0) < 12 ?
+			surface_at(server, p->x0, p->y0, &sx, &sy) : NULL;
+		if (surface) {
+			wlr_seat_touch_notify_down(server->seat, surface, time, id, sx, sy);
+			wlr_seat_touch_notify_frame(server->seat);
+			wlr_seat_touch_notify_up(server->seat, time, id);
+			wlr_seat_touch_notify_frame(server->seat);
+		}
+		break;
+	}
 	default:
 		break;
 	}
@@ -12143,29 +13200,137 @@ static void pointer_destroy(struct wl_listener *listener, void *data) {
 
 /* ---- control pipe: drive the shell without a finger ---------------------- */
 
+/* $XDG_RUNTIME_DIR/ztmetro.state, for ztmirror and test tools: the screen's
+ * size in points, the scale, its pixels, and whether it is on. Replaced whole
+ * whenever one of those changes, so a reader never sees half of it. */
+static void state_file_write(struct zt_server *server) {
+	if (!server->output) {
+		return;
+	}
+	char path[256], tmp[280];
+	runtime_file(path, sizeof(path), "ztmetro.state");
+	snprintf(tmp, sizeof(tmp), "%s.new", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f) {
+		return;
+	}
+	struct wlr_output *o = server->output->wlr_output;
+	fprintf(f, "points %d %d\nscale %.2f\npixels %d %d\nscreen %s\n", server->width, server->height,
+		server->scale, o->width, o->height, server->screen_on ? "on" : "off");
+	fclose(f);
+	rename(tmp, path);
+}
+
 /*
  * $XDG_RUNTIME_DIR/ztmetro.ctl takes one command per line, in points:
  *
  *     down ID X Y | move ID X Y | up ID | cancel ID | tap X Y | screen off | screen on | state
+ *     key CODE down|up    a phone key, as its evdev code: see ctl_key()
  *
  * It goes through the same code as the touchscreen, which is what makes the
  * shell testable over ssh.
  */
+static void ctl_key(struct zt_server *server, unsigned code, const char *how);
+
+/* Input from the control pipe (an agent, ztmirror) shows on the screen, so a
+ * person holding the phone can tell it isn't them and where it went: a circle
+ * at each finger, a thin trail of its last second of travel, and both stay a
+ * moment after it lifts, then go together. */
+static struct ctl_finger *ctl_finger_find(struct zt_server *server, int id) {
+	for (int i = 0; i < CTL_FINGERS; i++) {
+		struct ctl_finger *f = &server->ctl_fingers[i];
+		if (f->used && f->down && f->id == id) {
+			return f;
+		}
+	}
+	return NULL;
+}
+
+static void ctl_finger_point(struct ctl_finger *f, double x, double y) {
+	f->x = (float)x;
+	f->y = (float)y;
+	if (f->n > 0) {
+		int last = (f->head + CTL_TRAIL - 1) % CTL_TRAIL;
+		if (hypotf(f->trail[last].x - f->x, f->trail[last].y - f->y) < 2.0f) {
+			return;
+		}
+	}
+	f->trail[f->head].x = f->x;
+	f->trail[f->head].y = f->y;
+	f->trail[f->head].ms = now_ms();
+	f->head = (f->head + 1) % CTL_TRAIL;
+	if (f->n < CTL_TRAIL) {
+		f->n++;
+	}
+}
+
+static void ctl_finger_up(struct zt_server *server, int id) {
+	struct ctl_finger *f = ctl_finger_find(server, id);
+	if (f) {
+		f->down = false;
+		f->up_ms = now_ms();
+		damage(server);
+	}
+}
+
+static void ctl_finger_down(struct zt_server *server, int id, double x, double y) {
+	ctl_finger_up(server, id);	/* it never said it lifted */
+	struct ctl_finger *f = NULL;
+	for (int i = 0; i < CTL_FINGERS && !f; i++) {
+		if (!server->ctl_fingers[i].used) {
+			f = &server->ctl_fingers[i];
+		}
+	}
+	for (int i = 0; i < CTL_FINGERS && !f; i++) {
+		if (!server->ctl_fingers[i].down) {
+			f = &server->ctl_fingers[i];	/* the room is needed more than its last moments */
+		}
+	}
+	if (!f) {
+		return;
+	}
+	f->used = f->down = true;
+	f->id = id;
+	f->head = f->n = 0;
+	ctl_finger_point(f, x, y);
+	damage(server);
+}
+
+static void ctl_finger_move(struct zt_server *server, int id, double x, double y) {
+	struct ctl_finger *f = ctl_finger_find(server, id);
+	if (!f) {
+		ctl_finger_down(server, id, x, y);
+		return;
+	}
+	ctl_finger_point(f, x, y);
+	damage(server);
+}
+
 static void ctl_command(struct zt_server *server, char *line) {
 	int id;
 	double x, y;
+	unsigned code;
+	char how[8];
 	uint32_t t = now_ms();
 	if (sscanf(line, "down %d %lf %lf", &id, &x, &y) == 3) {
+		ctl_finger_down(server, id, x, y);
 		touch_begin(server, 1000 + id, x, y, t);
 	} else if (sscanf(line, "move %d %lf %lf", &id, &x, &y) == 3) {
+		ctl_finger_move(server, id, x, y);
 		touch_update(server, 1000 + id, x, y, t);
 	} else if (sscanf(line, "up %d", &id) == 1) {
+		ctl_finger_up(server, id);
 		touch_end(server, 1000 + id, t, false);
 	} else if (sscanf(line, "cancel %d", &id) == 1) {
+		ctl_finger_up(server, id);
 		touch_end(server, 1000 + id, t, true);
 	} else if (sscanf(line, "tap %lf %lf", &x, &y) == 2) {
+		ctl_finger_down(server, -1, x, y);
+		ctl_finger_up(server, -1);
 		touch_begin(server, 1999, x, y, t);
 		touch_end(server, 1999, t + 30, false);
+	} else if (sscanf(line, "key %u %7s", &code, how) == 2) {
+		ctl_key(server, code, how);
 	} else if (strncmp(line, "modem", 5) == 0) {
 		/* ztoscorenetworkingd: the SIM, the signal or the network changed */
 		modem_read(server);
@@ -12331,9 +13496,9 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (sscanf(line, "audio-volume %d %lf", &id, &x) == 2) {
 		audio_volume_report(server, id, x != 0);
 	} else if (strncmp(line, "media ", 6) == 0) {
-		/* media STATE|TITLE|ARTIST|PLAYER, or media none (ztnotifyd) */
-		char *f[4] = { line + 6, "", "", "" };
-		for (int k = 1; k < 4; k++) {
+		/* media STATE|TITLE|ARTIST|PLAYER|POSITION|LENGTH, or media none (ztnotifyd) */
+		char *f[6] = { line + 6, "", "", "", "", "" };
+		for (int k = 1; k < 6; k++) {
 			char *bar = strchr(f[k - 1], '|');
 			if (!bar) {
 				break;
@@ -12341,23 +13506,18 @@ static void ctl_command(struct zt_server *server, char *line) {
 			*bar = 0;
 			f[k] = bar + 1;
 		}
-		bool was = server->media, played = server->media_playing;
-		bool new_track = strcmp(server->media_title, f[1]) != 0;
 		server->media = strcmp(f[0], "none") != 0 && f[0][0];
 		server->media_playing = strcmp(f[0], "Playing") == 0;
 		snprintf(server->media_title, sizeof(server->media_title), "%s", server->media ? f[1] : "");
 		snprintf(server->media_artist, sizeof(server->media_artist), "%s", server->media ? f[2] : "");
+		server->media_pos = server->media && f[4][0] ? atof(f[4]) : 0;
+		server->media_len = server->media && f[5][0] ? atof(f[5]) : 0;
+		server->media_pos_ms = now_ms();
+		/* Nothing a player does brings the modal down: it only keeps up. */
 		if (server->width > 0 && server->screen_on) {
-			if (server->media && server->media_playing && (!was || !played || new_track)) {
-				/* something started: the banner comes down to say what */
-				draw_volume(server);
-				animate(server, &server->volume_y, 0.0f, 140, 0, false);
-				wl_event_source_timer_update(server->volume_timer, 4000);
-			} else if (server->volume_y > -10.0f) {
-				draw_volume(server);
-				damage(server);
-			}
+			audio_modal_redraw(server);
 		}
+		media_tick_arm(server);
     } else if (strncmp(line, "android-compile ", 16) == 0) {
         int pid, active;
         if (sscanf(line + 16, "%d %d", &pid, &active) == 2 &&
@@ -12450,6 +13610,9 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (sscanf(line, "brightness-auto %d", &id) == 1) {
 		/* the light sensor's goal, tenths of a percent: a slow glide here */
 		server->shade_brightness = id < 20 ? 2 : id > 1000 ? 100 : (id + 5) / 10;
+		if (server->level_kind == LEVEL_BRIGHT) {
+			level_modal_redraw(server);
+		}
 		if (bl.mode == BL_TABLE) {
 			ramp_goal(id / 10.0, BL_AUTO_SPEED, true);
 		} else {
@@ -12477,7 +13640,9 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (strcmp(line, "back") == 0) {
 		/* what the nav bar's back does to an app in front (for testing
 		 * transitions without a finger on the glass) */
-		if (server->shown) {
+		if (server->audio_modal_open) {
+			audio_modal_close(server);
+		} else if (server->shown) {
 			vkbd_send(server, KEY_ESC, false);
 		}
 	} else if (strcmp(line, "restart") == 0) {
@@ -12543,6 +13708,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 			server->osk_visible, server->osk_symbols ? "(symbols)" : "",
 			app_height(server), server->scroll, server->page, server->list_scroll,
 			server->n_items, server->editing, server->edit, server->menu_open, server->n_tiles);
+		state_file_write(server);
 	}
 }
 
@@ -12694,10 +13860,8 @@ static int power_key_held(void *data) {
 	return 0;
 }
 
-static void keyboard_handle_key(struct wl_listener *listener, void *data) {
-	struct zt_keyboard *keyboard = wl_container_of(listener, keyboard, key);
-	struct zt_server *server = keyboard->server;
-	struct wlr_keyboard_key_event *event = data;
+/* A key, from a keyboard or (keyboard NULL) from the control pipe. */
+static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, struct wlr_keyboard_key_event *event) {
 	if (event->keycode == KEY_POWER) {
 		/* the power key is the shell's alone: see power/power-key.h */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
@@ -12775,6 +13939,9 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 		}
 		return;
 	}
+	if (!keyboard) {
+		return;	/* the pipe's keys are all the phone's own, handled above */
+	}
     if (server->auth_active) {
         if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
             char text[64] = "";
@@ -12785,6 +13952,27 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
     }
 	wlr_seat_set_keyboard(server->seat, keyboard->wlr_keyboard);
 	wlr_seat_keyboard_notify_key(server->seat, event->time_msec, event->keycode, event->state);
+}
+
+static void keyboard_handle_key(struct wl_listener *listener, void *data) {
+	struct zt_keyboard *keyboard = wl_container_of(listener, keyboard, key);
+	key_event(keyboard->server, keyboard, data);
+}
+
+/* "key CODE down|up" on the control pipe: the phone's own keys only, through
+ * the same logic as the real ones. Typing is not offered here. */
+static void ctl_key(struct zt_server *server, unsigned code, const char *how) {
+	bool down = strcmp(how, "down") == 0;
+	if ((!down && strcmp(how, "up") != 0) || (code != KEY_POWER && code != KEY_VOLUMEUP &&
+			code != KEY_VOLUMEDOWN && code != KEY_HOMEPAGE && code != KEY_BACK)) {
+		return;
+	}
+	struct wlr_keyboard_key_event event = {
+		.time_msec = now_ms(),
+		.keycode = code,
+		.state = down ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED,
+	};
+	key_event(server, NULL, &event);
 }
 
 static void keyboard_handle_destroy(struct wl_listener *listener, void *data) {
@@ -13291,6 +14479,9 @@ static bool plane_pick(struct zt_server *server, struct zt_toplevel *app, const 
 			PLANE_NO("tinted");
 		}
 	}
+	if (app->fullscreen && (fs_bars_t(server) > 0.001f || server->audio_modal_open)) {
+		PLANE_NO("the bars over a full-screen app");
+	}
 	struct plane_find f = { .root = app->xdg_toplevel->base->surface };
 	wlr_xdg_surface_for_each_surface(app->xdg_toplevel->base, plane_find_surface, &f);
 	if (!f.found) {
@@ -13446,7 +14637,8 @@ static void render_frame(struct zt_server *server) {
 			shade_folded = true;
 		}
 	}
-	int under_bottom = server->sensorhub_fail_screen ? output->height :
+	/* (a full-screen app, its bars away or on their way, shows under the strip) */
+	int under_bottom = server->sensorhub_fail_screen || fs_bars_t(server) < 0.999f ? output->height :
 		output->height - (int)floorf(NAV_H * server->scale);
 	/* the lock screen nearly down: only the nav bar's strip, which covers
 	 * the rest, is left. An empty scissor (height below zero) was a GL
@@ -13723,6 +14915,7 @@ static void render_frame(struct zt_server *server) {
 				d.alpha *= server->drop > -300 ? 1.0f + server->drop / 300 : 0.0f;
 			}
 			app_origin(card, &d.ox, &d.oy);
+			d.oy += STATUS_H - app_top(card);	/* a card is a card, full screen or not */
 			d.fit = app_fit(server, card);
 			wlr_xdg_surface_for_each_surface(card->xdg_toplevel->base, draw_app_surface, &d);
 			if (server->card_title[i].tex) {
@@ -13759,12 +14952,13 @@ static void render_frame(struct zt_server *server) {
 	bool retro_home = (retro_home_shown(server) && !lock_shown) ||
 		(retro_on(server) && server->locked);	/* it has its own status column, as its lock has */
 	if (!retro_home) {
-		layer_draw(server, &server->status_layer, 0, 0, 1.0f);
+		layer_draw(server, &server->status_layer, 0, fs_status_y(server), 1.0f);
 	}
 	if (server->charging && server->plug_layer.tex && !retro_on(server)) {
 		float a = server->battery_full ? 1.0f : server->st_plug;
-		if (a > 0.5f) {
-			layer_draw(server, &server->plug_layer, server->plug_x, server->plug_y, 1.0f);
+		float bar_y = fs_status_y(server);	/* it goes with the bar it sits on */
+		if (a > 0.5f && bar_y > -(float)STATUS_H + 0.5f) {
+			layer_draw(server, &server->plug_layer, server->plug_x, server->plug_y + bar_y, 1.0f);
 		}
 	}
 	if (server->peek > 0.001f && server->peek_layer.tex) {
@@ -13866,7 +15060,10 @@ static void render_frame(struct zt_server *server) {
 	}
 	/* the nav bar stays on top: the panel comes down behind it */
 	if (!server->sensorhub_fail_screen && !(retro_on(server) && server->locked)) {
-		layer_draw(server, &server->nav_layer, 0, server->height - NAV_H, 1.0f);
+		float bars = fs_bars_t(server);
+		if (bars > 0.001f) {
+			layer_draw(server, &server->nav_layer, 0, server->height - NAV_H * bars, 1.0f);
+		}
 	}
 	if (server->keypop && server->osk_visible && server->keypop_layer.tex) {
 		layer_draw(server, &server->keypop_layer, server->keypop_x, server->keypop_y, 1.0f);
@@ -13900,7 +15097,7 @@ static void render_frame(struct zt_server *server) {
 		call_draw.fit = app_fit(server, server->shown);
 		wlr_xdg_surface_for_each_surface(server->shown->xdg_toplevel->base, draw_app_surface, &call_draw);
 		/* The call fills the margins; status glyphs still belong above it. */
-		layer_draw(server, &server->status_layer, 0, 0, 1.0f);
+		layer_draw(server, &server->status_layer, 0, fs_status_y(server), 1.0f);
 	}
 	if (server->splash && !animating(server, &server->lock_y) && server->lock_y >= 0.0f) {
 		server->splash = false;
@@ -13908,11 +15105,24 @@ static void render_frame(struct zt_server *server) {
 		wlr_log(WLR_INFO, "boot: transition complete, splash removed");
 		ui_sound(server, UIS_NOTIFY);	/* a chime as the phone finishes starting */
 	}
-	if (server->volume_y > 1.0f - (float)banner_h(server) && server->volume_layer.tex) {
-		layer_draw(server, &server->volume_layer, 0, server->volume_y, 1.0f);
-	}
 	if (server->toast_y > 0.02f && server->toast_layer.tex) {
 		layer_draw_swivel(server, &server->toast_layer, server->toast_y);
+	}
+	if (server->audio_modal_y > 1.0f - (float)server->audio_modal_h && server->audio_modal_layer.tex) {
+		float t = (server->audio_modal_y + (float)server->audio_modal_h) / (float)server->audio_modal_h;
+		float m[16];
+		mat_identity(m);
+		mat_scale(m, server->width, server->height);
+		quad(server, GL_TEXTURE_2D, server->black_tex, m, 0.627f * fminf(1.0f, t), false, false, 1.0f, 1.0f);
+		layer_draw(server, &server->audio_modal_layer, 0, server->audio_modal_y, 1.0f);
+	}
+	if (server->level_y > 1.0f - (float)server->level_h && server->level_layer.tex) {
+		float t = (server->level_y + (float)server->level_h) / (float)server->level_h;
+		float m[16];
+		mat_identity(m);
+		mat_scale(m, server->width, server->height);
+		quad(server, GL_TEXTURE_2D, server->black_tex, m, 0.627f * fminf(1.0f, t), false, false, 1.0f, 1.0f);
+		layer_draw(server, &server->level_layer, 0, server->level_y, 1.0f);
 	}
 	if (server->dialog_y > 1.0f - (float)server->dialog_h && server->dialog_layer.tex) {
 		float t = (server->dialog_y + (float)server->dialog_h) / (float)server->dialog_h;
@@ -13923,6 +15133,12 @@ static void render_frame(struct zt_server *server) {
 			quad(server, GL_TEXTURE_2D, server->black_tex, m, 0.627f * fminf(1.0f, t), false, false, 1.0f, 1.0f);
 		}
 		layer_draw(server, &server->dialog_layer, 0, server->dialog_y, 1.0f);
+	}
+	/* the status bar stays above these modals, which leave room for it */
+	if ((server->audio_modal_y > 1.0f - (float)server->audio_modal_h && server->audio_modal_layer.tex) ||
+	    (server->level_y > 1.0f - (float)server->level_h && server->level_layer.tex) ||
+	    (server->dialog_y > 1.0f - (float)server->dialog_h && server->dialog_layer.tex)) {
+		layer_draw(server, &server->status_layer, 0, fs_status_y(server), 1.0f);
 	}
 	if (server->show_touches) {
 		for (int i = 0; i < MAX_TOUCH; i++) {
@@ -13935,6 +15151,62 @@ static void render_frame(struct zt_server *server) {
 			mat_translate(m, (float)p->x - 9, (float)p->y - 9);
 			mat_scale(m, 18, 18);
 			quad(server, GL_TEXTURE_2D, server->white_tex, m, 0.55f, false, false, 1.0f, 1.0f);
+		}
+	}
+	{	/* input from the control pipe: see ctl_finger_down */
+		bool live = false;
+		for (int i = 0; i < CTL_FINGERS; i++) {
+			struct ctl_finger *f = &server->ctl_fingers[i];
+			if (!f->used) {
+				continue;
+			}
+			uint32_t gone = f->down ? 0 : now - f->up_ms;
+			if (gone >= CTL_DOT_STAY_MS) {
+				f->used = false;
+				continue;
+			}
+			float fade = gone > CTL_DOT_STAY_MS - CTL_DOT_FADE_MS ?
+				(float)(CTL_DOT_STAY_MS - gone) / CTL_DOT_FADE_MS : 1.0f;
+			if (!server->ctl_dot_layer.tex || !server->ctl_trail_layer.tex) {
+				cairo_t *dot;
+				struct zt_buffer *buffer = zt_buffer_create(server, CTL_DOT_D, CTL_DOT_D, &dot);
+				cairo_set_source_rgba(dot, 0.1, 0.75, 1.0, 1.0);
+				cairo_arc(dot, CTL_DOT_D / 2.0, CTL_DOT_D / 2.0, CTL_DOT_D / 2.0 - 1, 0, 2 * M_PI);
+				cairo_fill(dot);
+				zt_buffer_show(server, &server->ctl_dot_layer, buffer, dot, CTL_DOT_D, CTL_DOT_D);
+				buffer = zt_buffer_create(server, CTL_TRAIL_D, CTL_TRAIL_D, &dot);
+				cairo_set_source_rgba(dot, 0.1, 0.75, 1.0, 1.0);
+				cairo_arc(dot, CTL_TRAIL_D / 2.0, CTL_TRAIL_D / 2.0, CTL_TRAIL_D / 2.0, 0, 2 * M_PI);
+				cairo_fill(dot);
+				zt_buffer_show(server, &server->ctl_trail_layer, buffer, dot, CTL_TRAIL_D, CTL_TRAIL_D);
+			}
+			/* the trail: small circles close together, oldest first, fainter with age */
+			int start = (f->head + CTL_TRAIL - f->n) % CTL_TRAIL;
+			for (int k = 1; k < f->n && server->ctl_trail_layer.tex; k++) {
+				int a = (start + k - 1) % CTL_TRAIL, b = (start + k) % CTL_TRAIL;
+				uint32_t age = now - f->trail[b].ms;
+				if (age >= CTL_TRAIL_MS) {
+					continue;
+				}
+				float alpha = 0.4f * fade * (1.0f - (float)age / CTL_TRAIL_MS);
+				float dx = f->trail[b].x - f->trail[a].x, dy = f->trail[b].y - f->trail[a].y;
+				int steps = (int)(hypotf(dx, dy) / 2.5f) + 1;
+				steps = steps > 80 ? 80 : steps;
+				for (int n = 0; n < steps; n++) {
+					float u = (float)n / steps;
+					layer_draw(server, &server->ctl_trail_layer,
+						f->trail[a].x + dx * u - CTL_TRAIL_D / 2.0f,
+						f->trail[a].y + dy * u - CTL_TRAIL_D / 2.0f, alpha);
+				}
+			}
+			if (server->ctl_dot_layer.tex) {
+				layer_draw(server, &server->ctl_dot_layer, f->x - CTL_DOT_D / 2.0f,
+					f->y - CTL_DOT_D / 2.0f, 0.8f * fade);
+			}
+			live = true;
+		}
+		if (live) {
+			damage(server);
 		}
 	}
 	/* the colour temperature and the software brightness are not drawn here:
@@ -14233,6 +15505,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	server->lock_y = (float)-server->height;
 
 	server->screen_on = true;
+	state_file_write(server);
 	damage(server);
 
 	load_logo(server);
@@ -14301,6 +15574,19 @@ static int reload(int signal_number, void *data) {
 	int strength = server->haptic_strength;
 	int ring_before = server->ring_volume;
 	load_config(server);
+	app_scales_load(server);
+	{
+		struct zt_toplevel *t;
+		wl_list_for_each(t, &server->toplevels, link) {
+			float zoom = app_zoom_for(server, t);
+			if (t->xdg_toplevel->base->initialized && zoom != t->zoom) {
+				wlr_log(WLR_INFO, "app scale: %s %.2f", t->xdg_toplevel->app_id ? t->xdg_toplevel->app_id : "?", zoom);
+				t->zoom = zoom;
+				app_tell_scale(server, t);
+				app_configure(server, t);
+			}
+		}
+	}
 	if (server->style_config != server->style) {
 		/* the settings app chose the other style: the session starts again */
 		style_switch(server, server->style_config);
@@ -14545,7 +15831,10 @@ int main(int argc, char *argv[]) {
 	server.lock_enabled = true;
 	server.key_sound_fd = -1;
 	server.volume = 24;
-	server.volume_y = -(VOLUME_H + MEDIA_H + OUTPUT_H);
+	server.fs_bars = server.fs_want = 1.0f;
+	server.fs_bars_ms = 3000;
+	server.torch_level = TORCH_LEVEL;
+	server.level_y = -1000.0f;
 	server.toast_y = 0.0f;
 	server.dialog_h = 240;
 	server.dialog_y = -240.0f;
@@ -14707,6 +15996,8 @@ int main(int argc, char *argv[]) {
 	wl_event_loop_add_signal(server.loop, SIGHUP, reload, &server);
 	server.launch_timer = wl_event_loop_add_timer(server.loop, launch_timed_out, &server);
 	server.volume_timer = wl_event_loop_add_timer(server.loop, volume_hide, &server);
+	server.media_tick_timer = wl_event_loop_add_timer(server.loop, media_tick, &server);
+	server.fs_timer = wl_event_loop_add_timer(server.loop, fs_hide, &server);
 	server.volume_repeat_timer = wl_event_loop_add_timer(server.loop, volume_repeat, &server);
 	server.volume_pip_timer = wl_event_loop_add_timer(server.loop, volume_pip, &server);
 	server.peek_timer = wl_event_loop_add_timer(server.loop, peek_timed_out, &server);
@@ -14722,6 +16013,8 @@ int main(int argc, char *argv[]) {
 	server.home_flip_tile = -1;
 	modem_read(&server);
 	server.idle_notifier = wlr_idle_notifier_v1_create(server.wl_display);
+	server.idle_inhibit = wlr_idle_inhibit_v1_create(server.wl_display);
+	app_scales_load(&server);
 
 	server.new_output.notify = server_new_output;
 	wl_signal_add(&server.backend->events.new_output, &server.new_output);
@@ -14783,6 +16076,7 @@ int main(int argc, char *argv[]) {
 	run_detached("/usr/local/bin/ztos-sounds", NULL, NULL, NULL);
 	/* WirePlumber keeps each device's own volume: ask what it is, don't impose one */
 	audio_tell("hello");
+	audio_watch_start(&server);
 	{
 		/* zrnperfd puts the shell first in line for the CPU (see there) */
 		char line[32];

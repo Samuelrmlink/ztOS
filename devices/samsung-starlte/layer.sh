@@ -46,7 +46,7 @@ elif [ -f "$DEVROOT/prebuilts/modules/zrn-modem.ko" ]; then
 	install -m644 "$DEVROOT/prebuilts/modules/zrn-modem.ko" "$R/usr/lib/modules/7.1.0-zboot/extra/"
 fi
 MODULES="$DEVROOT/prebuilts/modules/*.ko $DEVROOT/power/idle/zrn-cpuidle.ko $DEVROOT/haptics/zrn-haptic.ko
-	$DEVROOT/power/hotplug/zrn-hotplug.ko $DEVROOT/leds/zrn-led.ko $DEVROOT/sensors/driver/zrn-bbd.ko
+	$DEVROOT/power/hotplug/zrn-hotplug.ko $DEVROOT/leds/zrn-led.ko $DEVROOT/leds/zrn-flash.ko $DEVROOT/sensors/driver/zrn-bbd.ko
 	$DEVROOT/audio/driver/snd-zrn-abox.ko $DEVROOT/audio/modules/*.ko $DEVROOT/score/driver/zrn-score.ko"
 for k in $MODULES; do
 	[ -f "$k" ] && install -m644 "$k" "$R/usr/lib/modules/7.1.0-zboot/extra/"

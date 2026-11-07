@@ -187,7 +187,9 @@ static const sd_bus_vtable notifications_vtable[] = {
 /* ---- 2. what is playing ---------------------------------------------------- */
 
 static long media_look_at;	/* a player said something: look, a moment later */
-static char media_told[400];
+static char media_told[400], media_logged[400];
+static long media_poll_at;	/* something plays: look again, for how far it has got */
+#define MEDIA_POLL_MS 10000
 
 static int media_changed(sd_bus_message *m, void *userdata, sd_bus_error *error)
 {
@@ -331,16 +333,17 @@ static void signal_player(const char *name, const char *status, const char *titl
 /* playerctl knows every player's dialect; asked once per change, for all of them. */
 static void media_look(void)
 {
-	char line[1400], out[400], cur[400] = "";
+	char line[1400], out[400], head[360], cur[400] = "";
+	long long pos = -1, len = -1;
 	int best = 0;
 	for (int i = 0; i < MAX_PLAYERS; i++)
 		told[i].seen = false;
 	FILE *p = popen("playerctl -a metadata --format "
-		"'{{playerInstance}}\x1f{{status}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:artUrl}}' 2>/dev/null", "r");
+		"'{{playerInstance}}\x1f{{status}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{mpris:artUrl}}\x1f{{position}}\x1f{{mpris:length}}' 2>/dev/null", "r");
 	while (p && fgets(line, sizeof(line), p)) {
-		char *f[6] = { line, "", "", "", "", "" };
+		char *f[8] = { line, "", "", "", "", "", "", "" };
 		line[strcspn(line, "\n")] = 0;
-		for (int k = 1; k < 6; k++) {
+		for (int k = 1; k < 8; k++) {
 			char *sep = strchr(f[k - 1], '\x1f');
 			if (!sep)
 				break;
@@ -355,6 +358,8 @@ static void media_look(void)
 		if (rank > best) {
 			best = rank;
 			snprintf(cur, sizeof(cur), "%s|%s|%s|%s", f[1], f[2], f[3], f[0]);
+			pos = f[6][0] ? atoll(f[6]) : -1;	/* microseconds */
+			len = f[7][0] ? atoll(f[7]) : -1;
 		}
 	}
 	if (p)
@@ -378,15 +383,27 @@ static void media_look(void)
 		clean(ti, sizeof(ti), fields[1] ? fields[1] : "");
 		clean(ar, sizeof(ar), fields[2] ? fields[2] : "");
 		clean(pl, sizeof(pl), fields[3] ? fields[3] : "");
-		snprintf(out, sizeof(out), "media %s|%s|%s|%s", st, ti, ar, pl);
+		snprintf(head, sizeof(head), "media %s|%s|%s|%s", st, ti, ar, pl);
+		if (pos >= 0 && len > 0) {
+			snprintf(out, sizeof(out), "%s|%.1f|%.1f", head, pos / 1e6, len / 1e6);
+		} else {
+			snprintf(out, sizeof(out), "%s||", head);
+		}
 	} else {
+		snprintf(head, sizeof(head), "media none");
 		snprintf(out, sizeof(out), "media none");
 	}
 	if (strcmp(out, media_told)) {
 		snprintf(media_told, sizeof(media_told), "%s", out);
 		shell_tell("%s", out);
-		fprintf(stderr, "ztnotifyd: %.60s\n", out);
+		if (strcmp(head, media_logged)) {	/* not every ten seconds of a film */
+			snprintf(media_logged, sizeof(media_logged), "%s", head);
+			fprintf(stderr, "ztnotifyd: %.60s\n", head);
+		}
 	}
+	/* Players do not say how far they have got, only where they jumped to.
+	 * The shell's clock keeps it going; this keeps its clock honest. */
+	media_poll_at = best == 2 && len > 0 ? now_ms() + MEDIA_POLL_MS : 0;
 }
 
 /* ---- 3. push ---------------------------------------------------------------- */
@@ -659,7 +676,7 @@ int main(void)
 			bus = NULL;
 		}
 		long now = now_ms(), wait = 60000;
-		if (media_look_at && now >= media_look_at) {
+		if ((media_look_at && now >= media_look_at) || (media_poll_at && now >= media_poll_at)) {
 			media_look_at = 0;
 			media_look();
 		}
@@ -667,6 +684,8 @@ int main(void)
 			push_open();
 		if (media_look_at && media_look_at - now < wait)
 			wait = media_look_at - now;
+		if (media_poll_at && media_poll_at - now < wait)
+			wait = media_poll_at - now;
 		if (!push_pipe && push_topic[0] && push_retry_at - now < wait)
 			wait = push_retry_at - now;
 		if (wait < 0)
