@@ -82,5 +82,7 @@ android/atl/packages/art_standalone/r8-*.jar
 ztmetro/files/ztfiles
 ztmetro/gallery/ztgallery
 ztmetro/sound/ztsound
+ztmetro/ntfy/ztos-ntfyd
+ztmetro/ntfy/ztntfy
 score/tools/scoremm
 ztmetro/osial/ztosial

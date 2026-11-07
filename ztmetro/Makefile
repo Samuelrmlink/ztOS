@@ -20,7 +20,7 @@ endif
 
 all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
-	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods
+	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy
 
 sounds/ztos-sounds: sounds/ztos-sounds.c
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libpulse) -o $@ $< $(shell pkg-config --libs libpulse) -lm
@@ -140,6 +140,14 @@ pods/ztos-podsd: pods/ztos-podsd.c $(PODS_DEPS)
 pods/ztpods: pods/ztpods.c $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ pods/ztpods.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
+# ntfy: pushes from outside (ntfy/README.md)
+ntfy/ztos-ntfyd: ntfy/ztos-ntfyd.c ntfy/ntfy-model.h
+	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd libcurl) -o $@ ntfy/ztos-ntfyd.c \
+		$(shell pkg-config --libs libsystemd libcurl)
+
+ntfy/ztntfy: ntfy/ztntfy.c ntfy/ntfy-model.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ ntfy/ztntfy.c $(CORE) $(APP_LIBS)
+
 # the phone's own three: calls, messages, people (comm.h is what they share)
 phone/ztphone: phone/ztphone.c comm/comm.h $(CORE_DEPS)
 	$(APP_BUILD) -Icomm -o $@ phone/ztphone.c $(CORE) $(APP_LIBS)
@@ -249,6 +257,10 @@ install: check-arch
 	install -Dm755 pods/ztpods /usr/local/bin/ztpods
 	install -Dm644 pods/ztpods.desktop /usr/local/share/applications/ztpods.desktop
 	install -Dm644 pods/ztpods.svg /usr/local/share/icons/hicolor/scalable/apps/ztpods.svg
+	install -Dm755 ntfy/ztos-ntfyd /usr/local/bin/ztos-ntfyd
+	install -Dm755 ntfy/ztntfy /usr/local/bin/ztntfy
+	install -Dm644 ntfy/ztntfy.desktop /usr/local/share/applications/ztntfy.desktop
+	install -Dm644 ntfy/ztntfy.svg /usr/local/share/icons/hicolor/scalable/apps/ztntfy.svg
 	install -Dm755 power/ztpower /usr/local/bin/ztpower
 	install -Dm755 osial/ztosial /usr/local/bin/ztosial
 	install -Dm644 osial/ztosial.desktop /usr/local/share/applications/ztosial.desktop
@@ -292,7 +304,7 @@ install: check-arch
 	install -Dm644 csf/ztoscoresensorframework.service /etc/systemd/system/ztoscoresensorframework.service
 
 clean:
-	rm -f pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
+	rm -f ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h
 
@@ -417,6 +429,18 @@ check-pods:
 .PHONY: check-podsd
 check-podsd: pods/ztos-podsd
 	python3 tests/podsd-e2e.py
+
+.PHONY: check-ntfy
+# ntfy's parsing and sanitising, with hostile input (no network, no bus, no libraries)
+check-ntfy:
+	$(CC) -std=c11 -g -Wall -Wextra -Werror -Wno-format-truncation -o /tmp/ztmetro-ntfy-test tests/ntfy-model.c
+	/tmp/ztmetro-ntfy-test
+
+# the daemon itself against a pretend server on loopback and a pretend notification service,
+# then the real ztnotifyd, on a private bus: touches no running session and no real server
+.PHONY: check-ntfyd
+check-ntfyd: ntfy/ztos-ntfyd ntfy/ztntfy notifyd/ztnotifyd
+	python3 tests/ntfyd-e2e.py
 
 .PHONY: check-power-key
 check-power-key:
