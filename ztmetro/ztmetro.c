@@ -9401,6 +9401,11 @@ static void tile_press(struct zt_server *server, int index, double x, double y) 
 
 /* The action centre's quick actions answer a finger the same way. `y` is in
  * the panel's own coordinates. */
+/* The action centre's tiles that do something else when held. */
+static bool quick_holds(int q) {
+	return q == Q_FLASHLIGHT || q == Q_BRIGHTNESS || q == Q_WIFI || q == Q_BLUETOOTH;
+}
+
 static void shade_tile_press(struct zt_server *server, int index, double x, double y) {
 	double tx, ty, tw, th;
 	shade_tile_rect(server, index, &tx, &ty, &tw, &th);
@@ -10085,14 +10090,19 @@ static int long_press_fired(void *data) {
         }
 		if (p->used && p->role == ROLE_SHADE && server->shade_open && !p->moved && !p->long_pressed &&
 				p->index >= 0 && p->index < 8 && now - p->down_ms >= LONG_PRESS_MS - 30 &&
-				(server->quick[p->index] == Q_FLASHLIGHT || server->quick[p->index] == Q_BRIGHTNESS)) {
+				quick_holds(server->quick[p->index])) {
 			int q = server->quick[p->index];
 			hap(server, HAP_HEAVY, HG_SYSTEM);
 			shade_tile_release(server, p->index);
 			server->shade_pressed = -1;
 			p->long_pressed = true;
 			p->role = ROLE_NONE;
-			level_modal_show(server, q == Q_BRIGHTNESS ? LEVEL_BRIGHT : LEVEL_TORCH);
+			if (q == Q_WIFI || q == Q_BLUETOOTH) {
+				shade_set_open(server, false);
+				launch(server, q == Q_WIFI ? "ztsettings wifi" : "ztsettings bluetooth");
+			} else {
+				level_modal_show(server, q == Q_BRIGHTNESS ? LEVEL_BRIGHT : LEVEL_TORCH);
+			}
 			continue;
 		}
 		if (p->used && p->role == ROLE_SHADE && !server->shade_open && !p->moved &&
@@ -12082,8 +12092,8 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		server->shade_pressed = p->index;
 		if (p->index >= 0 && p->index < 8) {
 			shade_tile_press(server, p->index, x, panel_y);
-			if (server->quick[p->index] == Q_FLASHLIGHT || server->quick[p->index] == Q_BRIGHTNESS) {
-				/* held: its modal */
+			if (quick_holds(server->quick[p->index])) {
+				/* held: its modal, or its page of Settings */
 				p->down_ms = now_ms();
 				wl_event_source_timer_update(server->long_press_timer, LONG_PRESS_MS);
 			}

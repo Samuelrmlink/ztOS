@@ -142,6 +142,7 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 | 7.16 | **Move the AirPods UI into a modal** reached from the same area as the audio sources modal (7.2). | M | Depends on 7.2 and 7.14. |
 | 7.17 | **Notification LED settings page.** Configure the front LED (`red/green/blue:status`, driver `leds/zrn-led.ko`): on/off and colour for charging, full and low battery (now fixed in `zrn-charge`), notifications, and whether the RapidBoost indicator runs (`zrnperfd` blinks it white at the top boost rung, which looks like a fault if you don't know). The two writers need one owner so they stop overwriting each other. | M | TODO |
 | 7.18 | **Auto-rotate.** Turn the screen to follow the phone, so fullscreen video can play in landscape (today it stays portrait and letterboxed). Needs an orientation source from the accelerometer, shell layout and touch mapping for each rotation, and apps resized to match. Possible first step: rotate only fullscreen apps, leaving the tiles and lock screen portrait. Bring back the Rotation Lock tile (see 7.13c), with a Settings switch. | L | TODO. The shell has no rotation today. Accelerometer data comes through the sensor hub, so it inherits the hub failure after a full power-off (section 2). |
+| 7.19 | **Fingerprint sensor: unlock, and a swipe to pull down the action centre**, as Android does. | L | Research under way: can Samsung's secure-world fingerprint code be used as a black box from Linux? Not started until that answers. |
 
 ### Building these in parallel
 
