@@ -36,6 +36,7 @@
 #include "retro/dm-chrome.h"
 #include "demoloop/stop-key.h"
 #include "power/power-key.h"
+#include "audio-sync.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -898,6 +899,7 @@ struct zt_server {
 	int ring_volume;
 	bool volume_is_media;
 	bool audio_active, audio_known;
+	uint32_t volume_key_ms;	/* when a key last moved the media volume */
 	int key_sound_fd;
 	bool osk_shift, osk_ctrl, osk_alt;
 	struct osk_key keys[MAX_KEYS];
@@ -9840,8 +9842,21 @@ static void perf_tell(const char *command) {
 	"pactl list sinks 2>/dev/null | awk -v d=\"$d\" '/^\\tName:/ { n = $2 } " \
 	"/^\\tDescription:/ { sub(/^\\tDescription: /, \"\"); print (n == d ? \"*\" : \"-\") \"|\" n \"|\" $0 }' " \
 	"> \"$f.new\" && mv \"$f.new\" \"$f\""
+/* ztos-audiod owns the volume of whichever device is active, and answers on the
+ * control pipe. False if it isn't there, so the caller can do without it. */
+static bool audio_tell(const char *line) {
+	struct sockaddr_un a = { .sun_family = AF_UNIX };
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	snprintf(a.sun_path, sizeof(a.sun_path), "%s/ztos-audio.sock", runtime ? runtime : "/tmp");
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) return false;
+	bool sent = sendto(fd, line, strlen(line), MSG_DONTWAIT, (struct sockaddr *)&a, sizeof(a)) >= 0;
+	close(fd);
+	return sent;
+}
+
 static void outputs_refresh(void) {
-	run_detached("sh", "-c", OUTPUTS_SH, NULL);
+	if (!audio_tell("refresh")) run_detached("sh", "-c", OUTPUTS_SH, NULL);
 }
 
 #define MAX_OUTPUTS 8
@@ -9879,9 +9894,12 @@ static void output_next(struct zt_server *server) {
 		if (out[i].current) cur = i;
 	}
 	const char *to = out[(cur + 1) % n].name;
-	run_detached("sh", "-c", "pactl set-default-sink \"$0\" && "
-		"pactl list short sink-inputs | cut -f1 | while read -r i; do pactl move-sink-input \"$i\" \"$0\"; done; "
-		OUTPUTS_SH, to);
+	char line[200];
+	snprintf(line, sizeof(line), "output '%s'", to);
+	/* Only the default moves: what follows it comes along, and an app sent to
+	 * its own output stays there. Node names have no quotes in them. */
+	if (strchr(to, '\'') || !audio_tell(line))
+		run_detached("sh", "-c", "pactl set-default-sink \"$0\"; " OUTPUTS_SH, to);
 	/* the file says so in a moment; the banner says so now */
 	char path[256];
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
@@ -10288,6 +10306,28 @@ static int volume_pip(void *data) {
     return 0;
 }
 
+/* ztos-audiod: the active output's volume, moved by its own buttons or because
+ * another output took over. external says to show it. */
+static void audio_volume_report(struct zt_server *server, int percent, bool external) {
+    uint32_t now = now_ms();
+    if (audio_sync_quiet(now, server->volume_key_ms))
+        return;
+    int level = audio_level_of_percent(percent, VOLUME_MAX);
+    bool moved = level != server->volume;
+    server->volume = level;
+    if (server->width <= 0 || !server->screen_on)
+        return;
+    if (external && moved) {
+        server->volume_is_media = true;
+        draw_volume(server);
+        animate(server, &server->volume_y, 0.0f, 140, 0, false);
+        wl_event_source_timer_update(server->volume_timer, server->media ? 4000 : 2000);
+    } else if (server->volume_y > -10.0f) {
+        draw_volume(server);
+        damage(server);
+    }
+}
+
 static void volume_step(struct zt_server *server, int by) {
     /* the stream is chosen on the first press; repeats keep it */
     if (!server->volume_repeat_by)
@@ -10303,8 +10343,12 @@ static void volume_step(struct zt_server *server, int by) {
     wl_event_source_timer_update(server->volume_timer, server->media ? 4000 : 2000);
     if (server->volume_is_media) {
         char percent[16];
-        snprintf(percent, sizeof(percent), "%d%%", *level * 100 / VOLUME_MAX);
-        run_detached("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", percent);
+        snprintf(percent, sizeof(percent), "%d%%", audio_percent_of_level(*level, VOLUME_MAX));
+        char line[32];
+        snprintf(line, sizeof(line), "volume %d", audio_percent_of_level(*level, VOLUME_MAX));
+        server->volume_key_ms = now_ms();
+        if (!audio_tell(line))
+            run_detached("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", percent);
     }
     hap(server, !server->volume_is_media && previous > 0 && *level == 0 ? HAP_TAP : HAP_TICK, HG_SYSTEM);
     if (!server->volume_is_media && *level != previous) {
@@ -12214,6 +12258,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (sscanf(line, "audio-active %d", &id) == 1) {
 		server->audio_active = id != 0;
 		server->audio_known = true;
+	} else if (sscanf(line, "audio-volume %d %lf", &id, &x) == 2) {
+		audio_volume_report(server, id, x != 0);
 	} else if (strncmp(line, "media ", 6) == 0) {
 		/* media STATE|TITLE|ARTIST|PLAYER, or media none (ztnotifyd) */
 		char *f[4] = { line + 6, "", "", "" };
@@ -14663,11 +14709,8 @@ int main(int argc, char *argv[]) {
     auth_init(&server);
     run_detached("ztos-polkit-agent", NULL, NULL, NULL);
 	run_detached("/usr/local/bin/ztos-sounds", NULL, NULL, NULL);
-	{
-		char percent[16];
-		snprintf(percent, sizeof(percent), "%d%%", server.volume * 100 / VOLUME_MAX);
-		run_detached("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", percent);
-	}
+	/* WirePlumber keeps each device's own volume: ask what it is, don't impose one */
+	audio_tell("hello");
 	{
 		/* zrnperfd puts the shell first in line for the CPU (see there) */
 		char line[32];
