@@ -56,6 +56,18 @@ struct zmc_hit {
 	int percent;	/* a slider: where its thumb is drawn */
 };
 
+/* One tab of a pivot (zmc_pivot_wheel). The title stays as given: a literal. */
+#define ZMC_MAX_TABS 8
+struct zmc_tab {
+	const char *title;
+	int page;
+};
+struct zmc_wheel {
+	int n, at;		/* how many tabs, and which is in front */
+	struct zmc_tab tabs[ZMC_MAX_TABS];
+	double w[ZMC_MAX_TABS];	/* how wide each title is drawn */
+};
+
 struct zmc_app {
 	const char *app_id, *title;
 	const char *caps;	/* the small line over every page's title */
@@ -178,22 +190,24 @@ struct zmc_state {
 	int slider_permille;	/* where the finger is, in tenths of a percent */
 
 	/* a pivot: its tabs slide sideways, under the finger or on their own */
+	bool tabs_loop;		/* tabs go round: on unless a setting says not, for every app */
 	bool pivot_set;		/* the page in front is one tab of a pivot */
-	int pivot_page;		/* and the other tab */
-	const char *pivot_after;	/* more than two tabs: the title after the next one */
-	double pivot_next_dx;	/* where the next tab's title is, from this one's */
+	struct zmc_wheel wheel;	/* and those are its tabs, going round */
 	int axis;		/* a moving finger: 0 undecided, 1 across, 2 along the list */
 	bool swiping, spring, slide_active;
 	double swipe_dx, vel_x, last_x;
-	/* both tabs drawn ahead, while nothing moves, at the moving scale and
-	 * with nothing behind them, and where their rows are */
-	cairo_surface_t *piv_cur, *piv_other;
-	struct zmc_rowset piv_cur_rows, piv_other_rows;
-	bool piv_ready;
+	/* this tab and the ones either side, drawn ahead while nothing moves, at the
+	 * moving scale and with nothing behind them. Of two tabs, piv_next is the
+	 * other one, whichever way the finger goes, and piv_prev stays empty. */
+	cairo_surface_t *piv_cur, *piv_next, *piv_prev;
+	bool piv_stale;		/* the app has redrawn since those either side were drawn */
+	uint32_t piv_refreshed;	/* when they last were, for that reason */
 	double piv_scroll;
+	bool swipe_caught;	/* this finger took the tabs in flight: see touch_up */
+	double swipe_catch_x;
 	double slide_d0, slide_dx, spring_dx0;
 	int slide_dir;
-	double slide_target, slide_v, swipe_grab, piv_other_next_dx;
+	double slide_target, slide_v, swipe_grab;
 	uint32_t slide_last;
 	uint32_t slide_start, spring_start;
 
@@ -226,10 +240,11 @@ void zmc_every(int ms, void (*tick)(void));
 
 /* ---- drawing a page ---- */
 double zmc_header(cairo_t *cr, const char *title);	/* returns where the content starts */
-double zmc_pivot(cairo_t *cr, const char *title, const char *next);
-void zmc_pivot_changed(void);	/* from arrived(), with more than two tabs */
-/* the same, with the next tab's title a thing to tap: it gives (action, arg) */
-double zmc_pivot_next(cairo_t *cr, const char *title, const char *next, int action, int arg);
+/* A page's title and its tabs, all of them in order, the same on each of them; `page`
+ * is the tab being drawn. A swipe either way goes one tab that way, and past either
+ * end round to the other (zmc.tabs_loop; off, it settles back there). */
+double zmc_pivot_wheel(cairo_t *cr, const struct zmc_tab *tabs, int count, int page);
+void zmc_pivot_changed(void);	/* what the other tabs show has changed: draw them again when idle */
 double zmc_entry(cairo_t *cr, double y, const char *title, const char *detail, int action, int arg);
 /* a title with On/Off under it and a switch on the right; returns the next y */
 double zmc_switch(cairo_t *cr, double y, const char *title, bool on, int action);

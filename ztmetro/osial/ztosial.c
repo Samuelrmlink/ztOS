@@ -367,8 +367,13 @@ static double draw_down(cairo_t *cr, double y) {
 		job.pid > 0 ? 0 : ACT_RESTART, 0) + 10;
 }
 
+static double tab_header(cairo_t *cr, int tab) {
+	static const struct zmc_tab tabs[] = { { "interfaces", PAGE_INTERFACES }, { "device", PAGE_DEVICE } };
+	return zmc_pivot_wheel(cr, tabs, 2, tab);
+}
+
 static double draw_interfaces(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "interfaces", "device", ACT_OPEN, PAGE_DEVICE);
+	double y = tab_header(cr, PAGE_INTERFACES);
 	if (!loaded) {
 		return note(cr, y, "asking ztOSIAL", 13.5) + 30;
 	}
@@ -416,7 +421,7 @@ static double draw_interfaces(cairo_t *cr) {
 }
 
 static double draw_device(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "device", "interfaces", ACT_OPEN, PAGE_INTERFACES);
+	double y = tab_header(cr, PAGE_DEVICE);
 	if (!loaded) {
 		return note(cr, y, "asking ztOSIAL", 13.5) + 30;
 	}

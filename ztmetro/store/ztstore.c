@@ -623,8 +623,13 @@ static struct pkg *spotlight(int *from) {
 	return NULL;
 }
 
+static double tab_header(cairo_t *cr, int tab) {
+	static const struct zmc_tab tabs[] = { { "top", P_TOP }, { "categories", P_CATS }, { "installed", P_INSTALLED } };
+	return zmc_pivot_wheel(cr, tabs, 3, tab);
+}
+
 static double draw_top(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "top", "categories", ZMC_ACT_PIVOT, P_CATS);
+	double y = tab_header(cr, P_TOP);
 	y = zmc_textbox(cr, y - 8, "search your repos and the AUR", "", false, ACT_SEARCHBOX, 0);
 	if (load_note[0]) {
 		y = note(cr, y, load_note);
@@ -705,7 +710,7 @@ static double draw_top(cairo_t *cr) {
 }
 
 static double draw_cats(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "categories", "installed", ZMC_ACT_PIVOT, P_INSTALLED);
+	double y = tab_header(cr, P_CATS);
 	y = heading(cr, y, "apps", n_apps ? "AppStream categories · your repos" : NULL);
 	if (!cats.n) {
 		y = note(cr, y, loading ? "Reading your repos…" :
@@ -740,7 +745,7 @@ static double draw_cats(cairo_t *cr) {
 }
 
 static double draw_installed(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "installed", "top", ZMC_ACT_PIVOT, P_TOP);
+	double y = tab_header(cr, P_INSTALLED);
 	/* the system's updates come from ztos-update: Arch updates everything at
 	 * once, never one package on its own */
 	y = heading(cr, y, "updates", "your repos, through the system updater");

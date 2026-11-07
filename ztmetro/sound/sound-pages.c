@@ -97,17 +97,14 @@ static bool paired;
 static int page_of(int tab) { return first_page + tab; }
 static int tab_of(int page) { return page - first_page; }
 
-static int next_tab(int tab) {
-	if (paired) return tab == P_EQ ? P_FX : tab == P_FX ? P_EQ : tab == P_OUT ? P_APPS : P_OUT;
-	return (tab + 1) % 4;
-}
-
 static const char *const TAB[] = { "equalizer", "effects", "output", "apps" };
 
 static double tab_header(cairo_t *cr, int tab) {
-	int next = next_tab(tab);
-	zmc.pivot_after = paired ? NULL : TAB[next_tab(next)];
-	return zmc_pivot_next(cr, TAB[tab], TAB[next], A_OPEN, page_of(next));
+	/* all four; or two by two: equalizer with effects, output with apps */
+	int first = paired ? tab / 2 * 2 : 0, count = paired ? 2 : 4;
+	struct zmc_tab tabs[4];
+	for (int i = 0; i < count; i++) tabs[i] = (struct zmc_tab){ TAB[first + i], page_of(first + i) };
+	return zmc_pivot_wheel(cr, tabs, count, page_of(tab));
 }
 
 static int open_picker;
@@ -1164,7 +1161,6 @@ static void tick(void) {
 
 void sound_arrived(int page) {
 	AA.page = tab_of(page);
-	if (!paired) zmc_pivot_changed();	/* four tabs going round: the one just left is not the next */
 	zmc_every(500, tick);
 }
 

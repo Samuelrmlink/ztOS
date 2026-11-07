@@ -468,10 +468,15 @@ static void refresh_all(void) {
 	drain_changed = load_drain();
 }
 
+static double tab_header(cairo_t *cr, int tab) {
+	static const struct zmc_tab tabs[] = { { "sleep", PAGE_SLEEP }, { "drain", PAGE_DRAIN }, { "history", PAGE_HISTORY } };
+	return zmc_pivot_wheel(cr, tabs, 3, tab);
+}
+
 /* -------------------------------------------------------- Page 0: Sleep */
 
 static double draw_page_sleep(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "sleep", "drain", ACT_TAB, PAGE_DRAIN);
+	double y = tab_header(cr, PAGE_SLEEP);
 
 	bool charging = (strcmp(pdata.status, "Charging") == 0 || pdata.charger_online);
 
@@ -613,7 +618,7 @@ static void clock_label(time_t t, char *out, size_t sz) {
 }
 
 static double draw_page_drain(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "drain", "history", ACT_TAB, PAGE_HISTORY);
+	double y = tab_header(cr, PAGE_DRAIN);
 	double w = zmc.width - 2 * ZMC_MARGIN;
 
 	if (drain.n < 2) {
@@ -747,7 +752,7 @@ static double draw_page_drain(cairo_t *cr) {
 /* ------------------------------------------------------ Page 1: History */
 
 static double draw_page_history(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "history", "sleep", ACT_TAB, PAGE_SLEEP);
+	double y = tab_header(cr, PAGE_HISTORY);
 
 	cairo_set_source_rgb(cr, 0.55, 0.55, 0.55);
 	zmc_text(cr, "SLEEP & WAKE LOG (NEWEST FIRST)", FONT_SEMIBOLD, 11.5, ZMC_MARGIN, y, 0);

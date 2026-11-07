@@ -72,7 +72,7 @@
 #define ANIM_SCALE	(zmg_ready() ? zmc.scale : 2)	/* GLES keeps native resolution */
 #define MAX_SOURCES	40	/* an app with an engine of its own (WebKit) hands its GLib fds in here */
 
-struct zmc_state zmc = { .scale = 4, .width = 360, .height = 640, .running = true,
+struct zmc_state zmc = { .tabs_loop = true, .scale = 4, .width = 360, .height = 640, .running = true,
 	.accent = 0x0050ef, .entrance_rate = 1.0 };
 
 static struct {
@@ -155,10 +155,11 @@ static bool board_touch_up(int32_t id);
 static void board_touch_cancel(void);
 static void board_paint(cairo_t *cr);
 static void back_forget(void);
+static void pivot_drop_all(void);
+static bool wheel_has(long k);
 static bool drawing_page_in_front;	/* a page being drawn is the one in front, not a picture of another */
 static void marquee_title(const char *title);
-static cairo_surface_t *pivot_snapshot(int page, double scroll, int scale, struct zmc_rowset *rows,
-		double *its_next_dx);
+static cairo_surface_t *pivot_snapshot(int page, double scroll, int scale, struct zmc_rowset *rows);
 /* The shell plays it, if the user has that kind of touch switched on: one
  * line down its control pipe, never waited for. */
 void zmc_haptic(const char *kind) {
@@ -498,8 +499,53 @@ static int pivot_title_width(cairo_t *cr, const char *text) {
 	return w;
 }
 
-double zmc_pivot_next(cairo_t *cr, const char *title, const char *next, int action, int arg) {
-	if (dotmatrix() && !next) {
+/* The title, and the tabs after it in grey, running off the edge. */
+double zmc_pivot_wheel(cairo_t *cr, const struct zmc_tab *tabs, int count, int page) {
+	struct zmc_wheel *wh = &zmc.wheel;
+	count = count > ZMC_MAX_TABS ? ZMC_MAX_TABS : count;
+	bool same = wh->n == count;
+	for (int i = 0; same && i < count; i++) {
+		same = wh->tabs[i].page == tabs[i].page && wh->tabs[i].title == tabs[i].title;
+	}
+	if (!same) {
+		wh->n = count;
+		for (int i = 0; i < count; i++) {
+			wh->tabs[i] = tabs[i];
+			wh->w[i] = pivot_title_width(cr, tabs[i].title);
+		}
+	}
+	wh->at = 0;
+	for (int i = 0; i < count; i++) {
+		if (tabs[i].page == page) wh->at = i;
+	}
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_text(cr, zmc.app->caps, FONT_SEMIBOLD, 11.5, MARGIN, 14, 0);
+	zmc_text(cr, tabs[wh->at].title, FONT_SEMILIGHT, 48, MARGIN - 3, 24, 0);
+	if (drawing_page_in_front) {
+		marquee_title("");	/* it runs off the edge on purpose */
+	}
+	/* The tabs go round, at rest as they do while they move: two short titles
+	 * would otherwise show a third that was not there a moment ago. */
+	cairo_set_source_rgb(cr, 0.38, 0.38, 0.38);
+	double x = MARGIN - 3 + wh->w[wh->at] + 16;
+	for (int k = 1; x < zmc.width && wheel_has(k); k++) {
+		int i = (wh->at + k) % count;
+		zmc_text(cr, tabs[i].title, FONT_SEMILIGHT, 48, x, 24, 0);
+		x += wh->w[i] + 16;
+	}
+	/* the next tab, to its right edge of the screen: before the title's own hit,
+	 * which would otherwise take the tap. It slides across, as a swipe would. */
+	double w = wh->w[wh->at];
+	if (wheel_has(1)) {
+		zmc_add_hit(MARGIN + w + 8, 0, zmc.width - (MARGIN + w + 8), 90, ZMC_ACT_PIVOT, 0);
+	}
+	zmc.pivot_set = true;
+	zmc_add_hit(0, 0, zmc.width, 90, ZMC_ACT_BACK, 0);
+	return 108;
+}
+
+double zmc_header(cairo_t *cr, const char *title) {
+	if (dotmatrix()) {
 		/* the app's name small and dim, the page's title in the dot font */
 		dm_cairo_text(cr, zmc.app->caps, MARGIN, 12, 2.2, zmc.dm_main, DM_DIM_ALPHA, 0);
 		double pitch = 5;
@@ -515,38 +561,10 @@ double zmc_pivot_next(cairo_t *cr, const char *title, const char *next, int acti
 	zmc_text(cr, zmc.app->caps, FONT_SEMIBOLD, 11.5, MARGIN, 14, 0);
 	zmc_text(cr, title, FONT_SEMILIGHT, 48, MARGIN - 3, 24, 0);
 	if (drawing_page_in_front) {
-		marquee_title(next ? "" : title);
-	}
-	if (next) {
-		int w = pivot_title_width(cr, title);
-		cairo_set_source_rgb(cr, 0.38, 0.38, 0.38);
-		zmc_text(cr, next, FONT_SEMILIGHT, 48, MARGIN - 3 + w + 16, 24, 0);
-		/* The tabs go round: after the next title comes this one again, as it
-		 * does while the tabs move. Drawn at rest too, or two short titles
-		 * show a third one that was not there a moment ago, popping in at the
-		 * edge as soon as a finger moves them. */
-		zmc_text(cr, zmc.pivot_after ? zmc.pivot_after : title, FONT_SEMILIGHT, 48,
-			MARGIN - 3 + w + 16 + pivot_title_width(cr, next) + 16, 24, 0);
-		if (action) {
-			/* the next tab, to its right edge of the screen: before the
-			 * title's own hit, which would otherwise take the tap. It
-			 * slides across, as a swipe would. */
-			zmc_add_hit(MARGIN + w + 8, 0, zmc.width - (MARGIN + w + 8), 90, ZMC_ACT_PIVOT, arg);
-			zmc.pivot_set = true;
-			zmc.pivot_page = arg;
-			zmc.pivot_next_dx = w + 16;
-		}
+		marquee_title(title);
 	}
 	zmc_add_hit(0, 0, zmc.width, 90, ZMC_ACT_BACK, 0);
 	return 108;
-}
-
-double zmc_pivot(cairo_t *cr, const char *title, const char *next) {
-	return zmc_pivot_next(cr, title, next, 0, 0);
-}
-
-double zmc_header(cairo_t *cr, const char *title) {
-	return zmc_pivot(cr, title, NULL);
 }
 
 /*
@@ -1352,8 +1370,7 @@ static void cache_ensure(int scale);
 static cairo_surface_t *cache_snapshot(int scale) {
 	if (vl.active && !vl_frozen && (zmc.scroll != 0 || vl.cache_rows == 0)) {
 		struct zmc_rowset rows;
-		double next_dx;
-		return pivot_snapshot(zmc.page, zmc.scroll, scale, &rows, &next_dx);
+		return pivot_snapshot(zmc.page, zmc.scroll, scale, &rows);
 	}
 	cache_ensure(zmc.scale);
 	cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24,
@@ -1950,14 +1967,12 @@ static void draw_press(cairo_t *cr, int scale) {
 /* A page drawn whole with nothing behind it (so that two can lie over each
  * other), at `scale`, scrolled by `scroll`; its rows into `rows`. What the
  * page in front has registered (its hits, its pivot) is left as it was. */
-static cairo_surface_t *pivot_snapshot(int page, double scroll, int scale, struct zmc_rowset *rows,
-		double *its_next_dx) {
+static cairo_surface_t *pivot_snapshot(int page, double scroll, int scale, struct zmc_rowset *rows) {
 	static struct zmc_hit saved[MAX_HITS];
 	int n = zmc.n_hits;
 	memcpy(saved, zmc.hits, sizeof(saved[0]) * (size_t)n);
 	bool set = zmc.pivot_set;
-	int other = zmc.pivot_page;
-	double next_dx = zmc.pivot_next_dx;
+	struct zmc_wheel wheel = zmc.wheel;
 	zmc_list_lock(true);
 	static __typeof__(vl) vl_kept;
 	double window_kept = vl_window;
@@ -1986,67 +2001,215 @@ static cairo_surface_t *pivot_snapshot(int page, double scroll, int scale, struc
 	vl_skip = false;
 	cairo_destroy(cr);
 	collect_rows(rows, scroll, -1, false);
-	*its_next_dx = zmc.pivot_next_dx;
 	vl = vl_kept;
 	vl_window = window_kept;
 	zmc_list_lock(false);
 	memcpy(zmc.hits, saved, sizeof(saved[0]) * (size_t)n);
 	zmc.n_hits = n;
 	zmc.pivot_set = set;
-	zmc.pivot_page = other;
-	zmc.pivot_next_dx = next_dx;
+	zmc.wheel = wheel;
 	return surface;
 }
 
-/* An app with more than two tabs: the tab just left is not the next one. Called
- * from arrived(); the next tab's picture is drawn again when idle. */
-void zmc_pivot_changed(void) {
-	if (zmc.piv_other) {
-		cairo_surface_destroy(zmc.piv_other);
-		zmc.piv_other = NULL;
-	}
-	zmc.piv_ready = false;
+/* ---- the wheel: where each tab is, going round ---- */
+/* Is there a tab k along from this one? This is the only place that says whether the
+ * tabs go round (zmc.tabs_loop): off, a swipe past the first or the last tab settles
+ * back, and the strip ends there. */
+static bool wheel_has(long k) {
+	if (zmc.tabs_loop) return true;
+	long at = zmc.wheel.at + k;
+	return at >= 0 && at < zmc.wheel.n;
 }
+
+static int wheel_wrap(long k) {
+	int n = zmc.wheel.n;
+	return n ? (int)(((zmc.wheel.at + k) % n + n) % n) : 0;
+}
+
+/* How far along the strip tab k's title is, from this tab's: each is its title's width
+ * and a gap after the one before, to the right and to the left alike. */
+static double wheel_pos(long k) {
+	double x = 0;
+	for (long i = 0; i < k; i++) x += zmc.wheel.w[wheel_wrap(i)] + 16;
+	for (long i = -1; i >= k; i--) x -= zmc.wheel.w[wheel_wrap(i)] + 16;
+	return x;
+}
+
+/* All the titles of the wheel, each whole, in a row of its own of one picture, made
+ * once. The strip used to be cut from the tabs' own screen-wide pictures, whose
+ * headers end at the screen's edge: a title that ran off there was cut in the middle
+ * when it moved in, with nothing after it. */
+#define WHEEL_ROW_H	(HEADER_H - CAPS_H)
+static cairo_surface_t *wheel_titles;
+static char wheel_titles_of[ZMC_MAX_TABS * 48];
+
+static void wheel_titles_ensure(void) {
+	char of[sizeof(wheel_titles_of)] = "";
+	double wide = 0;
+	for (int i = 0; i < zmc.wheel.n; i++) {
+		size_t at = strlen(of);
+		snprintf(of + at, sizeof(of) - at, "%s\n", zmc.wheel.tabs[i].title);
+		wide = zmc.wheel.w[i] > wide ? zmc.wheel.w[i] : wide;
+	}
+	if (wheel_titles && strcmp(of, wheel_titles_of) == 0) {
+		return;
+	}
+	if (wheel_titles) {
+		zmg_forget(wheel_titles);
+		cairo_surface_destroy(wheel_titles);
+	}
+	snprintf(wheel_titles_of, sizeof(wheel_titles_of), "%s", of);
+	int s = zmc.scale;
+	wheel_titles = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)ceil(wide + 6) * s, zmc.wheel.n * WHEEL_ROW_H * s);
+	cairo_t *cr = cairo_create(wheel_titles);
+	cairo_scale(cr, s, s);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	for (int i = 0; i < zmc.wheel.n; i++) {
+		cairo_save(cr);
+		cairo_rectangle(cr, 0, i * WHEEL_ROW_H, wide + 6, WHEEL_ROW_H);
+		cairo_clip(cr);
+		/* (where the header has it: 24 down, and the strip starts at CAPS_H) */
+		zmc_text(cr, zmc.wheel.tabs[i].title, FONT_SEMILIGHT, 48, 0, i * WHEEL_ROW_H + 24 - CAPS_H, 0);
+		cairo_restore(cr);
+	}
+	cairo_destroy(cr);
+	cairo_surface_flush(wheel_titles);
+}
+
+/* Title i of the wheel, with its left at x on the screen. */
+static void wheel_title_draw(cairo_t *cr, int i, double x, double alpha, int scale) {
+	double w = zmc.wheel.w[i] + 6, s = zmc.scale;
+	double x0 = x > 0 ? x : 0, x1 = x + w < zmc.width ? x + w : zmc.width;
+	if (x1 <= x0 || alpha <= 0.01) {
+		return;
+	}
+	if (!cr) {
+		gpu_surface_rect(wheel_titles, (x0 - x) * s, i * WHEEL_ROW_H * s, (x1 - x) * s, (i + 1) * WHEEL_ROW_H * s,
+			x0, CAPS_H, x1, HEADER_H, alpha);
+		return;
+	}
+	cairo_save(cr);
+	cairo_rectangle(cr, lround(x0 * scale), CAPS_H * scale, lround(x1 * scale) - lround(x0 * scale), WHEEL_ROW_H * scale);
+	cairo_clip(cr);
+	cairo_translate(cr, x * scale, (CAPS_H - i * WHEEL_ROW_H) * scale);
+	cairo_scale(cr, scale / s, scale / s);
+	cairo_set_source_surface(cr, wheel_titles, 0, 0);
+	cairo_paint_with_alpha(cr, alpha);
+	cairo_restore(cr);
+}
+
+/* ---- the tabs' pictures ---- */
+static void picture_drop(cairo_surface_t **s) {
+	if (*s) {
+		cairo_surface_destroy(*s);	/* (the GPU's copy goes with its last holder) */
+		*s = NULL;
+	}
+}
+
+/* What the other tabs show has changed. */
+void zmc_pivot_changed(void) {
+	picture_drop(&zmc.piv_next);
+	picture_drop(&zmc.piv_prev);
+	zmc.piv_stale = false;
+}
+
+/* The pictures do not outlive the tabs they are of: a page turn leaves the wheel, and
+ * the next wheel may have other tabs on the same pages. */
+static void pivot_drop_all(void) {
+	picture_drop(&zmc.piv_cur);
+	zmc_pivot_changed();
+}
+
+/* The page in front has changed. So may the others have, a little; but apps redraw
+ * every second or so, and a picture of every tab each time was most of what such an
+ * app did. Those either side are drawn again at most every PIVOT_REFRESH_MS, and at
+ * once when a finger is about to show one (pivot_begin). */
+#define PIVOT_REFRESH_MS 2000
 
 static void pivot_forget(void) {
-	if (zmc.piv_cur) {
-		cairo_surface_destroy(zmc.piv_cur);
-	}
-	if (zmc.piv_other) {
-		cairo_surface_destroy(zmc.piv_other);
-	}
-	zmc.piv_cur = zmc.piv_other = NULL;
-	zmc.piv_ready = false;
+	picture_drop(&zmc.piv_cur);
+	zmc.piv_stale = zmc.piv_next || zmc.piv_prev;
 }
 
-/* Both tabs, ready to move. Done while the app is idle (see zmc_run), so that
- * a swipe starts without a pause; at a swipe's start only what has changed. */
+static bool pivot_may_prepare(void) {
+	return zmc.pivot_set && zmc.configured && !zmc.touching && !zmc.anim_active && !zmc.fling &&
+		!zmc.slide_active && !zmc.spring && !zmc.swiping;
+}
+
+/* Is the picture of the tab that way wanted, and not there? */
+static bool pivot_lacks(int dir) {
+	return wheel_has(dir) && !(dir > 0 || zmc.wheel.n <= 2 ? zmc.piv_next : zmc.piv_prev);
+}
+
+static bool pivot_missing(void) {
+	return !wheel_titles || !zmc.piv_cur || zmc.piv_scroll != zmc.scroll || pivot_lacks(1) || pivot_lacks(-1);
+}
+
+/* When idle, how long until there is something to do; -1: nothing is coming. */
+static int pivot_idle_wait(void) {
+	if (!pivot_may_prepare()) return -1;
+	if (pivot_missing()) return 150;
+	if (!zmc.piv_stale) return -1;
+	int left = PIVOT_REFRESH_MS - (int)(now_ms() - zmc.piv_refreshed);
+	return left < 150 ? 150 : left;
+}
+
+static bool pivot_wants_prepare(void) {
+	return pivot_may_prepare() && (pivot_missing() ||
+		(zmc.piv_stale && (int)(now_ms() - zmc.piv_refreshed) >= PIVOT_REFRESH_MS));
+}
+
+static void pivot_cur_ensure(void) {
+	if (!zmc.piv_cur || zmc.piv_scroll != zmc.scroll) {
+		picture_drop(&zmc.piv_cur);
+		zmc.piv_cur = cache_snapshot(ANIM_SCALE);	/* from what is on the screen */
+		zmc.piv_scroll = zmc.scroll;
+	}
+}
+
+/* The picture of the tab that way: drawn now if it is not ready. */
+static cairo_surface_t *pivot_neighbour(int dir) {
+	bool two = zmc.wheel.n <= 2;
+	cairo_surface_t **pic = dir > 0 || two ? &zmc.piv_next : &zmc.piv_prev;
+	if (!*pic) {
+		struct zmc_rowset rows;
+		*pic = pivot_snapshot(zmc.wheel.tabs[wheel_wrap(two ? 1 : dir)].page, 0, ANIM_SCALE, &rows);
+	}
+	return *pic;
+}
+
+/* One thing at a time, while the app is idle (see zmc_run), so that a swipe starts
+ * without a pause and a finger never waits for more than one of them. */
 static void pivot_prepare(void) {
 	if (!zmc.pivot_set) {
 		return;
 	}
-	if (zmc.piv_ready && zmc.piv_scroll == zmc.scroll) {
+	if (!wheel_titles) {
+		wheel_titles_ensure();
 		return;
 	}
-	if (zmc.piv_cur) {
-		cairo_surface_destroy(zmc.piv_cur);
+	wheel_titles_ensure();	/* (the same ones, or another wheel's) */
+	if (!zmc.piv_cur || zmc.piv_scroll != zmc.scroll) {
+		pivot_cur_ensure();
+		zmg_prepare(zmc.piv_cur, 0);
+	} else if (pivot_lacks(1)) {
+		zmg_prepare(pivot_neighbour(1), 0);
+	} else if (pivot_lacks(-1)) {
+		zmg_prepare(pivot_neighbour(-1), 0);
+	} else if (zmc.piv_stale) {
+		zmc_pivot_changed();
+		zmc.piv_refreshed = now_ms();
 	}
-	zmc.piv_cur = cache_snapshot(ANIM_SCALE);	/* from what is on the screen */
-	zmc.piv_cur_rows.n = 0;
-	zmc.piv_scroll = zmc.scroll;
-	if (!zmc.piv_other) {
-		zmc.piv_other = pivot_snapshot(zmc.pivot_page, 0, ANIM_SCALE, &zmc.piv_other_rows,
-			&zmc.piv_other_next_dx);
-	}
-	zmc.piv_ready = true;
-	zmg_prepare(zmc.piv_cur, 0);
-	zmg_prepare(zmc.piv_other, 0);
 }
 
-static bool pivot_wants_prepare(void) {
-	return zmc.pivot_set && zmc.configured && !zmc.touching && !zmc.anim_active && !zmc.fling &&
-		!zmc.slide_active && !zmc.spring && !zmc.swiping &&
-		(!zmc.piv_ready || zmc.piv_scroll != zmc.scroll);
+/* A finger is about to move the tabs: what it will see is what opens. */
+static void pivot_begin(void) {
+	wheel_titles_ensure();
+	pivot_cur_ensure();
+	if (zmc.piv_stale) {
+		zmc_pivot_changed();
+		zmc.piv_refreshed = now_ms();
+	}
 }
 
 /* The page a forward turn left, drawn again while the new page is idle, and
@@ -2071,9 +2234,8 @@ static bool back_wants_prepare(void) {
 }
 
 static void back_prepare(void) {
-	double next_dx;
 	back_surface = pivot_snapshot(back_page, back_page < LIST_PAGES ? vl_saved[back_page] : 0, ANIM_SCALE,
-		&back_rows, &next_dx);
+		&back_rows);
 	for (int i = 0; i < back_rows.n; i++) {
 		back_rows.rows[i].order = back_rows.n - 1 - back_rows.rows[i].order;	/* it will turn back */
 	}
@@ -2112,11 +2274,17 @@ static void band(cairo_t *cr, cairo_surface_t *src, double y0, double y1, double
 	band_x(cr, src, y0, y1, 0, zmc.width, dx, src_dy, alpha, scale);
 }
 
+static int pivot_frames;
+static uint32_t pivot_last, pivot_worst;
+
 /* Let the tabs go: from where they are, at `v` points per ms, to `target`
  * (0: back; minus the screen's width: the next tab; plus: the one before). */
 static void pivot_go(double target, double v) {
-	pivot_prepare();
+	pivot_begin();
+	pivot_frames = 0;
+	pivot_worst = 0;
 	zmc.swiping = false;
+	zmc.swipe_caught = false;
 	zmc.spring = false;
 	zmc.slide_active = true;
 	zmc.slide_target = target;
@@ -2126,40 +2294,42 @@ static void pivot_go(double target, double v) {
 	present();
 }
 
-static int pivot_frames;
-static uint32_t pivot_last, pivot_worst;
 
 
-/* The slide is over (or cut short): the other tab is the page in front. */
-static void pivot_done(void) {
+/* Tab `dir` along is the page in front now. Its picture is already drawn, and the one
+ * left is the next one's neighbour the other way: going on one tab draws one page,
+ * and of three tabs, once they are all drawn, none. */
+static void pivot_land(int dir) {
 	zmg_report(zmc.app->app_id);
 	uint32_t ms = now_ms() - zmc.slide_start;
 	if (zmc_perflog()) fprintf(stderr, "%s: tab slide, %d frames in %u ms (%.1f ms each, worst %u)\n", zmc.app->app_id,
 		pivot_frames, ms, pivot_frames > 1 ? (double)ms / pivot_frames : 0.0, pivot_worst);
-	pivot_frames = 0;
-	pivot_worst = 0;
-	zmc.slide_active = false;
-	/* the two tabs change places: what was the other is in front, and the
-	 * one left is now the other, ready for the next swipe straight away */
-	int left = zmc.page;
-	zmc.page = zmc.pivot_page;
-	zmc.pivot_page = left;
-	double next_dx = zmc.pivot_next_dx;
-	zmc.pivot_next_dx = zmc.piv_other_next_dx;
-	zmc.piv_other_next_dx = next_dx;
-	cairo_surface_t *surface = zmc.piv_cur;
-	zmc.piv_cur = zmc.piv_other;
-	zmc.piv_other = surface;
-	struct zmc_rowset rows = zmc.piv_cur_rows;
-	zmc.piv_cur_rows = zmc.piv_other_rows;
-	zmc.piv_other_rows = rows;
-	if (zmc.piv_scroll != 0 && zmc.piv_other) {
-		cairo_surface_destroy(zmc.piv_other);	/* it was scrolled: drawn again when idle */
-		zmc.piv_other = NULL;
+	cairo_surface_t *left = zmc.piv_cur;
+	if (zmc.piv_scroll != 0) {
+		picture_drop(&left);	/* it was scrolled, and it opens at the top */
+	}
+	if (zmc.wheel.n <= 2) {
+		zmc.piv_cur = zmc.piv_next;
+		zmc.piv_next = left;
+	} else {
+		cairo_surface_t **ahead = dir > 0 ? &zmc.piv_next : &zmc.piv_prev;
+		cairo_surface_t **behind = dir > 0 ? &zmc.piv_prev : &zmc.piv_next;
+		cairo_surface_t *far = *behind;
+		zmc.piv_cur = *ahead;
+		*behind = left;
+		if (zmc.wheel.n == 3) {
+			*ahead = far;	/* the same tab, round the other way */
+		} else {
+			*ahead = NULL;
+			picture_drop(&far);
+		}
+	}
+	zmc.wheel.at = wheel_wrap(dir);
+	zmc.page = zmc.wheel.tabs[zmc.wheel.at].page;
+	if (zmc.piv_stale) {
+		pivot_drop_all();
 	}
 	zmc.piv_scroll = 0;
-	zmc.piv_ready = zmc.piv_cur && zmc.piv_other;
-	zmc.swipe_dx = 0;
 	zmc.scroll = 0;
 	zmc.vel = 0;
 	zmc.fling = false;
@@ -2169,19 +2339,11 @@ static void pivot_done(void) {
 	}
 }
 
-/* Where tab k's title is along the strip: a after this one, b after the
- * other, in turn. */
-static double pivot_title_at(long k, double a, double b) {
-	long q = k >= 0 ? k / 2 : -((-k + 1) / 2);
-	long r = k - 2 * q;
-	return q * (a + b) + r * a;
-}
-
 /* One frame of the tabs under the finger or let go, at the moving scale.
  * Returns false when there is nothing of the kind to draw. */
 static bool draw_pivot(cairo_t *cr, int scale) {
 	double w = zmc.width, h = zmc.height;
-	if (!zmc.piv_ready || (!zmc.swiping && !zmc.slide_active)) {
+	if (!zmc.pivot_set || (!zmc.swiping && !zmc.slide_active)) {
 		return false;
 	}
 	if (zmc.slide_active) {
@@ -2209,20 +2371,20 @@ static bool draw_pivot(cairo_t *cr, int scale) {
 		zmc.swipe_dx = arrived ? T : x;
 		zmc.slide_v = v;
 		if (arrived) {
-			long k = lround(-T / w);
-			if (k % 2 != 0) {
-				pivot_done();	/* landed on the other tab */
-			} else {
-				zmc.slide_active = false;	/* on this one again: the same picture */
-				zmc.swipe_dx = 0;
+			int to = (int)lround(-T / w);
+			zmc.slide_active = false;
+			zmc.swipe_dx = 0;
+			if (to != 0) {
+				pivot_land(to);
 			}
 			return false;
 		}
 	}
-	/* The tabs as an endless strip, this one, the other, this one again..., a
-	 * screen apart, k counting to the right from this one; the titles the same
-	 * way, each a title's width after the one before. u is how many tabs the
-	 * strip has moved left. */
+	/* The tabs as an endless strip, k counting to the right from this one, a screen
+	 * apart; the titles the same way, each a title's width after the one before. u is
+	 * how many tabs the strip has moved left. */
+	pivot_cur_ensure();
+	wheel_titles_ensure();
 	if (cr) {
 		cairo_save(cr);
 		cairo_set_source_rgb(cr, 0, 0, 0);
@@ -2231,30 +2393,24 @@ static bool draw_pivot(cairo_t *cr, int scale) {
 		cairo_restore(cr);
 	}
 	double x = zmc.swipe_dx, u = -x / w;
-	double a = zmc.pivot_next_dx, b = zmc.piv_other_next_dx;
 	long k0 = (long)floor(u);
-	double f = u - k0;
-	double strip = pivot_title_at(k0, a, b) + f * (pivot_title_at(k0 + 1, a, b) - pivot_title_at(k0, a, b));
+	double f = u - k0, strip = wheel_pos(k0) + f * (wheel_pos(k0 + 1) - wheel_pos(k0));
 	band(cr, zmc.piv_cur, 0, CAPS_H, 0, 0, 1, scale);
-	for (long k = k0 - 1; k <= k0 + 3; k++) {
-		/* each title once, cut from its own header: white for the tab
-		 * nearest the middle, grey for the rest, crossing at half way */
-		if (zmc.pivot_after && k >= 2) {
-			/* more than two tabs: what follows the other tab is in that
-			 * tab's own header, already grey, not this tab again */
-			double from = pivot_title_at(2, a, b) - strip;
-			if (k == 2)
-				band_x(cr, zmc.piv_other, CAPS_H, HEADER_H, from, zmc.width, from - b, 0, 1, scale);
-			continue;
-		}
-		cairo_surface_t *src = k % 2 == 0 ? zmc.piv_cur : zmc.piv_other;
-		double at = pivot_title_at(k, a, b) - strip, span = k % 2 == 0 ? a : b;
+	/* every title in sight, whole: white for the tab nearest the middle, grey for the
+	 * rest, crossing at half way */
+	long first = k0;
+	while (MARGIN - 3 + wheel_pos(first) - strip > 0) {
+		first--;
+	}
+	for (long k = first; MARGIN - 3 + wheel_pos(k) - strip < w; k++) {
+		if (!wheel_has(k)) continue;
 		double light = clamp01((w * 0.5 + 30 - fabs(u - k) * w) / 60);
-		band_x(cr, src, CAPS_H, HEADER_H, at, at + span, at, 0, 0.38 + 0.62 * light, scale);
+		wheel_title_draw(cr, wheel_wrap(k), MARGIN - 3 + wheel_pos(k) - strip, 0.38 + 0.62 * light, scale);
 	}
-	for (long k = k0; k <= k0 + 1; k++) {
-		band(cr, k % 2 == 0 ? zmc.piv_cur : zmc.piv_other, HEADER_H, h, x + k * w, 0, 1, scale);
+	if (x != 0 && wheel_has(x < 0 ? 1 : -1)) {
+		band(cr, pivot_neighbour(x < 0 ? 1 : -1), HEADER_H, h, x < 0 ? x + w : x - w, 0, 1, scale);
 	}
+	band(cr, zmc.piv_cur, HEADER_H, h, x, 0, 1, scale);
 	return true;
 }
 
@@ -2601,7 +2757,7 @@ static void present(void) {
 	}
 	if (zmc.frame) return;	/* arrived() may have committed an updated page */
 	/* while pages move they are drawn at half the pixels each way */
-	int scale = zmc.anim_active || ((zmc.slide_active || zmc.swiping || zmc.spring) && zmc.piv_ready) ?
+	int scale = zmc.anim_active || ((zmc.slide_active || zmc.swiping || zmc.spring) && zmc.pivot_set) ?
 		ANIM_SCALE : zmc.scale;
 	if (zmg_ready()) {
 		present_gpu(ms);
@@ -2785,6 +2941,7 @@ static void begin_animation(bool have_from, bool have_to, int target, double tap
 	board_forget();
 	marquee_stop();
 	mq.text[0] = 0;	/* whichever page comes in says what its title is */
+	pivot_drop_all();
 	uint32_t t0 = now_ms();
 	begin_animation_(have_from, have_to, target, tapped, requested_start);
 	uint32_t took = now_ms() - t0;
@@ -2828,8 +2985,7 @@ static void begin_animation_(bool have_from, bool have_to, int target, double ta
 		double arrive = target >= 0 && target < LIST_PAGES && zmc.anim_back ? vl_saved[target] : 0;
 		zmc.scroll = arrive;
 		if (arrive != 0 && !(back_surface && back_page == target) && zmg_ready() && have_from) {
-			double next_dx;
-			zmc.anim_to_surface = pivot_snapshot(target, arrive, ANIM_SCALE, &zmc.in_rows, &next_dx);
+			zmc.anim_to_surface = pivot_snapshot(target, arrive, ANIM_SCALE, &zmc.in_rows);
 			for (int i = 0; i < zmc.in_rows.n; i++) {
 				zmc.in_rows.rows[i].order = zmc.in_rows.n - 1 - zmc.in_rows.rows[i].order;
 			}
@@ -2993,9 +3149,18 @@ static void touch_down(void *data, struct wl_touch *touch, uint32_t serial, uint
 	}
 	bool caught = false;
 	if (zmc.slide_active && !zmc.touching && !zmc.anim_active) {
-		/* the tabs moving: a finger takes hold of them where they are */
+		/* The tabs moving: a finger takes hold of them where they are. What it does
+		 * next it does from where they were going: that tab is the page in front
+		 * from here on, and nothing on the screen moves as it becomes so. */
 		zmc.slide_active = false;
 		caught = true;
+		int to = (int)lround(-zmc.slide_target / zmc.width);
+		zmc.swipe_caught = to != 0;
+		if (to != 0) {
+			pivot_land(to);
+			zmc.swipe_dx += to * zmc.width;
+			zmc.swipe_catch_x = zmc.swipe_dx;
+		}
 	}
 	if (zmc.touching || zmc.anim_active) return;
 	zmc.touching = true;
@@ -3101,6 +3266,13 @@ static void touch_up(void *data, struct wl_touch *touch, uint32_t serial, uint32
 		double u = -x / w;
 		/* thrown: on to the next tab that way; else whichever is nearest */
 		double k = vx < -PIVOT_FLICK ? floor(u) + 1 : vx > PIVOT_FLICK ? ceil(u) - 1 : round(u);
+		if (zmc.swipe_caught) {
+			/* taken in flight, it is measured from there: thrown, one tab on from
+			 * the one the tabs were going to; held and let go, that one */
+			double moved = x - zmc.swipe_catch_x;
+			k = vx < -PIVOT_FLICK ? 1 : vx > PIVOT_FLICK ? -1 : moved < -w / 2 ? 1 : moved > w / 2 ? -1 : 0;
+		}
+		k = k > 0 ? (wheel_has(1) ? 1 : 0) : k < 0 ? (wheel_has(-1) ? -1 : 0) : 0;
 		double target = -k * w;
 		pivot_go(target, vx);
 		return;
@@ -3240,11 +3412,23 @@ static void touch_motion(void *data, struct wl_touch *touch, uint32_t time, int3
 			zmc.swipe_grab = 0;
 			zmc.down_x = now_x;	/* from here: nothing jumps as it starts */
 			dx = 0;
-			pivot_prepare();	/* already done, unless the list moved since */
+			pivot_begin();	/* already done, unless the list moved since */
 		}
 	}
 	if (zmc.swiping) {
 		zmc.swipe_dx = zmc.swipe_grab + dx;
+		/* past the next tab: it is the page in front, and the strip goes on from it */
+		while (fabs(zmc.swipe_dx) >= zmc.width) {
+			int to = zmc.swipe_dx < 0 ? 1 : -1;
+			if (!wheel_has(to)) {
+				zmc.swipe_dx = -to * (zmc.width - 1);	/* the end of the strip */
+				break;
+			}
+			pivot_land(to);
+			zmc.swipe_dx += to * zmc.width;
+			zmc.swipe_grab += to * zmc.width;
+			zmc.swipe_catch_x += to * zmc.width;
+		}
 		present();
 	} else if (zmc.moved && zmc.axis == ZMC_AXIS_ALONG && !zmc.app->fixed) {
 		set_scroll(zmc.down_scroll - dy);
@@ -3276,6 +3460,11 @@ static void touch_cancel(void *data, struct wl_touch *touch) {
 	}
 	zmc.sliding = false;
 	zmc.slider_pending = false;
+	if (zmc.swiping) {
+		zmc.swipe_caught = false;
+		pivot_go(0, 0);	/* a finger taken away settles where it was */
+		return;
+	}
 	zmc.fling = true;	/* back inside the ends, if it was past one */
 	zmc.vel = 0;
 	zmc.fling_last = now_ms();
@@ -3619,9 +3808,8 @@ static void slider_set(double x, bool done) {
 static void zmc_activate(struct zmc_hit *hit) {
 	zmc_haptic("tap");
 	if (hit->action == ZMC_ACT_PIVOT) {
-		zmc.pivot_page = hit->arg;
 		zmc.swipe_dx = 0;
-		pivot_go(-zmc.width, 0);
+		pivot_go(wheel_has(1) ? -zmc.width : 0, 0);
 		return;
 	}
 	if (hit->action == ZMC_ACT_BACK) {
@@ -4786,9 +4974,8 @@ int zmc_render_png(const struct zmc_app *app, int page, int height, const char *
 	zmc_config_style();
 	/* (ZMC_RENDER_SCROLL: how a list looks scrolled, for looking at it) */
 	const char *scroll = getenv("ZMC_RENDER_SCROLL");
-	double next_dx;
 	struct zmc_rowset rows;
-	cairo_surface_t *surface = scroll ? pivot_snapshot(page, atof(scroll), zmc.scale, &rows, &next_dx) :
+	cairo_surface_t *surface = scroll ? pivot_snapshot(page, atof(scroll), zmc.scale, &rows) :
 		page_snapshot(page, 0, zmc.scale);
 	{
 		cairo_t *cr = cairo_create(surface);
@@ -4898,7 +5085,7 @@ int zmc_run(const struct zmc_app *app, int first_page) {
 			}
 		}
 		/* a finger resting on something: a hold, when it has rested long enough */
-		int wait = pivot_wants_prepare() || back_wants_prepare() ? 150 : -1;
+		int wait = back_wants_prepare() ? 150 : pivot_idle_wait();
 		if (gpu_retry_at) {
 			int32_t left = (int32_t)(gpu_retry_at - now_ms());
 			if (left < 0) left = 0;

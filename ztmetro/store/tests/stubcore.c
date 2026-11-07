@@ -102,6 +102,12 @@ double zmc_pivot_next(cairo_t *cr, const char *title, const char *next, int acti
 	zmc_add_hit(0, 0, zmc.width, 90, ZMC_ACT_BACK, 0);
 	return 108;
 }
+double zmc_pivot_wheel(cairo_t *cr, const struct zmc_tab *tabs, int count, int page) {
+	for (int i = 0; i < count; i++) {
+		if (tabs[i].page == page) return zmc_pivot_next(cr, tabs[i].title, tabs[(i + 1) % count].title, 1, tabs[(i + 1) % count].page);
+	}
+	return 108;
+}
 double zmc_pivot(cairo_t *cr, const char *t, const char *n) { return zmc_pivot_next(cr, t, n, 0, 0); }
 double zmc_header(cairo_t *cr, const char *t) { return zmc_pivot(cr, t, NULL); }
 

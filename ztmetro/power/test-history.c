@@ -11,7 +11,7 @@
 struct zmc_state zmc = { .width = 360, .height = 664 };
 static int seen[MAX_EVENTS], entries;
 
-double zmc_pivot_next(cairo_t *cr, const char *title, const char *next, int action, int arg) {
+double zmc_pivot_wheel(cairo_t *cr, const struct zmc_tab *tabs, int count, int page) {
 	return 108;
 }
 double zmc_text(cairo_t *cr, const char *s, const char *font, double size,
