@@ -8,7 +8,8 @@ bus. The real BlueZ and the radio are not touched, and it opens no window.
 The bytes are built from pods/README.md's layouts, not captured. The advert below was
 encrypted with Python's `cryptography` (OpenSSL), so it also checks our AES against another's.
 
-    make check-podsd     (needs pods/ztos-podsd, dbus-python and PyGObject: on the phone)
+    make check-podsd     (needs pods/ztos-podsd, dbus-daemon, dbus-python and PyGObject: the phone
+                          has them, and so does a PC: pods/qt/README.md)
 """
 import json
 import os
@@ -207,11 +208,14 @@ class Test:
             f.write("points 360 740\nscale 1.00\npixels 1080 2220\nscreen %s\n" % state)
         os.rename(os.path.join(self.run, "ztmetro.state.new"), os.path.join(self.run, "ztmetro.state"))
 
-    def start(self):
+    def start(self, desktop=False):
         env = dict(os.environ, DBUS_SYSTEM_BUS_ADDRESS=self.address, XDG_RUNTIME_DIR=self.run, HOME=self.home,
                    ZTOS_PODSD_TEST_AAP_DIR=self.aap, ZTOS_PODSD_TRACE=os.path.join(self.tmp, "trace"))
         env.pop("XDG_DATA_HOME", None)
         env.pop("XDG_STATE_HOME", None)
+        env.pop("ZTOS_PODSD_DESKTOP", None)
+        if desktop:
+            env["ZTOS_PODSD_DESKTOP"] = "1"
         self.daemon = subprocess.Popen([DAEMON], env=env, stderr=self.err)
 
     def stop(self):
@@ -539,7 +543,23 @@ def run(t):
     # through all of it, it asked BlueZ for nothing else: no power, no connect, no pair
     bad = [c for c in t.bz.calls if c[0] not in ALLOWED]
     assert not bad, bad
+
+    # no ztmetro.state: on the phone the screen is off (ztMETRO isn't up); on a desktop, on
     t.stop()
+    os.unlink(os.path.join(t.run, "ztmetro.state"))
+    for desktop in (False, True):
+        os.unlink(os.path.join(t.run, "ztos-pods-state.json"))
+        t.start(desktop)
+        wait("BlueZ, again", lambda: t.state() and t.state()["bluetooth"])
+        n = len(t.calls("StartDiscovery"))
+        assert t.tell("scan-hint on") == "ok"
+        if desktop:
+            wait("discovery on a desktop", lambda: len(t.calls("StartDiscovery")) > n)
+        else:
+            time.sleep(2)
+            assert len(t.calls("StartDiscovery")) == n
+        t.tell("scan-hint off")
+        t.stop()
 
 
 if __name__ == "__main__":

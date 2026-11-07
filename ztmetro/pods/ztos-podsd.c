@@ -25,6 +25,8 @@
  *
  * ZTOS_PODSD_TRACE=FILE  appends every packet in hex, for making test data out of real
  *   pods. The key packet and device information (serials) go in as their length only.
+ * ZTOS_PODSD_DESKTOP=1  not under ztMETRO (a PC: qt/README.md): with no ztmetro.state, the
+ *   screen counts as on, so the bursts' policy is the same as the phone's with its screen on.
  * ZTOS_PODSD_TEST_AAP_DIR=DIR  tests only: a channel is AF_UNIX SEQPACKET to DIR/MAC.
  */
 #define _GNU_SOURCE
@@ -100,6 +102,7 @@ static bool dirty, readings_dirty;
 static uint64_t readings_saved;
 static long hint_until;
 static bool scan_wanted, scan_started, scan_pending;
+static bool desktop;		/* ZTOS_PODSD_DESKTOP=1: no ztmetro.state is a screen that is on */
 static uint64_t scan_next, scan_end;
 static char transports[8][128];
 static FILE *trace;
@@ -538,11 +541,13 @@ static void discovery_stop(void) {
 	}
 }
 
+/* ztMETRO's word. With none, on the phone the screen is off (ztMETRO not up yet, or another
+ * session); on a desktop (ZTOS_PODSD_DESKTOP=1) it is on, and the file still wins if there. */
 static bool screen_on(void) {
 	char path[300], line[64];
 	snprintf(path, sizeof(path), "%s/ztmetro.state", runtime);
 	FILE *f = fopen(path, "r");
-	bool on = false;
+	bool on = !f && desktop;
 	while (f && fgets(line, sizeof(line), f)) {
 		if (!strncmp(line, "screen ", 7)) on = !strncmp(line + 7, "on", 2);
 	}
@@ -1001,7 +1006,8 @@ int main(void) {
 	else snprintf(keys_path, sizeof(keys_path), "%s/.local/share/ztos/pods/keys", home ? home : "");
 	if (state_home) snprintf(readings_path, sizeof(readings_path), "%s/ztos/pods/readings", state_home);
 	else snprintf(readings_path, sizeof(readings_path), "%s/.local/state/ztos/pods/readings", home ? home : "");
-	const char *trace_path = getenv("ZTOS_PODSD_TRACE");
+	const char *trace_path = getenv("ZTOS_PODSD_TRACE"), *on_desktop = getenv("ZTOS_PODSD_DESKTOP");
+	desktop = on_desktop && !strcmp(on_desktop, "1");
 	if (trace_path) trace = fopen(trace_path, "a");
 
 	/* Two of these would open two channels to one pair, which the pods do not forgive. */

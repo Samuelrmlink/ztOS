@@ -43,6 +43,9 @@ ztmetro/notifyd/ztnotifyd
 ztmetro/phone/ztphone
 ztmetro/messages/ztmessages
 ztmetro/contacts/ztcontacts
+ztmetro/pods/ztos-podsd
+ztmetro/pods/ztpods
+ztmetro/pods/pods-adv-capture
 ztmetro/core/*-protocol.c
 ztmetro/core/*-client-protocol.h
 
