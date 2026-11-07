@@ -38,6 +38,7 @@ enum page {
 	PAGE_CONNECTIONS,	/* Wi-Fi, Bluetooth, the mobile network */
 	PAGE_SOUND_TOUCH,	/* ringtones + sounds, haptics */
 	PAGE_POWER,	/* battery + performance: power, then hardware */
+	PAGE_SYSTEM,	/* date + region, keyboard, developer, about */
 	N_PAGES
 };
 
@@ -59,18 +60,19 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_CPU] = PAGE_POWER,
 	[PAGE_VM] = PAGE_POWER,
 	[PAGE_GPU] = PAGE_POWER,
-	[PAGE_KEYBOARD] = PAGE_HUB_TAB,
-	[PAGE_ABOUT] = PAGE_HUB_TAB,
+	[PAGE_SYSTEM] = PAGE_HUB_TAB,
+	[PAGE_KEYBOARD] = PAGE_SYSTEM,
+	[PAGE_ABOUT] = PAGE_SYSTEM,
 	[PAGE_PERF] = PAGE_POWER,
-	[PAGE_DEV] = PAGE_HUB_TAB,
-	[PAGE_INSTALLED_APPS] = PAGE_APPS,
+	[PAGE_DEV] = PAGE_SYSTEM,
+	[PAGE_INSTALLED_APPS] = PAGE_MAIN,
 	[PAGE_APP_DETAIL] = PAGE_INSTALLED_APPS,
 	[PAGE_HAPTICS] = PAGE_SOUND_TOUCH,
 	[PAGE_QUICK] = PAGE_HUB_TAB,
 	[PAGE_APN] = PAGE_MOBILE,
 	[PAGE_WIFI_JOIN] = PAGE_WIFI,
 	[PAGE_WIFI_NET] = PAGE_WIFI,
-	[PAGE_DATE] = PAGE_HUB_TAB,
+	[PAGE_DATE] = PAGE_SYSTEM,
 	[PAGE_BLUETOOTH] = PAGE_CONNECTIONS,
 	[PAGE_ACCENTS] = PAGE_THEME,
 	[PAGE_WALLS] = PAGE_THEME,
@@ -108,6 +110,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "cpu", PAGE_CPU },
 	{ "gpu", PAGE_GPU },
 	{ "vm", PAGE_VM },
+	{ "system", PAGE_SYSTEM },
 	{ "date", PAGE_DATE },
 	{ "keyboard", PAGE_KEYBOARD },
 	{ "dev", PAGE_DEV },

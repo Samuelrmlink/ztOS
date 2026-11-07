@@ -1043,13 +1043,6 @@ static double draw_app_detail(cairo_t *cr) {
 /* The hub's second tab: what belongs to the system's own programs. */
 static double draw_apps(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "applications", "system", ACT_OPEN_PAGE, PAGE_MAIN);
-	y = zmc_entry(cr, y, "apps", "choose apps that run in the background", ACT_OPEN_PAGE, PAGE_INSTALLED_APPS);
-	y = zmc_entry(cr, y, "keyboard", app.haptics ? "vibrate on touch: on" : "vibrate on touch: off",
-		ACT_OPEN_PAGE, PAGE_KEYBOARD);
-
-	y = zmc_entry(cr, y, "developer tests", "demo tiles, slow motion, ZrnDevTest", ACT_OPEN_PAGE, PAGE_DEV);
-
-	y = zmc_entry(cr, y, "ZrnDevTest", "logs, sensors and system state", ACT_DEV_OPEN_TEST, 0);
 	return y + 20;
 }
 
@@ -2839,13 +2832,10 @@ static double draw_keyboard(cairo_t *cr) {
         (app.key_height - 42) * 100 / 30, height, ACT_KEY_HEIGHT);
     y += 76;
     y = zmc_switch(cr, y, "Keyboard sounds", app.key_sound, ACT_KEY_SOUND);
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "Vibrate on touch and typing", FONT_SEMILIGHT, 21, MARGIN, y, 0);
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, app.haptics ? "On" : "Off", FONT_REGULAR, 13.5, MARGIN, y + 28, 0);
-	zmc_toggle(cr, zmc.width - MARGIN - 54, y + 4, app.haptics);
-	zmc_add_hit(0, y - 4, zmc.width, 56, ACT_HAPTICS, 0);
-	y += 68;
+	/* the same switch as haptics': a way there, not a second one */
+	y = zmc_entry(cr, y, "haptics", app.haptics ? "vibrate on touch and typing: on" :
+		"vibrate on touch and typing: off", ACT_OPEN_PAGE, PAGE_HAPTICS);
+	y += 9;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Keyboard layout", FONT_REGULAR, 13, MARGIN, y, 0);
@@ -2986,7 +2976,7 @@ static double draw_perf(cairo_t *cr) {
 }
 
 static double draw_dev(cairo_t *cr) {
-	double y = zmc_header(cr, "developer tests");
+	double y = zmc_header(cr, "developer");
 	y = zmc_switch(cr, y, "Demo tiles on Start", app.dev_demo_tiles, ACT_DEV_DEMO_TILES);
 	y = zmc_switch(cr, y, "Slow motion (5x)", app.dev_slow, ACT_DEV_SLOW);
 	static const char *const speeds[] = { "50 % (slow)", "75 %", "100 % (as on a Lumia)", "125 %",
@@ -3078,6 +3068,17 @@ static double draw_power(cairo_t *cr) {
 	return y + 20;
 }
 
+static double draw_system(cairo_t *cr) {
+	double y = zmc_header(cr, "system");
+	char detail[128];
+	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
+	snprintf(detail, sizeof(detail), "key height %d, keyboard sounds %s", app.key_height, app.key_sound ? "on" : "off");
+	y = zmc_entry(cr, y, "keyboard", detail, ACT_OPEN_PAGE, PAGE_KEYBOARD);
+	y = zmc_entry(cr, y, "developer", "demo tiles, slow motion, ZrnDevTest", ACT_OPEN_PAGE, PAGE_DEV);
+	y = zmc_entry(cr, y, "about", "Samsung Galaxy S9, ztOS Mobile", ACT_OPEN_PAGE, PAGE_ABOUT);
+	return y + 20;
+}
+
 static double draw_main(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "system", "applications", ACT_OPEN_PAGE, PAGE_APPS);
 	char detail[128];
@@ -3112,9 +3113,8 @@ static double draw_main(cairo_t *cr) {
 	else snprintf(detail, sizeof(detail), "%s", profiles[app.perf_profile]);
 	y = zmc_entry(cr, y, "battery + performance", detail, ACT_OPEN_PAGE, PAGE_POWER);
 
-	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
-
-	y = zmc_entry(cr, y, "about", "Samsung Galaxy S9, ztOS Mobile", ACT_OPEN_PAGE, PAGE_ABOUT);
+	y = zmc_entry(cr, y, "apps", "choose apps that run in the background", ACT_OPEN_PAGE, PAGE_INSTALLED_APPS);
+	y = zmc_entry(cr, y, "system", "date, keyboard, developer, about", ACT_OPEN_PAGE, PAGE_SYSTEM);
 
 	return y + 20;
 }
@@ -3129,6 +3129,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_CONNECTIONS: return draw_connections(cr);
 	case PAGE_SOUND_TOUCH: return draw_sound_touch(cr);
 	case PAGE_POWER: return draw_power(cr);
+	case PAGE_SYSTEM: return draw_system(cr);
 	case PAGE_APPS: return draw_apps(cr);
 	case PAGE_INSTALLED_APPS: return draw_installed_apps(cr);
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);

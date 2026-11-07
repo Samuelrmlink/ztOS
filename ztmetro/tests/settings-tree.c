@@ -10,7 +10,11 @@ int main(void) {
 	assert(page_parent(PAGE_MAIN, PAGE_MAIN) == PAGE_NO_PARENT);
 	assert(page_parent(PAGE_APPS, PAGE_APPS) == PAGE_NO_PARENT);
 	assert(page_parent(PAGE_APP_DETAIL, PAGE_MAIN) == PAGE_INSTALLED_APPS);
-	assert(page_parent(PAGE_INSTALLED_APPS, PAGE_MAIN) == PAGE_APPS);
+	assert(page_parent(PAGE_INSTALLED_APPS, PAGE_MAIN) == PAGE_MAIN);
+	assert(page_parent(PAGE_DATE, PAGE_MAIN) == PAGE_SYSTEM);
+	assert(page_parent(PAGE_KEYBOARD, PAGE_MAIN) == PAGE_SYSTEM);
+	assert(page_parent(PAGE_DEV, PAGE_MAIN) == PAGE_SYSTEM);
+	assert(page_parent(PAGE_ABOUT, PAGE_MAIN) == PAGE_SYSTEM);
 	assert(page_parent(PAGE_WIFI_NET, PAGE_MAIN) == PAGE_WIFI);
 	assert(page_parent(PAGE_WIFI_JOIN, PAGE_MAIN) == PAGE_WIFI);
 	assert(page_parent(PAGE_ACCENTS, PAGE_MAIN) == PAGE_THEME);
@@ -26,8 +30,8 @@ int main(void) {
 	assert(page_parent(PAGE_BATTERY, PAGE_MAIN) == PAGE_POWER);
 	assert(page_parent(PAGE_VM, PAGE_MAIN) == PAGE_POWER);
 	/* the rest go to the tab they were opened from */
-	assert(page_parent(PAGE_DEV, PAGE_APPS) == PAGE_APPS);
-	assert(page_parent(PAGE_DEV, PAGE_MAIN) == PAGE_MAIN);
+	assert(page_parent(PAGE_SYSTEM, PAGE_APPS) == PAGE_APPS);
+	assert(page_parent(PAGE_SYSTEM, PAGE_MAIN) == PAGE_MAIN);
 
 	/* every page gets to the top in at most 3 steps, whichever tab it was */
 	for (int hub = PAGE_MAIN; hub <= PAGE_APPS; hub += PAGE_APPS - PAGE_MAIN) {
