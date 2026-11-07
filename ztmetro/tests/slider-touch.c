@@ -7,11 +7,13 @@
 #include <assert.h>
 #include "swipe-cost/fake-platform.h"
 
-enum { A_SLIDER = 5, A_ROW = 6 };
+enum { A_SLIDER = 5, A_ROW = 6, A_OTHER = 7 };
+static bool rows_moved;
 static int value = 50, slides, lifts, last_slide = -1, tapped;
 
 static double render(cairo_t *cr, int page) {
 	double y = zmc_header(cr, "test");
+	if (rows_moved) y = zmc_entry(cr, y, "came in above", "", A_OTHER, 0);
 	y = zmc_entry(cr, y, "a row", "", A_ROW, 0);
 	zmc_slider(cr, 16, 300, 328, value, "Volume", A_SLIDER);
 	return 3000;
@@ -124,6 +126,19 @@ int main(void) {
 	down(100, 120);
 	up();
 	assert(tapped == A_ROW && slides == 0);
+	/* the page changed under the finger: the tap is not on what has come there */
+	reset();
+	down(100, 120);
+	rows_moved = true;
+	cache_ensure(1);
+	zmc.cache_stale = true;
+	cache_ensure(1);
+	up();
+	assert(tapped == 0);
+	rows_moved = false;
+	zmc.cache_stale = true;
+	cache_ensure(1);
+
 	puts("PASS: a finger on a slider: vertical scrolls, sideways slides, no jump on touch-down");
 	return 0;
 }

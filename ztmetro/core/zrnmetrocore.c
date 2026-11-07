@@ -3123,6 +3123,23 @@ static int app_more_at(int32_t id) {
 	return -1;
 }
 
+/* What the finger came down on. Taps were looked up as it lifted, from where it came
+ * down, in the hits of the page as it was by then: a list that had moved on under the
+ * finger (a Wi-Fi scan, a device reconnecting) had another row there, and got the tap. */
+static struct zmc_hit down_hit;
+static bool down_on_hit;
+
+static bool hit_under(double x, double page_y_at, struct zmc_hit *out) {
+	for (int i = 0; i < zmc.n_hits; i++) {
+		struct zmc_hit *h = &zmc.hits[i];
+		if (!h->slider && x >= h->x && x < h->x + h->w && page_y_at >= h->y && page_y_at < h->y + h->h) {
+			*out = *h;
+			return true;
+		}
+	}
+	return false;
+}
+
 static void touch_down(void *data, struct wl_touch *touch, uint32_t serial, uint32_t time,
 		struct wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y) {
 	if (board_touch_down(id, wl_fixed_to_double(x), wl_fixed_to_double(y))) {
@@ -3188,6 +3205,7 @@ static void touch_down(void *data, struct wl_touch *touch, uint32_t serial, uint
 	zmc.sliding = false;
 	zmc.slider_pending = false;
 	double cy = page_y(zmc.down_y);
+	down_on_hit = hit_under(zmc.down_x, cy, &down_hit);
 	/* On a slider, nothing happens yet: the way the finger goes says whether
 	 * this is the slider's or the page's (touch_motion), and a slider that
 	 * jumped here would have moved under every scroll that began on it. */
@@ -3298,12 +3316,13 @@ static void touch_up(void *data, struct wl_touch *touch, uint32_t serial, uint32
 		slider_tapped(cx);
 		return;
 	}
-	for (int i = 0; i < zmc.n_hits; i++) {
-		struct zmc_hit *h = &zmc.hits[i];
-		if (!h->slider && cx >= h->x && cx < h->x + h->w && cy >= h->y && cy < h->y + h->h) {
-			zmc_activate(h);
-			return;
+	struct zmc_hit now;
+	if (hit_under(cx, cy, &now)) {
+		/* the same thing it came down on, or nothing: a tap is on what was touched */
+		if (down_on_hit && now.action == down_hit.action && now.arg == down_hit.arg && fabs(now.y - down_hit.y) < 1) {
+			zmc_activate(&now);
 		}
+		return;
 	}
 	if (on_slider) {
 		slider_tapped(cx);	/* near one, and on nothing else */
