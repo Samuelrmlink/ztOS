@@ -70,6 +70,7 @@ enum page {
 	PAGE_APPS,	/* the second tab of the hub */
 	PAGE_INSTALLED_APPS,
 	PAGE_APP_DETAIL,
+	PAGE_APP_SCALE,
 	PAGE_HAPTICS,
 	PAGE_QUICK,
 	PAGE_APN,
@@ -124,9 +125,11 @@ enum action {
 	ACT_TIMEOUT_CYCLE,
 	ACT_SCALE_CYCLE,
 	ACT_NAV_SIZE_CYCLE,
+	ACT_FS_BARS_CYCLE,
 	ACT_NAV_ICON,
 	ACT_KEY_HEIGHT,
 	ACT_KEY_SOUND,
+	ACT_VOLUME_MEDIA,
 	ACT_MOBILE_DATA,
 	ACT_ROAMING,
 	ACT_NETWORK_MODE,
@@ -167,6 +170,8 @@ enum action {
 	ACT_IB_ENGINE,		/* arg: 0 the processor, 1 SCORE */
 	ACT_QUICK_SLOT,		/* then one for each of the eight places */
 	ACT_QUICK_LAST = ACT_QUICK_SLOT + 7,
+	ACT_APP_SCALE_SLOT,	/* then one for each app listed */
+	ACT_APP_SCALE_LAST = ACT_APP_SCALE_SLOT + 23,
 };
 
 /* The kinds of touch that can be felt, each with a switch of its own; the
@@ -224,6 +229,7 @@ static struct {
 	bool opentone;
 	int timeout_idx;
 	int nav_size_idx;
+	int fs_bars_idx;	/* how long a full-screen app's bars stay after a swipe */
 	int nav_icon_idx;
 	int scale_idx;
 
@@ -239,6 +245,7 @@ static struct {
 
 	int key_height;
 	bool key_sound;
+	bool volume_media;	/* the audio modal brings the player's controls when the volume moves */
 	int media_vol;
 	int ring_vol;
 	bool vibrate_ring;
@@ -276,6 +283,7 @@ static struct {
 	.autobrightness = true,
 	.timeout_idx = 1,
 	.nav_size_idx = 0,
+	.fs_bars_idx = 1,
 	.scale_idx = 1,
 	.mobile_data = true,
 	.roaming = false,
@@ -350,6 +358,9 @@ static void config_load(void) {
 			snprintf(app.start_wall, sizeof(app.start_wall), "%s", val);
 		} else if (strcmp(key, "lock_wallpaper") == 0) {
 			snprintf(app.lock_wall, sizeof(app.lock_wall), "%s", val);
+		} else if (strcmp(key, "fullscreen_bars_secs") == 0) {
+			int n = atoi(val);
+			app.fs_bars_idx = n <= 2 ? 0 : n <= 3 ? 1 : n <= 5 ? 2 : 3;
 		} else if (strcmp(key, "nav_center_icon") == 0) {
 			int n = atoi(val); app.nav_icon_idx = n < 0 ? 0 : n > 4 ? 4 : n;
 		} else if (strcmp(key, "dotmatrix_palette") == 0) {
@@ -365,6 +376,8 @@ static void config_load(void) {
 		} else if (strcmp(key, "key_height") == 0) {
             int n = atoi(val);
             app.key_height = n < 42 ? 42 : n > 72 ? 72 : n;
+        } else if (strcmp(key, "volume_media_controls") == 0) {
+            app.volume_media = strcmp(val, "on") == 0;
         } else if (strcmp(key, "key_sound") == 0) {
             app.key_sound = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
         } else if (strcmp(key, "ring_volume") == 0) {
@@ -552,7 +565,7 @@ static void auto_load(void) {
 
 static void config_save(void) {
 	static const int timeouts[] = { 30, 60, 180, 300, 0 };
-	enum { N_KEYS = 23 + N_HAPTIC_GROUPS };
+	enum { N_KEYS = 25 + N_HAPTIC_GROUPS };
 	struct { const char *key; char value[300]; bool written; } keys[N_KEYS] = {
 		{ .key = "accent" }, { .key = "columns" }, { .key = "haptics" },
 		{ .key = "brightness" }, { .key = "timeout" }, { .key = "demo_tiles" },
@@ -587,6 +600,11 @@ static void config_save(void) {
 	snprintf(keys[20 + N_HAPTIC_GROUPS].value, 32, "%s", sizes[app.scale_idx]);
 	keys[21 + N_HAPTIC_GROUPS].key = "style";
 	snprintf(keys[21 + N_HAPTIC_GROUPS].value, 32, "%s", app.style ? "dotmatrix" : "metro");
+	static const int fs_bars_secs[] = { 2, 3, 5, 10 };
+	keys[24 + N_HAPTIC_GROUPS].key = "volume_media_controls";
+	snprintf(keys[24 + N_HAPTIC_GROUPS].value, 32, "%s", app.volume_media ? "on" : "off");
+	keys[23 + N_HAPTIC_GROUPS].key = "fullscreen_bars_secs";
+	snprintf(keys[23 + N_HAPTIC_GROUPS].value, 32, "%d", fs_bars_secs[app.fs_bars_idx]);
 	keys[22 + N_HAPTIC_GROUPS].key = "dotmatrix_palette";
 	snprintf(keys[22 + N_HAPTIC_GROUPS].value, 32, "%s", dm_palette_names[app.palette]);
 	snprintf(keys[0].value, 32, "%s", ACCENTS[app.accent].name);
@@ -1118,11 +1136,90 @@ static double draw_app_detail(cairo_t *cr) {
 	return y;
 }
 
+/* App scaling: a size for each app, by its Wayland app id. The shell reads
+ * ~/.config/ztmetro/app-scale; the apps offered are the ones saved there and
+ * those open now ($XDG_RUNTIME_DIR/ztmetro-apps, from the shell). */
+#define APP_SCALE_MAX 24
+static const char *const app_scale_names[] = { "75%", "90%", "100%", "110%", "125%", "150%" };
+static const float app_scale_values[] = { 0.75f, 0.9f, 1.0f, 1.1f, 1.25f, 1.5f };
+#define APP_SCALE_N 6
+static struct { char id[96]; int choice; } app_scale[APP_SCALE_MAX];
+static int app_scale_count;
+
+static void app_scale_path(char *path, size_t size) {
+	const char *home = getenv("HOME");
+	snprintf(path, size, "%s/.config/ztmetro/app-scale", home ? home : "");
+}
+
+static int app_scale_find(const char *id) {
+	for (int i = 0; i < app_scale_count; i++) {
+		if (!strcmp(app_scale[i].id, id)) return i;
+	}
+	return -1;
+}
+
+static void app_scale_load(void) {
+	char path[512], line[160], id[96];
+	float zoom;
+	app_scale_count = 0;
+	app_scale_path(path, sizeof(path));
+	FILE *f = fopen(path, "r");
+	while (f && fgets(line, sizeof(line), f) && app_scale_count < APP_SCALE_MAX) {
+		if (sscanf(line, "%95s = %f", id, &zoom) != 2) continue;
+		int best = 2;
+		for (int k = 0; k < APP_SCALE_N; k++) {
+			if (fabsf(app_scale_values[k] - zoom) < fabsf(app_scale_values[best] - zoom)) best = k;
+		}
+		snprintf(app_scale[app_scale_count].id, sizeof(app_scale[0].id), "%s", id);
+		app_scale[app_scale_count++].choice = best;
+	}
+	if (f) fclose(f);
+	f = fopen(runtime_file(path, sizeof(path), "ztmetro-apps"), "r");
+	while (f && fgets(line, sizeof(line), f) && app_scale_count < APP_SCALE_MAX) {
+		if (sscanf(line, "%95s", id) != 1 || app_scale_find(id) >= 0) continue;
+		snprintf(app_scale[app_scale_count].id, sizeof(app_scale[0].id), "%s", id);
+		app_scale[app_scale_count++].choice = 2;
+	}
+	if (f) fclose(f);
+}
+
+static void app_scale_save(void) {
+	char path[512], tmp[520];
+	app_scale_path(path, sizeof(path));
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f) return;
+	for (int i = 0; i < app_scale_count; i++) {
+		if (app_scale[i].choice != 2) {
+			fprintf(f, "%s = %.2f\n", app_scale[i].id, app_scale_values[app_scale[i].choice]);
+		}
+	}
+	fclose(f);
+	rename(tmp, path);
+	if (system("pkill -HUP -x ztmetro 2>/dev/null") != 0) {}
+}
+
+static double draw_app_scale(cairo_t *cr) {
+	double y = zmc_header(cr, "app scaling");
+	cairo_set_source_rgb(cr, .6, .6, .6);
+	y += zmc_text(cr, "Make one app's text and controls larger or smaller. Open an app and it appears here.",
+		FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 20;
+	if (!app_scale_count) {
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		y += zmc_text(cr, "No apps open", FONT_SEMILIGHT, 21, MARGIN, y, 0) + 20;
+	}
+	for (int i = 0; i < app_scale_count; i++) {
+		y = picker(cr, y, app_scale[i].id, app_scale_names, APP_SCALE_N, app_scale[i].choice, ACT_APP_SCALE_SLOT + i);
+	}
+	return y + 20;
+}
+
 /* The hub's second tab: what belongs to the system's own programs. */
 static double draw_apps(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "applications", "system", ACT_OPEN_PAGE, PAGE_MAIN);
 	char detail[128];
 	y = zmc_entry(cr, y, "apps", "choose apps that run in the background", ACT_OPEN_PAGE, PAGE_INSTALLED_APPS);
+	y = zmc_entry(cr, y, "app scaling", "make one app larger or smaller", ACT_OPEN_PAGE, PAGE_APP_SCALE);
 	y = zmc_entry(cr, y, "keyboard", app.haptics ? "vibrate on touch: on" : "vibrate on touch: off",
 		ACT_OPEN_PAGE, PAGE_KEYBOARD);
 
@@ -1888,6 +1985,8 @@ static double draw_display(cairo_t *cr) {
 	y = picker(cr, y, "Display scaling", scales, 3, app.scale_idx, ACT_SCALE_CYCLE);
 	static const char *const nav_sizes[] = { "Standard (48 pt)", "Compact (40 pt)", "Expanded (56 pt)" };
 	y = picker(cr, y, "Navigation bar widget size", nav_sizes, 3, app.nav_size_idx, ACT_NAV_SIZE_CYCLE);
+	static const char *const fs_bars[] = { "2 seconds", "3 seconds", "5 seconds", "10 seconds" };
+	y = picker(cr, y, "Bars stay after a swipe in full screen", fs_bars, 4, app.fs_bars_idx, ACT_FS_BARS_CYCLE);
 
 	return y + 20;
 }
@@ -2749,6 +2848,8 @@ static double draw_audio(cairo_t *cr) {
 	}
 	y += 26;
 
+	y = zmc_switch(cr, y, "Media controls with the volume", app.volume_media, ACT_VOLUME_MEDIA);
+	y += 10;
 	y = audio_section(cr, y, "system");
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Sound engine", FONT_REGULAR, 13, MARGIN, y, 0);
@@ -3105,6 +3206,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_APPS: return draw_apps(cr);
 	case PAGE_INSTALLED_APPS: return draw_installed_apps(cr);
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);
+	case PAGE_APP_SCALE: return draw_app_scale(cr);
 	case PAGE_THEME: return draw_theme(cr);
 	case PAGE_ACCENTS: return draw_accents(cr);
 	case PAGE_WALLS: return draw_wallpapers(cr);
@@ -3153,14 +3255,15 @@ static double render_page_content(cairo_t *cr, int p) {
 
 static bool is_picker(int action) {
 	switch (action) {
-	case ACT_TIMEOUT_CYCLE: case ACT_SCALE_CYCLE: case ACT_NAV_SIZE_CYCLE:
+	case ACT_TIMEOUT_CYCLE: case ACT_SCALE_CYCLE: case ACT_NAV_SIZE_CYCLE: case ACT_FS_BARS_CYCLE:
 	case ACT_NETWORK_MODE: case ACT_COMP_ALGO_CYCLE: case ACT_PERF_PROFILE: case ACT_IB_MODE: case ACT_IB_ENGINE:
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
 	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
 		return true;
 	}
-	return action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST;
+	return (action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST) ||
+		(action >= ACT_APP_SCALE_SLOT && action <= ACT_APP_SCALE_LAST);
 }
 
 static int board_choice;
@@ -3189,6 +3292,14 @@ static void activate(int action, int arg) {
 		return;
 	}
 	open_picker = 0;
+	if (action >= ACT_APP_SCALE_SLOT && action <= ACT_APP_SCALE_LAST) {
+		int i = action - ACT_APP_SCALE_SLOT;
+		if (i < app_scale_count && arg >= 0 && arg < APP_SCALE_N) {
+			app_scale[i].choice = arg;
+			app_scale_save();
+		}
+		return;
+	}
 	if (action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST) {
 		if (arg >= 0 && arg < N_QUICK) {
 			app.quick[action - ACT_QUICK_SLOT] = arg;
@@ -3280,6 +3391,7 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_OPEN_PAGE:
 		if (arg == PAGE_INSTALLED_APPS) installed_load();
+		if (arg == PAGE_APP_SCALE) app_scale_load();
 		if (arg == PAGE_MAIN || arg == PAGE_APPS) {
 			hub_tab = arg;	/* where back returns to from a page under it */
 		}
@@ -3665,8 +3777,16 @@ static void activate(int action, int arg) {
 		app.key_sound = !app.key_sound;
 		config_save();
 		break;
+	case ACT_VOLUME_MEDIA:
+		app.volume_media = !app.volume_media;
+		config_save();
+		break;
 	case ACT_NAV_SIZE_CYCLE:
 		app.nav_size_idx = arg;
+		break;
+	case ACT_FS_BARS_CYCLE:
+		app.fs_bars_idx = arg;
+		config_save();
 		break;
 	case ACT_MOBILE_DATA:
 		/* ztoscorenetworkingd's: the same thing the action centre's tile asks */
@@ -3953,7 +4073,7 @@ static bool back(void) {
 		return false;	/* either tab of the hub: back leaves the app */
 	}
 	if (zmc.page == PAGE_APP_DETAIL) { zmc_go(PAGE_INSTALLED_APPS, -1); return true; }
-	if (zmc.page == PAGE_INSTALLED_APPS) { zmc_go(PAGE_APPS, -1); return true; }
+	if (zmc.page == PAGE_INSTALLED_APPS || zmc.page == PAGE_APP_SCALE) { zmc_go(PAGE_APPS, -1); return true; }
 	zmc_every(0, NULL);	/* the performance page's refresh, if it was running */
 	if (zmc.page == PAGE_WIFI && wifi_menu >= 0) {
 		wifi_menu = -1;	/* back puts the menu away first */
@@ -4069,7 +4189,7 @@ static const struct zmc_app settings = {
  * That is how the look is checked without opening the app on the phone. */
 /* Pages by name: --render PAGE, and `ztsettings PAGE` (Hyperscan opens one). */
 static const struct { const char *name; enum page page; } pages[] = {
-	{ "date", PAGE_DATE }, { "main", PAGE_MAIN }, { "apps", PAGE_APPS }, { "installed-apps", PAGE_INSTALLED_APPS }, { "theme", PAGE_THEME }, { "accents", PAGE_ACCENTS }, { "wallpapers", PAGE_WALLS }, { "display", PAGE_DISPLAY },
+	{ "app-scale", PAGE_APP_SCALE }, { "date", PAGE_DATE }, { "main", PAGE_MAIN }, { "apps", PAGE_APPS }, { "installed-apps", PAGE_INSTALLED_APPS }, { "theme", PAGE_THEME }, { "accents", PAGE_ACCENTS }, { "wallpapers", PAGE_WALLS }, { "display", PAGE_DISPLAY },
 	{ "wifi", PAGE_WIFI }, { "bluetooth", PAGE_BLUETOOTH }, { "mobile", PAGE_MOBILE }, { "audio", PAGE_AUDIO },
 	{ "battery", PAGE_BATTERY }, { "cpu", PAGE_CPU }, { "vm", PAGE_VM },
 	{ "gpu", PAGE_GPU }, { "keyboard", PAGE_KEYBOARD }, { "about", PAGE_ABOUT },
@@ -4121,6 +4241,7 @@ int main(int argc, char **argv) {
 		int page = page_named(argv[1]);
 		if (page == PAGE_WIFI) wifi_load();
 		if (page == PAGE_INSTALLED_APPS) installed_load();
+		if (page == PAGE_APP_SCALE) app_scale_load();
 		return zmc_run(&settings, page);
 	}
 	if (argc > 1) {
