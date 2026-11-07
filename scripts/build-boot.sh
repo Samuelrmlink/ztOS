@@ -106,6 +106,8 @@ python3 "$ROOT/kernel/patch-suspend-mpidr.py" "$SRC"
 python3 "$ROOT/kernel/patch-ufs-suspend.py" "$SRC"
 python3 "$ROOT/kernel/patch-touch-suspend.py" "$SRC"
 python3 "$ROOT/kernel/patch-pinctrl-resume.py" "$SRC"
+# the firmware's roams are reported to the host the way Samsung's driver does
+python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
 
 echo "=== initramfs ==="
 LIST=$B/initramfs.list
@@ -209,8 +211,6 @@ if [ -n "$CPUFREQ" ]; then
 	cfg --enable CPU_FREQ_GOV_SCHEDUTIL
 	cfg --enable CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
 	cfg --enable ARM_S9P_CPUFREQ
-else
-	cfg --disable CPU_FREQ
 	# only the vendor-table driver: the generic ones defconfig pulls in (and
 	# their extra governors) are not in the image the phones run
 	for sym in CPUFREQ_DT CPUFREQ_DT_PLATDEV ARM_SCMI_CPUFREQ ARM_SCPI_CPUFREQ \
@@ -218,6 +218,8 @@ else
 		CPU_FREQ_GOV_POWERSAVE; do
 		cfg --disable "$sym"
 	done
+else
+	cfg --disable CPU_FREQ
 	cfg --disable ARM_S9P_CPUFREQ
 fi
 if [ -n "$GPU" ]; then
@@ -275,8 +277,8 @@ cfg --set-str LOCALVERSION "-zboot"
 # The watchdog is armed by uniLoader and again by the clock-gates node, then
 # taken over by s3c2410_wdt (tmr_atboot). The kernel pets it until userspace
 # opens /dev/watchdog, so a wedged kernel resets into the fallback target.
-# brcmfmac.roamoff=1: with the firmware roaming, 2.4 GHz went silent about 33 s after joining (ROADMAP 1.7)
-CMDLINE="console=tty0 console=ramoops-1 loglevel=7 panic=5 keep_bootcon maxcpus=8 brcmfmac.roamoff=1 s9p_vendor_m3_defaults s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60${EXTRA:+ $EXTRA}"
+# Firmware roaming stays on: kernel/patch-brcmfmac-roam.py reports its roams (ROADMAP 1.7)
+CMDLINE="console=tty0 console=ramoops-1 loglevel=7 panic=5 keep_bootcon maxcpus=8 s9p_vendor_m3_defaults s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60${EXTRA:+ $EXTRA}"
 cfg --set-str CMDLINE "$CMDLINE"
 make -s O=out olddefconfig
 grep -E '^CONFIG_(CMDLINE|SCSI_UFS_EXYNOS9810|USB_CONFIGFS_NCM|S3C2410_WATCHDOG|PSTORE_RAM|DRM_EXYNOS_BOOTFB|PHY_EXYNOS5_USBDRD|USB_DWC3_GADGET|USB_DWC3_MODE)' out/.config ||
