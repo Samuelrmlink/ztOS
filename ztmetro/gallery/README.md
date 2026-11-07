@@ -109,6 +109,9 @@ undone: there's no recycle bin on the phone.
 opt-in `zmc_app.multitouch`: while the app holds a finger, further fingers come to `.touch`
 too, and the territory stays the app's until the last one lifts. Other apps are unaffected.
 
+The shell keeps the left edge: a finger that comes down within 18 points of it and
+swipes right closes the app, the viewer included, so a pinch can't start there.
+
 The viewer draws in `.overlay`, and needs the GPU. So does the grid's thumbnails, like
 Settings' wallpaper grid. Without one the grid stays grey and a tap does nothing.
 Under the DotMatrix style photos are still plain photos on the GPU, as in Camera's roll;

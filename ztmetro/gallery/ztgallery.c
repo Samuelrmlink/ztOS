@@ -1184,7 +1184,7 @@ static double draw_note(cairo_t *cr, double y, const char *big, const char *smal
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	zmc_text(cr, big, FONT_SEMILIGHT, 25.5, ZMC_MARGIN, y + 8, zmc.width - 2 * ZMC_MARGIN);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	return zmc_text(cr, small, FONT_REGULAR, 14, ZMC_MARGIN, y + 48, zmc.width - 2 * ZMC_MARGIN);
+	return y + 48 + zmc_text(cr, small, FONT_REGULAR, 14, ZMC_MARGIN, y + 48, zmc.width - 2 * ZMC_MARGIN);
 }
 
 static const char *const empty_where =
@@ -1741,10 +1741,10 @@ static void dialog_paint(void) {
 	const char *shown = "";
 	char *name = NULL;
 	if (v.index >= 0 && v.index < v.n) shown = name = display_name(v.list[v.index]->name);
-	double y = zmc_text(cr, shown, FONT_REGULAR, 14, ZMC_MARGIN, 72, zmc.width - 2 * ZMC_MARGIN);
+	double name_h = zmc_text(cr, shown, FONT_REGULAR, 14, ZMC_MARGIN, 72, zmc.width - 2 * ZMC_MARGIN);
 	g_free(name);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "It will be gone from the phone. This can't be undone.", FONT_REGULAR, 13, ZMC_MARGIN, fmin(y, 112) + 6, zmc.width - 2 * ZMC_MARGIN);
+	zmc_text(cr, "It will be gone from the phone. This can't be undone.", FONT_REGULAR, 13, ZMC_MARGIN, 72 + fmin(name_h, 44) + 8, zmc.width - 2 * ZMC_MARGIN);
 	int hits = zmc.n_hits;
 	v.dlg_btn_w = (zmc.width - 2 * ZMC_MARGIN - 12) / 2.0;
 	v.dlg_btn_y = 170;
