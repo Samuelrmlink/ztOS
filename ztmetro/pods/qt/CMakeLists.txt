@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ztpods-qt, the desktop front end, and (when it can) ztos-podsd for the same PC. README.md.
+cmake_minimum_required(VERSION 3.19)
+project(ztpods-qt VERSION 1.0 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+	set(CMAKE_BUILD_TYPE RelWithDebInfo)
+endif()
+# a person's own: ~/.local unless said otherwise
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+	set(CMAKE_INSTALL_PREFIX "$ENV{HOME}/.local" CACHE PATH "Where to install" FORCE)
+endif()
+include(GNUInstallDirs)
+
+find_package(Qt6 6.2 REQUIRED COMPONENTS Widgets)
+
+set(PODS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+add_executable(ztpods-qt main.cpp mainwindow.cpp podsclient.cpp ztpods-qt.qrc)
+target_include_directories(ztpods-qt PRIVATE ${PODS_DIR})
+target_link_libraries(ztpods-qt PRIVATE Qt6::Widgets)
+target_compile_options(ztpods-qt PRIVATE -Wall -Wextra -Wno-unused-parameter)
+
+# the controls against a pretend daemon and fixture states: ctest --test-dir build
+option(ZTPODS_TESTS "Build the test" ON)
+if(ZTPODS_TESTS)
+	enable_testing()
+	add_executable(ztpods-qt-test test.cpp mainwindow.cpp podsclient.cpp)
+	target_include_directories(ztpods-qt-test PRIVATE ${PODS_DIR})
+	target_link_libraries(ztpods-qt-test PRIVATE Qt6::Widgets)
+	add_test(NAME ztpods-qt COMMAND ztpods-qt-test ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)
+	set_tests_properties(ztpods-qt PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
+# The daemon: AUTO builds it if libsystemd's headers are here, else installs a binary
+# made elsewhere (../ztos-podsd, from `make podsd-container`) if there is one.
+set(ZTPODS_DAEMON AUTO CACHE STRING "ztos-podsd: AUTO, BUILD, PREBUILT or OFF")
+set_property(CACHE ZTPODS_DAEMON PROPERTY STRINGS AUTO BUILD PREBUILT OFF)
+set(ZTPODS_DAEMON_BINARY "${PODS_DIR}/ztos-podsd" CACHE FILEPATH "A ztos-podsd built elsewhere, for PREBUILT")
+set(ZTPODS_SYSTEMD_USER_DIR "$ENV{HOME}/.config/systemd/user" CACHE PATH "Where the user unit goes")
+
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+	pkg_check_modules(LIBSYSTEMD QUIET IMPORTED_TARGET libsystemd)
+endif()
+set(daemon_how OFF)
+if(ZTPODS_DAEMON STREQUAL "BUILD" OR (ZTPODS_DAEMON STREQUAL "AUTO" AND LIBSYSTEMD_FOUND))
+	if(NOT LIBSYSTEMD_FOUND)
+		message(FATAL_ERROR "ZTPODS_DAEMON=BUILD needs libsystemd's headers (systemd-devel); see README.md")
+	endif()
+	set(daemon_how BUILD)
+elseif(ZTPODS_DAEMON STREQUAL "PREBUILT" OR (ZTPODS_DAEMON STREQUAL "AUTO" AND EXISTS "${ZTPODS_DAEMON_BINARY}"))
+	if(NOT EXISTS "${ZTPODS_DAEMON_BINARY}")
+		message(FATAL_ERROR "ZTPODS_DAEMON=PREBUILT: no ${ZTPODS_DAEMON_BINARY}")
+	endif()
+	set(daemon_how PREBUILT)
+endif()
+message(STATUS "ztos-podsd: ${daemon_how}")
+
+if(daemon_how STREQUAL "BUILD")
+	add_executable(ztos-podsd ${PODS_DIR}/ztos-podsd.c)
+	target_link_libraries(ztos-podsd PRIVATE PkgConfig::LIBSYSTEMD)
+	target_compile_options(ztos-podsd PRIVATE -Wall -Wno-unused-parameter)
+	set_target_properties(ztos-podsd PROPERTIES AUTOMOC OFF AUTORCC OFF)
+	install(TARGETS ztos-podsd RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+elseif(daemon_how STREQUAL "PREBUILT")
+	install(PROGRAMS ${ZTPODS_DAEMON_BINARY} DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME ztos-podsd)
+endif()
+if(NOT daemon_how STREQUAL "OFF")
+	set(ZTPODS_DAEMON_PATH ${CMAKE_INSTALL_FULL_BINDIR}/ztos-podsd)
+	configure_file(ztos-podsd.service.in ztos-podsd.service @ONLY)
+	install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ztos-podsd.service DESTINATION ${ZTPODS_SYSTEMD_USER_DIR})
+endif()
+
+configure_file(ztpods-qt.desktop.in ztpods-qt.desktop @ONLY)
+install(TARGETS ztpods-qt RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ztpods-qt.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(FILES ztpods-qt.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+
+# what `cmake --install` put down, taken away again
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake "
+if(NOT EXISTS \"${CMAKE_CURRENT_BINARY_DIR}/install_manifest.txt\")
+	message(FATAL_ERROR \"nothing installed from this build directory\")
+endif()
+file(STRINGS \"${CMAKE_CURRENT_BINARY_DIR}/install_manifest.txt\" files)
+foreach(f IN LISTS files)
+	message(STATUS \"Removing \${f}\")
+	file(REMOVE \"\${f}\")
+endforeach()
+")
+add_custom_target(uninstall COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake)

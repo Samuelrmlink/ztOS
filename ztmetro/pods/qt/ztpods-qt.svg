@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- ztpods.svg's two earbuds, on a tile: white alone vanishes on a light desktop -->
+  <rect x="2" y="2" width="44" height="44" rx="10" fill="#3b4045"/>
+  <g fill="#ffffff" transform="translate(5.5 5) scale(0.77)">
+    <circle cx="15" cy="13" r="8"/><rect x="16" y="13" width="5" height="26" rx="2.5"/>
+    <circle cx="33" cy="13" r="8"/><rect x="27" y="13" width="5" height="26" rx="2.5"/>
+  </g>
+</svg>

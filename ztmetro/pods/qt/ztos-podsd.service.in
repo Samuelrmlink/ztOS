@@ -1,0 +1,17 @@
+# ztos-podsd on a desktop (README.md). The phone's unit is
+# rootfs/overlay/etc/systemd/user/ztos-podsd.service; this one differs in the binary's
+# path, ZTOS_PODSD_DESKTOP=1 (no ztMETRO to say the screen is on), and no CPUAffinity
+# (the phone's efficiency cores).
+[Unit]
+Description=ztOS AirPods: batteries, listening modes and settings
+After=dbus.socket
+
+[Service]
+ExecStart=@ZTPODS_DAEMON_PATH@
+Environment=ZTOS_PODSD_DESKTOP=1
+ExecStopPost=/bin/rm -f %t/ztos-pods
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

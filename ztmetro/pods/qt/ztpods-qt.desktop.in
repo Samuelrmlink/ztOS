@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=AirPods
+GenericName=AirPods Settings
+Comment=Batteries, listening modes and settings
+Exec=@CMAKE_INSTALL_FULL_BINDIR@/ztpods-qt
+Terminal=false
+Type=Application
+Icon=ztpods-qt
+Categories=Qt;Settings;HardwareSettings;
+Keywords=airpods;bluetooth;headphones;battery;anc;
+StartupWMClass=ztpods-qt
