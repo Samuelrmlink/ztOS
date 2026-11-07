@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=NTFY
+Comment=Push notifications to this phone from outside
+Exec=ztntfy
+Terminal=false
+Type=Application
+Icon=ztntfy
+Categories=Network;Settings;

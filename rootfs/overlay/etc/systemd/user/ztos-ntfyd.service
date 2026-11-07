@@ -1,0 +1,14 @@
+[Unit]
+Description=ztOS push: messages from ntfy servers as notifications
+After=dbus.socket
+
+[Service]
+ExecStart=/usr/local/bin/ztos-ntfyd
+Restart=always
+RestartSec=5
+# listening, not computing: the efficiency cores are enough
+CPUAffinity=0-3
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

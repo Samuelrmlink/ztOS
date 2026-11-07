@@ -278,6 +278,7 @@ cp -a "$SRC/rootfs/overlay/." "$R/"         # every phone's: USB link, session, 
 ch systemctl --global enable ztos-audiod.service
 ch systemctl --global enable ztos-bt-agent.service
 ch systemctl --global enable ztos-podsd.service
+ch systemctl --global enable ztos-ntfyd.service
 ch systemctl --global enable mpris-proxy.service
 # the wallpapers and ringtones: scripts/pack-media.sh
 if [ -f "$SRC/prebuilts/ztos-media/ztos-media.tar.xz.partaa" ]; then
