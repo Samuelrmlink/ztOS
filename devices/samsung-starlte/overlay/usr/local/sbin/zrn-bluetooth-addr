@@ -24,16 +24,27 @@ i=0
 until btmgmt info 2>/dev/null | grep -q "^hci0:"; do
 	i=$((i + 1)); [ $i -gt 20 ] && { echo "zrn-bluetooth-addr: hci0 not registered"; exit 1; }; sleep 1
 done
-# Read only now: the modem mounts EFS after this service has started, and the
-# wait above outlasts that. (Reading first found nothing on a fresh install.)
+# The modem mounts EFS some time after this service starts, and the wait above
+# doesn't always outlast it: "no address in EFS yet" on several boots of
+# 2026-11-06, with the file there all along. With a copy kept that does no harm.
+# Without one, this boot would keep the chip's placeholder, so wait for EFS a
+# little longer; bluetoothd waits for this service, but only on such a boot.
+valid() { case "$1" in ??:??:??:??:??:??) return 0 ;; esac; return 1; }
+if ! valid "$(cat "$KEEP" 2>/dev/null)"; then
+	i=0
+	until [ -r "$EFS" ] || [ $i -ge 30 ]; do i=$((i + 1)); sleep 1; done
+fi
+# EFS is only ever read, and a copy replaced only by a real address.
 if [ -r "$EFS" ]; then
-	tr -d '\n\r' < "$EFS" > "$KEEP.new" && mv "$KEEP.new" "$KEEP"
+	new=$(tr -d '\n\r' < "$EFS")
+	if valid "$new"; then
+		printf '%s' "$new" > "$KEEP.new" && mv "$KEEP.new" "$KEEP"
+	fi
 fi
 addr=$(cat "$KEEP" 2>/dev/null)
-case "$addr" in
-??:??:??:??:??:??)
+if valid "$addr"; then
 	btmgmt -i hci0 power off >/dev/null
 	btmgmt -i hci0 public-addr "$addr" >/dev/null
-	;;
-*) echo "zrn-bluetooth-addr: no address in EFS yet; keeping the chip's" ;;
-esac
+else
+	echo "zrn-bluetooth-addr: no address in EFS yet; keeping the chip's"
+fi
