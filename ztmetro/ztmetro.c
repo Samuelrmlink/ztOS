@@ -41,6 +41,7 @@
 #include "audio-state.h"
 #include "airplane-radios.h"
 #include "osk-numeric.h"
+#include "note-logic.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -498,6 +499,7 @@ struct touch_point {
 	bool holding;		/* it has hold of the scrolling */
 	bool dragging;		/* it carries the tile being edited */
 	double gx, gy;		/* where on that tile it took hold */
+	uint32_t note_uid;	/* the notification it went down on (notes[].uid) */
 	int badge;		/* 1 unpin, 2 resize: the button it went down on */
 	bool press_shown;	/* its tile or row has leant in (PRESS_DELAY_MS) */
 };
@@ -665,8 +667,22 @@ struct zt_server {
 		time_t at;
 		bool expanded;		/* tapped in the action centre: all of its text */
 		bool quiet;		/* came without alerting: does not light the LED */
+		uint32_t uid;		/* stays with it as the list changes around it */
+		char key[NOTE_KEY_LEN];	/* its sender's name for it, to change it by */
+		bool ongoing;		/* something under way: a dismissal mutes its updates */
+		int percent;		/* with ongoing: its bar, or NOTE_BUSY for none */
 	} notes[MAX_NOTES];
 	int n_notes;
+	uint32_t note_next_uid;
+	struct note_muted note_muted;
+	/* the one being swiped sideways */
+	uint32_t note_swipe_uid;	/* 0: none */
+	double note_swipe_x;		/* how far from where it rests, points */
+	double note_swipe_to;		/* where it is going when let go */
+	bool note_swipe_flying;		/* off the edge, and then gone */
+	/* a gap closing where one went: places from this one on are this far down */
+	int note_close_slot;
+	float note_close_h;
 	/* The action centre's list scrolls. Each notification (with its app's
 	 * name above the first of an app) is a texture of its own, by its place
 	 * in the list, moved by the GPU: scrolling draws nothing with cairo. */
@@ -2493,7 +2509,8 @@ static void haptics_init(struct zt_server *server) {
 }
 
 static void hap(struct zt_server *server, enum hap_kind kind, enum hap_group group) {
-	if (!server->haptics_enabled || server->haptic_level[group] <= 0) {
+	/* (a render to files runs beside the real session: it never buzzes the phone) */
+	if (g_dump_dir || !server->haptics_enabled || server->haptic_level[group] <= 0) {
 		return;
 	}
 	if (server->haptic_fd < 0) {
@@ -5137,6 +5154,8 @@ static bool scroll_held(struct zt_server *server, bool list) {
 	return false;
 }
 
+static bool note_swipe_physics(struct zt_server *server, float dt);
+
 /* Whether a finger has hold of the action centre's list. */
 static bool note_held(struct zt_server *server) {
 	for (int i = 0; i < MAX_TOUCH; i++) {
@@ -5174,6 +5193,7 @@ static bool physics_step(struct zt_server *server, uint32_t now) {
 		/* the action centre's list let go: the same glide and spring */
 		moving |= scroll_step(&server->note_scroll, &server->note_v, server->note_max, dt);
 	}
+	moving |= note_swipe_physics(server, dt);
 	if (server->switch_moving) {
 		/* the switcher's row let go: the same spring as the pages, from
 		 * the speed the finger left it with */
@@ -6611,6 +6631,13 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 	draw_text(cr, label, FONT_SEMIBOLD, 7.6, 7, h - 15, w - 10, 0, false);
 }
 
+#define NOTE_BAR_H	3	/* a notification's progress bar */
+#define NOTE_BAR_ROOM	8	/* and the room it takes in the list */
+
+static bool note_has_bar(struct zt_server *server, int i) {
+	return server->notes[i].ongoing && server->notes[i].percent >= 0;
+}
+
 /* One place of the action centre's list, drawn with its top left at the
  * origin: the app's name when it is the first of its app, then the
  * notification: its title with the time beside it, and the text under. */
@@ -6654,12 +6681,23 @@ static void note_draw(struct zt_server *server, cairo_t *cr, int slot) {
 	draw_text(cr, when, FONT_REGULAR, 13.5, server->width - 14 - when_w, y + 1, 0, 0, false);
 	y += 21;
 	cairo_set_source_rgb(cr, 0.62, 0.62, 0.62);
+	double text_h = 19;
 	if (server->notes[i].expanded) {
 		/* all of it, on as many lines as it takes */
-		wrap_text(cr, server->notes[i].text, FONT_REGULAR, 13.5, 14, y, server->width - 28, false);
+		text_h = wrap_text(cr, server->notes[i].text, FONT_REGULAR, 13.5, 14, y, server->width - 28, false);
 	} else {
 		draw_text(cr, server->notes[i].text, FONT_REGULAR, 13.5, 14, y,
 			server->width - 28 - when_w - 12, 0, false);
+	}
+	if (note_has_bar(server, i)) {
+		/* how far along: a thin track under the text, the part done in the accent */
+		double bar_w = server->width - 28, bar_y = y + text_h + 2;
+		cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
+		cairo_rectangle(cr, 14, bar_y, bar_w, NOTE_BAR_H);
+		cairo_fill(cr);
+		set_rgb(cr, server->accent);
+		cairo_rectangle(cr, 14, bar_y, bar_w * server->notes[i].percent / 100.0, NOTE_BAR_H);
+		cairo_fill(cr);
 	}
 }
 
@@ -6691,7 +6729,8 @@ static void notes_layout(struct zt_server *server) {
 			server->note_head[at] = i == first;
 			server->note_last[at] = false;
 			server->note_ty[at] = (float)y;
-			server->note_th[at] = (float)((i == first ? NOTE_HEAD_H : 0) + 21 + text_h + 16);
+			server->note_th[at] = (float)((i == first ? NOTE_HEAD_H : 0) + 21 + text_h + 16 +
+				(note_has_bar(server, i) ? NOTE_BAR_ROOM : 0));
 			y += server->note_th[at];
 			last = at++;
 		}
@@ -6704,7 +6743,8 @@ static void notes_layout(struct zt_server *server) {
 	if (server->note_max < 0) {
 		server->note_max = 0;
 	}
-	if (server->note_scroll > server->note_max && server->note_v == 0) {
+	/* (a gap closing at the end of the list springs back with it: physics_step) */
+	if (server->note_scroll > server->note_max && server->note_v == 0 && server->note_close_h <= 0) {
 		server->note_scroll = server->note_max;
 	}
 }
@@ -6797,7 +6837,9 @@ static void draw_shade(struct zt_server *server) {
 		cairo_clip(cr);
 		for (int k = 0; k < server->n_notes; k++) {
 			cairo_save(cr);
-			cairo_translate(cr, 0, server->note_top + server->note_ty[k] - server->note_scroll);
+			cairo_translate(cr, server->notes[server->note_slot[k]].uid == server->note_swipe_uid &&
+				server->note_swipe_uid ? server->note_swipe_x : 0,
+				server->note_top + server->note_ty[k] - server->note_scroll);
 			note_draw(server, cr, k);
 			cairo_restore(cr);
 		}
@@ -8573,7 +8615,14 @@ static void shade_activate(struct zt_server *server, int index) {
 		launch_cmd(server, "ztsettings");
 		break;
 	case 8: /* CLEAR ALL */
+		for (int i = 0; i < server->n_notes; i++) {
+			if (server->notes[i].ongoing) {
+				note_muted_add(&server->note_muted, server->notes[i].key);
+			}
+		}
 		server->n_notes = 0;
+		server->note_swipe_uid = 0;
+		server->note_close_h = 0;
 		server->notes_dirty = true;
 		server->note_scroll = 0;
 		server->note_v = 0;
@@ -10622,6 +10671,7 @@ static void note_quiet(struct zt_server *server, const char *who, const char *ap
 		snprintf(server->notes[0].title, sizeof(server->notes[0].title), "%s", title);
 		server->notes[0].at = time(NULL);
 		server->notes[0].quiet = true;
+		server->notes[0].uid = ++server->note_next_uid;
 		if (server->n_notes < MAX_NOTES) {
 			server->n_notes++;
 		}
@@ -10649,6 +10699,7 @@ static void note_add_from(struct zt_server *server, const char *who, const char 
 	snprintf(server->notes[0].text, sizeof(server->notes[0].text), "%s", text);
 	snprintf(server->notes[0].who, sizeof(server->notes[0].who), "%s", who);
 	server->notes[0].at = time(NULL);
+	server->notes[0].uid = ++server->note_next_uid;
 	if (server->n_notes < MAX_NOTES) {
 		server->n_notes++;
 	}
@@ -10671,6 +10722,250 @@ static void note_add_from(struct zt_server *server, const char *who, const char 
 
 static void note_add(struct zt_server *server, const char *app, const char *title, const char *text) {
 	note_add_from(server, "", app, title, text);
+}
+
+static int note_find_key(struct zt_server *server, const char *key) {
+	for (int i = 0; i < server->n_notes; i++) {
+		if (!strcmp(server->notes[i].key, key)) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void note_store_key(struct zt_server *server, int i, const struct note_line *note) {
+	snprintf(server->notes[i].key, sizeof(server->notes[i].key), "%s", note->key);
+	server->notes[i].ongoing = note->percent != NOTE_PLAIN;
+	server->notes[i].percent = note->percent;
+}
+
+/* Takes one out of the list, as it stands. */
+static void note_remove_at(struct zt_server *server, int i) {
+	memmove(&server->notes[i], &server->notes[i + 1],
+		sizeof(server->notes[0]) * (size_t)(server->n_notes - i - 1));
+	server->n_notes--;
+	server->notes_dirty = true;
+}
+
+/* A notification with a name: changes the one of that name where it is, and only
+ * what changed gets drawn. A download updates every few seconds for as long as it
+ * lasts, so with the panel away this draws nothing and wakes nothing. */
+static void note_keyed(struct zt_server *server, const struct note_line *note) {
+	if (note_muted_drops(&server->note_muted, note->key, note->percent)) {
+		return;
+	}
+	int i = note_find_key(server, note->key);
+	char title[sizeof(server->notes[0].title)], text[sizeof(server->notes[0].text)];
+	snprintf(title, sizeof(title), "%s", note->title);
+	snprintf(text, sizeof(text), "%s", note->text);
+	if (i < 0 && note->quiet && note->percent == NOTE_PLAIN) {
+		/* a quiet update with a new id, from a sender that keeps none: as
+		 * note_quiet, the app's plain one of that title changes in place */
+		for (int k = 0; k < server->n_notes && i < 0; k++) {
+			if (!server->notes[k].ongoing && !strcmp(server->notes[k].app, note->app) &&
+					!strcmp(server->notes[k].title, title)) {
+				i = k;
+			}
+		}
+	}
+	if (i >= 0 && !note->quiet) {
+		/* news about one already there: it comes to the top, and alerts */
+		note_remove_at(server, i);
+		i = -1;
+	}
+	bool shown = server->width && (server->shade_open || server->shade_h > 0.1f);
+	if (i < 0 && !note->quiet) {
+		note_add_from(server, note->who, note->app, note->title, note->text);
+		note_store_key(server, 0, note);
+		if (note_has_bar(server, 0)) {
+			server->notes_dirty = true;
+			if (shown) {
+				draw_shade(server);
+				damage(server);
+			}
+		}
+		return;
+	}
+	if (i < 0) {
+		/* no sound, no banner, no buzz: note_quiet, but a name decides which it is */
+		memmove(&server->notes[1], &server->notes[0], sizeof(server->notes[0]) * (MAX_NOTES - 1));
+		memset(&server->notes[0], 0, sizeof(server->notes[0]));
+		snprintf(server->notes[0].app, sizeof(server->notes[0].app), "%s", note->app);
+		memcpy(server->notes[0].title, title, sizeof(title));
+		memcpy(server->notes[0].text, text, sizeof(text));
+		snprintf(server->notes[0].who, sizeof(server->notes[0].who), "%s", note->who);
+		server->notes[0].at = time(NULL);
+		server->notes[0].uid = ++server->note_next_uid;
+		note_store_key(server, 0, note);
+		if (server->n_notes < MAX_NOTES) {
+			server->n_notes++;
+		}
+		server->notes_dirty = true;
+		if (server->width == 0) {
+			return;
+		}
+		if (shown) {
+			draw_shade(server);
+		}
+		lock_notes_changed(server);
+		damage(server);
+		return;
+	}
+	bool had_bar = note_has_bar(server, i);
+	int had_percent = server->notes[i].percent;
+	bool words = strcmp(title, server->notes[i].title) || strcmp(text, server->notes[i].text);
+	note_store_key(server, i, note);
+	if (!words && had_percent == server->notes[i].percent) {
+		return;
+	}
+	memcpy(server->notes[i].title, title, sizeof(title));
+	memcpy(server->notes[i].text, text, sizeof(text));
+	snprintf(server->notes[i].who, sizeof(server->notes[i].who), "%s", note->who);
+	if (!shown) {
+		server->notes_dirty = true;	/* drawn when the panel next comes down */
+		return;
+	}
+	/* The same height: only its own texture. Else the list has to move. */
+	if (!server->notes_dirty && !server->notes[i].expanded && had_bar == note_has_bar(server, i) && !g_dump_dir) {
+		for (int k = 0; k < server->n_notes; k++) {
+			if (server->note_slot[k] == i) {
+				cairo_t *cr;
+				struct zt_buffer *buffer = zt_buffer_create(server, server->width, server->note_th[k], &cr);
+				note_draw(server, cr, k);
+				zt_buffer_show(server, &server->note_layer[k], buffer, cr, server->width, server->note_th[k]);
+				damage(server);
+				return;
+			}
+		}
+	}
+	server->notes_dirty = true;
+	draw_shade(server);
+	damage(server);
+}
+
+/* Its sender has finished with it. Whoever dismissed it, it is over: the next
+ * one of that name is a new one. */
+static void note_closed(struct zt_server *server, const char *key) {
+	note_muted_forget(&server->note_muted, key);
+	int i = note_find_key(server, key);
+	if (i < 0 || !key[0]) {
+		return;
+	}
+	note_remove_at(server, i);
+	if (server->width == 0) {
+		return;
+	}
+	if (server->shade_open || server->shade_h > 0.1f) {
+		draw_shade(server);
+	}
+	lock_notes_changed(server);
+	damage(server);
+}
+
+/* The finger finished: it has flown off the edge, so it goes, and those below
+ * close up over where it was. */
+static void note_swipe_finish(struct zt_server *server) {
+	uint32_t uid = server->note_swipe_uid;
+	server->note_swipe_uid = 0;
+	server->note_swipe_flying = false;
+	server->note_swipe_x = 0;
+	for (int k = 0; k < server->n_notes; k++) {
+		int i = server->note_slot[k];
+		if (server->notes[i].uid != uid) {
+			continue;
+		}
+		double height = server->note_ty[server->n_notes - 1] + server->note_th[server->n_notes - 1];
+		if (server->notes[i].ongoing) {
+			note_muted_add(&server->note_muted, server->notes[i].key);
+		}
+		note_remove_at(server, i);
+		server->note_close_slot = k;
+		server->note_close_h = 1;	/* (notes_layout: keep the scroll for now) */
+		notes_layout(server);
+		double now_h = server->n_notes ?
+			server->note_ty[server->n_notes - 1] + server->note_th[server->n_notes - 1] : height;
+		server->note_close_h = (float)(height - now_h);
+		animate(server, &server->note_close_h, 0.0f, 180, 0, false);
+		hap(server, HAP_TICK, HG_SYSTEM);
+		draw_shade(server);
+		lock_notes_changed(server);
+		damage(server);
+		return;
+	}
+}
+
+/* A swiped notification let go: back to rest, or off the edge. Only by the clock
+ * while it moves. Returns whether it still does. */
+static bool note_swipe_physics(struct zt_server *server, float dt) {
+	if (!server->note_swipe_uid) {
+		return false;
+	}
+	for (int i = 0; i < MAX_TOUCH; i++) {
+		struct touch_point *p = &server->touches[i];
+		if (p->used && p->role == ROLE_SHADE && p->axis == 3) {
+			return false;	/* a finger has it */
+		}
+	}
+	bool there = note_swipe_step(&server->note_swipe_x, server->note_swipe_to, dt,
+		server->note_swipe_flying ? 70.0 : 55.0, server->note_swipe_flying ? 1.0 : 0.05);
+	if (!there) {
+		return true;
+	}
+	if (server->note_swipe_flying) {
+		note_swipe_finish(server);
+	} else {
+		server->note_swipe_uid = 0;
+		server->note_swipe_x = 0;
+	}
+	return false;
+}
+
+/* The finger on one lets go of it. */
+static void note_swipe_let_go(struct zt_server *server, struct touch_point *p, uint32_t time, bool cancelled) {
+	bool rested = (int32_t)(time - p->t_last) > 90;
+	enum note_swipe_end end = note_swipe_release(server->note_swipe_x, rested || cancelled ? 0.0 : p->vx,
+		server->width, cancelled);
+	server->note_swipe_flying = end != NOTE_SWIPE_SETTLE;
+	server->note_swipe_to = end == NOTE_SWIPE_FLY_RIGHT ? server->width + 2 :
+		end == NOTE_SWIPE_FLY_LEFT ? -server->width - 2 : 0;
+	p->axis = 0;	/* (physics_step takes it from here) */
+	server->moving = true;
+	server->physics_ms = now_ms();
+	damage(server);
+}
+
+/* Whether a drag on a notification turns into swiping it. */
+static bool note_swipe_try(struct zt_server *server, struct touch_point *p, double x, double y) {
+	bool held = false;
+	for (int i = 0; i < MAX_TOUCH; i++) {
+		struct touch_point *q = &server->touches[i];
+		held = held || (q->used && q != p && q->role == ROLE_SHADE && q->axis == 3);
+	}
+	if (!note_swipe_wants(x - p->x0, y - p->y0, p->note_uid != 0,
+			server->shade_open && server->shade_h >= SHADE_MAX_H - 1.0f, !held)) {
+		return false;
+	}
+	if (server->note_swipe_uid && server->note_swipe_flying) {
+		note_swipe_finish(server);	/* the one still going: gone now */
+	}
+	bool found = false;
+	for (int i = 0; i < server->n_notes; i++) {
+		found = found || server->notes[i].uid == p->note_uid;
+	}
+	if (!found) {
+		return false;
+	}
+	/* one settling back can be taken up from where it has got to */
+	double from = server->note_swipe_uid == p->note_uid ? server->note_swipe_x : 0;
+	server->note_swipe_uid = p->note_uid;
+	server->note_swipe_flying = false;
+	server->note_swipe_x = from;
+	server->note_v = 0;
+	server->shade_pressed = -1;
+	p->axis = 3;
+	p->index = -1;
+	p->gx = x - from;
+	return true;
 }
 
 /* Lumia Metro top modal dialog: slides down from the top with title, message,
@@ -12470,6 +12765,8 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		double panel_y = y - (server->shade_h - SHADE_MAX_H);
 		p->index = shade_hit(server, x, panel_y);
 		server->shade_pressed = p->index;
+		p->note_uid = p->index >= 20 && p->index - 20 < server->n_notes ?
+			server->notes[p->index - 20].uid : 0;
 		if (p->index >= 0 && p->index < 8) {
 			shade_tile_press(server, p->index, x, panel_y);
 			if (quick_holds(server->quick[p->index])) {
@@ -12494,6 +12791,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		if (p->on_list && fabsf(server->note_v) > 0.4f) {
 			/* a finger on a list that is coasting stops it, and is not a tap */
 			server->note_v = 0;
+			p->note_uid = 0;
 			p->index = -1;
 			server->shade_pressed = -1;
 		}
@@ -12802,10 +13100,21 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 			float dt = (float)(int32_t)(time - p->t_last);
 			if (dt > 0) {
 				float keep = dt > 50 ? 0.0f : 0.45f;
+				p->vx = p->vx * keep + (float)(x - p->lx) / dt * (1 - keep);
 				p->vy = p->vy * keep + (float)(y - p->ly) / dt * (1 - keep);
+				p->lx = x;
 				p->ly = y;
 				p->t_last = time;
 			}
+		}
+		if (p->moved && p->on_list && p->axis == 0) {
+			note_swipe_try(server, p, x, y);
+		}
+		if (p->axis == 3) {
+			/* it follows the finger, and up or down no longer means anything */
+			server->note_swipe_x = x - p->gx;
+			damage(server);
+			break;
 		}
 		if (p->moved && p->on_list && p->axis == 0) {
 			/* Over the notifications a drag scrolls them. Only one that
@@ -13116,7 +13425,9 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		if (p->index >= 0 && p->index < 8) {
 			shade_tile_release(server, p->index);
 		}
-		if (p->axis == 1) {
+		if (p->axis == 3) {
+			note_swipe_let_go(server, p, time, cancelled);
+		} else if (p->axis == 1) {
 			/* the list let go: it carries on at the speed it had, unless
 			 * the finger had stopped */
 			bool rested = (int32_t)(time - p->t_last) > 90;
@@ -13126,6 +13437,15 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 			server->moving = true;
 			server->physics_ms = now_ms();
 		} else if (!cancelled && !p->moved) {
+			/* a notification by what it is, as the list may have changed under it */
+			if (p->index >= 20) {
+				p->index = -1;
+				for (int i = 0; i < server->n_notes; i++) {
+					if (server->notes[i].uid == p->note_uid) {
+						p->index = 20 + i;
+					}
+				}
+			}
 			if (server->shade_open && p->index >= 0) {
 				shade_activate(server, p->index);
 			}
@@ -13778,6 +14098,14 @@ static void ctl_command(struct zt_server *server, char *line) {
 			*bar = *second = 0;
 			note_quiet(server, "", line + 8, bar + 1, second + 1);
 		}
+	} else if (strncmp(line, "notekey ", 8) == 0) {
+		/* notekey KEY|FLAGS|PERCENT|WHO|APP|TITLE|TEXT, from ztnotifyd (note-logic.h) */
+		struct note_line note;
+		if (note_line_parse(line + 8, &note)) {
+			note_keyed(server, &note);
+		}
+	} else if (strncmp(line, "noteclose ", 10) == 0) {
+		note_closed(server, line + 10);
 	} else if (strncmp(line, "notifyh ", 8) == 0 || strncmp(line, "notifyqh ", 9) == 0) {
 		/* notifyh WHO|APP|TITLE|TEXT, from ztnotifyd: WHO says whose it is */
 		bool quiet = line[6] == 'q';
@@ -15253,11 +15581,28 @@ static void render_frame(struct zt_server *server) {
 				if (!layer->tex || y >= win_end || y + server->note_th[k] <= win_top) {
 					continue;
 				}
+				if (server->note_close_h > 0 && k >= server->note_close_slot) {
+					y += server->note_close_h;
+				}
+				bool swiped = server->note_swipe_uid &&
+					server->notes[server->note_slot[k]].uid == server->note_swipe_uid;
+				double sx = swiped ? server->note_swipe_x : 0;
 				if (dots()) {
 					/* on the dots' own lattice, so they do not shimmer as it moves */
 					y = round(y / dm_wrap_pitch) * dm_wrap_pitch;
+					sx = round(sx / dm_wrap_pitch) * dm_wrap_pitch;
 				}
-				layer_draw(server, layer, 0, (float)y, 1.0f);
+				if (swiped && server->note_head[k]) {
+					/* the app's name above it stays: others may be under it */
+					double split = fmax(win_top, fmin(win_end, y + NOTE_HEAD_H));
+					glScissor(0, (int)(win_top * server->scale), px_w, (int)ceil((split - win_top) * server->scale));
+					layer_draw(server, layer, 0, (float)y, 1.0f);
+					glScissor(0, (int)(split * server->scale), px_w, (int)ceil((win_end - split) * server->scale));
+					layer_draw(server, layer, (float)sx, (float)y, note_swipe_alpha(sx, server->width));
+					glScissor(0, (int)(win_top * server->scale), px_w, (int)ceil((win_end - win_top) * server->scale));
+				} else {
+					layer_draw(server, layer, (float)sx, (float)y, swiped ? note_swipe_alpha(sx, server->width) : 1.0f);
+				}
 			}
 			glScissor(0, 0, px_w, px_cover);
 		}
@@ -16014,6 +16359,32 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	g_dump_name = "shade";
 	server->shade_wifi = wifi_up();
 	draw_shade(server);
+	/* the same with notifications in it, one with a bar, one being swiped */
+	static const struct { const char *app, *title, *text; int percent; } SAMPLE[] = {
+		{ "Grayjay", "Freenet - Services Without Servers", "About 42% (164 MB)", 42 },
+		{ "Grayjay", "A second download", "Starting", NOTE_BUSY },
+		{ "Messages", "Plain", "Nothing under way here", NOTE_PLAIN },
+		{ "Messages", "Being swiped", "This one is 90 points along", NOTE_PLAIN },
+	};
+	g_dump_name = "shade-notes";
+	for (int i = 0; i < 4; i++) {
+		snprintf(server->notes[i].app, sizeof(server->notes[i].app), "%s", SAMPLE[i].app);
+		snprintf(server->notes[i].title, sizeof(server->notes[i].title), "%s", SAMPLE[i].title);
+		snprintf(server->notes[i].text, sizeof(server->notes[i].text), "%s", SAMPLE[i].text);
+		server->notes[i].at = time(NULL);
+		server->notes[i].uid = (uint32_t)i + 1;
+		server->notes[i].ongoing = SAMPLE[i].percent != NOTE_PLAIN;
+		server->notes[i].percent = SAMPLE[i].percent;
+	}
+	server->n_notes = 4;
+	server->note_swipe_uid = 4;
+	server->note_swipe_x = 90;
+	server->notes_dirty = true;
+	draw_shade(server);
+	server->n_notes = 0;
+	server->note_swipe_uid = 0;
+	server->note_swipe_x = 0;
+	server->notes_dirty = true;
     g_dump_name = "authentication";
     server->auth_active = true;
     snprintf(server->auth_status, sizeof(server->auth_status), "Enter your password");
