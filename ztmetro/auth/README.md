@@ -65,9 +65,9 @@ device that's already paired, because `CancelPairing` removes the bond if no pai
 is in progress. If the agent dies, the shell closes the sheet 5 s after its time
 is up.
 
-**Locked or asleep:** a request wakes the screen but doesn't show over the lock:
-a note says to unlock, and the sheet appears on unlocking if the request is still
-open. The sheet isn't left on a screen going to sleep. Typing is lost then, but
+**Locked or asleep:** a request wakes the screen but doesn't show over the lock.
+It adds a silent notification, which the lock screen shows only as a "B" badge,
+and the sheet appears on unlocking if the request is still open. The sheet isn't left on a screen going to sleep. Typing is lost then, but
 the question comes back. While the sheet is up the screen doesn't time out.
 
 **The channel:** requests are lines on the control pipe (0600), answers are

@@ -103,8 +103,9 @@ static void bt_pair_show(struct zt_server *server) {
 	activity(server);
 }
 
-/* The note on the lock screen says what the screen woke for. It says the
- * device's name, as a lock screen shows who is calling. */
+/* A notification says what the screen woke for. The Metro lock screen shows it
+ * only as a badge, "B" and a count; its text, with the device's name, is in the
+ * notification list. */
 static void bt_pair_note(struct zt_server *server, bool on) {
 	static const char *app = "Bluetooth", *title = "Pairing request";
 	if (on) {
