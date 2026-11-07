@@ -724,6 +724,7 @@ struct zt_server {
 	bool bt_on, bt_streaming, bt_blink;
 	char bt_name[64];
 	int bt_battery;			/* percent, -1 unknown */
+	bool bt_apple;			/* Apple's: AirPods get their own status icon, not the meter */
 	bool shade_torch;
 	bool shade_rotation;
 	bool shade_airplane;
@@ -5514,15 +5515,23 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	double nub_w = round(cell * 0.16);
 	double nub_h = round(cell * 0.38);
 	double bx = right - clock_w - cell * 0.9 - (bw + gap + nub_w);
-	/* the connected device's charge, if it tells: on the clock's baseline, and
-	 * steady while the icon beside it blinks. Left out rather than run into
-	 * the battery on a screen too narrow for it. */
-	if (server->bt_on && server->bt_name[0] && server->bt_battery >= 0 && server->bt_battery <= 100) {
-		char level[16];
-		snprintf(level, sizeof(level), "%d%%", server->bt_battery);
-		double size = cell * 1.05, at = x + cell * 1.25 * 0.55 + 5;
-		if (at + text_width(level, FONT_REGULAR, size) < bx - cell * 0.5) {
-			draw_text(cr, level, FONT_REGULAR, size, at, base - clock_baseline * size / clock_size, 0, 0, false);
+	/* the connected device's charge, if it tells: one thin bar hard against the
+	 * icon, filling from the bottom, and steady while the icon beside it blinks.
+	 * Left out rather than run into the battery on a screen too narrow for it. */
+	if (server->bt_on && server->bt_name[0] && !server->bt_apple &&
+	    server->bt_battery >= 0 && server->bt_battery <= 100) {
+		double bar_w = cell * 0.2, bar_h = cell * 1.05;
+		double bar_x = x + cell * 1.25 * 0.55 + 1.5, bar_y = base - bar_h;
+		if (bar_x + bar_w < bx - cell * 0.5) {
+			double fill = bar_h * server->bt_battery / 100.0;
+			if (server->bt_battery > 0 && fill < 1.0) fill = 1.0;	/* some charge is never an empty bar */
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.28);
+			cairo_rectangle(cr, bar_x, bar_y, bar_w, bar_h);
+			cairo_fill(cr);
+			if (server->bt_battery <= 15) cairo_set_source_rgb(cr, 0.9, 0.16, 0.16);
+			else cairo_set_source_rgb(cr, 1, 1, 1);
+			cairo_rectangle(cr, bar_x, base - fill, bar_w, fill);
+			cairo_fill(cr);
 		}
 	}
 	if (battery >= 0) {
@@ -6126,7 +6135,7 @@ static bool bt_state_read(struct zt_server *server) {
 	if (!f) {
 		return false;
 	}
-	bool on = false, streaming = false;
+	bool on = false, streaming = false, apple = false;
 	int battery = -1;
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\n")] = 0;
@@ -6134,14 +6143,16 @@ static bool bt_state_read(struct zt_server *server) {
 		else if (strncmp(line, "connected=", 10) == 0) snprintf(name, sizeof(name), "%s", line + 10);
 		else if (strncmp(line, "battery=", 8) == 0 && line[8] >= '0' && line[8] <= '9') battery = atoi(line + 8);
 		else if (strncmp(line, "streaming=", 10) == 0) streaming = line[10] == '1';
+		else if (strncmp(line, "apple=", 6) == 0) apple = line[6] == '1';
 	}
 	fclose(f);
 	bool changed = on != server->bt_on || streaming != server->bt_streaming ||
-		battery != server->bt_battery || strcmp(name, server->bt_name) != 0;
+		battery != server->bt_battery || apple != server->bt_apple || strcmp(name, server->bt_name) != 0;
 	server->bt_on = on;
 	server->shade_bt = on;
 	server->bt_streaming = streaming;
 	server->bt_battery = battery;
+	server->bt_apple = apple;
 	snprintf(server->bt_name, sizeof(server->bt_name), "%s", name);
 	return changed;
 }
@@ -9690,8 +9701,10 @@ static void nav_activate(struct zt_server *server, int index) {
 		osk_show(server, false);
 		return;
 	}
+	bool closed_hyper = false;
 	if (server->hyper && index != NAV_SEARCH) {
 		hyper_close(server);	/* back, or Start: it goes, and nothing else */
+		closed_hyper = true;
 		if (index == NAV_BACK) {
 			return;
 		}
@@ -9701,10 +9714,11 @@ static void nav_activate(struct zt_server *server, int index) {
 		if (server->shown) {
 			show_toplevel(server, NULL);
 		} else if (retro_on(server)) {
-	bool closed_hyper = false;
 			dm_launcher_home(server->dm, wall_ms());
 			damage(server);
-		closed_hyper = true;
+		} else if (!closed_hyper && !server->menu_open && !server->editing && !server->board_state &&
+				!server->shade_open && server->page <= 0.5f && server->scroll <= 1) {
+			switcher_open(server);	/* already home, at the top of the tiles */
 		} else {
 			home_reset(server);
 		}
@@ -9716,9 +9730,6 @@ static void nav_activate(struct zt_server *server, int index) {
 		}
 		if (server->shown && server->shown->android_runtime && server->osk_visible) {
 			osk_show(server, false);
-		} else if (!closed_hyper && !server->menu_open && !server->editing && !server->board_state &&
-				!server->shade_open && server->page <= 0.5f && server->scroll <= 1) {
-			switcher_open(server);	/* already home, at the top of the tiles */
 			const char *id = server->shown->xdg_toplevel->app_id;
 			if (id && !strncmp(id, "waydroid.", 9)) {
 				vkbd_send(server, KEY_ESC, false);

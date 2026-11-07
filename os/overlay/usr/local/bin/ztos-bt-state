@@ -1,6 +1,8 @@
 #!/bin/sh
 # Bluetooth, as the shell shows it: every 2 s, into $XDG_RUNTIME_DIR/ztos-bt,
-#   on=0|1  connected=NAME  battery=PERCENT  streaming=0|1
+#   on=0|1  connected=NAME  battery=PERCENT  streaming=0|1  apple=0|1
+# (apple: the device is Apple's. AirPods report battery their own way, so the
+# status bar's plain meter leaves them out.)
 # (the status bar's icon), and the Settings tile's live back while a device
 # is connected ($XDG_RUNTIME_DIR/ztos-live/ztsettings). One of it runs per
 # session; the shell starts it.
@@ -9,7 +11,7 @@ live=${XDG_RUNTIME_DIR:-/tmp}/ztos-live
 demoloop=${XDG_RUNTIME_DIR:-/tmp}/ztos-demoloop.active
 mkdir -p "$live"
 while :; do
-	on=0 name= battery= streaming=0
+	on=0 name= battery= streaming=0 apple=0
 	if bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
 		on=1
 		mac=$(bluetoothctl devices Connected 2>/dev/null | awk 'NR == 1 { print $2 }')
@@ -17,10 +19,11 @@ while :; do
 			info=$(bluetoothctl info "$mac" 2>/dev/null)
 			name=$(printf '%s\n' "$info" | sed -n 's/^\tAlias: //p')
 			battery=$(printf '%s\n' "$info" | sed -n 's/.*Battery Percentage: .*(\([0-9]*\)).*/\1/p')
+			printf '%s\n' "$info" | grep -qE 'Modalias: (bluetooth:v004C|usb:v05AC)' && apple=1
 			pactl list short sinks 2>/dev/null | grep "bluez_output" | grep -q RUNNING && streaming=1
 		fi
 	fi
-	printf 'on=%s\nconnected=%s\nbattery=%s\nstreaming=%s\n' "$on" "$name" "$battery" "$streaming" > "$f.new"
+	printf 'on=%s\nconnected=%s\nbattery=%s\nstreaming=%s\napple=%s\n' "$on" "$name" "$battery" "$streaming" "$apple" > "$f.new"
 	mv "$f.new" "$f"
 	if [ -n "$name" ]; then
 		{
