@@ -2,9 +2,11 @@
 # fetch.sh NAME: bring /tmp/ztrec from the phone into build/NAME and make build/NAME.png
 set -e
 cd "$(dirname "$0")/../.."
+ROOT=$PWD
+. scripts/phone-lib.sh
 N=$1; mkdir -p build/$N
-(timeout 60 socat -u "TCP-LISTEN:5596,bind=172.16.42.2,reuseaddr" "OPEN:build/$N.tar,creat,trunc" &); sleep 1
-timeout 60 scripts/ssh-pw.py alarm "${ZT_PW:-alarm}" 172.16.42.1 'cd /tmp/ztrec && tar cf - . > /dev/tcp/172.16.42.2/5596' >/dev/null 2>&1 || true
+(timeout 60 socat -u "TCP-LISTEN:5596,bind=$HOST,reuseaddr" "OPEN:build/$N.tar,creat,trunc" &); sleep 1
+timeout 60 "$PHONE_DO" "cd /tmp/ztrec && tar cf - . > /dev/tcp/$HOST/5596" >/dev/null 2>&1 || true
 sleep 1; tar xf build/$N.tar -C build/$N 2>/dev/null || true
 python3 - "$N" <<'PY'
 import sys,glob,os

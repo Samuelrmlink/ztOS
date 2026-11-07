@@ -24,14 +24,15 @@ psize=$("$PSH" -t 20 "blockdev --getsize64 $PART" | tr -dc 0-9)
 
 gzip -1 -c "$IMG" > "$TMP/img.gz"
 "$PSH" -t 30 'killall nc gunzip 2>/dev/null; rm -f /tmp/boot.img; true' >/dev/null
-socat -u "OPEN:$TMP/img.gz" "TCP-LISTEN:$PORT,bind=$HOST,reuseaddr" 2>/dev/null &
+# a time limit: a firewall blocking the port would otherwise hang this forever
+timeout 330 socat -u "OPEN:$TMP/img.gz" "TCP-LISTEN:$PORT,bind=$HOST,reuseaddr" &
 server=$!
 sleep 1
 "$PSH" -t 300 "nc $HOST $PORT | gunzip > /tmp/boot.img; sha256sum /tmp/boot.img" | awk 'NF{print "   received:", $1}'
 wait $server 2>/dev/null
 
 got=$("$PSH" -t 60 'sha256sum /tmp/boot.img' | awk 'NF{print $1; exit}')
-[ "$got" = "$SUM" ] || { echo "transfer mismatch: $got != $SUM" >&2; exit 1; }
+[ "$got" = "$SUM" ] || { echo "transfer mismatch: $got != $SUM (is a firewall blocking port $PORT? see installer/README.md)" >&2; exit 1; }
 "$PSH" -t 120 "dd if=/tmp/boot.img of=$PART bs=1M conv=fsync 2>/dev/null; sync; echo written" >/dev/null
 back=$("$PSH" -t 120 "head -c $SIZE $PART | sha256sum" | awk 'NF{print $1; exit}')
 [ "$back" = "$SUM" ] || { echo "READBACK MISMATCH on RECOVERY" >&2; exit 1; }

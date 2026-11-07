@@ -17,23 +17,27 @@ installer/ztos doctor               is this computer ready?
 installer/ztos build --target gsi   the generic system image alone (for ztConflo)
 ```
 
-> **Default Credentials:**
+> **Default credentials of the release images** (a build asks you for your own):
 > - **Username:** `zerone`
 > - **Password:** `toor` (has full `sudo` privileges)
 
 
 ## What you need
 
-A Linux computer (x86-64 or ARM), about 15 GB free, and an internet
+A Linux computer (x86-64 or ARM), about 20 GB free, and an internet
 connection: the build downloads Arch Linux ARM and about 2 GB of packages. On
 Arch Linux:
 
 ```
-sudo pacman -S --needed util-linux libarchive dosfstools mtools e2fsprogs \
-    qemu-user-static qemu-user-static-binfmt qemu-system-aarch64 edk2-aarch64 \
+sudo pacman -S --needed python util-linux libarchive dosfstools mtools e2fsprogs \
+    curl gnupg tar xz qt6-base qemu-user-static qemu-user-static-binfmt qemu-system-aarch64 edk2-aarch64 \
     qemu-hw-display-virtio-gpu qemu-hw-display-virtio-gpu-gl \
     qemu-hw-display-virtio-gpu-pci qemu-hw-display-virtio-gpu-pci-gl qemu-ui-gtk qemu-ui-opengl
 ```
+
+On Fedora, Rocky, Alma or RHEL, see [Host setup for the Red Hat family](../docs/host-setup-rhel.md).
+
+`installer/ztos doctor` checks all of this, by running it where it can.
 
 The build never needs `sudo`. It runs in a user namespace, so your account
 needs a subordinate ID range in `/etc/subuid` and `/etc/subgid` (most
@@ -86,10 +90,12 @@ installer/ztos install --target starlte
 1. **Unlock the bootloader and put TWRP in RECOVERY.** In Android: Settings >
    Developer options > OEM unlocking. Then, from download mode (Volume Down
    + Bixby + Power), flash TWRP for starlte with Odin or Heimdall.
-2. **Back up what you want to keep.**
+2. **Back up what you want to keep.** The installer can't save your own files.
 3. **Start TWRP:** power off, then hold Volume Up + Bixby + Power. Plug the
    phone into the computer (`adb devices` shows it as `recovery`).
 4. **Run the installer.** It builds ztOS's boot image and system, then:
+   - offers to save the phone's `BOOT`, `RECOVERY` and `EFS` partitions to `stock/`,
+     see [the backups](#the-backups-in-stock). Nothing is written to the phone without them
    - builds the Galaxy S9 boot image with WLAN enabled; the build applies the
      Exynos9810 PCIe and pinctrl resume fixes automatically
    - asks before writing the boot image to BOOT, and reads it back to check it
@@ -108,10 +114,72 @@ retries. Check the result with `df -h /`.
 If the phone ever fails to start, it falls back to TWRP by itself. Run the
 installer again from step 3.
 
+The kernel modules come from `prebuilts/modules/`. A module built in your own tree
+replaces its prebuilt only if it is newer than its source, and the build stops if a
+module was made for another kernel. Modules built for the exact kernel you are
+installing (`scripts/build-bt-modules.sh <its .config> <dir>`) go in with
+`ZTOS_MODULES=<dir>`. Matching the version string alone is not proof of a match:
+see `power/BT-FIX.md`.
+
 The Wi-Fi resume support is part of the phone kernel/device tree, not a
 separate package. A fresh install that rebuilds the boot image includes it.
 Choosing to reuse a previously built `out/ztos-boot.img` reuses that image as
 is; rebuild it from the current source to include later kernel fixes.
+
+### The backups in stock/
+
+`scripts/flash.sh`, which the installer uses to write `BOOT`, refuses to run until
+`stock/BOOT.img`, `stock/RECOVERY.img` and `stock/EFS.img` exist. That check is
+deliberate: they are the way back to Android, and `EFS` can't be made again.
+
+The installer offers to make them. To do it yourself, with the phone in TWRP:
+
+```
+scripts/backup-stock.sh
+```
+
+It only reads the phone, compares each copy with the partition, and never replaces
+a file already in `stock/`. Do it before the first install: afterwards `BOOT` holds
+ztOS, not Android. `EFS.img` holds your IMEI. Keep a copy of `stock/` off this
+computer, and never share it. The repository ignores the folder.
+
+### The USB network
+
+The phone is `172.16.42.1` and hands this computer `172.16.42.2` by DHCP, with no route
+and no DNS, so your internet keeps using its own way out. NetworkManager on this computer
+may still prefer a fixed profile; `docs/host-setup-rhel.md` has one. Builds from before
+this was fixed (ROADMAP 1.6) do not answer DHCP in running ztOS, only in rescue, and need
+that fixed profile, or the host drops the link about every 45 s.
+
+### The firewall
+
+No script changes your firewall. While installing, the phone connects **to this computer**,
+so these must be let in, from the USB interface only:
+
+| Script | Port (TCP) |
+|---|---|
+| `scripts/flash-root.sh`, which the installer runs | 5557 |
+| `scripts/flash-from-rescue.sh` | 5558 |
+| `scripts/flash-boot-from-arch.sh` | 5559 |
+
+`flash-root.sh` tries the connection before it writes, and stops with a message if it's
+blocked. The system write can be run again, and carries on where it stopped.
+
+Don't open these ports on the zone your Wi-Fi is in: anyone on that network could then
+reach them. Give the USB interface its own zone. With firewalld and NetworkManager, using
+the `ztos-usb` profile from the host guide:
+
+```
+sudo firewall-cmd --permanent --new-zone=ztos-usb
+sudo firewall-cmd --permanent --zone=ztos-usb --add-port=5557-5559/tcp
+sudo firewall-cmd --reload
+sudo nmcli con mod ztos-usb connection.zone ztos-usb
+sudo nmcli con up ztos-usb
+```
+
+The development tools in `scripts/` use more ports on this same link (5561, 5576, 5581,
+5583, 5587, 5596, and 8080 for `pacman-proxy.py`); add them to this zone if you use them.
+With another firewall, the rule is the same: allow those ports in on the USB interface.
 
 ## What you get
 

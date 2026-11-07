@@ -22,4 +22,4 @@ performance = "normal"
 dependencies = []
 
 # [device]
-# host = "alarm@172.16.42.1"
+# host = "user@172.16.42.1"

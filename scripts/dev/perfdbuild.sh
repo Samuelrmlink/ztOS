@@ -1,7 +1,8 @@
 #!/bin/sh
-cd /home/alarm/ztmetro || exit 1
-cp /tmp/zrn/zrnperfd.c perfd/zrnperfd.c && chown alarm: perfd/zrnperfd.c && touch perfd/zrnperfd.c
-su alarm -c "make -s perfd/zrnperfd" 2>&1 | grep -E "error|Error" -A3
+. /usr/lib/ztos/user.sh
+cd "$ZTOS_HOME/ztmetro" || exit 1
+cp /tmp/zrn/zrnperfd.c perfd/zrnperfd.c && chown "$ZTOS_USER:" perfd/zrnperfd.c && touch perfd/zrnperfd.c
+su "$ZTOS_USER" -c "make -s perfd/zrnperfd" 2>&1 | grep -E "error|Error" -A3
 dest=$(systemctl show -p ExecStart zrnperfd | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
 echo "service runs $dest"
 if [ -x perfd/zrnperfd ] && [ -n "$dest" ]; then

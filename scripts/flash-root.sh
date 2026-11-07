@@ -16,17 +16,82 @@
 #     `iflag=fullblock` stops after 256 32 KB reads (8 MB), not 256 MiB.
 # The receiver is started detached and waited for by watching its dd, because
 # the phone's shell will not return while nc is still holding the pipeline.
+#
+# The phone has to reach this computer on port 5557. That is tried first, before
+# anything is written, so a firewall gets a clear message and not a silent wait.
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 IMG=${1:-$ROOT/out/arch-root.img}
 CHUNK=${2:-256}
 PART=/dev/sda25
-HOST=172.16.42.2
-PORT=5557
-PSH=$ROOT/scripts/psh.py
+HOST=${HOST:-172.16.42.2}
+PORT=${PORT:-5557}
+PSH=${PSH:-$ROOT/scripts/psh.py}
+DRAIN_WAIT=${DRAIN_WAIT:-30}	# seconds for the listener to finish once the phone's dd is gone
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+LOG=$TMP/socat.log
+server=
+trap '[ -z "$server" ] || kill "$server" 2>/dev/null; rm -rf "$TMP"' EXIT
 
+die() {
+	echo "flash-root: $*" >&2
+	exit 1
+}
+
+blocked() {
+	cat >&2 <<-EOF
+	flash-root: the phone could not connect to this computer on $HOST port $PORT.
+	  Most likely a firewall is blocking it. Let the USB interface in, and not Wi-Fi:
+	  see "The firewall" in installer/README.md. With firewalld, for example:
+	    sudo firewall-cmd --get-active-zones
+	    sudo firewall-cmd --zone=<the USB interface's zone> --add-port=$PORT/tcp
+	  Nothing is lost: run this script again and it carries on where it stopped.
+	EOF
+	exit 2
+}
+
+# Serve one file to the first phone that connects.
+listen() {
+	: > "$LOG"
+	socat -d -d -u "OPEN:$1" "TCP-LISTEN:$PORT,bind=$HOST,reuseaddr" 2> "$LOG" &
+	server=$!
+	sleep 1
+	if ! kill -0 "$server" 2> /dev/null; then
+		wait "$server" 2> /dev/null
+		server=
+		echo "flash-root: could not listen on $HOST port $PORT:" >&2
+		tail -n 3 "$LOG" >&2
+		die "does this computer have the address $HOST on the USB interface? See docs/host-setup-rhel.md."
+	fi
+}
+
+connected() {
+	grep -q 'accepting connection' "$LOG"
+}
+
+stop_listening() {
+	[ -z "$server" ] && return
+	kill "$server" 2> /dev/null
+	wait "$server" 2> /dev/null
+	server=
+}
+
+# Can the phone reach the listener? Nothing here writes to the phone's storage.
+check_link() {
+	local mark=ZTOS_LINK_$$
+	echo "$mark" > "$TMP/probe"
+	listen "$TMP/probe"
+	local got
+	got=$("$PSH" -t 15 "nc $HOST $PORT" 2> /dev/null)
+	stop_listening
+	"$PSH" -t 10 'killall nc 2>/dev/null; true' > /dev/null 2>&1
+	case $got in
+	*"$mark"*) ;;
+	*) blocked ;;
+	esac
+}
+
+command -v socat > /dev/null || die "socat is not installed on this computer"
 [ -s "$IMG" ] || { echo "no image: $IMG" >&2; exit 1; }
 SIZE=$(stat -c %s "$IMG")
 (( SIZE % (CHUNK * 1048576) == 0 )) || { echo "image size is not a multiple of ${CHUNK}M" >&2; exit 1; }
@@ -37,6 +102,7 @@ psize=$("$PSH" -t 20 "blockdev --getsize64 $PART" | tr -dc 0-9)
 [ -n "$psize" ] && [ "$psize" -ge "$SIZE" ] ||
 	{ echo "partition too small or unreachable ($psize)" >&2; exit 1; }
 "$PSH" -t 10 "touch /run/zboot.hold" >/dev/null 2>&1 || true
+[ -n "${SKIP_LINK_CHECK:-}" ] || check_link	# if the check itself is ever wrong, the transfer still has its own limit
 
 # sha256 of one chunk of the partition, as the phone reads it
 part_hash() {
@@ -66,18 +132,26 @@ for ((i = 0; i < N; i++)); do
 	back=
 	for try in 1 2 3; do
 		cleanup_phone
-		socat -u "OPEN:$TMP/chunk.gz" "TCP-LISTEN:$PORT,bind=$HOST,reuseaddr" 2>/dev/null &
-		server=$!
-		sleep 1
+		listen "$TMP/chunk.gz"
 		"$PSH" -t 60 "setsid sh -c 'nc $HOST $PORT | gunzip | dd of=$PART bs=1M seek=$off count=$CHUNK iflag=fullblock conv=notrunc,fsync' >/dev/null 2>&1 & echo started" >/dev/null
 		for ((w = 0; w < 60; w++)); do
 			sleep 5
 			writer_gone && break
 		done
-		wait $server 2>/dev/null
-		kill $server 2>/dev/null
+		# the listener ends once the phone has read everything; it must not be
+		# waited for without a limit, since nobody may ever have connected
+		for ((w = 0; w < DRAIN_WAIT; w++)); do
+			kill -0 "$server" 2> /dev/null || break
+			sleep 1
+		done
+		if kill -0 "$server" 2> /dev/null; then
+			connected || { stop_listening; cleanup_phone; blocked; }
+			echo "   chunk $i: the transfer stalled (try $try)" >&2
+		fi
+		stop_listening
 		cleanup_phone
 		back=$(part_hash "$off")
+		[ -n "$back" ] || die "the phone stopped answering at chunk $i. Check the cable, then run this again: it carries on."
 		[ "$back" = "$want" ] && break
 		echo "   chunk $i readback mismatch (try $try)" >&2
 	done

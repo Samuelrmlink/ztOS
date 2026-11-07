@@ -16,7 +16,10 @@ RECOVERY) NODE=/dev/block/sda11 ;;
 *) echo "only BOOT or RECOVERY" >&2; exit 2 ;;
 esac
 for f in BOOT RECOVERY EFS; do
-	[ -s "$ROOT/stock/$f.img" ] || { echo "stock/$f.img missing: back up first" >&2; exit 1; }
+	[ -s "$ROOT/stock/$f.img" ] || {
+		echo "stock/$f.img missing: with the phone in TWRP, run scripts/backup-stock.sh first (it only reads the phone)" >&2
+		exit 1
+	}
 done
 [ "$(head -c 8 "$IMG")" = "ANDROID!" ] || { echo "not an Android boot image" >&2; exit 1; }
 BY=/dev/block/platform/11120000.ufs/by-name/$PART

@@ -17,10 +17,12 @@ from __future__ import annotations
 import argparse
 import getpass
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 from . import build as b
+from . import host
 from . import targets as t
 
 BANNER = r"""
@@ -198,15 +200,22 @@ def cmd_guide(args):
 
 
 def cmd_doctor(args):
-    import shutil
-    b.check_host()
+    def show(checks):
+        for c in checks:
+            state = "yes" if c.ok else ("warning" if c.warning else "no")
+            print(f"  {c.what}: {state}" + (f" ({c.detail})" if c.detail else ""))
+
+    build = host.build_checks()
+    print("building ztOS")
+    show(build)
+    print("installing on a phone (the emulator does not need these)")
+    show(host.phone_checks())
+    print("the emulator (optional)")
+    show(host.emulator_checks())
+    failed = host.problems(build)
+    if failed:
+        raise b.Fail(f"this computer cannot build ztOS yet: {len(failed)} thing(s) under 'building ztOS' said no")
     print("this computer can build ztOS")
-    print(f"  the emulator (qemu-system-aarch64): {'yes' if shutil.which('qemu-system-aarch64') else 'no'}")
-    gpu = Path("/usr/lib/qemu/hw-display-virtio-gpu-pci-gl.so").exists()
-    window = Path("/usr/lib/qemu/ui-gtk.so").exists() and Path("/usr/lib/qemu/ui-opengl.so").exists()
-    print(f"  its graphics (virtio GPU with OpenGL): {'yes' if gpu else 'no: sudo pacman -S qemu-hw-display-virtio-gpu-pci-gl'}")
-    print(f"  its window (GTK + OpenGL): {'yes' if window else 'no: sudo pacman -S qemu-ui-gtk qemu-ui-opengl'}")
-    print(f"  phones over USB (adb): {'yes' if shutil.which('adb') else 'no (only for installing on a phone)'}")
 
 
 def cmd_mirror(args):
@@ -292,6 +301,10 @@ def main(argv=None):
         return 0
     except b.Fail as e:
         print(f"ztos: {e}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as e:
+        name = Path(str(e.cmd[0])).name if isinstance(e.cmd, (list, tuple)) else e.cmd
+        print(f"ztos: {name} failed (exit status {e.returncode}): see what it said above", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("\nztos: stopped")

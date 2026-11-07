@@ -18,7 +18,7 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 | 1.3 | **Kernel and module build (partly done).** `build/linux-7.1` and the toolchain are in place, and `scripts/build-bt-modules.sh` built the running Bluetooth, sound and other modules. On a fresh clone nothing fetches them, and a boot image hasn't been built here yet. | M | Confirmed |
 | 1.4 | **Rebuild prebuilts together and enforce it.** Prebuilts date from 14 and 26 Oct, while the boot image is from 14 Oct and kernel files changed through 30 Oct. All carry the vermagic `7.1.0-zboot`, so a mismatch loads silently. Add a CI check. | M | Confirmed (dates); harm Likely |
 | 1.5 | **`btmgmt` kernel crash (fixed on this phone).** Rebuilding `bluetooth.ko` against the running kernel stopped the oopses (3.0a): none in the four boots from 2026-11-06. The install still needs 4.0 and 1.4, or a new install could bring it back. | M | Confirmed; fixed on this phone |
-| 1.6 | **Answer DHCP on USB.** `build.py:335` disables `systemd-networkd`, the only thing serving DHCP on `usb0`, and NetworkManager is told to ignore `usb0`. Hosts retry every 45 s and lose the connection. Check that enabling it doesn't conflict with NetworkManager on `wlan`/`eth`. Workaround in use: a static host profile (`ztos-usb`), which stopped the DHCP loop on this PC. The phone side is unchanged: `systemd-networkd` is still disabled. | S | Confirmed |
+| 1.6 | **Answer DHCP on USB (fixed in the installer, untried on a phone).** The device layer turns `systemd-networkd` on for the phone, with only `10-zboot-usb.network` left: Arch Linux ARM's `en.network` and `eth.network`, and our `20-wlan.network`, would have fought NetworkManager. It leaves other daemons' routes alone, and `wait-online` is masked. Not applied to this phone on purpose: it could cut the only link. This phone keeps its static host profile (`ztos-usb`). | S | Confirmed; fix by review |
 | 1.7 | **Fix Wi-Fi going silent while connected.** The phone stays associated (5280 MHz) but ARP to the gateway and the PC fails, though DHCP worked at 21:48 UTC. Power save is on, and the driver logs `-52` errors. This blocks SSH over the LAN. | M | Unknown |
 
 ## 2. G960F support
@@ -68,26 +68,26 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 
 | # | Item | Size | Evidence |
 |---|---|---|---|
-| 4.0 | **Rebuild the Bluetooth modules during install.** Once the rebuild is proven by hand, add a script the installer runs so they always match the boot image being flashed. Needs the kernel source and compiler, or a prebuilt set checked against the boot image. Depends on 1.3 to 1.5. | M | New |
-| 4.1 | RHEL-family host guide, build-tested on Rocky and Fedora. | M | In progress |
-| 4.2 | Make `doctor` complete: subgid, `curl`, `xz`, `pyside6-uic`, Python version, `socat`, and a real run of the qemu interpreter. It currently passes with a broken one. | S | Review |
-| 4.3 | Add a timeout and a clear error to `flash-root.sh`. A blocked port 5557 should hang with no message (`wait $server`, stderr discarded). | S | Review |
-| 4.4 | Document the firewall step, and use the USB interface's zone rather than opening ports on Wi-Fi too. No script handles the firewall now. | S | Confirmed |
-| 4.5 | Remove Arch-only paths and hints: `/usr/lib/qemu/*.so`, `/usr/lib/qt6/uic`, `pacman` in error messages. | S | Review |
-| 4.6 | Document or relax the `stock/` requirement. `flash.sh` stops without those backups, and no install guide mentions them. | S | Review |
-| 4.7 | Verify the Arch Linux ARM tarball. It's fetched over plain HTTP with no checksum check. | S | Review |
-| 4.8 | Check why CI passes without installing `uic`, or fix it. | S | Likely |
-| 4.9 | Make helper scripts work with any username. Several assume `alarm`. | S | Review |
-| 4.11 | Replace `scripts/ztmetro-push.sh`'s hardcoded `alarm` login and `su` with something that works on installer builds. | S | Confirmed |
-| 4.10 | Add a log-collection script, with IMEI and EFS data excluded. | S | New |
+| 4.0 | **Hardware modules at install (partly done).** A fresh clone had no `zrn-flash.ko`, so no sensor hub fix (1.2), and a stale one in a working tree went in silently. `prebuilts/modules/zrn-flash.ko` is now the tested module, `devices/samsung-starlte/pick-modules.sh` skips stale local modules and stops on a wrong kernel or a prebuilt older than its source, and `ZTOS_MODULES=<dir>` takes a `build-bt-modules.sh` set. The installer doesn't rebuild them itself: that needs 1.3. **Fresh installs still get the old Bluetooth modules** (1.5): the prebuilts of `bluetooth`, `btbcm`, `hci_uart`, `rfcomm`, `aes`, `cmac`, `ecc`, `ecdh_generic`, `kpp`, `snd-zrn-abox` and `zrn-bbd` differ from this phone's working ones. The prebuilt boot image is the phone's kernel (#15, 14 Oct), so copying the phone's set in would fit; owner's decision, with 1.4. | M | Confirmed |
+| 4.1 | RHEL-family host guide, `docs/host-setup-rhel.md`, build-tested on Rocky and Fedora, updated for the fixes below. No VM build was repeated with them. | M | Done |
+| 4.2 | `doctor` complete: subgid, `curl`, `xz`, `gpg`, `uic`, Python and `mke2fs` versions, `socat`, the namespace, and a real aarch64 program through binfmt. A build insists on the same checks. It warns on this PC: `/usr/bin/qemu-aarch64-static` is gone, so builds stop working at the next reboot. | S | Done |
+| 4.3 | `flash-root.sh` tries the link before writing, limits each wait, and says what's wrong. Tested with a pretend phone, not a real one. The other two flash scripts got a time limit. | S | Done; not run on a phone |
+| 4.4 | Firewall documented in `installer/README.md`, with a zone for the USB interface alone. No script touches the firewall. The zone commands haven't been run. | S | Done; zone commands untested |
+| 4.5 | Arch-only paths and hints removed: `doctor` asks QEMU what it has, the SDK finds `uic` on each family, and messages use this host's package manager. | S | Done |
+| 4.6 | `stock/` requirement kept and documented. `scripts/backup-stock.sh` makes the backups from TWRP, read only, and the installer offers it before writing. Tested with a stand-in `adb`. | S | Done; not run on a phone |
+| 4.7 | Arch Linux ARM tarball checked against its signature and a pinned key in `installer/keys/`. The mirrors have no HTTPS. | S | Done |
+| 4.8 | CI never passed without `uic`: all 84 listed runs failed, the latest on that error. The workflow now installs it and runs `doctor` first. Not run on GitHub, so later build steps are unproven there. | S | Fixed; not run |
+| 4.9 | Helper scripts work with any username: `scripts/phone-lib.sh` and `phone-do.sh` (`ZT_USER`, `ZT_PW`, `ZT_SSH`). The old default now needs `ZT_USER=alarm ZT_PW=alarm`. Tested with stand-ins for ssh and sudo. | S | Done; not run on a phone |
+| 4.11 | `scripts/ztmetro-push.sh` uses those and `sudo`, so it should work on installer builds. Tested with stand-ins only. | S | Done; not run on a phone |
+| 4.10 | `scripts/collect-logs.py`: IMEI and EFS data excluded, addresses and Wi-Fi names masked. The filter was checked on 12,537 real log lines. | S | Done |
 
 ## 5. Security and housekeeping
 
 | # | Item | Size | Evidence |
 |---|---|---|---|
-| 5.0 | Tighten sudo: `99-ztos-alarm` grants passwordless `/usr/bin/systemctl`, which is effectively root. | S | Confirmed |
-| 5.1 | Review the rescue shell: unauthenticated root telnet on the USB network. Convenient for recovery, but it should be a conscious choice and documented. | S | Review |
-| 5.2 | Fix out-of-date docs, for example the `ztoscsf` poll interval in `README.md`. | S | Review |
+| 5.0 | `99-ztos-alarm` removed from new images: every `sudo systemctl` in the tree is already covered by `99-ztos-shell`. Existing phones keep the file, and this phone also has `zz-dev-nopasswd`: remove both when development allows. | S | Done in the repository |
+| 5.1 | Rescue shell documented in `README.md`: unauthenticated root telnet, USB only, early boot and failed boots. Keeping it needs the owner's yes. | S | Documented; decision open |
+| 5.2 | Out-of-date docs fixed: the `ztoscsf` poll interval, logins, Bluetooth status, disk space, the new scripts. Older sections about Hyprland and `alarm` are left as history. | S | Done |
 | 5.3 | Decide how to feed fixes upstream. Many items here affect all installer builds, not only the F. | S | New |
 | 5.4 | Test changes on a G960N if possible. None is available here, so N compatibility is by code review only. | ? | Open |
 

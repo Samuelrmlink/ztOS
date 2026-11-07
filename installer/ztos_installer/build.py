@@ -10,26 +10,32 @@ namespace (mke2fs -d, mtools), so nothing is ever mounted for real.
 from __future__ import annotations
 
 import os
-import platform
 import re
-import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import host
 
 ROOT = Path(__file__).resolve().parents[2]          # the repository
 OS = ROOT / "os"
 WORK = ROOT / "build" / "ztos"
 TARBALL = ROOT / "build" / "alarm.tar.gz"
 TARBALL_URL = "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+# "Arch Linux ARM Build System", who signs the tarballs
+TARBALL_KEY = ROOT / "installer" / "keys" / "archlinuxarm-build-system.asc"
+TARBALL_FINGERPRINT = "68B3537F39A313B3E574D06777193F152BDBE6A6"
+TARBALL_MIN_SIZE = 100_000_000      # smaller is a download that stopped early
 SDK = ROOT / "sdk"
 PKGCACHE = ROOT / "build" / "pkg-cache"
-# Arch's edk2-aarch64 package; the Nix development shell exports ZTOS_EDK2
-# with the same QEMU_EFI.fd from nixpkgs.
-EDK2 = Path(os.environ.get("ZTOS_EDK2", "/usr/share/edk2/aarch64"))
+# Where QEMU_EFI.fd is: Arch's and Fedora's edk2-aarch64, then Debian's and
+# Ubuntu's qemu-efi-aarch64; the Nix development shell exports ZTOS_EDK2.
+EDK2 = next((Path(d) for d in (os.environ.get("ZTOS_EDK2"), "/usr/share/edk2/aarch64", "/usr/share/qemu-efi-aarch64")
+             if d and (Path(d) / "QEMU_EFI.fd").exists()), Path("/usr/share/edk2/aarch64"))
 
 
 class Fail(Exception):
@@ -80,35 +86,71 @@ def packages(target: str) -> list:
 
 
 def check_host():
-    """What building needs on this computer."""
-    missing = []
-    for tool in ("unshare", "newuidmap", "bsdtar", "mkfs.fat", "mcopy", "mmd", "sfdisk", "python3"):
-        if shutil.which(tool) is None:
-            missing.append(tool)
-    if not Path("/usr/bin/mke2fs").exists() and not Path("/usr/sbin/mke2fs").exists():
-        missing.append("mke2fs (e2fsprogs)")
-    if platform.machine() not in ("aarch64", "arm64") and not Path(
-        "/proc/sys/fs/binfmt_misc/qemu-aarch64"
-    ).exists():
-        missing.append("qemu-user-static + qemu-user-static-binfmt (to run aarch64 programs)")
-    user = os.environ.get("USER", "")
-    subuid = Path("/etc/subuid").read_text() if Path("/etc/subuid").exists() else ""
-    if os.geteuid() != 0 and not re.search(rf"^{re.escape(user)}:", subuid, re.M):
-        missing.append(f"a /etc/subuid range for {user} (usermod --add-subuids 100000-165535 {user})")
-    if missing:
-        raise Fail("this computer is missing what building ztOS needs:\n  " + "\n  ".join(missing) +
-                   "\nOn Arch Linux: sudo pacman -S --needed util-linux libarchive dosfstools mtools e2fsprogs "
-                   "qemu-user-static qemu-user-static-binfmt")
+    """What building needs on this computer (host.py; `ztos doctor` shows it all)."""
+    failed = host.problems(host.build_checks())
+    if failed:
+        raise Fail("this computer is missing what building ztOS needs (ztos doctor shows it all):\n  " +
+                   "\n  ".join(host.describe(c) for c in failed))
+
+
+def signature_problem(path: Path, sig: Path, key: Path = TARBALL_KEY, fingerprint: str = TARBALL_FINGERPRINT):
+    """Why this signature does not prove the file came from Arch Linux ARM, or None.
+    The key is the copy in this repository, read in a keyring made just for this,
+    and the signing key must be that very one: anything else in gpg's answer is
+    not looked at, so the keys and the trust settings of this computer play no part."""
+    with tempfile.TemporaryDirectory(prefix="ztos-gpg-") as home:
+        gpg = ["gpg", "--homedir", home, "--batch", "--quiet", "--no-autostart"]
+        imported = subprocess.run([*gpg, "--import", str(key)], capture_output=True, text=True)
+        if imported.returncode != 0:
+            return f"gpg could not read {key}: {imported.stderr.strip()[:300]}"
+        run = subprocess.run([*gpg, "--status-fd", "1", "--verify", str(sig), str(path)],
+                             capture_output=True, text=True)
+    for line in run.stdout.splitlines():
+        words = line.split()
+        # [GNUPG:] VALIDSIG <key> <date> <time> <expires> <ver> <reserved> <algo> <hash> <class> <primary key>
+        if words[:2] == ["[GNUPG:]", "VALIDSIG"] and fingerprint in (words[2], words[-1]):
+            return None
+    return (run.stderr.strip()[:300] or "no valid signature") + f" (expected key {fingerprint})"
+
+
+def fetch(url: str, dest: Path) -> None:
+    try:
+        subprocess.run(["curl", "-L", "--fail", "--retry", "3", "-o", str(dest), url], check=True)
+    except subprocess.CalledProcessError as e:
+        dest.unlink(missing_ok=True)
+        raise Fail(f"could not download {url} (curl exit status {e.returncode})") from None
 
 
 def fetch_tarball():
-    if TARBALL.exists() and TARBALL.stat().st_size > 100_000_000:
-        return
-    say(f"downloading Arch Linux ARM ({TARBALL_URL})")
+    """The Arch Linux ARM tarball, checked against its signature. The mirrors are plain
+    HTTP only, so that signature, and our copy of the key, are what make it safe."""
     TARBALL.parent.mkdir(parents=True, exist_ok=True)
-    tmp = TARBALL.with_suffix(".part")
-    subprocess.run(["curl", "-L", "--fail", "-o", str(tmp), TARBALL_URL], check=True)
+    sig = TARBALL.with_name(TARBALL.name + ".sig")
+    if TARBALL.exists() and TARBALL.stat().st_size > TARBALL_MIN_SIZE:
+        if not sig.exists():        # from before the signature was checked
+            fetch(TARBALL_URL + ".sig", sig)
+        problem = signature_problem(TARBALL, sig)
+        if problem is None:
+            say("Arch Linux ARM tarball: signature good")
+            return
+        # most likely a newer tarball was published after this one was saved
+        say(f"the saved tarball does not match its signature, so it is being downloaded again ({problem})")
+        sig.unlink(missing_ok=True)
+    say(f"downloading Arch Linux ARM ({TARBALL_URL})")
+    tmp, tmp_sig = TARBALL.with_suffix(".part"), sig.with_suffix(".part")
+    fetch(TARBALL_URL + ".sig", tmp_sig)
+    fetch(TARBALL_URL, tmp)
+    problem = signature_problem(tmp, tmp_sig)
+    if problem is not None:
+        tmp.unlink(missing_ok=True)
+        tmp_sig.unlink(missing_ok=True)
+        raise Fail("the downloaded Arch Linux ARM tarball failed its signature check, so it was deleted:\n  "
+                   f"{problem}\nA new tarball may have come out during the download: try again. If it keeps "
+                   "failing, do not work around it: the download may have been altered, or the project may "
+                   f"have changed its key ({TARBALL_KEY.relative_to(ROOT)}).")
+    say("Arch Linux ARM tarball: signature good")
     tmp.replace(TARBALL)
+    tmp_sig.replace(sig)
 
 
 def build_apps(stage: Path):
@@ -297,11 +339,10 @@ ch passwd -l root > /dev/null
 install -Dm440 /dev/stdin "$R/etc/sudoers.d/10-wheel" <<'SUDO'
 %wheel ALL=(ALL:ALL) ALL
 SUDO
+# (an older build tree may still hold 99-ztos-alarm: its passwordless systemctl was root)
+rm -f "$R/etc/sudoers.d/99-ztos-alarm"
 if [ -d "$R/etc/sudoers.d" ]; then
 	chmod 440 "$R"/etc/sudoers.d/* 2>/dev/null || true
-	if [ "$USERNAME" != alarm ] && [ -f "$R/etc/sudoers.d/99-ztos-alarm" ]; then
-		sed -i "s/^alarm /$USERNAME /" "$R/etc/sudoers.d/99-ztos-alarm"
-	fi
 fi
 # The one place the system learns who its user is (user.sh, ztos_user.py and
 # ztos-user.h read it). ztos-user-dropins then writes what cannot read it:
@@ -332,12 +373,16 @@ for u in greetd NetworkManager systemd-resolved sshd systemd-pstore ztos-pstore-
 		ztos-iald zrnperfd waydroid-container ztos-waydroid-images; do
 	ch systemctl enable "$u" > /dev/null 2>&1
 done
+# (systemd-networkd: only a device layer with a USB link turns it on, for its DHCP.
+# Its wait-online would hold boot up for a cable that may not be plugged in.)
 for u in systemd-networkd getty@tty1; do
 	ch systemctl disable "$u" > /dev/null 2>&1 || true
 done
 for u in $DEVICE_UNITS; do
 	ch systemctl enable "$u" > /dev/null 2>&1 || echo "(no $u)"
 done
+ch systemctl disable systemd-networkd-wait-online > /dev/null 2>&1 || true
+ch systemctl mask systemd-networkd-wait-online > /dev/null 2>&1 || true
 
 step "tidying up"
 rm -f "$R/etc/resolv.conf"; ln -sf /run/systemd/resolve/stub-resolv.conf "$R/etc/resolv.conf"
@@ -397,6 +442,8 @@ def run_stage(s: Settings, log: Path) -> None:
         # checkout of the device's own repository (ZTOS_DEVICE=<path>)
         "DEVSRC": os.environ.get("ZTOS_DEVICE") or str(ROOT / "devices" / DEVICES.get(s.target, "none")),
         "DEVROOT": os.environ.get("ZTOS_DEVICE") or str(ROOT),
+        # modules built for the kernel being installed (devices/samsung-starlte/pick-modules.sh)
+        "ZTOS_MODULES": os.environ.get("ZTOS_MODULES", ""),
         "GSITAR": str(s.dir / f"ztos-gsi-{gsi_version()}-aarch64.tar.zst"),
         "PATH": os.environ.get("PATH", "/usr/bin"),
     }

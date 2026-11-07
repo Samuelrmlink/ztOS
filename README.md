@@ -252,20 +252,21 @@ microSD / postmarketOS half is untouched.
 | Kernel | mainline 7.1.0 + the Exynos 9810 drivers of [SheroAbi/galaxy-s9plus-mainline-linux](https://github.com/SheroAbi/galaxy-s9plus-mainline-linux), device tree derived for starlte |
 | Userspace | Arch Linux ARM aarch64, systemd, 0 failed units, root grown to 53 G on `USERDATA` |
 | Boot | normal power-on → Arch; `reboot recovery` → TWRP; a panic or watchdog reset → TWRP |
-| Reached over | USB: `ssh alarm@172.16.42.1` (the host gets 172.16.42.2) and a serial console on `/dev/ttyACM0` |
+| Reached over | USB: `ssh <your user>@172.16.42.1` (the host gets 172.16.42.2) and a serial console on `/dev/ttyACM0` |
 | Works | all 8 cores with frequency scaling (M3 to 2704 MHz, thermal capped), UFS, USB gadget (NCM + ACM), **GPU: Mesa 26.2 Panfrost on Mali-G72 MC18, GLES 3.1, glmark2 570**, **DECON scanout 1440x2960**, touch (S6SY761), battery + charger (MAX17042 / MAX77705), **Wi-Fi (BCM4361), joined from Settings**, watchdog, **sound: speaker and DSP (ztOSCirrusAudio)**, **mobile network: 4G data, SMS, placing and answering calls (ztOSCoreNetworking)**, sensors (ztOSCoreSensorFramework), notification light, vibration, core power-down |
-| Still missing | camera, Bluetooth, the sound of calls (a call connects, but its audio is not routed yet), suspend (the M3 cores do not come back) |
+| Still missing | camera, the sound of calls (a call connects, but its audio is not routed yet), suspend (the M3 cores do not come back) |
 
-Login: `alarm` / `alarm`, root password `root` (Arch Linux ARM defaults,
-unchanged — change them). `sudo` is installed. An SSH key is in place for both
-users (`~/.ssh/id_ed25519.pub` of the build host), but that key has a
-passphrase, so password auth is what actually gets used today.
+Login: the user and password you chose in the installer, with `sudo` through the `wheel`
+group, and root's password locked. A release image is `zerone` / `toor`. An image from
+`scripts/build-arch-root.sh` keeps Arch Linux ARM's `alarm` / `alarm` and root / `root`:
+change them. Scripts on the build host take the user from `ZT_USER` (see
+`scripts/phone-lib.sh`).
 
 ## Partition layout
 
 | Partition | Node | Holds |
 |---|---|---|
-| `BOOT` | `/dev/sda10` | ztOS uniLoader + mainline kernel + initramfs; current device image is kernel #27, with PCIe/Wi-Fi resume support |
+| `BOOT` | `/dev/sda10` | ztOS uniLoader + mainline kernel + initramfs, with PCIe/Wi-Fi resume support |
 | `RECOVERY` | `/dev/sda11` | stock TWRP 3.7.0_9-0, byte-identical to `stock/RECOVERY.img` |
 | `USERDATA` | `/dev/sda25` | the Arch root, ext4, label `ZR_ARCH` |
 
@@ -294,6 +295,21 @@ Arch is on `BOOT` and TWRP on `RECOVERY`, so: a normal power-on or
 Power) lands in TWRP, and from TWRP a plain `adb reboot` comes back to Arch.
 All three were tested on the device.
 
+### The rescue shell has no password
+
+`initramfs/init` starts `telnetd -l /bin/sh` on the USB network: a root shell with no
+login, so that a phone that won't start can still be reached. This is deliberate. What
+it means:
+
+- It runs from early boot until the handover to the system, on every boot, and it stays
+  only if the system fails to start. Running ztOS does not listen on port 23.
+- Only USB is up at that stage, so reaching it takes a cable, and no Wi-Fi network can.
+- It gives away little today: whoever has the phone in hand can already boot TWRP, which
+  is also a root shell, and `USERDATA` is not encrypted.
+
+That last point is what could change: with encrypted storage, or a locked way into
+TWRP, this shell would become the easy way in, and should then be reviewed.
+
 ## Scripts
 
 Everything runs unprivileged on the build host; nothing needs sudo.
@@ -306,16 +322,19 @@ Everything runs unprivileged on the build host; nothing needs sudo.
 | `scripts/flash-boot-from-arch.sh <image>` | write BOOT from the running Arch system, over the USB link |
 | `scripts/pacman-proxy.py` | HTTP proxy on the host so the phone's pacman can reach a mirror over USB |
 | `scripts/flash-from-rescue.sh <image>` | the same, from our own rescue shell when TWRP is not running |
-| `scripts/flash-root.sh [image]` | write the root image into `USERDATA` in verified, resumable 256 MiB chunks |
+| `scripts/flash-root.sh [image]` | write the root image into `USERDATA` in verified, resumable 256 MiB chunks; the phone connects back on port 5557, see [the firewall](installer/README.md#the-firewall) |
+| `scripts/backup-stock.sh` | save `BOOT`, `RECOVERY` and `EFS` into `stock/` from TWRP; only reads the phone. `flash.sh` needs them |
+| `scripts/collect-logs.py` | the phone's logs in one file, with IMEI, EFS data, addresses and Wi-Fi names left out |
+| `scripts/phone-do.sh [--root] 'command'` | run one command on the phone as its user or as root, with `ZT_USER`, `ZT_PW` or `ZT_SSH` |
 | `scripts/psh.py 'command'` | run one command in the rescue shell (telnet over USB) |
 | `scripts/ssh-pw.py <user> <pw[,pw2]> <host> 'command'` | ssh with a password and `su`, without sshpass |
 | `kernel/make-dts.py` | derive the starlte device tree from the S9+ one; every edit is asserted |
 | `kernel/uniloader-failsafe.py` | patch the watchdog + fallback-target writes into uniLoader's first board hook |
 
 Build inputs live in `build/` (kernel tree, toolchain, busybox, the ALARM
-tarball) and are not in the repository. The ALARM tarball's GPG signature was
-verified against the Arch Linux ARM build key `68B3 537F 39A3 13B3 E574 D067
-7719 3F15 2BDB E6A6`.
+tarball) and are not in the repository. The installer checks the ALARM tarball's
+GPG signature against the Arch Linux ARM build key `68B3 537F 39A3 13B3 E574 D067
+7719 3F15 2BDB E6A6`, kept in `installer/keys/`.
 
 ## Build switches
 
@@ -591,7 +610,7 @@ it loads the modules that have no service of their own (the LED, the vibration
 motor) behind a mark in `/var/lib/ztoscsf` (a load that stops the kernel is
 not tried again; `ztoscsf retry NAME`), starts any listed unit that is not
 running, and then watches them all: units through one `systemctl show` every
-20 s, modules in `/sys/module`, session programs in `/proc`, and the kernel
+6 s while things are coming up, then every 60 s, modules in `/sys/module`, session programs in `/proc`, and the kernel
 log for faults. Anything that does not start, stops, or is restarted is sent
 to ztMETRO as a notification (`notify TITLE|TEXT` on its control pipe: a
 banner, and kept in the action centre). The list is
@@ -611,7 +630,7 @@ the config). Apps ask through ZrnMetroCore's `zmc_haptic()`, which writes
 
 Third-party apps in Python and Qt: [sdk/README.md](sdk/README.md). `ztos-sdk new NAME`
 makes one, `ztos-sdk run` tries it on the laptop, and `ztos-sdk deploy` builds a single
-aarch64 binary (a launcher with the app zipped onto it), installs it in the alarm user's
+aarch64 binary (a launcher with the app zipped onto it), installs it in the phone user's
 home and opens it in the shell. The phone needs `pyside6 qt6-wayland qt6-svg`
 (`ztos-sdk doctor --fix`).
 

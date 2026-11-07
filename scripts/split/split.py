@@ -105,7 +105,7 @@ def git(out):
     if subprocess.run(['git', '-C', str(ROOT), 'status', '--porcelain', '--ignore-submodules=dirty'], capture_output=True, text=True).stdout.strip():
         sys.exit('ztOSMobile has uncommitted changes: commit them first, the split takes history')
     if not shutil.which('git-filter-repo'):
-        sys.exit('needs git-filter-repo (pacman -S git-filter-repo)')
+        sys.exit('needs git-filter-repo (pip install git-filter-repo, or your distribution\'s package)')
     out = pathlib.Path(out).resolve()   # filter-repo runs inside each clone
     for repo, entries in plan(committed_only=True).items():
         base = out / repo
