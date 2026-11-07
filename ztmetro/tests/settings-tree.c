@@ -12,7 +12,7 @@ int main(void) {
 		{ PAGE_SYSTEM, PAGE_MAIN },
 		{ PAGE_WIFI, PAGE_CONNECTIONS }, { PAGE_BLUETOOTH, PAGE_CONNECTIONS }, { PAGE_MOBILE, PAGE_CONNECTIONS },
 		{ PAGE_WIFI_NET, PAGE_WIFI }, { PAGE_WIFI_JOIN, PAGE_WIFI }, { PAGE_APN, PAGE_MOBILE },
-		{ PAGE_ACCENTS, PAGE_THEME }, { PAGE_ANIMATION, PAGE_THEME }, { PAGE_STYLE, PAGE_THEME }, { PAGE_TILES, PAGE_THEME }, { PAGE_WALLS, PAGE_TILES }, { PAGE_NAVIGATION, PAGE_THEME }, { PAGE_QUICK, PAGE_THEME },
+		{ PAGE_ACCENTS, PAGE_THEME }, { PAGE_ANIMATION, PAGE_THEME }, { PAGE_STYLE, PAGE_THEME }, { PAGE_TILES, PAGE_THEME }, { PAGE_LOCK, PAGE_THEME }, { PAGE_NAVIGATION, PAGE_THEME }, { PAGE_QUICK, PAGE_THEME },
 		{ PAGE_AUDIO, PAGE_SOUND_TOUCH }, { PAGE_HAPTICS, PAGE_SOUND_TOUCH },
 		{ PAGE_BATTERY, PAGE_POWER }, { PAGE_PERF, PAGE_POWER }, { PAGE_BOOST, PAGE_POWER },
 		{ PAGE_CPU, PAGE_POWER }, { PAGE_GPU, PAGE_POWER }, { PAGE_VM, PAGE_POWER },
@@ -20,19 +20,26 @@ int main(void) {
 		{ PAGE_DATE, PAGE_SYSTEM }, { PAGE_KEYBOARD, PAGE_SYSTEM }, { PAGE_DEV, PAGE_SYSTEM }, { PAGE_ABOUT, PAGE_SYSTEM },
 	};
 	for (size_t i = 0; i < sizeof(tree) / sizeof(tree[0]); i++) {
-		assert(page_parent(tree[i].page) == tree[i].parent);
+		assert(page_parent(tree[i].page, WALL_TARGET_TILES) == tree[i].parent);
+		assert(page_parent(tree[i].page, WALL_TARGET_LOCK) == tree[i].parent);
 	}
-	assert(page_parent(PAGE_MAIN) == PAGE_NO_PARENT);
+	assert(page_parent(PAGE_MAIN, WALL_TARGET_TILES) == PAGE_NO_PARENT);
+
+	/* the picker has two parents, by whose photo it is choosing */
+	assert(page_parent(PAGE_WALLS, WALL_TARGET_TILES) == PAGE_TILES);
+	assert(page_parent(PAGE_WALLS, WALL_TARGET_LOCK) == PAGE_LOCK);
 
 	/* every page gets to the top in at most 3 steps, and only the top has no parent */
-	for (int p = 0; p < N_PAGES; p++) {
-		int steps = 0, at = p;
-		while (page_parent(at) != PAGE_NO_PARENT) {
-			at = page_parent(at);
-			assert(at >= 0 && at < N_PAGES);
-			assert(++steps <= 3);
+	for (int target = WALL_TARGET_TILES; target <= WALL_TARGET_LOCK; target++) {
+		for (int p = 0; p < N_PAGES; p++) {
+			int steps = 0, at = p;
+			while (page_parent(at, target) != PAGE_NO_PARENT) {
+				at = page_parent(at, target);
+				assert(at >= 0 && at < N_PAGES);
+				assert(++steps <= 3);
+			}
+			assert(at == PAGE_MAIN);
 		}
-		assert(at == PAGE_MAIN);
 	}
 	/* every page has a name, and no name means two pages */
 	for (int p = 0; p < N_PAGES; p++) {

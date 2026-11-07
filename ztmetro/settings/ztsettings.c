@@ -65,7 +65,7 @@ enum action {
 	ACT_ACCENT_OPEN,	/* the theme page's box: the picker swivels in over it */
 	ACT_PALETTE,	/* the DotMatrix style's palette, as the accent is Metro's */
 	ACT_WALL,		/* arg: 0 none, else the photo walls[arg - 1] */
-	ACT_WALL_TARGET,	/* arg: 0 start and lock, 1 start, 2 lock */
+	ACT_WALL_OPEN,		/* arg: WALL_TARGET_, whose photo to choose */
 	ACT_WALL_CAT,		/* arg: the category to open (a folder of photos) */
 	ACT_BT_POWER,
 	ACT_BT_DEVICE,		/* arg: which device: pair, connect or disconnect it */
@@ -185,7 +185,7 @@ static struct {
 	int accent;
 	int palette;		/* dotmatrix_palette */
 	char start_wall[256], lock_wall[256];	/* the photos, or "" */
-	int wall_target;			/* 0 both, 1 Start, 2 lock screen */
+	int wall_target;			/* WALL_TARGET_: whose photo the picker chooses */
 	int columns;
 	int style;				/* ztRetrofit's look: 0 Metro, 1 DotMatrix */
 	int style_pending;			/* the one chosen, until it is applied */
@@ -240,6 +240,7 @@ static struct {
 	 * "none" and is saved as such) */
 	.start_wall = "/usr/local/share/backgrounds/ztos/Lumia Cyan/Background_01.jpg",
 	.lock_wall = "/usr/local/share/backgrounds/ztos/Lumia Cyan lock screens/Wallpaper_01.jpg",
+	.wall_target = WALL_TARGET_TILES,
 	.haptic_strength = 80,
 	.haptic_group = { 100, 100, 100, 100, 100, 100 },
 	.quick = { 0, 1, 2, 3, 4, 5, 7, 8 },
@@ -1369,7 +1370,7 @@ static void wall_overlay(int page) {
 	uint32_t now = zmc_now_ms();
 	double gap = 8, tw = (zmc.width - 2 * MARGIN - 2 * gap) / 3.0, th = tw * 16.0 / 9.0;
 	int c = wall_cat_open;
-	const char *current = app.wall_target == 2 ? app.lock_wall : app.start_wall;
+	const char *current = app.wall_target == WALL_TARGET_LOCK ? app.lock_wall : app.start_wall;
 	unsigned col = ACCENTS[app.accent].color;
 	double ar = ((col >> 16) & 255) / 255.0, ag = ((col >> 8) & 255) / 255.0, ab = (col & 255) / 255.0;
 	bool leaving = wall_leave_at != 0, dots = zmc.style == ZMC_STYLE_DOTMATRIX;
@@ -1430,24 +1431,6 @@ static void draw_wall_tile(cairo_t *cr, cairo_surface_t *img, double x, double y
 	cairo_restore(cr);
 }
 
-/* the picker's first row: what Start and the lock screen take the photo for */
-static double draw_wall_targets(cairo_t *cr, double y) {
-	static const char *targets[] = { "start + lock", "start", "lock screen" };
-	double gap = 8;
-	double btn_w = (zmc.width - 2 * MARGIN - 2 * gap) / 3.0;
-	for (int i = 0; i < 3; i++) {
-		double bx = MARGIN + i * (btn_w + gap);
-		if (app.wall_target == i) zmc_set_rgb(cr, ACCENTS[app.accent].color);
-		else cairo_set_source_rgb(cr, 0.18, 0.18, 0.18);
-		cairo_rectangle(cr, bx, y, btn_w, 36);
-		cairo_fill(cr);
-		cairo_set_source_rgb(cr, 1, 1, 1);
-		zmc_text(cr, targets[i], FONT_REGULAR, 13, bx + 10, y + 9, 0);
-		zmc_add_hit(bx, y, btn_w, 36, ACT_WALL_TARGET, i);
-	}
-	return y + 36 + 16;
-}
-
 /* the categories, two across, each with its first photo and how many */
 static double draw_wall_categories(cairo_t *cr, double y) {
 	double gap = 10;
@@ -1472,7 +1455,7 @@ static double draw_wall_categories(cairo_t *cr, double y) {
 /* one category's photos, three across, "none" first */
 static double draw_wall_grid(cairo_t *cr, double y) {
 	double gap = 8;
-	const char *current = app.wall_target == 2 ? app.lock_wall : app.start_wall;
+	const char *current = app.wall_target == WALL_TARGET_LOCK ? app.lock_wall : app.start_wall;
 	double tw = (zmc.width - 2 * MARGIN - 2 * gap) / 3.0, th = tw * 16.0 / 9.0;
 	int c = wall_cat_open;
 	int count = cat_count[c];
@@ -1507,8 +1490,8 @@ static double draw_wall_grid(cairo_t *cr, double y) {
 /* the whole picker page: targets, then the categories or one of them */
 static double draw_wallpapers(cairo_t *cr) {
 	if (n_walls < 0) walls_scan();
-	double y = zmc_header(cr, wall_cat_open >= 0 ? cat_name[wall_cat_open] : "background");
-	y = draw_wall_targets(cr, y);
+	double y = zmc_header(cr, wall_cat_open >= 0 ? cat_name[wall_cat_open] :
+		app.wall_target == WALL_TARGET_LOCK ? "lock screen" : "background");
 	if (wall_cat_open < 0) {
 		y = draw_wall_categories(cr, y);
 		if (n_cats == 0) {
@@ -1522,14 +1505,12 @@ static double draw_wallpapers(cairo_t *cr) {
 	return y + 24;
 }
 
-/* the theme page's row: the photo it has now, opening the picker */
-static double draw_wall_row(cairo_t *cr, double y) {
-	if (n_walls < 0) walls_scan();
-	const char *current = app.start_wall[0] ? app.start_wall : "none";
+/* a row with the photo it has now, opening the picker for it */
+static double draw_wall_row(cairo_t *cr, double y, const char *title, const char *current, int target) {
 	const char *slash = strrchr(current, '/');
 	char detail[96];
-	snprintf(detail, sizeof(detail), "%s", slash ? slash + 1 : current);
-	return zmc_entry(cr, y, "background photo", detail, ACT_OPEN_PAGE, PAGE_WALLS) + 24;
+	snprintf(detail, sizeof(detail), "%s", !current[0] ? "none" : slash ? slash + 1 : current);
+	return zmc_entry(cr, y, title, detail, ACT_WALL_OPEN, target);
 }
 
 /* The accent picker, as the phone's: four swatches a row, each row a strip
@@ -1723,6 +1704,8 @@ static double draw_theme(cairo_t *cr) {
 	y += 4;
 	snprintf(detail, sizeof(detail), "%d columns", app.columns);
 	y = zmc_entry(cr, y, "Tiles Shell", detail, ACT_OPEN_PAGE, PAGE_TILES);
+	y = zmc_entry(cr, y, "Lock Screen", app.dev_lock ? "locks when the screen wakes" : "wakes without locking",
+		ACT_OPEN_PAGE, PAGE_LOCK);
 	y = zmc_entry(cr, y, "navigation bar", "choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
 	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
 		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
@@ -1755,7 +1738,16 @@ static double draw_tiles(cairo_t *cr) {
 		zmc_add_hit(bx, y, btn_w, 36, ACT_COLUMNS, c);
 	}
 	y += 60;
-	return draw_wall_row(cr, y);
+	return draw_wall_row(cr, y, "background photo", app.start_wall, WALL_TARGET_TILES) + 20;
+}
+
+/* What waking the phone shows. The separate list of its photos comes with the
+ * home screen's switcher (ROADMAP 7.8, 7.12); this is the one photo it has. */
+static double draw_lock(cairo_t *cr) {
+	double y = zmc_header(cr, "Lock Screen");
+	y = draw_wall_row(cr, y, "background photo", app.lock_wall, WALL_TARGET_LOCK);
+	y = zmc_switch(cr, y + 6, "Lock screen on wake", app.dev_lock, ACT_DEV_LOCK);
+	return y + 20;
 }
 
 /* The brightness as it is now, in percent (the shell or sensord may have
@@ -3022,7 +3014,6 @@ static double draw_dev(cairo_t *cr) {
 	double y = zmc_header(cr, "developer");
 	y = zmc_switch(cr, y, "Demo tiles on Start", app.dev_demo_tiles, ACT_DEV_DEMO_TILES);
 	y = zmc_switch(cr, y, "Show touches", app.dev_touches, ACT_DEV_TOUCHES);
-	y = zmc_switch(cr, y, "Lock screen on wake", app.dev_lock, ACT_DEV_LOCK);
 	char demo_flag[256];
 	bool demoloop = access(runtime_file(demo_flag, sizeof(demo_flag), "ztos-demoloop.active"), F_OK) == 0;
 	y = zmc_entry(cr, y, "DemoLoop", demoloop ? "running: tap to stop" : "start the repeating demo", ACT_DEV_DEMOLOOP, 0);
@@ -3175,6 +3166,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_THEME: return draw_theme(cr);
 	case PAGE_STYLE: return draw_style(cr);
 	case PAGE_TILES: return draw_tiles(cr);
+	case PAGE_LOCK: return draw_lock(cr);
 	case PAGE_ACCENTS: return draw_accents(cr);
 	case PAGE_WALLS: return draw_wallpapers(cr);
 	case PAGE_NAVIGATION: {
@@ -3350,15 +3342,16 @@ static void activate(int action, int arg) {
 	case ACT_OPEN_PAGE:
 		if (arg == PAGE_INSTALLED_APPS) installed_load();
 		if (arg == PAGE_STYLE) app.style_pending = app.style;	/* what was left unapplied is forgotten */
-		if (arg == PAGE_WALLS) {
-			app.wall_target = 1;	/* from Tiles Shell: Start's photo */
-			wall_cat_open = -1;	/* opens on the categories */
-			wall_leave_at = 0;
-			if (n_walls < 0) walls_scan();
-			for (int c = 0; c < n_cats; c++) wall_prefetch(cat_first[c]);	/* their first photos */
-			wall_kick();
-		}
 		zmc_go(arg, 1);
+		break;
+	case ACT_WALL_OPEN:
+		app.wall_target = arg;
+		wall_cat_open = -1;	/* opens on the categories */
+		wall_leave_at = 0;
+		if (n_walls < 0) walls_scan();
+		for (int c = 0; c < n_cats; c++) wall_prefetch(cat_first[c]);	/* their first photos */
+		wall_kick();
+		zmc_go(PAGE_WALLS, 1);
 		break;
 	case ACT_PALETTE:
 		if (zmc_board_up()) {
@@ -3390,9 +3383,6 @@ static void activate(int action, int arg) {
 			zmc_go(PAGE_THEME, -1);	/* (opened directly, by name) */
 		}
 		break;
-	case ACT_WALL_TARGET:
-		app.wall_target = arg;
-		break;
 	case ACT_WALL_CAT:
 		/* the first screen of photos made, then the rows swivel out and the
 		 * category's rows swivel in, the photos on them */
@@ -3412,8 +3402,8 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_WALL: {
 		const char *path = arg > 0 && arg <= n_walls ? walls[arg - 1] : "";
-		if (app.wall_target != 2) snprintf(app.start_wall, sizeof(app.start_wall), "%s", path);
-		if (app.wall_target != 1) snprintf(app.lock_wall, sizeof(app.lock_wall), "%s", path);
+		if (app.wall_target == WALL_TARGET_LOCK) snprintf(app.lock_wall, sizeof(app.lock_wall), "%s", path);
+		else snprintf(app.start_wall, sizeof(app.start_wall), "%s", path);
 		config_save();
 		break;
 	}
@@ -4026,7 +4016,7 @@ static bool back(void) {
 		zmc_redraw();
 		return true;
 	}
-	int up = page_parent(zmc.page);
+	int up = page_parent(zmc.page, app.wall_target);
 	if (up == PAGE_NO_PARENT) {
 		return false;	/* the top of the tree: back leaves the app */
 	}
@@ -4182,6 +4172,7 @@ int main(int argc, char **argv) {
 		if (getenv("ZT_ABOUT_REPO")) {
 			app.about_show_repo = true;
 		}
+		if (getenv("ZT_WALL_LOCK")) app.wall_target = WALL_TARGET_LOCK;
 		/* a choice not yet applied, for reviews */
 		if (getenv("ZT_PENDING")) {
 			app.style_pending = !app.style;

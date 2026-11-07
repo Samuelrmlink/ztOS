@@ -41,6 +41,7 @@ enum page {
 	PAGE_ANIMATION,	/* animation speeds */
 	PAGE_STYLE,	/* the shell's style: chosen, then applied with a warning */
 	PAGE_TILES,	/* Tiles Shell: the start screen's columns and background */
+	PAGE_LOCK,	/* Lock Screen: its photo, and whether waking shows it */
 	N_PAGES
 };
 
@@ -76,7 +77,8 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_BLUETOOTH] = PAGE_CONNECTIONS,
 	[PAGE_ACCENTS] = PAGE_THEME,
 	[PAGE_TILES] = PAGE_THEME,
-	[PAGE_WALLS] = PAGE_TILES,
+	[PAGE_LOCK] = PAGE_THEME,
+	[PAGE_WALLS] = PAGE_TILES,	/* or Lock Screen: see page_parent */
 	[PAGE_ANIMATION] = PAGE_THEME,
 	[PAGE_STYLE] = PAGE_THEME,
 	[PAGE_NAVIGATION] = PAGE_THEME,
@@ -97,6 +99,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "animation", PAGE_ANIMATION },
 	{ "style", PAGE_STYLE },
 	{ "tiles", PAGE_TILES },
+	{ "lock", PAGE_LOCK },
 	{ "navigation", PAGE_NAVIGATION },
 	{ "quick", PAGE_QUICK },
 	{ "display", PAGE_DISPLAY },
@@ -125,8 +128,12 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 };
 #define N_PAGE_NAMES (int)(sizeof(PAGE_NAMES) / sizeof(PAGE_NAMES[0]))
 
+/* Whose photo the picker is choosing, and so where it goes back to. */
+enum { WALL_TARGET_TILES = 1, WALL_TARGET_LOCK = 2 };
+
 /* Where back goes from a page. */
-static inline int page_parent(int page) {
+static inline int page_parent(int page, int wall_target) {
+	if (page == PAGE_WALLS && wall_target == WALL_TARGET_LOCK) return PAGE_LOCK;
 	return page >= 0 && page < N_PAGES ? PAGE_PARENTS[page] : PAGE_NO_PARENT;
 }
 
