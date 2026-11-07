@@ -32,7 +32,7 @@
 enum page { P_STATUS, P_LISTEN, P_CONTROLS, P_ABOUT };
 
 enum {
-	A_PICK = PODS_ACTIONS + 1, A_MODE, A_CYCLE, A_NAME, A_NAME_SAVE, A_FORGET, A_FORGET_YES, A_BLUETOOTH,
+	A_PICK = PODS_ACTIONS + 1, A_MODE, A_CYCLE, A_NAME, A_NAME_SAVE, A_FORGET, A_FORGET_YES, A_BLUETOOTH, A_CONNECT,
 	A_ROW = PODS_ACTIONS + 100,	/* + which row of ROWS */
 };
 
@@ -305,6 +305,40 @@ static double draw_nearby(cairo_t *cr, double y) {
 	return y;
 }
 
+/* What a broadcast says of who has them. */
+static const char *where_in_use(void) {
+	static char text[96];
+	const char *host = js(dev, "host", "unknown");
+	long conn = jl(dev, "connection", -1);
+	const char *doing = conn == 5 ? ", playing music" : conn == 6 ? ", on a call" : conn == 7 ? ", ringing" : "";
+	if (!strcmp(host, "other")) snprintf(text, sizeof(text), "In use by another device%s", doing);
+	else if (!strcmp(host, "this")) snprintf(text, sizeof(text), "Not connected. Last used with this phone%s", doing);
+	else if (!strcmp(host, "none")) snprintf(text, sizeof(text), "Not connected to anything");
+	else snprintf(text, sizeof(text), "Not connected to this phone");
+	return text;
+}
+
+/* Connecting them to this phone: BlueZ does it, and only for this tap. May take them from
+ * another device, as an Apple device tapping "connect" does. */
+static double connect_row(cairo_t *cr, double y) {
+	if (!dev || jb(dev, "ready") || !strcmp(js(dev, "link", ""), "connected")) return y;
+	if (!jb(root, "bluetooth")) return note(cr, y, "Bluetooth is off, so they can't be connected or heard.");
+	if (!jb(dev, "in_bluez")) {
+		y = note(cr, y, "They aren't paired with this phone. Pair them on the Bluetooth page.");
+		zmc_add_hit(0, y - 4, zmc.width, 40, A_BLUETOOTH, 0);
+		zmc_set_rgb(cr, zmc.accent);
+		zmc_text(cr, "open Bluetooth", FONT_SEMILIGHT, 21, MARGIN, y, 0);
+		return y + 44;
+	}
+	const char *state = js(dev, "connect", "idle");
+	if (!strcmp(state, "busy")) return note(cr, y, "Connecting…");
+	y = zmc_button(cr, MARGIN, y, 150, "connect here", A_CONNECT, 0) + 10;
+	if (!strcmp(state, "failed")) {
+		y = note(cr, y, "That didn't work. They may be in their closed case, out of range, or holding on to another device.");
+	}
+	return y;
+}
+
 static double draw_status(cairo_t *cr) {
 	double y = tab_header(cr, P_STATUS);
 	if (!root) {
@@ -324,10 +358,13 @@ static double draw_status(cairo_t *cr) {
 	y += 34;
 	const char *link = js(dev, "link", "none");
 	bool live = !strcmp(link, "aap");
-	const char *line = live ? "Connected" : !strcmp(link, "connected") ? "Connected, reading from the AirPods…" :
-		jb(dev, "has_keys") ? "Not connected: read from their broadcasts" :
-		"Not connected. Battery can be read from broadcasts after they have connected here once.";
+	char line[128];
+	if (live) snprintf(line, sizeof(line), "Connected");
+	else if (!strcmp(link, "connected")) snprintf(line, sizeof(line), "Connected, reading from the AirPods…");
+	else if (!jb(dev, "has_keys")) snprintf(line, sizeof(line), "Not connected. Battery can be read from broadcasts after they have connected here once.");
+	else snprintf(line, sizeof(line), "%s", where_in_use());
 	y = note(cr, y, line);
+	y = connect_row(cr, y);
 
 	json_object *bat = jo(dev, "battery");
 	if (jo(bat, "headset")) {
@@ -337,25 +374,33 @@ static double draw_status(cairo_t *cr) {
 		y = battery_row(cr, y, "Right", jo(bat, "right"), live);
 		/* over a link too, the case says nothing when it is away: its reading has an age */
 		json_object *kase = jo(bat, "case");
-		y = battery_row(cr, y, "Case", kase, live && !strcmp(js(kase, "source", ""), "aap") &&
+		y = battery_row(cr, y, "Case", kase, live && (!strcmp(js(kase, "source", ""), "aap") || !strcmp(js(kase, "source", ""), "case")) &&
 			now_s() - jl(kase, "seen", 0) < 300);
 	}
 
 	char where[96] = "";
 	const char *lp = place_text(js(jo(dev, "ear"), "left", "")), *rp = place_text(js(jo(dev, "ear"), "right", ""));
 	if (lp && rp) snprintf(where, sizeof(where), "Left %s, right %s", lp, rp);
-	if (where[0]) y = note(cr, y, where);
-	if (!live) {
-		const char *lid = js(dev, "lid", "unknown");
-		if (strcmp(lid, "unknown")) {
-			char text[64], age[32];
-			age_text(age, sizeof(age), jl(dev, "lid_seen", 0));
-			snprintf(text, sizeof(text), "Lid %s, %s", lid, age);
+	else if (lp) snprintf(where, sizeof(where), "Left %s", lp);
+	else if (rp) snprintf(where, sizeof(where), "Right %s", rp);
+	if (where[0]) {
+		if (strcmp(js(dev, "ear_source", ""), "aap")) {
+			char age[32], text[140];
+			age_text(age, sizeof(age), jl(dev, "ear_seen", 0));
+			snprintf(text, sizeof(text), "%s, %s", where, age);
 			y = note(cr, y, text);
+		} else {
+			y = note(cr, y, where);
 		}
-		y = note(cr, y, "A closed case broadcasts nothing, and levels can lag by a few minutes. Open the "
-			"lid to read the case.");
 	}
+	const char *lid = js(dev, "lid", "unknown");
+	if (strcmp(lid, "unknown")) {
+		char text[64], age[32];
+		age_text(age, sizeof(age), jl(dev, "lid_seen", 0));
+		snprintf(text, sizeof(text), "Lid %s, %s", lid, age);
+		y = note(cr, y, text);
+	}
+	if (!live) y = note(cr, y, "Heard from their broadcasts while this page is open. Levels can lag events by a little.");
 
 	/* other pairs, if there are any */
 	json_object *list = jo(root, "devices");
@@ -375,7 +420,7 @@ static double switch_row(cairo_t *cr, double y, const char *title, int value, in
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	double label = zmc_switch_label_y(zmc_text(cr, title, FONT_SEMILIGHT, 21, MARGIN, y, zmc.width - 2 * MARGIN - 64));
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Not reported by the AirPods. Tap to turn on.", FONT_REGULAR, 13, MARGIN, y + label, zmc.width - 2 * MARGIN - 64);
+	zmc_text(cr, settings_open() ? "Not reported by the AirPods. Tap to turn on." : "Not known", FONT_REGULAR, 13, MARGIN, y + label, zmc.width - 2 * MARGIN - 64);
 	zmc_toggle(cr, zmc.width - MARGIN - 54, y + 4, false);
 	zmc_add_hit(0, y - 4, zmc.width, 52 + label - ZMC_SWITCH_LINE, action, 0);
 	return y + 66 + label - ZMC_SWITCH_LINE;
@@ -411,12 +456,33 @@ static double rows(cairo_t *cr, double y, int page) {
 	return y;
 }
 
-/* Why the rows below can't be used yet; NULL when they can. */
-static const char *blocked(void) {
-	if (!dev) return "No AirPods yet.";
-	if (!ready()) return "Connect the AirPods to this phone to change these.";
-	if (!settings_open()) return "Reading settings from the AirPods…";
-	return NULL;
+/* The top of a page of settings: why they can't be changed, if they can't, and how old they are.
+ * Settings go over AAP only: no broadcast carries them, and nothing can set one without a link. */
+static double settings_banner(cairo_t *cr, double y) {
+	if (settings_open()) return y;
+	if (ready()) return note(cr, y, "Reading settings from the AirPods…");
+	if (!strcmp(js(dev, "link", ""), "connected")) return note(cr, y, "Connected, reading from the AirPods…");
+	long seen = jl(dev, "link_seen", 0);
+	char text[160], age[32];
+	if (seen) {
+		age_text(age, sizeof(age), seen);
+		snprintf(text, sizeof(text), "Not connected to this phone. As they were when last connected, %s. They can only be changed with a connection.", age);
+	} else {
+		snprintf(text, sizeof(text), "Not connected to this phone. They can only be read and changed with a connection.");
+	}
+	y = note(cr, y, text);
+	return connect_row(cr, y);
+}
+
+/* Rows drawn while they can't be changed: nothing under a finger, and looking it */
+static void read_only_end(cairo_t *cr, double y0, double y1, int hits) {
+	if (settings_open()) return;
+	zmc.n_hits = hits;
+	if (zmc.style == ZMC_STYLE_METRO) {
+		cairo_set_source_rgba(cr, 0, 0, 0, 0.45);
+		cairo_rectangle(cr, 0, y0 - 4, zmc.width, y1 - y0 + 4);
+		cairo_fill(cr);
+	}
 }
 
 static const struct { const char *name, *label; int bit; } MODES[] = {
@@ -433,10 +499,13 @@ static bool mode_available(int i) {
 
 static double draw_listening(cairo_t *cr) {
 	double y = tab_header(cr, P_LISTEN);
-	const char *why = blocked();
-	if (why) return note(cr, y, why);
+	if (!dev) return note(cr, y, "No AirPods yet.");
+	y = settings_banner(cr, y);
+	double top = y;
+	int hits = zmc.n_hits;
 	if (in_list(dev, "caps", "modes")) {
-		const char *mode = js(dev, "mode", "");
+		const char *mode = js(dev, "mode", js(dev, "last_mode", ""));
+		if (!mode[0]) mode = js(dev, "last_mode", "");
 		for (int i = 0; i < 4; i++) {
 			if (!mode_available(i)) continue;
 			bool on = !strcmp(mode, MODES[i].name);
@@ -451,7 +520,7 @@ static double draw_listening(cairo_t *cr) {
 		y = note(cr, y, "These AirPods have no listening modes.");
 	}
 	y = rows(cr, y, P_LISTEN);
-	if (in_list(dev, "visible", "mode_cycle")) {
+	if (in_list(dev, "visible", "mode_cycle") && (settings_open() || setting("mode_cycle") >= 0)) {
 		y = section(cr, y + 4, "PRESS AND HOLD SWITCHES BETWEEN");
 		int mask = setting("mode_cycle");
 		if (mask < 0) y = note(cr, y, "The AirPods don't report this. Choosing here replaces their list. At least two.");
@@ -460,14 +529,19 @@ static double draw_listening(cairo_t *cr) {
 			y = zmc_switch_arg(cr, y, MODES[i].label, mask > 0 && (mask & MODES[i].bit), A_CYCLE, i);
 		}
 	}
+	read_only_end(cr, top, y, hits);
 	return y;
 }
 
 static double draw_controls(cairo_t *cr) {
 	double y = tab_header(cr, P_CONTROLS);
-	const char *why = blocked();
-	if (why) return note(cr, y, why);
-	return rows(cr, y, P_CONTROLS);
+	if (!dev) return note(cr, y, "No AirPods yet.");
+	y = settings_banner(cr, y);
+	double top = y;
+	int hits = zmc.n_hits;
+	y = rows(cr, y, P_CONTROLS);
+	read_only_end(cr, top, y, hits);
+	return y;
 }
 
 static double draw_about(cairo_t *cr) {
@@ -480,14 +554,25 @@ static double draw_about(cairo_t *cr) {
 			"and Apple devices keep their own name for them.");
 	} else {
 		y = zmc_field(cr, y, "Name", js(dev, "name", "AirPods"));
-		y = note(cr, y, "Connect them to change the name.");
+		y = note(cr, y, "The name is kept on the AirPods: connect them to change it.");
+		y = connect_row(cr, y);
 	}
 	y = zmc_field(cr, y, "Model", js(dev, "model_label", "AirPods"));
 	const char *number = js(dev, "model_number", "");
 	if (number[0]) y = zmc_field(cr, y, "Model number", number);
 	const char *fw = js(dev, "firmware", "");
 	if (fw[0]) y = zmc_field(cr, y, "Version", fw);
+	static const char *const COLOURS[] = { "White", "Black", "Red", "Blue", "Pink", "Gray", "Silver", "Gold", "Rose Gold",
+		"Space Gray", "Dark Blue", "Light Blue", "Yellow" };
+	long colour = jl(dev, "color", -1);
+	if (colour >= 0 && colour < 13) y = zmc_field(cr, y, "Colour", COLOURS[colour]);
 	y = zmc_field(cr, y, "Address", js(dev, "mac", ""));
+	y = zmc_field(cr, y, "Broadcasts", jb(dev, "has_keys") ? "Can be read: this phone has their keys" : "Can't be read until they have connected here once");
+	if (jl(dev, "link_seen", 0) && !ready()) {
+		char age[32];
+		age_text(age, sizeof(age), jl(dev, "link_seen", 0));
+		y = zmc_field(cr, y, "Last connected here", age);
+	}
 	if (!jb(dev, "tested")) {
 		y = note(cr, y, "ztOS has been written against AirPods Pro 2. On this model some rows may not work: "
 			"what they do comes from other projects' notes.");
@@ -572,6 +657,12 @@ void pods_activate(int action, int arg) {
 		}
 		break;
 	case A_NAME_SAVE: save_name(); break;
+	case A_CONNECT:
+		if (dev) {
+			send_fmt("connect %s", js(dev, "mac", ""));
+			json_object_object_add(dev, "connect", json_object_new_string("busy"));
+		}
+		break;
 	case A_FORGET: forget_asked = true; break;
 	case A_FORGET_YES:
 		send_fmt("forget %s", js(dev, "mac", ""));
@@ -631,7 +722,7 @@ static void tick(void) {
 	static uint32_t hinted, redrawn;
 	uint32_t now = zmc_now_ms();
 	/* "someone is looking": short bursts of listening, for as long as it is said */
-	if (!hinted || now - hinted > 10000) {
+	if (zmc.active && (!hinted || now - hinted > 10000)) {
 		hinted = now;
 		send_line("scan-hint on\n");
 	}

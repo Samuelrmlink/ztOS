@@ -226,9 +226,9 @@ static inline const uint8_t *ble_find_proximity(const uint8_t *m, size_t n) {
 	return ble_find_message(m, n, 0x01, BLE_PROXIMITY_LEN, false);
 }
 
-/* The charging case's own advert, as LibrePods' android/rewrite branch reads it: same type,
- * first byte 06, then one AES block under ENC_KEY. From an address of the case's, which the
- * pods' IRK does not resolve. NOT YET SEEN ON OUR HARDWARE: see README.md. */
+/* The charging case's own advert: same type, first byte 06, then one AES block under ENC_KEY,
+ * from an address of the case's that the pods' IRK does not resolve. On a Pro 2 USB-C it comes
+ * after a Find My field (12 02 ac 00). Read as LibrePods' android/rewrite branch reads it. */
 #define BLE_CASE_LEN 17
 static inline const uint8_t *ble_find_case(const uint8_t *m, size_t n) {
 	return ble_find_message(m, n, 0x06, BLE_CASE_LEN, true);
@@ -237,7 +237,7 @@ static inline const uint8_t *ble_find_case(const uint8_t *m, size_t n) {
 /* What anyone nearby can read. Levels in 10% steps, -1 unknown. Which pair: not said. */
 struct ble_clear {
 	unsigned product;
-	bool sender_left, sender_in_case, both_in_case;
+	bool sender_left, sender_in_case, both_in_case, one_in_case;
 	int level[3];			/* POD_LEFT, POD_RIGHT, POD_CASE */
 	bool charging[3];
 	bool in_ear[2];			/* POD_LEFT, POD_RIGHT */
@@ -258,6 +258,7 @@ static inline bool ble_parse_clear(const uint8_t *p, struct ble_clear *c) {
 	c->sender_left = st & 0x20;
 	c->sender_in_case = st & 0x40;
 	c->both_in_case = st & 0x04;
+	c->one_in_case = st & 0x10;
 	int self = c->sender_left ? POD_LEFT : POD_RIGHT, other = c->sender_left ? POD_RIGHT : POD_LEFT;
 	c->level[self] = ble_nibble(p[4] & 0xf);
 	c->level[other] = ble_nibble(p[4] >> 4);
@@ -285,7 +286,12 @@ static inline bool ble_rpa_resolves(const uint8_t irk[16], const uint8_t addr[6]
 	return memcmp(out + 13, addr + 3, 3) == 0;
 }
 
-struct ble_exact { int level[3]; bool charging[3]; };
+struct ble_exact {
+	int level[3];
+	bool charging[3];
+	int lid;		/* 0 open, 1 closed, -1 not said */
+	uint8_t host[3];	/* the pods': the last three bytes of the host they last used */
+};
 
 /* Bytes 9-24, one AES block under ENC_KEY. AES always "works", so the plaintext is checked
  * by the pair's MAC: its last three bytes at 7-9, or zeros unless both pods are in the case.
@@ -298,6 +304,8 @@ static inline bool ble_decrypt(const uint8_t enc[16], const uint8_t *payload, co
 	if (memcmp(pt + 7, mac + 3, 3) != 0 && memcmp(pt + 7, zero, 3) != 0) return false;
 	int self = sender_left ? POD_LEFT : POD_RIGHT, other = sender_left ? POD_RIGHT : POD_LEFT;
 	const int part[3] = { self, other, POD_CASE };
+	out->lid = -1;
+	memcpy(out->host, pt + 4, 3);
 	for (int i = 0; i < 3; i++) {
 		uint8_t b = pt[1 + i];
 		int level = b & 0x7f;
@@ -309,11 +317,16 @@ static inline bool ble_decrypt(const uint8_t enc[16], const uint8_t *payload, co
 
 /* A block that opens as a case advert: byte 1 is 0x20, byte 15 is 0, then case, left, right at
  * 3, 4, 5 as bit 7 charging, the rest the level, FF none. There is no MAC in it to check, so a
- * wrong key passes about one time in 130,000; only keys of pairs we hold are tried. */
+ * wrong key passes about one time in 130,000; only keys of pairs we hold are tried.
+ * Heard on this phone from a Pro 2 USB-C, every 2-4 s with the lid closed. Byte 2's bit 3 looks
+ * like the lid, as byte 6 of the pods' advert has it (0x0c, 0x0d closed; 0x05 once, open);
+ * bytes 12-13 count up. */
 static inline bool ble_decrypt_case(const uint8_t enc[16], const uint8_t *payload, struct ble_exact *out) {
 	uint8_t pt[16];
 	pods_aes_decrypt(enc, payload + 1, pt);
 	if (pt[1] != 0x20 || pt[15] != 0) return false;
+	out->lid = (pt[2] & 0x08) ? 1 : 0;
+	memset(out->host, 0, 3);
 	static const int part[3] = { POD_CASE, POD_LEFT, POD_RIGHT };
 	for (int i = 0; i < 3; i++) {
 		uint8_t b = pt[3 + i];
