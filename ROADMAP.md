@@ -61,7 +61,7 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 | 3.9 | Test real sleep on the F. `zrn-sleepd` reports `switched off` here, so it isn't sleeping. Find out why, and whether that's intended. | L | Confirmed; cause Unknown |
 | 3.10 | `ztmetro.c:10753` sends `reboot_recovery`, but `ztoscsf` only handles `stop_sensorhub`. | S | Review |
 | 3.11 | `zrn-android-root:28-34` has unchecked mounts, so it can report success with a broken root. | S | Review |
-| 3.12 | `ztoscsf` runs the hub check on devices without that hub, and its retries block the main loop. | S | Review |
+| 3.12 | `ztoscsf` runs the hub check on devices without that hub, and its retries block the main loop. Fixed in the source: no check where `ztoscsf-sensorhub.service` is not installed, and a recovery now runs a step a second, so the control pipe and other checks keep going. `make check-csf`; not yet on the phone. | S | Review; fixed, host test only |
 | 3.13 | `/run/ztoscsf.ctl` is mode 0666, so any local user can stop the hub. | S | Review |
 
 ## 4. Build and install

@@ -314,6 +314,10 @@ check-bt-pair-sheet: xdg-shell-protocol.h
 
 # a settings reload keeps the scale; the hub warning lets go of the screen
 .PHONY: check-reload-hub
+check-csf:
+	$(CC) -std=gnu11 -Wall -Wno-unused-result -o /tmp/ztmetro-csf-test ../sensors/test-csf-failure.c
+	/tmp/ztmetro-csf-test && /tmp/ztmetro-csf-test reset-fails
+
 check-reload-hub: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o /tmp/ztmetro-reload-hub-test tests/reload-hub.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
