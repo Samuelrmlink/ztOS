@@ -33,8 +33,6 @@ static void bt_pair_hide(struct zt_server *server) {
 	b->shown = false;
 	server->auth_active = false;
 	if (entry) {
-		server->osk_numeric = false;
-		server->osk_symbols = false;
 		server->osk_terminal = b->osk_was_terminal;
 		osk_show(server, b->osk_was_visible);
 	}
@@ -83,6 +81,9 @@ static void bt_pair_show(struct zt_server *server) {
 	bt_pair_wipe_entry(b);
 	snprintf(b->status, sizeof(b->status), "%s", r->mode == BT_PAIR_PIN ? "Letters and digits, up to 16" :
 		r->mode == BT_PAIR_PASSKEY ? "6 digits" : "");
+	/* the tiles' own modals take every touch while they are up */
+	level_modal_close(server);
+	audio_modal_close(server);
 	b->osk_was_visible = server->osk_visible;
 	b->osk_was_terminal = server->osk_terminal;
 	/* dialog_show keeps out everything else while auth_active is set: us too */
@@ -94,11 +95,10 @@ static void bt_pair_show(struct zt_server *server) {
 		server->key_prefix[0] = 0;
 		server->osk_shift = server->osk_ctrl = server->osk_alt = false;
 		server->osk_emoji = false;
-		/* a passkey has its own keypad; a PIN starts on the digits page, with
-		 * the letters a key away */
-		server->osk_numeric = r->mode == BT_PAIR_PASSKEY;
-		server->osk_symbols = r->mode == BT_PAIR_PIN;
-		osk_show(server, true);
+		server->osk_symbols = false;
+		/* a passkey is only digits; a PIN nearly always is, with the letters a
+		 * key away. (It lasts until the next osk_show: bt_pair_hide's.) */
+		osk_show_mode(server, r->mode == BT_PAIR_PASSKEY ? OSK_MODE_DIGITS : OSK_MODE_NUMBER);
 	}
 	activity(server);
 }

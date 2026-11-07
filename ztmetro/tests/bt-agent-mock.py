@@ -13,7 +13,7 @@ tests/bt-agent-mock.sh, which arranges all this.
 Commands come from FIFO, one a line, and what comes back goes to stdout:
     pin | passkey | confirm N | authorize | service UUID
     show-pin P | show-passkey N ENTERED | cancel
-    paired | disconnected | reset | discoverable 0|1 | restart | calls | quit
+    paired | disconnected | trust | reset | discoverable 0|1 | restart | calls | quit
 """
 import os
 import sys
@@ -131,8 +131,10 @@ def command(line):
     elif cmd == "disconnected":
         values[DEVICE1]["Connected"] = False
         device.PropertiesChanged(DEVICE1, {"Connected": False}, [])
+    elif cmd == "trust":
+        values[DEVICE1]["Trusted"] = True
     elif cmd == "reset":
-        values[DEVICE1].update(Paired=False, Connected=True)
+        values[DEVICE1].update(Paired=False, Connected=True, Trusted=False)
     elif cmd == "discoverable":
         values[ADAPTER1]["Discoverable"] = w[1] == "1"
     elif cmd == "restart":

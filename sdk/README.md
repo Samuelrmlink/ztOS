@@ -144,7 +144,7 @@ app.run(Home())
 | `Entry(title, detail, on_tap, on_hold)` | a list row; `set_title`, `set_detail` |
 | `Toggle(title, on, on_change)` | the on/off switch row |
 | `Slider(caption, value, on_change)` | caption, value, and a bar to drag |
-| `TextBox(caption, text, on_change, on_submit, password)` | brings up the keyboard when tapped |
+| `TextBox(caption, text, on_change, on_submit, password, placeholder, numbers=...)` | brings up the keyboard when tapped; `numbers="digits"`, `"number"` or `"phone"` brings up its number pad |
 | `RoundButton(glyph, label, on_tap)` | glyphs: add, save, edit, delete, send, cancel, check, back, refresh, search, call, message, more, share, settings, play, pause; any short text; or an `.svg` of the app's |
 | `menu(widget, [(text, callback)])` | the hold menu under a row |
 | `haptic(kind)` | tick, tap, click, heavy; at the strengths set in Settings > haptics |

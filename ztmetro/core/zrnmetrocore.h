@@ -242,6 +242,10 @@ double zmc_picker(cairo_t *cr, double y, const char *caption, const char *const 
 double zmc_textbox(cairo_t *cr, double y, const char *caption, const char *value, bool focused,
 	int action, int arg);
 void zmc_keyboard(bool show);		/* ask the shell for its keyboard, or to put it away */
+/* Its number pad instead, for a box of numbers: "digits" (0-9 only), "number"
+ * (and a decimal point and minus) or "phone" (and * # +). NULL: the full
+ * keyboard. zmc_keyboard(false) puts it away. */
+void zmc_keyboard_numeric(const char *mode);
 /* Where the box being typed into ends, in window points, so the shell lifts the
  * app over the keyboard. zmc_textbox sends this itself; a custom control (an
  * app that draws its own field, e.g. the browser's bottom address bar) sends it

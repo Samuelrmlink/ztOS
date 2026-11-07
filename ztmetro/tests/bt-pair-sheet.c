@@ -43,7 +43,7 @@ int main(void) {
 
 	/* a PIN: shown as typed, digits page up, only letters and digits taken */
 	ctl(&s, "bt-pair 1|pin|55|00:0D:44:EB:50:54||Speaker|x\n");
-	assert(s.bt_pair.shown && s.auth_active && s.dialog_open && s.osk_visible && s.osk_symbols && !s.osk_numeric);
+	assert(s.bt_pair.shown && s.auth_active && s.dialog_open && s.osk_visible && s.osk_mode == OSK_MODE_NUMBER);
 	assert(strstr(s.dialog_text, "Speaker/x") && strstr(s.dialog_text, "00:0D:44:EB:50:54"));
 	dialog_close(&s); assert(s.dialog_open);		/* a tap outside can't close it */
 	dialog_show(&s, "x", "y", "power off", "power_off", "", "");
@@ -59,18 +59,18 @@ int main(void) {
 	tap_key(&s, KEY_ENTER, "");
 	expect(&s, "1\tOK\t1777777777777777\n");
 	assert(!s.bt_pair.active && !s.bt_pair.shown && !s.auth_active && !s.dialog_open && !s.osk_visible);
-	assert(!s.bt_pair.entry[0] && !s.bt_pair.entry_len && !s.osk_symbols);
+	assert(!s.bt_pair.entry[0] && !s.bt_pair.entry_len && s.osk_shell_mode == OSK_MODE_FULL);
 
 	/* a passkey: exactly six, on its own keypad */
 	ctl(&s, "bt-pair 2|passkey|55|||Phone");
-	assert(s.bt_pair.shown && s.osk_numeric && !s.osk_symbols && s.n_keys == 12);
+	assert(s.bt_pair.shown && s.osk_mode == OSK_MODE_DIGITS && s.n_keys == 12);
 	tap_key(&s, KEY_A, "a"); assert(!s.bt_pair.entry_len);
 	for (int i = 0; i < 5; i++) tap_key(&s, KEY_4, "4");
 	dialog_handle_action(&s, "bt_pair_ok"); assert(s.bt_pair.active);
 	tap_key(&s, KEY_0, "0"); tap_key(&s, KEY_0, "0"); assert(s.bt_pair.entry_len == 6);
 	dialog_handle_action(&s, "bt_pair_ok");
 	expect(&s, "2\tOK\t444440\n");
-	assert(!s.bt_pair.active && !s.osk_numeric);
+	assert(!s.bt_pair.active && s.osk_shell_mode == OSK_MODE_FULL);
 
 	/* a number to compare: yes and no are the buttons, no key is a yes */
 	ctl(&s, "bt-pair 3|confirm|55|||Phone");		/* no number: no sheet */

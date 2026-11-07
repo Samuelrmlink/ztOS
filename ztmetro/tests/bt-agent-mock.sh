@@ -7,6 +7,8 @@ here=$(dirname "$(readlink -f "$0")")
 conf=/tmp/btmock.conf
 case "$1" in
 start)
+	# only a real agent that's running comes back afterwards
+	systemctl --user -q is-active ztos-bt-agent && touch /tmp/btmock.restart
 	systemctl --user stop ztos-bt-agent
 	rm -f /tmp/btmock.in /tmp/btmock.out; mkfifo /tmp/btmock.in
 	cat > $conf <<'EOF'
@@ -40,6 +42,7 @@ stop)
 	kill "$(cat /tmp/btmock.agent.pid)" "$(cat /tmp/btmock.dbus.pid)" 2>/dev/null
 	sleep 0.3
 	rm -f /tmp/btmock.in /tmp/btmock.bus /tmp/btmock.conf /tmp/btmock.agent.pid /tmp/btmock.dbus.pid
-	systemctl --user start ztos-bt-agent
+	[ -e /tmp/btmock.restart ] && systemctl --user start ztos-bt-agent
+	rm -f /tmp/btmock.restart
 	;;
 esac

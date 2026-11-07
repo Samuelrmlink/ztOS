@@ -35,8 +35,8 @@ BUSY while the sheet is up; if polkit got there first, the request waits for it.
 | BlueZ asks | Sheet | Buttons |
 |---|---|---|
 | RequestConfirmation | a number: does the other device show it? | yes, no |
-| RequestPinCode | type a PIN (1 to 16 letters and digits, starts on the digits page) | pair, cancel |
-| RequestPasskey | type a passkey (6 digits, on a keypad) | pair, cancel |
+| RequestPinCode | type a PIN (1 to 16 letters and digits, on the number pad, with abc for letters) | pair, cancel |
+| RequestPasskey | type a passkey (6 digits, on the digits pad) | pair, cancel |
 | DisplayPinCode, DisplayPasskey | a number to type on the other device | cancel |
 | RequestAuthorization | pairing with no code: allow it? | pair, cancel |
 | AuthorizeService | a paired device wants to use a service | allow, deny |
