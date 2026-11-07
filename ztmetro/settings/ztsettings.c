@@ -1650,6 +1650,7 @@ static void accent_board_open(void) {
 
 static double draw_theme(cairo_t *cr) {
 	double y = zmc_header(cr, "customization");
+	char detail[128];
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, zmc.style == ZMC_STYLE_DOTMATRIX ? "Palette" : "Accent colour", FONT_REGULAR, 13.5, MARGIN, y, 0);
 	/* Windows Phone's list picker, collapsed: the box shows the choice and
@@ -1669,6 +1670,9 @@ static double draw_theme(cairo_t *cr) {
 	zmc_text(cr, zmc.style == ZMC_STYLE_DOTMATRIX ? dm_palette_names[app.palette] : ACCENTS[app.accent].name, FONT_REGULAR, 16, MARGIN + 42, y + 10, 0);
 	zmc_add_hit(0, y - 4, zmc.width, 50, ACT_ACCENT_OPEN, 0);
 	y += 62;
+	snprintf(detail, sizeof(detail), "%d %%%s", menu_speeds[app.menu_speed_idx], app.dev_slow ? ", slow motion" : "");
+	y = zmc_entry(cr, y, "animation speeds", detail, ACT_OPEN_PAGE, PAGE_ANIMATION);
+	y += 4;
 	double gap = 8;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
@@ -1719,7 +1723,6 @@ static double draw_theme(cairo_t *cr) {
 	y += 20;
 	y = draw_wall_row(cr, y + 60);	/* under the style row (36 high, 24 below) */
 	y = zmc_entry(cr, y, "navigation bar", "choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
-	char detail[128];
 	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
 		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
 	y = zmc_entry(cr, y, "quick tiles", detail, ACT_OPEN_PAGE, PAGE_QUICK);
@@ -2972,13 +2975,20 @@ static double draw_perf(cairo_t *cr) {
 	return y + 20;
 }
 
-static double draw_dev(cairo_t *cr) {
-	double y = zmc_header(cr, "developer");
-	y = zmc_switch(cr, y, "Demo tiles on Start", app.dev_demo_tiles, ACT_DEV_DEMO_TILES);
-	y = zmc_switch(cr, y, "Slow motion (5x)", app.dev_slow, ACT_DEV_SLOW);
+/* The shell's motion (Start, the lock screen, the action centre) and each app's
+ * opening. Pages turning inside an app keep their own time. */
+static double draw_animation(cairo_t *cr) {
+	double y = zmc_header(cr, "animation speeds");
 	static const char *const speeds[] = { "50 % (slow)", "75 %", "100 % (as on a Lumia)", "125 %",
 		"150 %", "200 % (fast)" };
 	y = picker(cr, y, "Animation speed", speeds, N_MENU_SPEEDS, app.menu_speed_idx, ACT_DEV_MENU_SPEED);
+	y = zmc_switch(cr, y, "Slow motion (5x)", app.dev_slow, ACT_DEV_SLOW);
+	return y + 20;
+}
+
+static double draw_dev(cairo_t *cr) {
+	double y = zmc_header(cr, "developer");
+	y = zmc_switch(cr, y, "Demo tiles on Start", app.dev_demo_tiles, ACT_DEV_DEMO_TILES);
 	y = zmc_switch(cr, y, "Show touches", app.dev_touches, ACT_DEV_TOUCHES);
 	y = zmc_switch(cr, y, "Lock screen on wake", app.dev_lock, ACT_DEV_LOCK);
 	char demo_flag[256];
@@ -3071,7 +3081,7 @@ static double draw_system(cairo_t *cr) {
 	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
 	snprintf(detail, sizeof(detail), "key height %d, keyboard sounds %s", app.key_height, app.key_sound ? "on" : "off");
 	y = zmc_entry(cr, y, "keyboard", detail, ACT_OPEN_PAGE, PAGE_KEYBOARD);
-	y = zmc_entry(cr, y, "developer", "demo tiles, slow motion, ZrnDevTest", ACT_OPEN_PAGE, PAGE_DEV);
+	y = zmc_entry(cr, y, "developer", "demo tiles, show touches, ZrnDevTest", ACT_OPEN_PAGE, PAGE_DEV);
 	y = zmc_entry(cr, y, "about", "Samsung Galaxy S9, ztOS Mobile", ACT_OPEN_PAGE, PAGE_ABOUT);
 	return y + 20;
 }
@@ -3122,6 +3132,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_PERF: return draw_perf(cr);
 	case PAGE_BOOST: return draw_boost(cr);
 	case PAGE_DEV: return draw_dev(cr);
+	case PAGE_ANIMATION: return draw_animation(cr);
 	case PAGE_MAIN: return draw_main(cr);
 	case PAGE_CONNECTIONS: return draw_connections(cr);
 	case PAGE_SOUND_TOUCH: return draw_sound_touch(cr);

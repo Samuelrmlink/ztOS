@@ -38,6 +38,7 @@ enum page {
 	PAGE_SOUND_TOUCH,	/* ringtones + sounds, haptics */
 	PAGE_POWER,	/* battery + performance: power, then hardware */
 	PAGE_SYSTEM,	/* date + region, keyboard, developer, about */
+	PAGE_ANIMATION,	/* animation speeds */
 	N_PAGES
 };
 
@@ -73,6 +74,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_BLUETOOTH] = PAGE_CONNECTIONS,
 	[PAGE_ACCENTS] = PAGE_THEME,
 	[PAGE_WALLS] = PAGE_THEME,
+	[PAGE_ANIMATION] = PAGE_THEME,
 	[PAGE_NAVIGATION] = PAGE_THEME,
 	[PAGE_BOOST] = PAGE_POWER,
 };
@@ -88,6 +90,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "theme", PAGE_THEME },	/* its old name */
 	{ "accents", PAGE_ACCENTS },
 	{ "wallpapers", PAGE_WALLS },
+	{ "animation", PAGE_ANIMATION },
 	{ "navigation", PAGE_NAVIGATION },
 	{ "quick", PAGE_QUICK },
 	{ "display", PAGE_DISPLAY },
