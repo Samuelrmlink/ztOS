@@ -30,6 +30,7 @@ The device is ZT_SSH, as ssh arguments. The default is the phone over USB; for
 the emulator use ZT_SSH='-p 2222 user@localhost'. Nothing is installed on the
 device: the capture client below is sent to its python3 over the connection.
 """
+import getpass
 import os
 import shlex
 import struct
@@ -37,7 +38,7 @@ import subprocess
 import sys
 import zlib
 
-DEFAULT_SSH = "-i ~/.ssh/ztos_phone -o IdentitiesOnly=yes samuel@172.16.42.1"
+DEFAULT_SSH = f"-i ~/.ssh/ztos_phone -o IdentitiesOnly=yes {os.environ.get('ZT_USER') or getpass.getuser()}@172.16.42.1"
 CTL = 'timeout 5 tee "$XDG_RUNTIME_DIR/ztmetro.ctl" >/dev/null'
 
 # Runs on the device. A minimal Wayland client for wlr-screencopy: writes

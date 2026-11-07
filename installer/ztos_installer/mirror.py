@@ -7,6 +7,7 @@ file needs only the standard library. The window is in mirror_view.py (PySide6).
 """
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import shlex
@@ -27,7 +28,7 @@ MAX_FINGERS = 10
 KEYS = {"power": (0, 116), "volup": (1, 115), "voldown": (2, 114), "home": (3, 172), "back": (4, 158)}
 
 TARGETS = {
-    "phone": {"host": "172.16.42.1", "ssh": "-i ~/.ssh/ztos_phone -o IdentitiesOnly=yes samuel@172.16.42.1"},
+    "phone": {"host": "172.16.42.1", "ssh": f"-i ~/.ssh/ztos_phone -o IdentitiesOnly=yes {os.environ.get('ZT_USER') or getpass.getuser()}@172.16.42.1"},
     # the forwarded ports in targets.qemu_command; the user is the one installed
     "qemu": {"host": "127.0.0.1", "ssh": "-p 2222 ztos@localhost"},
 }

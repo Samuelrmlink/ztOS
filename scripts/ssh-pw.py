@@ -4,7 +4,7 @@
   scripts/ssh-pw.py <user> <password[,password2,...]> <host> '<command>'
 
 ssh insists on a terminal for the password prompt, so it is given one. More
-than one password is answered in order, which is what `su -c` inside the
+than one password is answered in order, which is what `sudo -S` inside the
 command needs (the login password, then root's).
 """
 import os

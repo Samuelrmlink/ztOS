@@ -1,7 +1,7 @@
 #!/bin/sh
 # rate.sh: play for a moment and report how fast the DSP reads the buffer,
 # as a multiple of 48 kHz stereo 16 bit (1.00 is right).
-(aplay -q -D hw:0,0 --period-size=1024 --buffer-size=8192 /home/alarm/test-tone.wav >/dev/null 2>&1) &
+(aplay -q -D hw:0,0 --period-size=1024 --buffer-size=8192 "$HOME/test-tone.wav" >/dev/null 2>&1) &
 sleep 0.1
 python3 /tmp/zrn/watch.py 0x17C50000 0x1030 12 20 | awk '
 	{ pos = (strtonum("0x" substr($4,5)) + strtonum("0x" substr($5,5))) * 16

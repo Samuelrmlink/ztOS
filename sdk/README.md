@@ -55,7 +55,7 @@ Qt itself is not inside the binary. The phone provides it (`pyside6`,
 `qt6-wayland`, `qt6-svg` from Arch Linux ARM), which is why apps stay small. The native renderer can be built on the phone
 during deployment, so a phone cross compiler is optional.
 
-`ztos-sdk install` copies files into the alarm user's home on the phone:
+`ztos-sdk install` copies files into the user's home on the phone:
 
 | what | where |
 |---|---|
@@ -82,10 +82,12 @@ ztos-sdk doctor
 ztos-sdk doctor --fix       # pacman -S --needed python pyside6 qt6-wayland qt6-svg
 ```
 
-The phone is `alarm@172.16.42.1` (USB networking). Point at another address
-with `--device user@host`, `$ZTOS_DEVICE`, or `[device] host` in `ztos.toml`.
-ssh asks for the password. Set `$ZTOS_PASSWORD` to skip the prompt, and
-`$ZTOS_ROOT_PASSWORD` for `doctor --fix`. Neither is ever written to a file.
+The phone is `you@172.16.42.1` (USB networking), with your name on this computer
+or `$ZT_USER`. Point at another address with `--device user@host`, `$ZTOS_DEVICE`,
+or `[device] host` in `ztos.toml`. ssh asks for the password. Set `$ZTOS_PASSWORD`
+to skip the prompt. `doctor --fix` goes through sudo with the same password; on a
+phone where root has its own, `$ZTOS_ROOT_PASSWORD` uses su. Neither is ever written
+to a file.
 
 ## ztos.toml
 

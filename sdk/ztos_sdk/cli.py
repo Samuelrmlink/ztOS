@@ -11,14 +11,16 @@
     ztos-sdk list                   the SDK's apps on the phone
     ztos-sdk doctor [--fix]         is the phone ready to run them?
 
-The phone is alarm@172.16.42.1 (USB) unless --device, $ZTOS_DEVICE, or
-[device] host in ztos.toml say otherwise. ssh asks for the password, or takes
-it from $ZTOS_PASSWORD; `doctor --fix` takes root's from $ZTOS_ROOT_PASSWORD.
+The phone is you@172.16.42.1 (USB), with your name on this computer or $ZT_USER,
+unless --device, $ZTOS_DEVICE, or [device] host in ztos.toml say otherwise. ssh
+asks for the password, or takes it from $ZTOS_PASSWORD. `doctor --fix` goes through
+sudo with that same password, or su if $ZTOS_ROOT_PASSWORD gives root's.
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import getpass
 import hashlib
 import platform
 import fnmatch
@@ -41,11 +43,12 @@ SDK = Path(__file__).resolve().parent.parent
 RUNTIME = SDK / "runtime"
 TEMPLATE = SDK / "templates" / "app"
 LAUNCHERS = SDK / "launcher" / "prebuilt"
-DEFAULT_DEVICE = "alarm@172.16.42.1"
+DEFAULT_USER = os.environ.get("ZT_USER") or getpass.getuser()
+DEFAULT_DEVICE = f"{DEFAULT_USER}@172.16.42.1"
 DEFAULT_INCLUDE = ["**/*.py", "**/*.ui", "**/*.svg", "**/*.png", "**/*.jpg", "**/*.json", "**/*.txt",
                    "**/*.qss", "**/*.ttf", "**/*.otf", "**/*.wav", "**/*.ogg"]
 SKIP_DIRS = {"dist", "build", "__pycache__", ".git", ".venv", "venv", ".ztos"}
-# where an app lives on the phone, under the alarm user's home
+# where an app lives on the phone, under its user's home
 APPS_DIR = ".local/share/ztos/apps"
 LOG_DIR = ".local/state/ztos"
 
@@ -404,7 +407,7 @@ def cmd_build(args):
 
 class Device:
     def __init__(self, spec: str):
-        self.spec = spec if "@" in spec else f"alarm@{spec}"
+        self.spec = spec if "@" in spec else f"{DEFAULT_USER}@{spec}"
         self._home: str | None = None
 
     def _ssh(self) -> tuple:
@@ -668,19 +671,22 @@ def plan(device: Device, packages: list) -> list:
 
 
 def as_root(device: Device, command: str) -> int:
-    """Run `command` as root on the phone: su asks for root's password on
-    this terminal, or takes it from $ZTOS_ROOT_PASSWORD."""
+    """Run `command` as root on the phone, through sudo: an installer build locks
+    root's password. sudo asks on this terminal, or gets $ZTOS_PASSWORD. On a phone
+    where root has a password, $ZTOS_ROOT_PASSWORD uses su instead."""
     root_pw = os.environ.get("ZTOS_ROOT_PASSWORD")
-    if root_pw:
-        out, code = pty_run(device, f"su -c {shlex.quote(command)}", root_pw)
+    sudo = f"sudo sh -c {shlex.quote(command)}"
+    if root_pw or os.environ.get("ZTOS_PASSWORD"):
+        out, code = pty_run(device, f"su -c {shlex.quote(command)}" if root_pw else sudo,
+                            root_pw or os.environ["ZTOS_PASSWORD"])
         print(out[-3000:], end="")
         return code
     if not sys.stdin.isatty():
-        raise Fail("this needs root on the phone: run it in a terminal (su asks for root's password), "
-                   "or set $ZTOS_ROOT_PASSWORD")
-    say("root's password on the phone, for su:")
+        raise Fail("this needs root on the phone: run it in a terminal (sudo asks for your password), "
+                   "or set $ZTOS_PASSWORD")
+    say("your password on the phone, for sudo:")
     ssh, env = device._ssh()
-    return subprocess.call([*ssh[:-1], "-t", device.spec, f"su -c {shlex.quote(command)}"], env=env)
+    return subprocess.call([*ssh[:-1], "-t", device.spec, sudo], env=env)
 
 
 def ensure_ready(device: Device, project: "Project | None" = None, fix: bool = True, quiet: bool = False) -> dict:
@@ -743,7 +749,7 @@ def cmd_doctor(args):
 
 
 def pty_run(device: Device, command: str, root_password: str) -> tuple:
-    """Run `command` with a terminal on the phone, answering su's password
+    """Run `command` with a terminal on the phone, answering su's or sudo's password
     prompt (an ssh login prompt gets $ZTOS_PASSWORD). Returns (output, exit)."""
     import pty
     import select
