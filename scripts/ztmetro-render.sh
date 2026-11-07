@@ -14,7 +14,7 @@ timeout 60 socat -u "TCP-LISTEN:$PORT,bind=$HOST,reuseaddr" "OPEN:$ROOT/build/re
 sleep 1
 timeout 90 "$ROOT/scripts/ssh-pw.py" alarm alarm "$PHONE" \
 	"rm -rf /tmp/zr && mkdir -p /tmp/zr && cd ~/ztmetro && ./ztmetro --render /tmp/zr 2>&1 | grep -v INFO | head -5; \
-	 for p in main theme display wifi battery keyboard about; do ./settings/ztsettings --render \$p /tmp/zr/settings-\$p.png 2>&1 | head -2; done; \
+	 for p in \$(./settings/ztsettings --list-pages); do ./settings/ztsettings --render \$p /tmp/zr/settings-\$p.png 2>&1 | head -2; done; \
 	 cd /tmp/zr && tar cf - . > /dev/tcp/$HOST/$PORT" | grep -v '^Password' || true
 wait || true
 tar xf "$ROOT/build/render.tar" -C "$ROOT/out/render"
