@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from .build import EDK2, ROOT, WORK, Fail, say
+from . import host
 from .host import install_hint
 
 
@@ -147,11 +148,15 @@ You need
     Heimdall from download mode: Volume Down + Bixby + Power).
   - adb on this computer (android-tools) and a USB cable.
   - The phone charged above 50 %.
+  - Space on this computer for its BOOT, RECOVERY and EFS partitions (about
+    150 MB), which the installer saves to stock/ before writing anything.
 
 Steps (the installer does 3 to 6 for you, and asks before each)
   1. Back up anything on the phone you want to keep. It will be gone.
   2. Start TWRP: power the phone off, then hold Volume Up + Bixby + Power
-     until the TWRP screen. Plug it into this computer.
+     until the TWRP screen. Plug it into this computer. The installer offers to
+     save BOOT, RECOVERY and EFS (scripts/backup-stock.sh): nothing is written
+     to the phone without them. Keep a copy of stock/ off this computer.
   3. ztOS's boot image is built (kernel 7.1 with the S9's drivers, ztOS's
      start-up program, made fail-safe: a crash falls back to TWRP).
   4. The ztOS system is built for the phone.
@@ -176,14 +181,35 @@ def adb_state() -> str:
     return "none"
 
 
+def backup_stock(ask) -> None:
+    """scripts/flash.sh refuses to write without these: the way back to Android, and
+    the phone's identity."""
+    missing = [p for p in ("BOOT", "RECOVERY", "EFS") if not (ROOT / "stock" / f"{p}.img").is_file()
+               or (ROOT / "stock" / f"{p}.img").stat().st_size == 0]
+    if not missing:
+        return
+    print(f"\nNo backup yet in stock/ of: {', '.join(missing)}. They are the way back to Android, and EFS holds")
+    print("the phone's IMEI and modem calibration, which can't be made again. Saving them only reads the phone.")
+    if not ask("Save them now?"):
+        raise Fail("stopped: nothing was written to the phone. scripts/flash.sh will not write without these "
+                   "backups (scripts/backup-stock.sh)")
+    subprocess.run([str(ROOT / "scripts" / "backup-stock.sh")], check=True)
+
+
 def install_phone(root_image: Path, ask) -> None:
     """Steps 3 to 7 of PHONE_GUIDE. `ask(question) -> bool` asks the person at
     the computer; nothing is written to the phone without a yes, and the
     erasing step wants the word typed out."""
+    # all of it before anything is written: the steps below leave a phone that
+    # only rescue can start, so this is no place to find socat is not installed
+    missing = host.problems(host.phone_checks())
+    if missing:
+        raise Fail("installing on a phone needs:\n  " + "\n  ".join(host.describe(c) for c in missing))
     state = adb_state()
     if state != "recovery":
         raise Fail(f"the phone is not in TWRP over adb (adb says: {state}). Start TWRP (Volume Up + Bixby + "
                    "Power) and plug it in, then run this again.")
+    backup_stock(ask)
     boot = ROOT / "out" / "ztos-boot.img"
     # building the boot image needs the kernel toolchain under build/ and TWRP's
     # image in stock/, which a fresh clone has neither of: then the prebuilt one
@@ -215,7 +241,13 @@ def install_phone(root_image: Path, ask) -> None:
         if r.returncode == 0:
             break
     time.sleep(2)
-    subprocess.run([str(ROOT / "scripts" / "flash-root.sh"), str(root_image)], check=True)
+    flash = [str(ROOT / "scripts" / "flash-root.sh"), str(root_image)]
+    try:
+        subprocess.run(flash, check=True)
+    except subprocess.CalledProcessError:
+        raise Fail("writing the system stopped. The phone is waiting in ztOS Rescue, and nothing is lost: "
+                   f"fix what is said above, then run this, which carries on where it stopped:\n  {' '.join(flash)}\n"
+                   "and restart the phone with Power and Volume+, Volume-.") from None
     try:
         subprocess.run([sys.executable, str(ROOT / "scripts" / "psh.py"), "-t", "5", "reboot"],
                        capture_output=True, timeout=5)

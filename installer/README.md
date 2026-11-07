@@ -88,10 +88,12 @@ installer/ztos install --target starlte
 1. **Unlock the bootloader and put TWRP in RECOVERY.** In Android: Settings >
    Developer options > OEM unlocking. Then, from download mode (Volume Down
    + Bixby + Power), flash TWRP for starlte with Odin or Heimdall.
-2. **Back up what you want to keep.**
+2. **Back up what you want to keep.** The installer can't save your own files.
 3. **Start TWRP:** power off, then hold Volume Up + Bixby + Power. Plug the
    phone into the computer (`adb devices` shows it as `recovery`).
 4. **Run the installer.** It builds ztOS's boot image and system, then:
+   - offers to save the phone's `BOOT`, `RECOVERY` and `EFS` partitions to `stock/`,
+     see [the backups](#the-backups-in-stock). Nothing is written to the phone without them
    - builds the Galaxy S9 boot image with WLAN enabled; the build applies the
      Exynos9810 PCIe and pinctrl resume fixes automatically
    - asks before writing the boot image to BOOT, and reads it back to check it
@@ -114,6 +116,23 @@ The Wi-Fi resume support is part of the phone kernel/device tree, not a
 separate package. A fresh install that rebuilds the boot image includes it.
 Choosing to reuse a previously built `out/ztos-boot.img` reuses that image as
 is; rebuild it from the current source to include later kernel fixes.
+
+### The backups in stock/
+
+`scripts/flash.sh`, which the installer uses to write `BOOT`, refuses to run until
+`stock/BOOT.img`, `stock/RECOVERY.img` and `stock/EFS.img` exist. That check is
+deliberate: they are the way back to Android, and `EFS` can't be made again.
+
+The installer offers to make them. To do it yourself, with the phone in TWRP:
+
+```
+scripts/backup-stock.sh
+```
+
+It only reads the phone, compares each copy with the partition, and never replaces
+a file already in `stock/`. Do it before the first install: afterwards `BOOT` holds
+ztOS, not Android. `EFS.img` holds your IMEI. Keep a copy of `stock/` off this
+computer, and never share it. The repository ignores the folder.
 
 ## What you get
 

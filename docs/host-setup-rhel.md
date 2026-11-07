@@ -256,8 +256,8 @@ from its `CMakeLists.txt` and the host's dnf history; it was not rebuilt in a gu
 The USB permissions `adb` and `odin4` need were not tested.
 
 `scripts/flash.sh` refuses to run unless `stock/BOOT.img`, `stock/RECOVERY.img` and
-`stock/EFS.img` exist, and the installer calls it to write BOOT, so a fresh clone
-stops there (read from code, not run).
+`stock/EFS.img` exist. The installer offers to save them first; see
+[the backups](../installer/README.md#the-backups-in-stock).
 
 ### The emulator
 

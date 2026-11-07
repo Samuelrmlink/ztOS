@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -300,6 +301,10 @@ def main(argv=None):
         return 0
     except b.Fail as e:
         print(f"ztos: {e}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as e:
+        name = Path(str(e.cmd[0])).name if isinstance(e.cmd, (list, tuple)) else e.cmd
+        print(f"ztos: {name} failed (exit status {e.returncode}): see what it said above", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("\nztos: stopped")
