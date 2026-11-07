@@ -267,11 +267,102 @@ static void test_advert(void) {
 	advert(m, 0x21, 0x78, 0x0f, 0x11, 1, 1, 1, NO_SUFFIX);
 	assert(pods_advert(&w2, RPA, m, 27, 1, &which) == PODS_ADV_NEARBY && nokeys->part[POD_LEFT].level == -1);
 
-	/* with AAP open, the advert does not overwrite it */
+	/* with AAP reporting a pod, the advert does not overwrite it, however new */
 	d->link = PODS_LINK_READY;
+	d->aap_live[POD_LEFT] = d->aap_live[POD_RIGHT] = d->aap_live[POD_CASE] = true;
 	d->part[POD_LEFT] = (struct pods_battery){ 42, false, 100, 'a' };
+	d->part[POD_CASE] = (struct pods_battery){ 60, false, 5990, 'a' };
 	advert(m, 0x21, 0x78, 0x0f, 0x11, 1, 1, 1, NO_SUFFIX);
 	assert(pods_advert(&w, RPA, m, 27, 6000, &which) == PODS_ADV_READING && d->part[POD_LEFT].level == 42);
+	assert(d->part[POD_CASE].level == 60);		/* the link's word on the case is fresh */
+	/* ... the case's is only good for so long, since the link reports on events */
+	assert(pods_advert(&w, RPA, m, 27, 5990 + PODS_AAP_CASE_FRESH_S, &which) == PODS_ADV_READING);
+	assert(d->part[POD_CASE].level == 1 && d->part[POD_CASE].source == 'b' && d->part[POD_LEFT].level == 42);
+	/* the link says the case is Disconnected (lid shut): a broadcast may say */
+	d->aap_live[POD_CASE] = false;
+	d->part[POD_CASE] = (struct pods_battery){ 60, false, 7000, 'a' };
+	assert(pods_advert(&w, RPA, m, 27, 7001, &which) == PODS_ADV_READING && d->part[POD_CASE].level == 1);
+}
+
+/* The case's own advert (first byte 06), constructed from LibrePods' reading of it. */
+static size_t case_advert(uint8_t *m, const uint8_t *key, uint8_t head, int kase, int left, int right) {
+	uint8_t pt[16] = { 0x11, 0x20, 0x33, (uint8_t)kase, (uint8_t)left, (uint8_t)right, 7, 7, 7 };
+	m[0] = 0x07;
+	m[1] = head;		/* (top bits flags) */
+	m[2] = 0x06;
+	pods_aes_encrypt(key, pt, m + 3);
+	return 19;
+}
+
+static void test_case_advert(void) {
+	static struct pods_world w;
+	struct pods_device *d = keyed(&w);
+	uint8_t m[40], stranger[6] = { 0x12, 1, 2, 3, 4, 5 };	/* not the pods' RPA: it needn't be */
+	int which = -1;
+
+	/* not linked: charging is read, and left and right, from the case itself */
+	size_t n = case_advert(m, ENC, 0x11, 0x80 | 64, 33, 0xff);
+	assert(ble_find_case(m, n) == m + 2 && !ble_find_proximity(m, n));
+	assert(pods_advert(&w, stranger, m, n, 100, &which) == PODS_ADV_READING && which == 0);
+	assert(d->part[POD_CASE].level == 64 && d->part[POD_CASE].charging && d->part[POD_CASE].source == 'k');
+	assert(d->part[POD_LEFT].level == 33 && d->part[POD_RIGHT].level == -1);	/* FF: none */
+	/* flags in the length's top bits are not length */
+	n = case_advert(m, ENC, 0x31, 50, 0xff, 0xff);
+	assert(pods_advert(&w, stranger, m, n, 101, &which) == PODS_ADV_READING && d->part[POD_CASE].level == 50);
+	assert(!d->part[POD_CASE].charging);
+
+	/* another pair's case: nothing, and not "nearby" either */
+	static const uint8_t OTHER[16] = { 1, 2, 3 };
+	n = case_advert(m, OTHER, 0x11, 10, 10, 10);
+	assert(pods_advert(&w, stranger, m, n, 102, &which) == PODS_ADV_IGNORED);
+	assert(d->part[POD_CASE].level == 50 && w.n_nearby == 0);
+
+	/* THE case asked for: left pod worn and linked, right in a closed case. The link says the
+	 * case and right are Disconnected, the charger goes in, and the case's advert tells. */
+	d->link = PODS_LINK_READY;
+	struct pods_out o = { 0 };
+	assert(pods_link_packet(d, 1, 200, PKT(0x04, 0x00, 0x03, 0x04, 0x01, 0x46, 0x02, 0x01, 0x02, 0x01, 0x00, 0x04, 0x01, 0x08, 0x01, 0x00, 0x04, 0x01), &o));
+	assert(d->aap_live[POD_LEFT] && !d->aap_live[POD_RIGHT] && !d->aap_live[POD_CASE]);
+	n = case_advert(m, ENC, 0x11, 0x80 | 77, 12, 0x80 | 99);
+	assert(pods_advert(&w, stranger, m, n, 300, &which) == PODS_ADV_READING);
+	assert(d->part[POD_CASE].level == 77 && d->part[POD_CASE].charging && d->part[POD_CASE].seen == 300);
+	assert(d->part[POD_RIGHT].level == 99 && d->part[POD_RIGHT].source == 'k');
+	assert(d->part[POD_LEFT].level == 70 && d->part[POD_LEFT].source == 'a');	/* linked: stays */
+}
+
+/* Real bytes, heard from this phone off a Pro 2 USB-C (A3047) on 2026-11-07, left pod worn and
+ * linked, right pod in the closed case. Only the clear part can be checked here: the key that
+ * opens the rest stays on the phone. There it opened to left 99%, FF for right and case, zeros
+ * for the MAC's suffix, as the layouts say. */
+static void test_captured(void) {
+	static const uint8_t real[] = { 0x07, 0x19, 0x01, 0x24, 0x20, 0x22, 0xf9, 0x8f, 0x11, 0x00, 0x04, 0xc2, 0x0a, 0xfc, 0xd5,
+		0xf3, 0xfe, 0xf8, 0x19, 0x3a, 0x3c, 0x16, 0x25, 0x1a, 0xf5, 0xa5, 0x68 };
+	struct ble_clear c;
+	assert(ble_parse_clear(ble_find_proximity(real, sizeof(real)), &c));
+	assert(c.product == 0x2024 && c.sender_left && c.in_ear[POD_LEFT] && !c.in_ear[POD_RIGHT]);
+	assert(c.level[POD_LEFT] == 90 && c.level[POD_RIGHT] == -1 && c.level[POD_CASE] == -1 && c.lid == -1);
+	assert(c.connection == 4);
+}
+
+static void test_coarse(void) {
+	static struct pods_world w;
+	struct pods_device *d = keyed(&w);
+	uint8_t m[40];
+	int which;
+	/* the block says nothing of the case, the clear nibble says 50-59: 57 keeps its precision */
+	d->part[POD_CASE] = (struct pods_battery){ 57, false, 100, 'a' };
+	advert(m, 0x21, 0x78, 0x45, 0x11, 50, 50, 0xff, NO_SUFFIX);
+	assert(pods_advert(&w, RPA, m, 27, 200, &which) == PODS_ADV_READING);
+	assert(d->part[POD_CASE].level == 57 && d->part[POD_CASE].source == 'a' && d->part[POD_CASE].seen == 200);
+	assert(d->part[POD_CASE].charging);
+	/* it disagrees: the step, and said to be one */
+	advert(m, 0x21, 0x78, 0x03, 0x11, 50, 50, 0xff, NO_SUFFIX);
+	assert(pods_advert(&w, RPA, m, 27, 300, &which) == PODS_ADV_READING);
+	assert(d->part[POD_CASE].level == 30 && d->part[POD_CASE].source == 'c');
+	/* FF in both: nothing to say */
+	advert(m, 0x21, 0x78, 0x0f, 0x11, 50, 50, 0xff, NO_SUFFIX);
+	assert(pods_advert(&w, RPA, m, 27, 400, &which) == PODS_ADV_READING);
+	assert(d->part[POD_CASE].level == 30 && d->part[POD_CASE].seen == 300);
 }
 
 /* A whole link, as the captures in LinuxPods' docs have it, with no I/O. */
@@ -468,10 +559,21 @@ static void test_scan(void) {
 	s.screen_on = false;
 	assert(pods_scan_policy(&s).on_s == 0);
 	s.screen_on = true;
-	/* every known pair linked: AAP says it all */
+	/* every known pair linked: still, slowly: the case's broadcasts say what the link can't */
 	s.linked = 1;
 	s.keyed_unlinked = 0;
+	s.keyed_linked = 1;
+	s.ui_open = false;
+	p = pods_scan_policy(&s);
+	assert(p.on_s == 3 && p.every_s == 60);
+	s.ui_open = true;
+	p = pods_scan_policy(&s);
+	assert(p.on_s == 4 && p.every_s == 10);
+	/* never beside music to pods we hold a link to, app open or not */
+	s.audio_active = true;
 	assert(pods_scan_policy(&s).on_s == 0);
+	s.audio_active = false;
+	s.keyed_linked = 0;
 	/* music playing elsewhere: no background scanning beside A2DP, only for an open app */
 	s.linked = 0;
 	s.keyed_unlinked = 1;
@@ -479,7 +581,8 @@ static void test_scan(void) {
 	s.audio_active = true;
 	assert(pods_scan_policy(&s).on_s == 0);
 	s.ui_open = true;
-	assert(pods_scan_policy(&s).on_s == 4);
+	p = pods_scan_policy(&s);
+	assert(p.on_s == 2 && p.every_s == 20);	/* looking at the app: little, and less */
 	/* no keys: only while the app is open */
 	struct pods_scan_in n = { .powered = true, .screen_on = true };
 	assert(pods_scan_policy(&n).on_s == 0);
@@ -641,6 +744,9 @@ int main(void) {
 	test_keys();
 	test_clear();
 	test_advert();
+	test_case_advert();
+	test_coarse();
+	test_captured();
 	test_session();
 	test_gating();
 	test_scan();

@@ -528,8 +528,12 @@ static struct pods_scan_plan scan_plan(void) {
 	struct pods_scan_in s = { .powered = powered && bluez_up && adapter[0], .screen_on = screen_on(),
 		.ui_open = time(NULL) < hint_until, .audio_active = audio_active(), .known = world.n };
 	for (int i = 0; i < world.n; i++) {
-		if (world.dev[i].link == PODS_LINK_READY) s.linked++;
-		else if (world.dev[i].has_keys) s.keyed_unlinked++;
+		bool linked = world.dev[i].link == PODS_LINK_READY;
+		if (linked) s.linked++;
+		if (world.dev[i].has_keys) {
+			if (linked) s.keyed_linked++;
+			else s.keyed_unlinked++;
+		}
 	}
 	return pods_scan_policy(&s);
 }
@@ -597,10 +601,10 @@ static void apply_device(const char *path, const struct dev_props *p, bool snaps
 		if (!pods_mac_parse(mac, addr)) return;
 		long now = (long)time(NULL);
 		int r = pods_advert(&world, addr, p->mfr, p->mfr_len, now, &which);
-		if (trace && r != PODS_ADV_IGNORED) {
-			const uint8_t *q = ble_find_proximity(p->mfr, p->mfr_len);
-			fprintf(trace, "%ld adv %s result=%d clear=", now, mac, r);
-			for (int b = 0; q && b < 9; b++) fprintf(trace, "%02x", q[b]);
+		if (trace) {
+			/* all of Apple's data: it is what the air carries, and no key of ours */
+			fprintf(trace, "%ld adv %s result=%d raw=", now, mac, r);
+			for (size_t b = 0; b < p->mfr_len; b++) fprintf(trace, "%02x", p->mfr[b]);
 			fputc('\n', trace);
 			fflush(trace);
 		}

@@ -140,6 +140,11 @@ pods/ztos-podsd: pods/ztos-podsd.c $(PODS_DEPS)
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd) -o $@ pods/ztos-podsd.c \
 		$(shell pkg-config --libs libsystemd)
 
+# not installed: for looking at what the air carries (pods/README.md)
+pods/pods-adv-capture: pods/pods-adv-capture.c $(PODS_DEPS)
+	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd) -o $@ pods/pods-adv-capture.c \
+		$(shell pkg-config --libs libsystemd)
+
 pods/ztpods: pods/ztpods.c pods/pods-pages.c pods/pods-pages.h $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ pods/ztpods.c pods/pods-pages.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
