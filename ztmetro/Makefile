@@ -275,6 +275,11 @@ check-auth: xdg-shell-protocol.h
 		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(shell pkg-config --libs $(PKGS)) -lm
 	/tmp/ztmetro-auth-test
 
+.PHONY: check-bt-list
+check-bt-list:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-list-test tests/bt-list.c
+	/tmp/ztmetro-bt-list-test
+
 .PHONY: check-power-key
 check-power-key:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-power-key-test tests/power-key.c

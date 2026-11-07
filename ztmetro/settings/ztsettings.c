@@ -1875,10 +1875,7 @@ static int wifi_menu_items(const struct network *n, const char *items[3]) {
 /* ---- Bluetooth (bluetoothctl; the controller is bluetooth/README.md's) ------ */
 
 #define MAX_BT 24
-struct bt_device {
-	char mac[18], name[64], icon[32];
-	bool paired, connected;
-};
+#include "bt-list.h"
 static struct {
 	bool on, loading;
 	struct bt_device dev[MAX_BT];
@@ -1897,14 +1894,15 @@ static char bt_buf[8192];
 static size_t bt_len;
 
 static void bt_parse(char *text) {
+	static struct bt_device fresh[MAX_BT];
+	int n_fresh = 0;
 	bool devices = false;
-	bt.n = 0;
 	for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
 		if (strcmp(line, "@devices") == 0) {
 			devices = true;
 		} else if (!devices) {
 			bt.on = strncmp(line, "yes", 3) == 0;
-		} else if (bt.n < MAX_BT) {
+		} else if (n_fresh < MAX_BT) {
 			char *f[5] = { line, "", "", "", "" };
 			for (int i = 1; i < 5; i++) {
 				char *bar = strchr(f[i - 1], '|');
@@ -1912,7 +1910,8 @@ static void bt_parse(char *text) {
 				*bar = 0;
 				f[i] = bar + 1;
 			}
-			struct bt_device *d = &bt.dev[bt.n++];
+			struct bt_device *d = &fresh[n_fresh++];
+			memset(d, 0, sizeof(*d));
 			snprintf(d->mac, sizeof(d->mac), "%s", f[0]);
 			snprintf(d->name, sizeof(d->name), "%s", f[1][0] ? f[1] : f[0]);
 			d->paired = strncmp(f[2], "yes", 3) == 0;
@@ -1920,21 +1919,13 @@ static void bt_parse(char *text) {
 			snprintf(d->icon, sizeof(d->icon), "%s", f[4]);
 		}
 	}
-	/* connected first, then paired, then the rest */
-	for (int i = 1; i < bt.n; i++) {
-		struct bt_device d = bt.dev[i];
-		int rank = d.connected * 2 + d.paired, j = i;
-		while (j > 0 && bt.dev[j - 1].connected * 2 + bt.dev[j - 1].paired < rank) {
-			bt.dev[j] = bt.dev[j - 1];
-			j--;
-		}
-		bt.dev[j] = d;
-	}
+	bt.n = bt_list_merge(bt.dev, bt.on ? bt.n : 0, fresh, n_fresh);
 }
 
 /* What the user asked for while a scan was running: it runs when that ends, so
  * a tap on a device is never lost. A scan is only ever skipped, not queued. */
 static char bt_pending[600];
+static char bt_drawn[MAX_BT][18];	/* each row's device, as last drawn */
 static void bt_refresh(const char *first);
 
 static void bt_ready(int fd, void *data) {
@@ -2043,14 +2034,15 @@ static double draw_bluetooth(cairo_t *cr) {
 	double menu_at = -1;
 	for (int i = 0; i < bt.n; i++) {
 		struct bt_device *d = &bt.dev[i];
+		snprintf(bt_drawn[i], sizeof(bt_drawn[i]), "%s", d->mac);
 		cairo_set_source_rgb(cr, 1, 1, 1);
 		zmc_text_line(cr, d->name, FONT_SEMILIGHT, 26, MARGIN, y, zmc.width - 2 * MARGIN);
 		char line[64];
 		if (d->connected && battery >= 0) {
 			snprintf(line, sizeof(line), "Connected, battery %d%%", battery);
 		} else {
-			snprintf(line, sizeof(line), "%s", d->connected ? "Connected" : d->paired ? "Not connected" :
-				"Tap to pair");
+			snprintf(line, sizeof(line), "%s", d->gone ? "Not in range" : d->connected ? "Connected" :
+				d->paired ? "Not connected" : "Tap to pair");
 		}
 		if (d->connected) {
 			zmc_set_rgb(cr, ACCENTS[app.accent].color);
@@ -3259,8 +3251,19 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_BT_DEVICE:
 	case ACT_BT_FORGET: {
-		if (arg < 0 || arg >= bt.n || !bt_mac_ok(bt.dev[arg].mac)) break;
-		struct bt_device *d = &bt.dev[arg];
+		/* the device that was on the screen in that row, wherever it is now */
+		if (arg < 0 || arg >= MAX_BT) break;
+		struct bt_device *d = NULL;
+		for (int i = 0; i < bt.n; i++) {
+			if (strcmp(bt.dev[i].mac, bt_drawn[arg]) == 0) d = &bt.dev[i];
+		}
+		if (!d || !bt_mac_ok(d->mac)) break;
+		if (d->gone && action == ACT_BT_DEVICE) {
+			snprintf(bt.status, sizeof(bt.status), "%.60s is not in range, searching…", d->name);
+			bt_request("bluetoothctl --timeout 10 scan on >/dev/null 2>&1");
+			zmc_redraw();
+			break;
+		}
 		char cmd[400];
 		if (action == ACT_BT_FORGET) {
 			snprintf(cmd, sizeof(cmd), "bluetoothctl remove %s >/dev/null 2>&1", d->mac);
@@ -3872,6 +3875,7 @@ static void arrived(int page) {
 		bt.status[0] = 0;
 		bt_menu = -1;
 		bt_discoverable = true;
+		bt.n = 0;	/* a fresh list: only an open page holds its rows */
 		/* the real state first: the switch must not read Off through a scan */
 		bt_refresh(NULL);
 		bt_request("bluetoothctl pairable on >/dev/null 2>&1; bluetoothctl discoverable on >/dev/null 2>&1; "
