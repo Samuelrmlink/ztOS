@@ -95,6 +95,7 @@ void MainWindow::hint() {
 }
 
 void MainWindow::tick() {
+	if (QApplication::activePopupWidget()) return;	/* a list open: not pulled from under the pointer */
 	bool changed = false;
 	if (!c->changed_here_lately() && !name_editing && !slider_held) changed = c->load(false);
 	if (changed || redrawn.elapsed() > 30000) later();	/* the ages move on by themselves */
