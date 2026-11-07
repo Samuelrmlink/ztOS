@@ -276,6 +276,14 @@ static void parse_reg(const char *p, bool answer, int *reg, int *act)
 	*act = n > first + 3 ? v[first + 3] : (*reg == 1 || *reg == 5) ? *act : -1;
 }
 
+/* While AT+CREG=1 (or =2) is what was sent, a "+CREG: 1" is the setting coming back, not
+ * a report: read as one it says "registered, home", which is how a phone in airplane
+ * mode came to say it had signal, and to ask for data, each time the screen went off. */
+static bool reg_setting_echo(const char *sent)
+{
+	return !strncmp(sent, "AT+CREG=", 8) || !strncmp(sent, "AT+CGREG=", 9) || !strncmp(sent, "AT+CEREG=", 9);
+}
+
 static int csq_bars(int rssi)
 {
 	if (rssi == 99 || rssi < 0)
@@ -950,11 +958,14 @@ static void on_line(char *l)
 			now.operator[0] = 0;
 		}
 	} else if (!strncmp(l, "+CREG:", 6)) {
-		parse_reg(l + 6, !strncmp(sent, "AT+CREG?", 8), &now.cs_reg, &now.cs_act);
+		if (!reg_setting_echo(sent))
+			parse_reg(l + 6, !strncmp(sent, "AT+CREG?", 8), &now.cs_reg, &now.cs_act);
 	} else if (!strncmp(l, "+CGREG:", 7)) {
-		parse_reg(l + 7, !strncmp(sent, "AT+CGREG?", 9), &now.ps_reg, &now.ps_act);
+		if (!reg_setting_echo(sent))
+			parse_reg(l + 7, !strncmp(sent, "AT+CGREG?", 9), &now.ps_reg, &now.ps_act);
 	} else if (!strncmp(l, "+CEREG:", 7)) {
-		parse_reg(l + 7, !strncmp(sent, "AT+CEREG?", 9), &now.eps_reg, &now.eps_act);
+		if (!reg_setting_echo(sent))
+			parse_reg(l + 7, !strncmp(sent, "AT+CEREG?", 9), &now.eps_reg, &now.eps_act);
 	} else if (!strncmp(l, "+CFUN:", 6)) {
 		/* 4 (and 0) are the radio off; after a start this modem answers
 		 * with other values while it is registered and working */
