@@ -4474,7 +4474,9 @@ double zmc_picker(cairo_t *cr, double y, const char *caption, const char *const 
 	if (!zmc.configured) {
 		p = open ? 1 : 0;	/* drawn into a file: no motion, the end state */
 	}
-	if (p > 0.001 && p < 0.999) {
+	/* moving: its first draw is at one end (p exactly 0 opening, 1 closing), and
+	 * on a page with nothing else redrawing it the motion must go on from there */
+	if (moving == action && (open ? p < 0.999 : p > 0.001)) {
 		zmc.picker_until = now + 100;
 	}
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
