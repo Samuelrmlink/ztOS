@@ -306,7 +306,7 @@ Everything runs unprivileged on the build host; nothing needs sudo.
 | `scripts/flash-boot-from-arch.sh <image>` | write BOOT from the running Arch system, over the USB link |
 | `scripts/pacman-proxy.py` | HTTP proxy on the host so the phone's pacman can reach a mirror over USB |
 | `scripts/flash-from-rescue.sh <image>` | the same, from our own rescue shell when TWRP is not running |
-| `scripts/flash-root.sh [image]` | write the root image into `USERDATA` in verified, resumable 256 MiB chunks |
+| `scripts/flash-root.sh [image]` | write the root image into `USERDATA` in verified, resumable 256 MiB chunks; the phone connects back on port 5557, see [the firewall](installer/README.md#the-firewall) |
 | `scripts/psh.py 'command'` | run one command in the rescue shell (telnet over USB) |
 | `scripts/ssh-pw.py <user> <pw[,pw2]> <host> 'command'` | ssh with a password and `su`, without sshpass |
 | `kernel/make-dts.py` | derive the starlte device tree from the S9+ one; every edit is asserted |

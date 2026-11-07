@@ -198,31 +198,35 @@ before it writes anything, and says what to do if the phone cannot connect. Befo
 check it waited forever and printed nothing (in a test with a stub phone over a veth pair
 it was still waiting when killed after 120 s).
 
-The better fix is to put only the USB interface in the `trusted` zone, through its
-NetworkManager connection (next section), and open nothing else:
+Put only the USB interface in a zone that allows them. Don't open the ports on the zone
+your Wi-Fi uses. A zone of its own holds just these ports, as in
+[the firewall section of the install guide](../installer/README.md#the-firewall). That exact
+sequence was not run in a guest. Two simpler forms were, and both let the connection through
+in the veth test on Rocky. The whole USB interface can go in `trusted`, which also lets
+the phone reach everything else on this computer:
 
 ```sh
 sudo nmcli con mod ztos-usb connection.zone trusted
 sudo nmcli con up ztos-usb
 ```
 
-The other way is to open the ports on the zone the interface is in. Interface names
-vary, so look it up first:
+Or the ports can be opened for now, on the zone the USB interface is in. Interface names
+vary, so look it up first, and check it isn't your Wi-Fi's zone too:
 
 ```sh
 sudo firewall-cmd --get-active-zones
 sudo firewall-cmd --zone=public --add-port=5557/tcp --add-port=5558/tcp --add-port=5559/tcp
 ```
 
-Without `--permanent` this lasts until the next reload (tested). Both methods let the
-connection through in the veth test on Rocky.
+Without `--permanent` this lasts until the next reload (tested).
 
 ## The USB network
 
-**Confirmed on a real phone:** installer builds do not serve DHCP on USB
-(`build.py:332` disables `systemd-networkd`). NetworkManager on the host keeps
-trying DHCP and wipes the interface about every 45 seconds. Give it a static address
-instead:
+**Confirmed on a real phone:** installer builds from before ROADMAP 1.6 was fixed do not
+serve DHCP on USB, because they disable `systemd-networkd`. NetworkManager on the host keeps
+trying DHCP and wipes the interface about every 45 seconds. Newer builds turn it on for the
+USB link alone, which has not been tried on a phone yet. A static address works with
+both, and gives the firewall zone something to attach to:
 
 ```sh
 sudo nmcli con add type ethernet con-name ztos-usb \

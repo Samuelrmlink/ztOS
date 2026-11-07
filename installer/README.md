@@ -143,6 +143,44 @@ a file already in `stock/`. Do it before the first install: afterwards `BOOT` ho
 ztOS, not Android. `EFS.img` holds your IMEI. Keep a copy of `stock/` off this
 computer, and never share it. The repository ignores the folder.
 
+### The USB network
+
+The phone is `172.16.42.1` and hands this computer `172.16.42.2` by DHCP, with no route
+and no DNS, so your internet keeps using its own way out. NetworkManager on this computer
+may still prefer a fixed profile; `docs/host-setup-rhel.md` has one. Builds from before
+this was fixed (ROADMAP 1.6) do not answer DHCP in running ztOS, only in rescue, and need
+that fixed profile, or the host drops the link about every 45 s.
+
+### The firewall
+
+No script changes your firewall. While installing, the phone connects **to this computer**,
+so these must be let in, from the USB interface only:
+
+| Script | Port (TCP) |
+|---|---|
+| `scripts/flash-root.sh`, which the installer runs | 5557 |
+| `scripts/flash-from-rescue.sh` | 5558 |
+| `scripts/flash-boot-from-arch.sh` | 5559 |
+
+`flash-root.sh` tries the connection before it writes, and stops with a message if it's
+blocked. The system write can be run again, and carries on where it stopped.
+
+Don't open these ports on the zone your Wi-Fi is in: anyone on that network could then
+reach them. Give the USB interface its own zone. With firewalld and NetworkManager, using
+the `ztos-usb` profile from the host guide:
+
+```
+sudo firewall-cmd --permanent --new-zone=ztos-usb
+sudo firewall-cmd --permanent --zone=ztos-usb --add-port=5557-5559/tcp
+sudo firewall-cmd --reload
+sudo nmcli con mod ztos-usb connection.zone ztos-usb
+sudo nmcli con up ztos-usb
+```
+
+The development tools in `scripts/` use more ports on this same link (5561, 5576, 5581,
+5583, 5587, 5596, and 8080 for `pacman-proxy.py`); add them to this zone if you use them.
+With another firewall, the rule is the same: allow those ports in on the USB interface.
+
 ## What you get
 
 | | |
