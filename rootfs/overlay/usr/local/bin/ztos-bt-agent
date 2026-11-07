@@ -1,0 +1,614 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""ztos-bt-agent: answers BlueZ's pairing questions by asking the person.
+
+BlueZ calls an agent when pairing or a connection needs someone's decision.
+This one registers as the default (org.bluez.Agent1, capability KeyboardDisplay)
+and again whenever bluetoothd restarts. It asks through a sheet in the shell:
+
+    to the shell    $XDG_RUNTIME_DIR/ztmetro.ctl, one line each:
+                        bt-pair ID|MODE|SECONDS|ADDRESS|VALUE|NAME
+                        bt-pair-update ID|ENTERED
+                        bt-pair-close ID
+    back            $XDG_RUNTIME_DIR/ztos-bt-agent.sock (mode 0600, checked to
+                    be our own user), one connection for each answer:
+                        ID\\tOK\\tVALUE\\n  or  ID\\tCANCEL\\n
+
+ztmetro/auth/btpair-proto.h reads these, and ztmetro/auth/README.md says more.
+
+WHAT IT WILL ASK: only while the phone is discoverable, which Settings keeps on
+for as long as its Bluetooth page is open. BlueZ doesn't say which side started
+a pairing, so outside that it refuses everything, without a sheet: a stranger
+can't make a phone that isn't looking put questions on its screen. (Pairing with
+bluetoothctl from a terminal therefore needs "discoverable on".)
+
+It never says yes by itself. The one thing that goes through without a sheet is
+AuthorizeService for a device someone trusted: see Broker._service_look.
+
+Neither PINs nor passkeys are logged. Python can't wipe its strings: a PIN stays
+in this process's memory until the garbage collector reuses it.
+"""
+import os
+import re
+import signal
+import socket
+import stat
+import struct
+import sys
+import unicodedata
+
+BUS_NAME = "org.bluez"
+AGENT_PATH = "/org/ztos/BluetoothAgent"
+AGENT_IFACE = "org.bluez.Agent1"
+MANAGER_IFACE = "org.bluez.AgentManager1"
+DEVICE_IFACE = "org.bluez.Device1"
+ADAPTER_IFACE = "org.bluez.Adapter1"
+PROPS_IFACE = "org.freedesktop.DBus.Properties"
+CAPABILITY = "KeyboardDisplay"
+
+# bluetoothd gives an agent 60 s to answer: end it ourselves first, cleanly
+ANSWER_SECONDS = 55
+SHOW_SECONDS = 60       # a number on the screen: nothing tells us about a failure for sure
+TRUST_WAIT_SECONDS = 1.5
+NAME_BYTES = 96
+
+SERVICES = {
+    "1101": "a serial port",
+    "1105": "file transfer",
+    "1106": "file transfer",
+    "1108": "audio and calls",
+    "110a": "audio",
+    "110b": "audio",
+    "110c": "media controls",
+    "110d": "audio",
+    "110e": "media controls",
+    "1112": "audio and calls",
+    "1115": "the network",
+    "1116": "the network",
+    "1117": "the network",
+    "1124": "input",
+    "111e": "audio and calls",
+    "111f": "audio and calls",
+    "112f": "your contacts",
+    "1130": "your contacts",
+    "1132": "your messages",
+    "1133": "your messages",
+    "1134": "your messages",
+}
+
+
+def log(*words):
+    print("ztos-bt-agent:", *words, file=sys.stderr, flush=True)
+
+
+def clean_name(name):
+    """A device's name is whatever its owner wants: one line of what can be
+    seen, with no field separator, cut at a whole character."""
+    text = "".join(
+        "/" if c == "|" else c
+        for c in str(name)
+        if unicodedata.category(c) not in ("Cc", "Cf", "Cs", "Zl", "Zp", "Co", "Cn"))
+    text = text.strip()
+    data = text.encode("utf-8", "ignore")[:NAME_BYTES]
+    return data.decode("utf-8", "ignore")
+
+
+def address_of(path):
+    """The address in a BlueZ device path, or nothing."""
+    match = re.search(r"/dev_([0-9A-Fa-f]{2}(?:_[0-9A-Fa-f]{2}){5})$", str(path))
+    return match.group(1).replace("_", ":") if match else ""
+
+
+def adapter_of(path):
+    return str(path).rsplit("/", 1)[0]
+
+
+def service_label(uuid):
+    """What a service is called on the sheet. Unknown ones: the shell says "a service"."""
+    match = re.fullmatch(r"0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb", str(uuid).lower())
+    return SERVICES.get(match.group(1), "") if match else ""
+
+
+def ctl_line(req_id, mode, seconds, address, value, name):
+    return "bt-pair %s|%s|%d|%s|%s|%s\n" % (req_id, mode, seconds, address, value, clean_name(name))
+
+
+def answer_value(mode, text):
+    """What the shell sent, as BlueZ wants it. None if it isn't right."""
+    if mode == "pin":
+        return text if re.fullmatch(r"[0-9A-Za-z]{1,16}", text) else None
+    if mode == "passkey":
+        return int(text) if re.fullmatch(r"[0-9]{6}", text) else None
+    return True
+
+
+def parse_reply(line):
+    """An answer from the shell: (id, ok, value), or None."""
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) == 2 and parts[1] == "CANCEL":
+        return parts[0], False, ""
+    if len(parts) == 3 and parts[1] == "OK":
+        return parts[0], True, parts[2]
+    return None
+
+
+class Request:
+    def __init__(self, req_id, mode, device, value, ok, err):
+        self.id = req_id
+        self.mode = mode
+        self.device = str(device)
+        self.value = value
+        self.ok = ok
+        self.err = err
+        self.timer = None
+        self.shown = False
+        self.props = {}
+        self.entered = 0
+        self.looked_again = False
+
+    @property
+    def display(self):
+        return self.mode in ("show-pin", "show-passkey")
+
+
+class Broker:
+    """The decisions, with D-Bus and the shell behind `io`, so a test can be it.
+
+    io.show(line) -> bool       a line for the shell: False if it isn't there
+    io.device(path, cb)         cb(dict of Device1's properties, or None)
+    io.discoverable(path, cb)   cb(bool) for that adapter
+    io.after(seconds, fn)       -> a handle for io.stop(handle)
+    io.abort(device)            end the pairing in progress with this device
+
+    `ok` and `err` are BlueZ's reply: ok(value) or err("Rejected"|"Canceled", why).
+    One request at a time, as BlueZ asks them.
+    """
+
+    def __init__(self, io):
+        self.io = io
+        self.cur = None
+        self.count = 0
+
+    # ---- BlueZ's calls
+
+    def ask(self, mode, device, value, ok, err):
+        cur = self.cur
+        if cur:
+            if not cur.display or not cur.shown:
+                log(mode, address_of(device), "refused: another request is open")
+                err("Rejected", "another request is open")
+                return
+            self._end(cur)      # a number on the screen, for a pairing that's over
+        self.count += 1
+        self.cur = req = Request("%x" % self.count, mode, device, value, ok, err)
+        log(mode, address_of(device), "asked")
+        self.io.device(req.device, lambda props: self._device_known(req, props))
+
+    def display_passkey(self, device, passkey, entered, ok, err):
+        """BlueZ calls this again for each digit typed on the other device."""
+        cur = self.cur
+        value = "%06d" % passkey
+        if cur and cur.mode == "show-passkey" and cur.device == str(device) and cur.value == value:
+            cur.entered = entered
+            if cur.shown:
+                self.io.show("bt-pair-update %s|%d\n" % (cur.id, entered))
+            ok(None)
+            return
+        self.ask("show-passkey", device, value, ok, err)
+
+    def cancel(self):
+        """The request is over: failed, timed out, or the other side gave up."""
+        cur = self.cur
+        if not cur:
+            return
+        log(cur.mode, address_of(cur.device), "cancelled by BlueZ")
+        self._end(cur)
+        if not cur.display:
+            cur.err("Canceled", "cancelled")
+
+    release = cancel
+
+    def device_changed(self, path, changed):
+        """A number shown has no reply to wait for and BlueZ needn't send Cancel
+        when the pairing ends, so watch the device for that."""
+        cur = self.cur
+        if not cur or not cur.display or cur.device != str(path):
+            return
+        if changed.get("Paired") or ("Connected" in changed and not changed["Connected"]):
+            log(cur.mode, address_of(cur.device), "over:", "paired" if changed.get("Paired") else "disconnected")
+            self._end(cur)
+
+    # ---- on the way to the sheet
+
+    def _device_known(self, req, props):
+        if req is not self.cur:
+            return
+        req.props = props or {}
+        if req.mode == "service":
+            self._service_look(req)
+        else:
+            self._gate(req)
+
+    def _service_look(self, req):
+        """AuthorizeService. Trusted devices don't need asking, and BlueZ doesn't
+        ask for them. But a speaker that has just been paired from Settings may
+        connect back in the moment before Settings trusts it, and it would be
+        wrong to put a question up about a device the person just chose. So wait
+        for that once, briefly. Nothing but someone trusting the device gets it
+        past this."""
+        if req.props.get("Trusted"):
+            log(req.mode, address_of(req.device), "allowed: trusted")
+            self._drop(req)
+            req.ok(None)
+        elif req.looked_again:
+            self._gate(req)
+        else:
+            req.looked_again = True
+            req.timer = self.io.after(TRUST_WAIT_SECONDS, lambda: self._service_again(req))
+
+    def _service_again(self, req):
+        req.timer = None
+        if req is self.cur:
+            self.io.device(req.device, lambda props: self._device_known(req, props))
+
+    def _gate(self, req):
+        self.io.discoverable(adapter_of(req.device), lambda on: self._gated(req, on))
+
+    def _gated(self, req, on):
+        if req is not self.cur:
+            return
+        if not on:
+            log(req.mode, address_of(req.device), "refused: not discoverable")
+            self._drop(req)
+            req.err("Rejected", "not discoverable")
+            return
+        address = req.props.get("Address") or address_of(req.device)
+        name = req.props.get("Alias") or req.props.get("Name") or address
+        seconds = SHOW_SECONDS if req.display else ANSWER_SECONDS
+        line = ctl_line(req.id, req.mode, seconds, address, req.value, name)
+        if not self.io.show(line):
+            log(req.mode, address_of(req.device), "refused: no shell")
+            self._drop(req)
+            req.err("Rejected", "no shell to ask")
+            return
+        req.shown = True
+        req.timer = self.io.after(seconds, lambda: self._timed_out(req))
+        if req.entered:
+            self.io.show("bt-pair-update %s|%d\n" % (req.id, req.entered))
+        if req.display:
+            # DisplayPinCode: BlueZ sends the PIN when this returns
+            req.ok(None)
+
+    def _timed_out(self, req):
+        req.timer = None
+        if req is not self.cur:
+            return
+        log(req.mode, address_of(req.device), "timed out")
+        self._end(req)
+        if not req.display:
+            req.err("Canceled", "no answer in time")
+
+    # ---- the person's answer
+
+    def answered(self, req_id, accepted, text):
+        req = self.cur
+        if not req or req.id != req_id or not req.shown:
+            return      # too late for this one
+        if req.display:
+            self._end(req)
+            if not accepted:
+                log(req.mode, address_of(req.device), "cancelled by the person")
+                # A paired device's bond is not this request's to touch: BlueZ's
+                # CancelPairing removes the bond if nothing is in progress
+                if not req.props.get("Paired"):
+                    self.io.abort(req.device)
+            return
+        if not accepted:
+            log(req.mode, address_of(req.device), "refused by the person")
+            self._end(req)
+            req.err("Rejected", "refused")
+            return
+        value = answer_value(req.mode, text)
+        if value is None:
+            log(req.mode, address_of(req.device), "refused: bad answer from the shell")
+            self._end(req)
+            req.err("Rejected", "bad answer")
+            return
+        log(req.mode, address_of(req.device), "answered")
+        self._end(req)
+        req.ok(value)
+
+    # ---- ending
+
+    def _drop(self, req):
+        if req.timer is not None:
+            self.io.stop(req.timer)
+            req.timer = None
+        if self.cur is req:
+            self.cur = None
+
+    def _end(self, req):
+        was_shown = req.shown
+        self._drop(req)
+        if was_shown:
+            self.io.show("bt-pair-close %s\n" % req.id)
+
+
+def write_ctl(path, line):
+    """One write to the shell's pipe: whole, since it's under PIPE_BUF. False if
+    nothing is reading it."""
+    try:
+        if not stat.S_ISFIFO(os.stat(path).st_mode):
+            return False
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        return os.write(fd, line.encode()) == len(line.encode())
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def listen(path):
+    """The socket the shell answers on, as ztos-auth.sock is: 0600, in a private
+    directory."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM | socket.SOCK_CLOEXEC)
+    old = os.umask(0o077)
+    try:
+        sock.bind(path)
+    finally:
+        os.umask(old)
+    sock.listen(4)
+    return sock
+
+
+def read_answer(conn):
+    """One answer from a connection, if it's from this user. None otherwise."""
+    cred = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+    if struct.unpack("3i", cred)[1] != os.getuid():
+        return None
+    conn.settimeout(0.5)
+    data = b""
+    try:
+        while b"\n" not in data and len(data) < 128:
+            chunk = conn.recv(128 - len(data))
+            if not chunk:
+                break
+            data += chunk
+    except OSError:
+        return None
+    if b"\n" not in data:
+        return None
+    return parse_reply(data.decode("utf-8", "replace"))
+
+
+def main():
+    import dbus
+    import dbus.mainloop.glib
+    import dbus.service
+    from gi.repository import GLib
+
+    run = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+    ctl = os.path.join(run, "ztmetro.ctl")
+    sock_path = os.path.join(run, "ztos-bt-agent.sock")
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()      # exits if the bus goes away: systemd starts it again
+
+    class IO:
+        def show(self, line):
+            return write_ctl(ctl, line)
+
+        def device(self, path, cb):
+            bus.call_async(BUS_NAME, path, PROPS_IFACE, "GetAll", "s", (DEVICE_IFACE,),
+                           lambda props: cb(dict(props)), lambda _e: cb(None))
+
+        def discoverable(self, path, cb):
+            bus.call_async(BUS_NAME, path, PROPS_IFACE, "Get", "ss", (ADAPTER_IFACE, "Discoverable"),
+                           lambda on: cb(bool(on)), lambda _e: cb(False))
+
+        def after(self, seconds, fn):
+            def fire():
+                fn()
+                return False
+            return GLib.timeout_add(int(seconds * 1000), fire)
+
+        def stop(self, handle):
+            GLib.source_remove(handle)
+
+        def abort(self, device):
+            # on a pairing started from there, there's nothing of ours to cancel:
+            # dropping the link is what ends it
+            bus.call_async(BUS_NAME, device, DEVICE_IFACE, "CancelPairing", "", (),
+                           lambda *_a: None,
+                           lambda _e: bus.call_async(BUS_NAME, device, DEVICE_IFACE, "Disconnect", "", (),
+                                                     lambda *_a: None, lambda _e: None))
+
+    broker = Broker(IO())
+
+    def bluez_error(which, why):
+        return dbus.DBusException(why, name="org.bluez.Error." + which)
+
+    class Agent(dbus.service.Object):
+        """BlueZ's side. The system bus lets only root call Agent1 (BlueZ's own
+        policy, /usr/share/dbus-1/system.d/bluetooth.conf). Check again: a
+        forged RequestConfirmation answered yes could do nothing, but one on the
+        screen could fool someone."""
+
+        def _allowed(self, sender, err):
+            try:
+                if bus.get_unix_user(sender) == 0:
+                    return True
+            except dbus.DBusException:
+                pass
+            log("a call from someone else, refused")
+            err(bluez_error("Rejected", "only BlueZ may ask"))
+            return False
+
+        def _ask(self, mode, device, value, sender, ok, err, convert=None):
+            if not self._allowed(sender, err):
+                return
+            broker.ask(mode, device, value,
+                       (lambda v: ok(convert(v))) if convert else (lambda _v: ok()),
+                       lambda which, why: err(bluez_error(which, why)))
+
+        @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s",
+                             sender_keyword="sender", async_callbacks=("ok", "err"))
+        def RequestPinCode(self, device, sender, ok, err):
+            self._ask("pin", device, "", sender, ok, err, str)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="",
+                             sender_keyword="sender", async_callbacks=("ok", "err"))
+        def DisplayPinCode(self, device, pincode, sender, ok, err):
+            # a PIN we were given to show: only what the sheet can show of it
+            if not re.fullmatch(r"[0-9A-Za-z]{1,16}", str(pincode)):
+                err(bluez_error("Rejected", "not a PIN"))
+                return
+            self._ask("show-pin", device, str(pincode), sender, ok, err)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="u",
+                             sender_keyword="sender", async_callbacks=("ok", "err"))
+        def RequestPasskey(self, device, sender, ok, err):
+            self._ask("passkey", device, "", sender, ok, err, dbus.UInt32)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="ouq", out_signature="",
+                             sender_keyword="sender", async_callbacks=("ok", "err"))
+        def DisplayPasskey(self, device, passkey, entered, sender, ok, err):
+            if not self._allowed(sender, err):
+                return
+            if passkey > 999999:
+                err(bluez_error("Rejected", "not a passkey"))
+                return
+            broker.display_passkey(device, int(passkey), int(entered),
+                                   lambda *_v: ok(), lambda which, why: err(bluez_error(which, why)))
+
+        @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="",
+                             sender_keyword="sender", async_callbacks=("ok", "err"))
+        def RequestConfirmation(self, device, passkey, sender, ok, err):
+            if passkey > 999999:
+                err(bluez_error("Rejected", "not a passkey"))
+                return
+            self._ask("confirm", device, "%06d" % passkey, sender, ok, err)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="",
+                             sender_keyword="sender", async_callbacks=("ok", "err"))
+        def RequestAuthorization(self, device, sender, ok, err):
+            self._ask("authorize", device, "", sender, ok, err)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="",
+                             sender_keyword="sender", async_callbacks=("ok", "err"))
+        def AuthorizeService(self, device, uuid, sender, ok, err):
+            self._ask("service", device, service_label(uuid), sender, ok, err)
+
+        @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="", sender_keyword="sender")
+        def Cancel(self, sender):
+            if bus.get_unix_user(sender) == 0:
+                broker.cancel()
+
+        @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="", sender_keyword="sender")
+        def Release(self, sender):
+            if bus.get_unix_user(sender) != 0:
+                return
+            log("released by BlueZ")
+            broker.release()
+            registered[0] = False
+            retry_register()
+
+    agent = Agent(bus, AGENT_PATH)      # (the object stays on the bus)
+    assert agent
+    registered = [False]
+    bluez_owner = [""]
+    retry = [None]
+
+    def retry_register():
+        if retry[0] is None and bluez_owner[0]:
+            def again():
+                retry[0] = None
+                register()
+                return False
+            retry[0] = GLib.timeout_add_seconds(5, again)
+
+    def register():
+        def failed(error):
+            # already ours (another registration won a race) is as good
+            if error.get_dbus_name() == "org.bluez.Error.AlreadyExists":
+                make_default()
+            else:
+                log("can't register:", error.get_dbus_name())
+                retry_register()
+
+        def make_default(*_):
+            bus.call_async(BUS_NAME, "/org/bluez", MANAGER_IFACE, "RequestDefaultAgent", "o", (AGENT_PATH,),
+                           default_done, default_failed)
+
+        def default_done(*_):
+            registered[0] = True
+            log("registered as the default agent:", CAPABILITY)
+
+        def default_failed(error):
+            log("not the default agent:", error.get_dbus_name())
+            retry_register()
+
+        if not registered[0] and bluez_owner[0]:
+            bus.call_async(BUS_NAME, "/org/bluez", MANAGER_IFACE, "RegisterAgent", "os",
+                           (AGENT_PATH, CAPABILITY), make_default, failed)
+
+    def owner_changed(owner):
+        had = bluez_owner[0]
+        bluez_owner[0] = str(owner)
+        if had and had != owner:
+            log("bluetoothd went away")
+            registered[0] = False
+            broker.release()
+        if owner:
+            register()
+
+    bus.add_signal_receiver(
+        lambda iface, changed, _inv, path=None: broker.device_changed(path, changed) if iface == DEVICE_IFACE else None,
+        dbus_interface=PROPS_IFACE, signal_name="PropertiesChanged", bus_name=BUS_NAME, path_keyword="path")
+    bus.watch_name_owner(BUS_NAME, owner_changed)
+
+    sock = listen(sock_path)
+
+    def accept(_fd, _cond):
+        try:
+            conn, _ = sock.accept()
+        except OSError:
+            return True
+        with conn:
+            answer = read_answer(conn)
+        if answer:
+            broker.answered(*answer)
+        return True
+
+    GLib.io_add_watch(sock.fileno(), GLib.IO_IN, accept)
+
+    loop = GLib.MainLoop()
+
+    def stop():
+        loop.quit()
+        return False
+
+    try:
+        from gi.repository import GLibUnix
+        add_signal = GLibUnix.signal_add
+    except ImportError:         # an older GLib
+        add_signal = GLib.unix_signal_add
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGTERM, stop)
+    add_signal(GLib.PRIORITY_DEFAULT, signal.SIGINT, stop)
+    log("started")
+    loop.run()
+    broker.release()
+    try:
+        os.unlink(sock_path)
+    except OSError:
+        pass
+
+
+if __name__ == "__main__":
+    main()

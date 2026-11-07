@@ -1,0 +1,15 @@
+[Unit]
+Description=ztOS Bluetooth pairing agent: PINs, passkeys and permissions
+# it waits for bluetoothd by itself, and registers again when it restarts
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/local/bin/ztos-bt-agent
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+# waiting, nearly always: the efficiency cores are enough
+CPUAffinity=0-3
+
+[Install]
+WantedBy=default.target

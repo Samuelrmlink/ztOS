@@ -209,13 +209,27 @@ def tile_clear() -> None:
         pass
 
 
+def _osk_pad(box: QWidget) -> Optional[str]:
+    """Which number pad, if any, a box's inputMethodHints ask for."""
+    hints = box.inputMethodHints()
+    if hints & Qt.ImhDialableCharactersOnly:
+        return "phone"
+    if hints & Qt.ImhFormattedNumbersOnly:
+        return "number"
+    if hints & Qt.ImhDigitsOnly:
+        return "digits"
+    return None
+
+
 def osk(show: bool, box: Optional[QWidget] = None) -> None:
     """Bring up (or put away) the on-screen keyboard. It lies over the app; with
     `box` (what is typed into), the shell lifts the app just enough for that
-    box to stay above it: nothing is resized or laid out again."""
+    box to stay above it: nothing is resized or laid out again. A box whose
+    inputMethodHints ask for numbers gets the keyboard's number pad."""
     if show and box is not None and box.window() is not None:
         bottom = box.mapTo(box.window(), QPoint(0, box.height())).y()
-        _ctl(f"osk show {bottom}")
+        pad = _osk_pad(box)
+        _ctl(f"osk numeric {pad} {bottom}" if pad else f"osk show {bottom}")
     else:
         _ctl("osk show" if show else "osk hide")
 
@@ -1435,7 +1449,9 @@ class TextBox(QWidget):
 
     def __init__(self, caption: str = "", text: str = "", on_change: Optional[Callable[[str], None]] = None,
                  on_submit: Optional[Callable[[str], None]] = None, password: bool = False,
-                 placeholder: str = "", parent=None):
+                 placeholder: str = "", parent=None, numbers: str = ""):
+        """`numbers`: the box only takes numbers, so type them on the number pad:
+        "digits" (0-9, for a PIN), "number" (and . -) or "phone" (and * # +)."""
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1443,6 +1459,9 @@ class TextBox(QWidget):
         if caption:
             layout.addWidget(_label(caption, FONT_REGULAR, 13, GREY))
         self.field = _Field(text)
+        if numbers:
+            self.field.setInputMethodHints({"digits": Qt.ImhDigitsOnly, "number": Qt.ImhFormattedNumbersOnly,
+                                            "phone": Qt.ImhDialableCharactersOnly}[numbers])
         self.field.setPlaceholderText(placeholder)
         self.field.setFixedHeight(40)
         if password:

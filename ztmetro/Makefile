@@ -37,7 +37,7 @@ RETRO_DEPS = $(RETRO) core/zrnboard.h retro/dotmatrix.h retro/dm-launcher.h retr
 DM_WRAP = retro/dm-wrap.c
 DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
 
-ztmetro: ztmetro.c audio-state.h audio-sync.h auth/prompt.c xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+ztmetro: ztmetro.c audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -269,22 +269,37 @@ clean:
 
 # Uses a private Wayland seat; does not touch the running compositor or display.
 .PHONY: check-arch check-keyboard
-check-keyboard: xdg-shell-protocol.h
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
-		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(shell pkg-config --libs $(PKGS)) -lm
+check-keyboard: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-keyboard-test
 
 .PHONY: check-launch
-check-launch: xdg-shell-protocol.h
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
-		-o /tmp/ztmetro-launch-test tests/launch-state.c $(shell pkg-config --libs $(PKGS)) -lm
+check-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-launch-test tests/launch-state.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-launch-test
 
 .PHONY: check-auth
-check-auth: xdg-shell-protocol.h
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
-		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(shell pkg-config --libs $(PKGS)) -lm
+check-auth: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-auth-test
+
+# what the Bluetooth agent asks the shell, and the agent itself (no D-Bus, no phone)
+.PHONY: check-bt-pair
+check-bt-pair:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-pair-test tests/bt-pair-proto.c
+	/tmp/ztmetro-bt-pair-test
+	python3 tests/bt-agent.py
+
+# the sheet itself, on the phone: as check-auth
+.PHONY: check-bt-pair-sheet
+check-bt-pair-sheet: xdg-shell-protocol.h
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
+		$(IAL_FLAGS) -o /tmp/ztmetro-bt-pair-sheet-test tests/bt-pair-sheet.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) \
+		$(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+	/tmp/ztmetro-bt-pair-sheet-test
 
 .PHONY: check-bt-list
 check-bt-list:
@@ -309,6 +324,11 @@ check-audiod:
 check-power-key:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-power-key-test tests/power-key.c
 	/tmp/ztmetro-power-key-test
+
+.PHONY: check-osk-numeric
+check-osk-numeric:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-osk-numeric-test tests/osk-numeric.c -lm
+	/tmp/ztmetro-osk-numeric-test
 
 .PHONY: check-demoloop-stop
 check-demoloop-stop:

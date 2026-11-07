@@ -58,6 +58,40 @@ int main(void) {
         }
     }
     s.osk_terminal = false; s.key_height = 56; osk_layout(&s);
+    /* A number pad: the same height, whatever the settings say, and no dot. */
+    static const enum osk_mode pads[] = { OSK_MODE_DIGITS, OSK_MODE_NUMBER, OSK_MODE_PHONE };
+    double letters_h = s.osk_h;
+    for (int i = 0; i < 3; i++) {
+        s.osk_field_mode = pads[i];
+        osk_mode_refresh(&s);
+        assert(s.osk_mode == pads[i] && s.osk_h == letters_h && !s.osk_cursor_touch);
+        touch_begin(&s, 3, osk_dot_x(&s), s.height - NAV_H - s.osk_h + osk_dot_y(&s), now_ms());
+        assert(!s.osk_cursor_touch && s.osk_pressed >= 0);
+        /* the field changes under the finger: it presses nothing when it lifts */
+        s.osk_field_mode = pads[(i + 1) % 3];
+        osk_mode_refresh(&s);
+        assert(s.osk_pressed == -1);
+        touch_end(&s, 3, now_ms(), false);
+        /* the letters and back, where the pad has the key */
+        if (s.osk_mode != OSK_MODE_DIGITS) {
+            for (int k = 0; k < s.n_keys; k++) {
+                if (s.keys[k].action != ACT_PAGE) continue;
+                osk_activate(&s, k);
+                break;
+            }
+            assert(s.osk_mode == OSK_MODE_FULL && s.osk_letters);
+            int page = -1;
+            for (int k = 0; k < s.n_keys; k++) {
+                if (s.keys[k].action == ACT_PAGE) page = k;
+            }
+            assert(page >= 0 && !strcmp(s.keys[page].label, "123"));
+            osk_activate(&s, page);
+            assert(s.osk_mode == s.osk_wanted && !s.osk_letters);
+        }
+    }
+    s.osk_field_mode = OSK_MODE_FULL;
+    osk_mode_refresh(&s);
+    assert(s.osk_mode == OSK_MODE_FULL && s.osk_h == letters_h);
     hold_dot(&s, 1);
     struct touch_point *p = s.osk_cursor_touch;
     double x = p->x, y = p->y;
@@ -84,12 +118,13 @@ int main(void) {
     touch_update(&s, 5, x+30, y, now_ms());
     s.osk_cursor_touch->down_ms = now_ms()-LONG_PRESS_MS;
     long_press_fired(&s);
-    assert(!s.osk_trackpad);
+    assert(s.osk_trackpad);	/* a drag off the dot starts it too, without the hold */
     touch_end(&s, 5, now_ms(), false);
+    assert(!s.osk_trackpad);
     hold_dot(&s, 6);
     osk_show(&s, false);
     assert(!s.osk_trackpad && !s.osk_cursor_touch);
     touch_end(&s, 6, now_ms(), false);
-    puts("PASS: aligned rows at all heights, hold, fractional cursor movement, modifiers, extra finger, release, cancel, short tap, movement before hold, keyboard hide");
+    puts("PASS: aligned rows at all heights, hold, fractional cursor movement, modifiers, extra finger, release, cancel, short tap, drag off the dot, keyboard hide, number pads");
     return 0;
 }

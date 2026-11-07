@@ -21,6 +21,37 @@ The smile key opens 24 emoji; `abc` returns to letters. Unicode is delivered
 through the virtual keyboard's XKB map, including to applications without a
 text-input protocol. ZrnMetroCore clients also decode that keymap as UTF-8.
 
+## Number pads
+
+A numbers-only field gets a number pad instead of the letters, in the same four
+rows of the key height setting, so the app's clear area does not move, with the
+same sounds, haptics, key pop and touch targets. There is no cursor dot.
+
+| Pad | Keys | Used for (text-input-v3 purpose) |
+| --- | --- | --- |
+| digits | 0-9, backspace, enter | `digits`, `pin` |
+| number | 0-9, `-`, `.`, backspace, enter, abc | `number` |
+| phone | 0-9, `*`, `#`, `+`, backspace, enter, abc | `phone` |
+
+Every other purpose has the full keyboard. On the number and phone pads, `abc`
+goes to the letters, where the `123` key goes back. The keyboard masks nothing,
+for a PIN or anything else. The pad follows a field whose purpose or focus changes
+while the keyboard is up; a finger on a key at that moment presses nothing.
+
+Where it comes from, first match wins (`osk_mode_choose` in `osk-numeric.h`):
+
+1. A field of the shell's own: what it asked for with `osk_show_mode`. The app
+   list's search, Hyperscan and the password prompt use plain `osk_show`, so they
+   always have the letters, whatever the app behind them has focused.
+2. The focused text-input-v3 field's content purpose.
+3. What an app of ours asked for on the control pipe: `osk numeric digits|number|phone [Y]`
+   (`zmc_keyboard_numeric` in ZrnMetroCore; `TextBox(numbers=...)` or a field's
+   `inputMethodHints` in the SDK; the browser, from WebKit's input purpose for the
+   page's field). `osk show` without a position, or `osk hide`, goes back to the letters.
+
+Android apps under Waydroid get the letters: its input method window says nothing
+about the field. See `android/waydroid/KEYS.md`.
+
 Touch targets cover the gaps between keys. An English common-word prefix
 model modestly expands likely next letters at key edges; the center of every
 key always selects that key. It does not replace text or save typed words.

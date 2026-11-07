@@ -37,7 +37,9 @@
 #include "demoloop/stop-key.h"
 #include "power/power-key.h"
 #include "audio-sync.h"
+#include "auth/btpair-proto.h"
 #include "audio-state.h"
+#include "osk-numeric.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -718,6 +720,14 @@ struct zt_server {
     struct wl_event_source *auth_source;
     char auth_password[512], auth_status[160], auth_read[1024];
     size_t auth_len, auth_read_len;
+	struct bt_pair {		/* auth/btpair.c */
+		bool active, shown, noted, osk_was_visible, osk_was_terminal;
+		struct bt_pair_request req;
+		int entered;
+		char entry[BT_PAIR_PIN_MAX + 1], status[64];
+		size_t entry_len;
+		struct wl_event_source *deadline;
+	} bt_pair;
 	bool dialog_open;
 	float dialog_y;			/* 0 shown, -dialog_h out of sight */
 	double dialog_h;
@@ -936,6 +946,12 @@ struct zt_server {
 	bool osk_terminal;		/* extra row for terminals */
 	bool osk_symbols;
 	bool osk_emoji;
+	enum osk_mode osk_mode;		/* what the keys are now */
+	enum osk_mode osk_wanted;	/* what the field wants: the same, unless it went to the letters */
+	enum osk_mode osk_shell_mode;	/* asked for by osk_show_mode */
+	enum osk_mode osk_field_mode;	/* the focused text-input field's purpose */
+	enum osk_mode osk_app_mode;	/* asked for down the control pipe ("osk numeric") */
+	bool osk_letters;		/* the abc key, from a number pad */
 	int key_height;
 	bool key_sound;
 	char key_prefix[32];
@@ -1022,6 +1038,15 @@ static void auth_input(struct zt_server *, uint32_t, const char *);
 static void auth_submit(struct zt_server *);
 static void auth_finish(struct zt_server *);
 static void draw_dialog(struct zt_server *);
+static void screen_set(struct zt_server *, bool);
+static void activity(struct zt_server *);
+static void bt_pair_input(struct zt_server *, uint32_t, const char *);
+static void bt_pair_sync(struct zt_server *);
+static void bt_pair_hide(struct zt_server *);
+static bool bt_pair_action(struct zt_server *, const char *);
+static double bt_pair_field_h(struct zt_server *);
+static void bt_pair_draw(struct zt_server *, cairo_t *, double, double, double);
+static void bt_pair_ctl(struct zt_server *, char *);
 enum { LEVEL_TORCH, LEVEL_BRIGHT };
 static void level_modal_show(struct zt_server *, int);
 static void level_modal_close(struct zt_server *);
@@ -7131,6 +7156,13 @@ static double osk_dot_y(struct zt_server *server) {
 static const char *const OSK_EMOJIS[] = {"😀", "😂", "😍", "😊", "😭", "😎", "🤔", "😅", "👍", "👎", "🙏", "👏", "❤", "🔥", "🎉", "✨", "😡", "😢", "😴", "😘", "😁", "💯", "✅", "👋"};
 static const unsigned OSK_EMOJI_CODES[] = {0x1f600, 0x1f602, 0x1f60d, 0x1f60a, 0x1f62d, 0x1f60e, 0x1f914, 0x1f605, 0x1f44d, 0x1f44e, 0x1f64f, 0x1f44f, 0x2764, 0x1f525, 0x1f389, 0x2728, 0x1f621, 0x1f622, 0x1f634, 0x1f618, 0x1f601, 0x1f4af, 0x2705, 0x1f44b};
 
+static enum osk_mode osk_mode_wanted(struct zt_server *server) {
+	bool shell_field = server->auth_active || server->hyper ||
+		(server->searching && !server->shown);
+	return osk_mode_choose(shell_field, server->osk_shell_mode, server->osk_field_mode,
+		server->osk_app_mode);
+}
+
 static void osk_layout(struct zt_server *server) {
 	server->osk_base_dirty = true;
 	static const struct osk_key term[] = {
@@ -7176,6 +7208,21 @@ static void osk_layout(struct zt_server *server) {
         { NULL, "enter", KEY_ENTER, false, ACT_CHAR, 1 } };
 	server->n_keys = 0;
 	double y = KEY_GAP;
+	server->osk_wanted = osk_mode_wanted(server);
+	server->osk_mode = osk_mode_shown(server->osk_wanted, server->osk_letters);
+	if (server->osk_mode != OSK_MODE_FULL) {
+		int n, columns;
+		const struct osk_pad_key *pad = osk_pad_keys(server->osk_mode, &n, &columns);
+		for (int i = 0; i < n; i++) {
+			struct osk_key *key = &server->keys[server->n_keys++];
+			*key = (struct osk_key){ pad[i].label, pad[i].icon, pad[i].keycode, pad[i].shift,
+				pad[i].page ? ACT_PAGE : ACT_CHAR, 1 };
+			osk_pad_place(&pad[i], columns, server->width, server->key_height, KEY_GAP, y,
+				&key->x, &key->y, &key->w, &key->h);
+		}
+		server->osk_h = y + OSK_PAD_ROWS * server->key_height;
+		return;
+	}
 	if (server->osk_terminal) {
 		osk_row(server, term, 8, y, TERM_ROW_H, 0);
 		y += TERM_ROW_H;
@@ -7204,8 +7251,25 @@ static void osk_layout(struct zt_server *server) {
 		osk_grid_row(server, l2, 9, y + server->key_height);
 		osk_grid_row(server, l3, 9, y + 2 * server->key_height);
 		osk_grid_row(server, bottom_letters, 6, y + 3 * server->key_height);
+		if (server->osk_wanted != OSK_MODE_FULL) {
+			/* came from a number pad, and this key goes back to it */
+			for (int i = 0; i < server->n_keys; i++) {
+				if (server->keys[i].action == ACT_PAGE) server->keys[i].label = "123";
+			}
+		}
 	}
 	server->osk_h = y + 4 * server->key_height;
+}
+
+/* A number pad's keys are large, and so is what is on them. */
+static double osk_label_size(struct zt_server *server, const struct osk_key *key) {
+	bool letter = key->label && strlen(key->label) == 1;
+	if (server->osk_mode != OSK_MODE_FULL) return letter ? 30 : 16;
+	return server->osk_emoji && key->action == ACT_CHAR ? 24 : letter ? 20 : 13;
+}
+
+static double osk_icon_size(struct zt_server *server) {
+	return server->osk_mode != OSK_MODE_FULL ? 24 : 18;
 }
 
 /* The key under the finger, drawn again larger just above it, where the
@@ -7278,14 +7342,14 @@ static void draw_osk(struct zt_server *server) {
 			if (key->icon) {
 				const char *icon = key->action == ACT_SHIFT && server->osk_shift ?
 					"shift-on" : key->icon;
-				draw_icon(bcr, icon, key->x + key->w / 2, key->y + key->h / 2, 18);
+				draw_icon(bcr, icon, key->x + key->w / 2, key->y + key->h / 2, osk_icon_size(server));
 			} else {
 				char label[16];
 				snprintf(label, sizeof(label), "%s", key->label);
 				if (letter && label[0] >= 'a' && label[0] <= 'z' && server->osk_shift) {
 					label[0] -= 32;
 				}
-				draw_text(bcr, label, FONT_REGULAR, server->osk_emoji && key->action == ACT_CHAR ? 24 : letter ? 20 : 13, key->x, key->y,
+				draw_text(bcr, label, FONT_REGULAR, osk_label_size(server, key), key->x, key->y,
 					key->w, key->h, true);
 			}
 		}
@@ -7320,7 +7384,7 @@ static void draw_osk(struct zt_server *server) {
 		if (key->icon) {
 			const char *icon = key->action == ACT_SHIFT && server->osk_shift ?
 				"shift-on" : key->icon;
-			draw_icon(cr, icon, key->x + key->w / 2, key->y + key->h / 2, 18);
+			draw_icon(cr, icon, key->x + key->w / 2, key->y + key->h / 2, osk_icon_size(server));
 		} else {
 			char label[16];
 			snprintf(label, sizeof(label), "%s", key->label);
@@ -7328,7 +7392,7 @@ static void draw_osk(struct zt_server *server) {
 			if (letter && label[0] >= 'a' && label[0] <= 'z' && server->osk_shift) {
 				label[0] -= 32;
 			}
-			draw_text(cr, label, FONT_REGULAR, server->osk_emoji && key->action == ACT_CHAR ? 24 : letter ? 20 : 13, key->x, key->y,
+			draw_text(cr, label, FONT_REGULAR, osk_label_size(server, key), key->x, key->y,
 				key->w, key->h, true);
 		}
 	}
@@ -7340,13 +7404,16 @@ static void draw_osk(struct zt_server *server) {
         draw_text(cr, "move cursor", FONT_REGULAR, 16, 0, 0,
             server->width, server->osk_h, true);
     }
-    /* The corner dot stays small; its invisible touch target is larger. */
-    cairo_set_source_rgb(cr, 0, 0, 0);
-    cairo_arc(cr, osk_dot_x(server), osk_dot_y(server), 10, 0, 2 * M_PI);
-    cairo_fill(cr);
-    set_rgb(cr, server->accent);
-    cairo_arc(cr, osk_dot_x(server), osk_dot_y(server), 3.5, 0, 2 * M_PI);
-    cairo_fill(cr);
+    /* The corner dot stays small; its invisible touch target is larger.
+     * A number pad has no such corner, and little need of a cursor. */
+    if (server->osk_mode == OSK_MODE_FULL) {
+        cairo_set_source_rgb(cr, 0, 0, 0);
+        cairo_arc(cr, osk_dot_x(server), osk_dot_y(server), 10, 0, 2 * M_PI);
+        cairo_fill(cr);
+        set_rgb(cr, server->accent);
+        cairo_arc(cr, osk_dot_x(server), osk_dot_y(server), 3.5, 0, 2 * M_PI);
+        cairo_fill(cr);
+    }
 	zt_buffer_show(server, &server->osk_layer, buffer, cr, server->width, server->osk_h);
 	draw_keypop(server);
 }
@@ -7536,6 +7603,13 @@ static void osk_show(struct zt_server *server, bool visible) {
 	if (visible && server->width == 0) {
 		return;
 	}
+	/* a shell field gets a number pad only by asking again each time: see
+	 * osk_show_mode. A password prompt can't inherit one from the PIN prompt. */
+	server->osk_shell_mode = OSK_MODE_FULL;
+	server->osk_letters = false;
+	if (!visible) {
+		server->osk_app_mode = OSK_MODE_FULL;
+	}
 	if (visible != server->osk_visible) {
 		wlr_log(WLR_INFO, "keyboard %s%s", visible ? "shown" : "hidden",
 			visible && server->osk_terminal ? " (terminal row)" : "");
@@ -7571,6 +7645,63 @@ static void osk_show(struct zt_server *server, bool visible) {
 	osk_lift(server);
 }
 
+/* The keys changed under a visible keyboard: lay it out again, and keep the app
+ * clear of it, for it may be another height now. */
+static void osk_relayout(struct zt_server *server) {
+	osk_layout(server);
+	draw_osk(server);
+	if (server->shown) {
+		app_configure(server, server->shown);
+	}
+	osk_lift(server);
+}
+
+/* What the field wants may have changed: follow it, if the keyboard is up. A
+ * finger on a key now lifts without pressing whatever has taken its place. */
+static void osk_mode_refresh(struct zt_server *server) {
+	enum osk_mode wanted = osk_mode_wanted(server);
+	if (wanted == server->osk_wanted) {
+		return;
+	}
+	wlr_log(WLR_INFO, "keyboard: %s for the field in focus", osk_mode_name(wanted));
+	server->osk_wanted = wanted;
+	server->osk_letters = server->osk_symbols = server->osk_emoji = false;
+	server->osk_shift = server->osk_ctrl = server->osk_alt = false;
+	server->key_prefix[0] = 0;
+	if (!server->osk_visible) {
+		return;
+	}
+	for (int i = 0; i < MAX_TOUCH; i++) {
+		if (server->touches[i].used && (server->touches[i].role == ROLE_KEY ||
+				server->touches[i].role == ROLE_CURSOR)) {
+			server->touches[i].role = ROLE_NONE;
+		}
+	}
+	server->osk_cursor_touch = NULL;
+	server->osk_trackpad = false;
+	server->osk_pressed = -1;
+	server->repeat_index = -1;
+	osk_relayout(server);
+}
+
+/* For the shell's own text fields, which don't go through text-input: bring the
+ * keyboard up with `mode`, whatever the app behind has focused.
+ *
+ *   OSK_MODE_DIGITS  0-9, backspace, enter: PINs and passkeys
+ *   OSK_MODE_NUMBER  and a decimal point, minus, and a key to the letters
+ *   OSK_MODE_PHONE   and * # +, and a key to the letters
+ *   OSK_MODE_FULL    the same as osk_show(server, true)
+ *
+ * Call it where a field would call osk_show(server, true). It lasts until the
+ * next osk_show, of either kind, so close or restore the keyboard with osk_show
+ * as usual. Keys reach the field as they always do: from osk_activate, with
+ * auth_active to auth_input (KEY_BACKSPACE, KEY_ENTER, and the digit as text). */
+static void osk_show_mode(struct zt_server *server, enum osk_mode mode) {
+	osk_show(server, true);
+	server->osk_shell_mode = mode;
+	osk_mode_refresh(server);
+}
+
 static bool is_terminal(struct zt_toplevel *toplevel) {
 	static const char *ids[] = { "foot", "kgx", "konsole", "console", "terminal",
 		"alacritty", "kitty", NULL };
@@ -7581,6 +7712,21 @@ static bool is_terminal(struct zt_toplevel *toplevel) {
 		}
 	}
 	return false;
+}
+
+/* The purpose of the field with the keyboard's focus, if an app says. Enabled and
+ * focused, as in osk_commit_text: only that one is typed into. */
+static void osk_field_read(struct zt_server *server) {
+	enum osk_mode mode = OSK_MODE_FULL;
+	struct zt_text_input *ti;
+	wl_list_for_each(ti, &server->text_inputs, link) {
+		if (ti->input->current_enabled && ti->input->focused_surface &&
+				ti->input->focused_surface == server->seat->keyboard_state.focused_surface) {
+			mode = osk_mode_for_purpose(ti->input->current.content_type.purpose);
+			break;
+		}
+	}
+	server->osk_field_mode = mode;
 }
 
 static void text_inputs_focus(struct zt_server *server, struct wlr_surface *surface) {
@@ -7595,6 +7741,7 @@ static void text_inputs_focus(struct zt_server *server, struct wlr_surface *surf
 			wlr_text_input_v3_send_enter(ti->input, surface);
 		}
 	}
+	osk_field_read(server);		/* osk_show, which follows, picks it up */
 }
 
 static const char *app_name(struct zt_toplevel *toplevel) {
@@ -7878,6 +8025,7 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 	}
 	/* A terminal never asks for a keyboard, and is useless without one. */
 	server->osk_terminal = is_terminal(toplevel);
+	server->osk_app_mode = OSK_MODE_FULL;	/* what the last app asked for */
 	osk_show(server, server->osk_terminal);
 }
 
@@ -8993,6 +9141,14 @@ static void osk_activate(struct zt_server *server, int index) {
 		osk_layout(server);
 		break;
 	case ACT_PAGE:
+		if (server->osk_wanted != OSK_MODE_FULL) {
+			/* a number pad and the letters, and back */
+			server->osk_letters = !server->osk_letters;
+			server->osk_emoji = server->osk_symbols = server->osk_shift = false;
+			server->key_prefix[0] = 0;
+			osk_relayout(server);
+			break;
+		}
 		server->osk_emoji = false;
 		server->osk_symbols = !server->osk_symbols;
 		server->osk_shift = false;
@@ -9355,6 +9511,8 @@ static void server_new_decoration(struct wl_listener *listener, void *data) {
 static void text_input_commit(struct wl_listener *listener, void *data) {
 	struct zt_text_input *ti = wl_container_of(listener, ti, commit);
 	struct zt_server *server = ti->server;
+	osk_field_read(server);		/* the purpose can change without a disable */
+	osk_mode_refresh(server);
 	if (!(ti->input->current.features & WLR_TEXT_INPUT_V3_FEATURE_CURSOR_RECTANGLE) || !server->shown) {
 		return;
 	}
@@ -9377,6 +9535,11 @@ static void text_input_commit(struct wl_listener *listener, void *data) {
 static void text_input_enable(struct wl_listener *listener, void *data) {
 	struct zt_text_input *ti = wl_container_of(listener, ti, enable);
 	struct zt_server *server = ti->server;
+	osk_field_read(server);
+	wlr_log(WLR_INFO, "text-input enable: purpose %u hint 0x%x features 0x%x",
+		ti->input->current.content_type.purpose, ti->input->current.content_type.hint,
+		ti->input->current.features);
+	osk_mode_refresh(server);	/* (the keyboard may already be up) */
 	if (now_ms() - server->client_tap_ms > OSK_TAP_MS) {
 		server->osk_pending = true;
 		return;
@@ -9396,6 +9559,8 @@ static void text_input_disable(struct wl_listener *listener, void *data) {
 	if (!ti->server->osk_terminal) {
 		osk_show(ti->server, false);
 	}
+	osk_field_read(ti->server);	/* after hiding it: no letters in the slide down */
+	osk_mode_refresh(ti->server);
 }
 
 static void text_input_destroy(struct wl_listener *listener, void *data) {
@@ -9405,7 +9570,10 @@ static void text_input_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&ti->destroy.link);
 	wl_list_remove(&ti->commit.link);
 	wl_list_remove(&ti->link);
+	struct zt_server *server = ti->server;
 	free(ti);
+	osk_field_read(server);
+	osk_mode_refresh(server);
 }
 
 static void server_new_text_input(struct wl_listener *listener, void *data) {
@@ -9573,7 +9741,8 @@ static int key_at(struct zt_server *server, double x, double y) {
         double dy = (y - key->y - key->h / 2) / (key->h / 2 + KEY_GAP / 2);
         if (fabs(dx) < .6 && fabs(dy) < .6) return i;
         double score = dx * dx + dy * dy;
-        if (!server->osk_symbols && !server->osk_emoji && !server->osk_ctrl && !server->osk_alt &&
+        if (server->osk_mode == OSK_MODE_FULL &&
+                !server->osk_symbols && !server->osk_emoji && !server->osk_ctrl && !server->osk_alt &&
                 key->action == ACT_CHAR && key->label && !key->label[1])
             score -= .5 * next_key_weight(server->key_prefix, key->label[0]);
         if (score < best) { best = score; nearest = i; }
@@ -10454,7 +10623,8 @@ static void draw_dialog(struct zt_server *server) {
 	double btn_h = 40.0;
 	double btn_y = text_y + th + 20.0;
     double auth_y = btn_y;
-    if (server->auth_active) btn_y += 90;
+    if (server->bt_pair.shown) btn_y += bt_pair_field_h(server);
+    else if (server->auth_active) btn_y += 90;
 
 	bool stack_buttons = false;
 	if (server->dialog_btn2[0]) {
@@ -10530,7 +10700,9 @@ static void draw_dialog(struct zt_server *server) {
 		draw_text(cr, server->dialog_btn1, FONT_REGULAR, 15.0, pad, btn_y, content_w, btn_h, true);
 	}
 
-    if (server->auth_active) {
+    if (server->bt_pair.shown) {
+        bt_pair_draw(server, cr, pad, auth_y, content_w);
+    } else if (server->auth_active) {
         cairo_set_source_rgb(cr, .3, .3, .3);
         cairo_rectangle(cr, pad, auth_y, content_w, 42); cairo_fill(cr);
         char masked[100]; int count = 0;
@@ -10556,6 +10728,7 @@ static void dialog_close(struct zt_server *server) {
 
 static void dialog_handle_action(struct zt_server *server, const char *act) {
 	if (!act || !act[0]) return;
+    if (bt_pair_action(server, act)) return;
     if (!strcmp(act, "auth_submit")) { auth_submit(server); return; }
     if (!strcmp(act, "auth_cancel")) {
         send(server->auth_fd, "CANCEL\n", 7, MSG_NOSIGNAL);
@@ -11255,6 +11428,7 @@ static void audio_modal_key(struct zt_server *server, int percent) {
 
 
 #include "auth/prompt.c"
+#include "auth/btpair.c"
 
 /* Remove user SDK/Android apps locally, or ask the authenticated package
  * manager to remove a Linux package that owns the app's desktop entry. */
@@ -11437,6 +11611,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		wlr_log(WLR_INFO, "nested: the screen stays on");
 		return;
 	}
+	if (!on) bt_pair_hide(server);	/* (it comes back: bt_pair_sync) */
 	if (!on && server->auth_active) auth_finish(server);
 	if (!on && server->audio_modal_open) audio_modal_close(server);
 	if (!on) level_modal_close(server);
@@ -11515,6 +11690,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		draw_status(server);	/* the clock moved on while it slept */
 		shade_set_open(server, false);
 		lock(server);
+		bt_pair_sync(server);
 		damage(server);
 	}
 }
@@ -11569,6 +11745,12 @@ static bool app_keeps_screen_on(struct zt_server *server) {
 static int idle_fired(void *data) {
 	struct zt_server *server = data;
 	if (server->screen_timeout > 0) {
+		/* the pairing sheet: someone is reading the other device. The agent
+		 * ends the request within a minute. */
+		if (server->screen_on && server->bt_pair.shown) {
+			wl_event_source_timer_update(server->idle_timer, 15000);
+			return 0;
+		}
 		bool app = server->screen_on && app_keeps_screen_on(server);
 		if (app != server->idle_inhibit_logged) {
 			server->idle_inhibit_logged = app;
@@ -12292,7 +12474,8 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
             return;
         }
         double dot_y = server->height - NAV_H - server->osk_h + osk_dot_y(server);
-        if (!server->auth_active && hypot(x - osk_dot_x(server), y - dot_y) <= 14) {
+        if (!server->auth_active && server->osk_mode == OSK_MODE_FULL &&
+                hypot(x - osk_dot_x(server), y - dot_y) <= 14) {
             /* Existing key contacts must not commit when trackpad mode starts. */
             for (int i = 0; i < MAX_TOUCH; i++)
                 if (server->touches[i].used && server->touches[i].role == ROLE_KEY)
@@ -12819,6 +13002,7 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		}
 		if (dm_swiped || (!retro_on(server) && !cancelled && p->y - p->y0 < -server->height / 5.0)) {
 			server->locked = false;
+			bt_pair_sync(server);
 			if (!server->boot_logo_done) {
 				char marker[256];
 				if (access(runtime_file(marker, sizeof(marker), "ztmetro-logo-unlocked"), F_OK) == 0) server->boot_logo_done = true;
@@ -13401,17 +13585,33 @@ static void ctl_command(struct zt_server *server, char *line) {
 			server->screen_timeout = server->demo_saved_timeout > 0 ? server->demo_saved_timeout : SCREEN_TIMEOUT_S;
 		activity(server);
 	} else if (strncmp(line, "osk ", 4) == 0) {
-		/* an app of ours has a box to type into, or is done with it */
+		/* an app of ours has a box to type into, or is done with it:
+		 *   osk show           the full keyboard
+		 *   osk show Y         the keyboard it has, the box ending at Y
+		 *   osk numeric M [Y]  a number pad: digits, number or phone
+		 *   osk hide */
 		if (server->shown) {
 			double y;
-			bool show = strncmp(line + 4, "show", 4) == 0;
-			if (show && sscanf(line + 8, "%lf", &y) == 1) {
+			char mode[16];
+			bool numeric = strncmp(line + 4, "numeric ", 8) == 0;
+			bool show = numeric || strncmp(line + 4, "show", 4) == 0;
+			int words = numeric ? sscanf(line + 12, "%15s %lf", mode, &y) : 0;
+			bool has_y = numeric ? words == 2 : show && sscanf(line + 8, "%lf", &y) == 1;
+			if (has_y) {
 				server->osk_box_bottom = y;	/* where the box ends, in the app */
+			}
+			if (numeric) {
+				server->osk_app_mode = osk_mode_from_name(words >= 1 ? mode : NULL);
+			} else if (show && !has_y) {
+				server->osk_app_mode = OSK_MODE_FULL;
 			}
 			if (show != server->osk_visible) {
 				osk_show(server, show);
-			} else {
+			} else if (show) {
+				osk_mode_refresh(server);
 				osk_lift(server);	/* the same keyboard, another box (or it moved) */
+			} else {
+				osk_lift(server);
 			}
 		}
 	} else if (strncmp(line, "ready ", 6) == 0) {
@@ -13611,6 +13811,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (strncmp(line, "screen on", 9) == 0) {
 		screen_set(server, true);
 		activity(server);
+	} else if (strncmp(line, "bt-pair", 7) == 0) {
+		bt_pair_ctl(server, line);
 	} else if (strncmp(line, "dialog_sensorhub", 16) == 0) {
 		dialog_show(server, "ztOSCoreSensorFramework",
 			"Sensor hub failed to initialize, please boot into twrp, go to reboot, and select system to hot-boot the sensor hub.",
@@ -13660,7 +13862,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 		wlr_log(WLR_INFO, "state: front=%s apps=%d keyboard=%d%s app_height=%.0f scroll=%.0f "
 			"page=%.2f list=%.0f/%d editing=%d(%d) menu=%d tiles=%d",
 			server->shown ? app_name(server->shown) : "start", mapped,
-			server->osk_visible, server->osk_symbols ? "(symbols)" : "",
+			server->osk_visible, server->osk_mode != OSK_MODE_FULL ? osk_mode_name(server->osk_mode) :
+				server->osk_symbols ? "(symbols)" : "",
 			app_height(server), server->scroll, server->page, server->list_scroll,
 			server->n_items, server->editing, server->edit, server->menu_open, server->n_tiles);
 		state_file_write(server);
@@ -15742,6 +15945,15 @@ static int render_to_files(struct zt_server *server, const char *dir) {
     server->osk_trackpad = true;
     draw_osk(server);
     server->osk_trackpad = false;
+    static const char *const pad_dumps[] = { "keyboard-digits", "keyboard-number", "keyboard-phone" };
+    static const enum osk_mode pad_modes[] = { OSK_MODE_DIGITS, OSK_MODE_NUMBER, OSK_MODE_PHONE };
+    for (int i = 0; i < 3; i++) {
+        g_dump_name = pad_dumps[i];
+        server->osk_shell_mode = pad_modes[i];
+        osk_layout(server);
+        draw_osk(server);
+    }
+    server->osk_shell_mode = OSK_MODE_FULL;
     g_dump_name = "keyboard-terminal";
     server->osk_terminal = true;
     osk_layout(server);

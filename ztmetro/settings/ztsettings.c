@@ -3534,7 +3534,7 @@ static void activate(int action, int arg) {
 			snprintf(bt.status, sizeof(bt.status), "connecting to %.60s…", d->name);
 		} else {
 			/* headsets pair with "just works": no code to compare */
-			snprintf(cmd, sizeof(cmd), "bluetoothctl --agent NoInputNoOutput pair %s >/dev/null 2>&1 && "
+			snprintf(cmd, sizeof(cmd), "timeout 120 bluetoothctl pair %s >/dev/null 2>&1 && "
 				"bluetoothctl trust %s >/dev/null 2>&1 && bluetoothctl connect %s >/dev/null 2>&1",
 				d->mac, d->mac, d->mac);
 			snprintf(bt.status, sizeof(bt.status), "pairing with %.60s…", d->name);
