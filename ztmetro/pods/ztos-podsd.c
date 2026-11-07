@@ -14,12 +14,13 @@
  *       set MAC KEY VALUE        a setting of PODS_SETTINGS
  *       rename MAC NAME
  *       forget MAC               its keys and readings
+ *       connect MAC              BlueZ connects it: only ever because a person tapped
  *       scan-hint on             an app is showing this: lasts PODS_HINT_S, send it again
  *   ~/.local/share/ztos/pods/keys       the pairs' keys, mode 0600, never logged
  *   ~/.local/state/ztos/pods/readings   last readings, and what was last set
  *
- * It never powers Bluetooth, connects, pairs or changes anything in BlueZ, and never
- * starts bluetoothd: every call carries NoAutoStart. An L2CAP connect pages the device,
+ * It never powers Bluetooth, pairs or changes anything in BlueZ, and connects only for the
+ * `connect` command, and never starts bluetoothd: every call carries NoAutoStart. An L2CAP connect pages the device,
  * so a channel is opened only to a pair BlueZ reports connected, asked again just before.
  *
  * ZTOS_PODSD_TRACE=FILE  appends every packet in hex, for making test data out of real
@@ -275,6 +276,7 @@ static void channel_close(struct pod_io *i, bool failed) {
 	}
 	i->fd = -1;
 	bool had_link = i->state == IO_UP;
+	if (d && had_link) d->link_seen = (long)time(NULL);
 	i->state = IO_IDLE;
 	if (d && had_link) pods_link_gone(d, i->connected);
 	else if (d) d->link = i->connected ? PODS_LINK_CONNECTED : PODS_LINK_NONE;
@@ -365,6 +367,36 @@ static void channel_connect(struct pod_io *i) {
 
 static void apply_connected(struct pod_io *i, struct pods_device *d, bool connected);
 
+static int on_connect_reply(sd_bus_message *m, void *data, sd_bus_error *ret) {
+	struct pod_io *i = data;
+	struct pods_device *d = i->used ? pods_find(&world, i->mac) : NULL;
+	if (d) {
+		const sd_bus_error *e = sd_bus_message_get_error(m);
+		if (e) say("%s: connect: %s", i->mac, e->name ? e->name : "failed");
+		d->connect = e ? PODS_CONNECT_FAILED : PODS_CONNECT_IDLE;
+		dirty = true;
+	}
+	kick();
+	return 0;
+}
+
+/* A person tapped "connect". BlueZ does the rest, and says Connected. */
+static const char *device_connect(struct pod_io *i, struct pods_device *d) {
+	if (!powered) return "bluetooth-off";
+	if (!i || !i->path[0]) return "not-in-bluez";
+	if (i->connected) return NULL;
+	if (d->connect == PODS_CONNECT_BUSY) return NULL;
+	sd_bus_message *m = NULL;
+	if (sd_bus_message_new_method_call(bus, &m, BLUEZ, i->path, DEVICE1, "Connect") < 0) return "failed";
+	sd_bus_message_set_auto_start(m, 0);
+	int r = sd_bus_call_async(bus, NULL, m, on_connect_reply, i, 40000000);
+	sd_bus_message_unref(m);
+	if (r < 0) return "failed";
+	d->connect = PODS_CONNECT_BUSY;
+	dirty = true;
+	return NULL;
+}
+
 /* A last word from BlueZ before anything pages the pair. */
 static int on_connected_answer(sd_bus_message *m, void *data, sd_bus_error *ret) {
 	struct pod_io *i = data;
@@ -400,7 +432,8 @@ static int on_channel(sd_event_source *s, int fd, uint32_t revents, void *data) 
 		ssize_t n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
 		if (n < 0 && (errno == EAGAIN || errno == EINTR)) break;
 		if (n <= 0) {
-			say("%s: AAP channel closed%s%s", i->mac, n < 0 ? ": " : "", n < 0 ? strerror(errno) : "");
+			say("%s: AAP channel closed%s%s (%s)", i->mac, n < 0 ? ": " : "", n < 0 ? strerror(errno) : "",
+				scan_started ? "during a burst" : discovering ? "while someone discovers" : "no discovery");
 			channel_close(i, i->connected);
 			kick();
 			return 0;
@@ -636,6 +669,8 @@ static int read_props(const char *path, const char *iface, sd_bus_message *m, bo
 			if (sd_bus_message_read(m, "v", "b", &b) >= 0) adapter_powered = b;
 		} else if (!strcmp(iface, ADAPTER1) && !strcmp(key, "Discovering")) {
 			if (sd_bus_message_read(m, "v", "b", &b) >= 0) adapter_discovering = b;
+		} else if (!strcmp(iface, ADAPTER1) && !strcmp(key, "Address")) {
+			if (sd_bus_message_read(m, "v", "s", &s) >= 0 && pods_mac_parse(s, world.own_mac)) world.has_own = true;
 		} else if (!strcmp(iface, TRANSPORT1) && !strcmp(key, "State")) {
 			if (sd_bus_message_read(m, "v", "s", &s) >= 0) transport = s;
 		} else if (strcmp(iface, DEVICE1)) {
@@ -787,6 +822,17 @@ static void bluez_gone(void) {
 	dirty = true;
 }
 
+/* BlueZ's own word on why a link went, in the log: it says more than a socket's errno. */
+static int on_disconnected(sd_bus_message *m, void *data, sd_bus_error *ret) {
+	char mac[18];
+	const char *reason = NULL, *message = NULL;
+	if (pods_path_mac(sd_bus_message_get_path(m), mac) && pods_find(&world, mac) &&
+			sd_bus_message_read(m, "ss", &reason, &message) >= 0) {
+		say("%s: disconnected: %s (%s, %s)", mac, reason, message, scan_started ? "during a burst" : discovering ? "while someone discovers" : "no discovery");
+	}
+	return 0;
+}
+
 static int on_owner(sd_bus_message *m, void *data, sd_bus_error *ret) {
 	const char *name, *from, *to;
 	if (sd_bus_message_read(m, "sss", &name, &from, &to) < 0 || strcmp(name, BLUEZ)) return 0;
@@ -842,6 +888,8 @@ static const char *command(char *line) {
 		name[strcspn(name, "\n")] = 0;
 		why = pods_cmd_rename(d, name, &o);
 		readings_dirty = readings_dirty || !why;
+	} else if (!strcmp(verb, "connect")) {
+		return device_connect(i, d);
 	} else if (!strcmp(verb, "forget")) {
 		if (i && i->connected) return "connected";
 		if (i && i->state != IO_IDLE) return "busy";
@@ -1004,6 +1052,7 @@ int main(void) {
 	sd_bus_match_signal_async(bus, NULL, BLUEZ, NULL, om, "InterfacesRemoved", on_removed, NULL, NULL);
 	sd_bus_match_signal_async(bus, NULL, BLUEZ, NULL, "org.freedesktop.DBus.Properties", "PropertiesChanged", on_changed, NULL, NULL);
 	sd_bus_match_signal_async(bus, NULL, dbus_name, "/org/freedesktop/DBus", dbus_name, "NameOwnerChanged", on_owner, NULL, NULL);
+	sd_bus_match_signal_async(bus, NULL, BLUEZ, NULL, DEVICE1, "Disconnected", on_disconnected, NULL, NULL);
 	/* whether it is there at all: asking the bus starts nothing */
 	sd_bus_call_method_async(bus, NULL, dbus_name, "/org/freedesktop/DBus", dbus_name, "NameHasOwner", on_has_owner, NULL, "s", BLUEZ);
 

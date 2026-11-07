@@ -344,6 +344,112 @@ static void test_captured(void) {
 	assert(c.connection == 4);
 }
 
+/* The case's advert as heard (desk-handled.txt, 2026-11-07): a Find My field, then ours, from
+ * D7:97:.., lid closed, right pod charging in it. The key stays on the phone, where this
+ * ciphertext opened to the plaintext below; here that plaintext goes under a test key, behind
+ * the real Find My field. */
+static void test_captured_case(void) {
+	static const uint8_t real[] = { 0x12, 0x02, 0xac, 0x00, 0x07, 0x11, 0x06, 0x7d, 0xff, 0xfa, 0x5b, 0x6d, 0x16, 0x0e, 0x89, 0x14,
+		0xcc, 0x26, 0x53, 0xed, 0x3c, 0x9b, 0x2f };
+	assert(ble_find_case(real, sizeof(real)) == real + 6 && !ble_find_proximity(real, sizeof(real)));
+	static const uint8_t PLAIN_CLOSED[16] = { 0x18, 0x20, 0x0d, 0x15, 0xff, 0xe1, 0x5a, 0x86, 0, 0, 0, 0, 0x70, 0x05, 0, 0 };	/* 97, charging */
+	static const uint8_t PLAIN_OPEN[16] = { 0x18, 0x20, 0x05, 0x15, 0xff, 0xe0, 0x5a, 0x86, 0, 0, 0, 0, 0x6d, 0x05, 0, 0 };
+	uint8_t m[23];
+	memcpy(m, real, 7);
+	pods_aes_encrypt(ENC, PLAIN_CLOSED, m + 7);
+	static struct pods_world w;
+	struct pods_device *d = keyed(&w);
+	const uint8_t static_addr[6] = { 0xd7, 0x97, 0x43, 0x5f, 0x39, 0xb4 };	/* the IRK doesn't resolve it */
+	int which;
+	assert(!ble_rpa_resolves(IRK, static_addr));
+
+	/* the coordinator's question: left linked and reporting; case and right Disconnected */
+	d->link = PODS_LINK_READY;
+	d->aap_live[POD_LEFT] = true;
+	d->part[POD_LEFT] = (struct pods_battery){ 93, false, 10, 'a' };
+	d->part[POD_RIGHT] = (struct pods_battery){ 90, true, 10, 'a' };
+	assert(pods_advert(&w, static_addr, m, sizeof(m), 1000, &which) == PODS_ADV_READING);
+	assert(d->part[POD_CASE].level == 21 && !d->part[POD_CASE].charging && d->part[POD_CASE].source == 'k');
+	assert(d->part[POD_RIGHT].level == 97 && d->part[POD_RIGHT].charging && d->part[POD_RIGHT].source == 'k');
+	assert(d->part[POD_LEFT].level == 93 && d->part[POD_LEFT].source == 'a');
+	assert(d->lid == 1 && d->ble_place[POD_RIGHT] == EAR_CASE_CLOSED);
+	/* the lid opens */
+	pods_aes_encrypt(ENC, PLAIN_OPEN, m + 7);
+	assert(pods_advert(&w, static_addr, m, sizeof(m), 1001, &which) == PODS_ADV_READING);
+	assert(d->lid == 0 && d->ble_place[POD_RIGHT] == EAR_CASE_OPEN && d->part[POD_RIGHT].level == 96);
+
+	/* a 1% reading from the case isn't called coarse in the file readers see */
+	char *j = NULL;
+	size_t jn = 0;
+	FILE *f = open_memstream(&j, &jn);
+	pods_json(f, &w, true, false, 1001, NULL);
+	fclose(f);
+	assert(strstr(j, "\"right\":{\"level\":96,\"charging\":true,\"seen\":1001,\"source\":\"case\"}"));
+	assert(strstr(j, "\"lid\":\"open\""));
+	free(j);
+}
+
+/* In use where, and where each pod is, from the pods' own adverts. */
+static void test_offline_status(void) {
+	static struct pods_world w;
+	struct pods_device *d = keyed(&w);
+	uint8_t m[40];
+	int which;
+	memcpy(w.own_mac, "\x01\x02\x03\xa1\xa2\xa3", 6);	/* advert()'s host is a1 a2 a3 */
+	w.has_own = true;
+	/* conn 04, our address: it was this phone */
+	advert(m, 0x20, 0xf9, 0x8f, 0x11, 93, 0xff, 0xff, NO_SUFFIX);
+	assert(pods_advert(&w, RPA, m, 27, 100, &which) == PODS_ADV_READING);
+	assert(d->host == PODS_HOST_THIS && d->connection == 4);
+	assert(d->ble_place[POD_LEFT] == EAR_OUT && d->ble_place[POD_RIGHT] == -1);	/* nothing said of the right */
+	/* another's */
+	w.own_mac[5] = 0;
+	assert(pods_advert(&w, RPA, m, 27, 101, &which) == PODS_ADV_READING && d->host == PODS_HOST_OTHER);
+	/* in ear */
+	advert(m, 0x22, 0xf9, 0x8f, 0x11, 93, 0xff, 0xff, NO_SUFFIX);
+	assert(pods_advert(&w, RPA, m, 27, 102, &which) == PODS_ADV_READING && d->ble_place[POD_LEFT] == EAR_IN);
+	/* one pod in the open case, from the worn one (0x31) and from itself (0x51) */
+	advert(m, 0x31, 0xa2, 0x4f, 0x11, 93, 96, 21, NO_SUFFIX);
+	assert(pods_advert(&w, RPA, m, 27, 103, &which) == PODS_ADV_READING);
+	assert(d->ble_place[POD_RIGHT] == EAR_CASE_OPEN && d->ble_place[POD_LEFT] == EAR_OUT);
+	advert(m, 0x51, 0x99, 0x2f, 0x31, 96, 93, 21, NO_SUFFIX);
+	assert(pods_advert(&w, RPA, m, 27, 104, &which) == PODS_ADV_READING);
+	assert(d->ble_place[POD_RIGHT] == EAR_CASE_OPEN && d->ble_place[POD_LEFT] == EAR_OUT && d->lid == 0);
+	/* a pod in a closed case says 00 while its partner is in use: not "nothing" until it lasts */
+	uint8_t *conn = m + 2 + 8;
+	advert(m, 0x04, 0xf9, 0x2f, 0x39, 96, 0xff, 21, SUFFIX);
+	*conn = 0;
+	assert(pods_advert(&w, RPA, m, 27, 105, &which) == PODS_ADV_READING && d->host == PODS_HOST_OTHER);
+	assert(pods_advert(&w, RPA, m, 27, 120, &which) == PODS_ADV_READING && d->host == PODS_HOST_NONE);
+
+	/* what shows after the link has gone: the mode, kept; a restart keeps it */
+	static struct pods_world back;
+	struct pods_out o = { 0 };
+	d->link = PODS_LINK_READY;
+	d->mode = AAP_MODE_ANC;
+	d->known[0x28] = true;
+	d->raw[0x28][0] = AAP_ON;
+	pods_link_packet(d, 1, 500, PKT(0x09, 0x00, 0x25, 0x01, 0, 0, 0), &o);
+	assert(d->link_seen == 500);
+	pods_link_gone(d, false);
+	assert(d->mode == 0 && d->last_mode == AAP_MODE_ANC);
+	assert(pods_cmd_mode(d, 1, "off", &o) != NULL);		/* and it can't be changed */
+	char *j = NULL;
+	size_t jn = 0;
+	FILE *f = open_memstream(&j, &jn);
+	pods_json(f, &w, true, false, 600, NULL);
+	fclose(f);
+	assert(strstr(j, "\"last_mode\":\"anc\"") && strstr(j, "\"mode\":null") && strstr(j, "\"conversation\":1"));
+	assert(strstr(j, "\"link_seen\":500") && strstr(j, "\"host\":\"none\"") && strstr(j, "\"connect\":\"idle\""));
+	free(j);
+	f = open_memstream(&j, &jn);
+	pods_readings_write(f, &w);
+	fclose(f);
+	for (char *line = strtok(j, "\n"); line; line = strtok(NULL, "\n")) pods_readings_line(&back, line);
+	free(j);
+	assert(back.dev[0].last_mode == AAP_MODE_ANC && back.dev[0].link_seen == 500);
+}
+
 static void test_coarse(void) {
 	static struct pods_world w;
 	struct pods_device *d = keyed(&w);
@@ -734,6 +840,8 @@ int main(void) {
 	test_case_advert();
 	test_coarse();
 	test_captured();
+	test_captured_case();
+	test_offline_status();
 	test_session();
 	test_gating();
 	test_scan();

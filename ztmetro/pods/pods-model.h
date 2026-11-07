@@ -104,6 +104,8 @@ static const struct pods_setting __attribute__((unused)) PODS_SETTINGS[] = {
 
 /* ---- a pair ---- */
 
+enum { PODS_HOST_UNKNOWN, PODS_HOST_NONE, PODS_HOST_THIS, PODS_HOST_OTHER };
+enum { PODS_CONNECT_IDLE, PODS_CONNECT_BUSY, PODS_CONNECT_FAILED };
 enum pods_link { PODS_LINK_NONE, PODS_LINK_CONNECTED, PODS_LINK_WAIT_ANSWER, PODS_LINK_READY };
 
 struct pods_battery { int level; bool charging; long seen; char source; };	/* level -1: never read */
@@ -127,6 +129,13 @@ struct pods_device {
 	int connection;			/* the advert's: -1 unknown */
 	int primary;			/* POD_LEFT, POD_RIGHT, -1 */
 	int place[2];			/* primary pod's, secondary's: EAR_*, -1 */
+	int ble_place[2];		/* POD_LEFT's, POD_RIGHT's, from broadcasts: EAR_*, -1 */
+	long ble_place_seen;
+	int host;			/* PODS_HOST_*: where a broadcast says the pods are in use */
+	long host_seen;
+	int connect;			/* PODS_CONNECT_*: the person's tap, through BlueZ */
+	int last_mode;			/* the mode when the link last went, kept */
+	long link_seen;			/* the last word over a link: how old the kept values are */
 
 	int mode;			/* AAP_MODE_*, 0 unknown */
 	uint32_t mode_sent_ms;
@@ -145,6 +154,8 @@ struct pods_world {
 	int n;
 	struct pods_nearby nearby[PODS_NEARBY];
 	int n_nearby;
+	bool has_own;
+	uint8_t own_mac[6];		/* this phone's adapter, to tell "in use here" from "elsewhere" */
 };
 
 #define PODS_OUT_MAX 4
@@ -178,6 +189,7 @@ static inline struct pods_device *pods_add(struct pods_world *w, const char *mac
 	memcpy(d->mac_b, bytes, 6);
 	for (int i = 0; i < POD_PARTS; i++) d->part[i].level = -1;
 	d->color = d->lid = d->connection = d->primary = d->place[0] = d->place[1] = -1;
+	d->ble_place[0] = d->ble_place[1] = -1;
 	return d;
 }
 
@@ -220,6 +232,7 @@ static inline int pods_setting_value(const struct pods_device *d, const struct p
 
 /* The channel is up. Nothing else may go out until the handshake is answered. */
 static inline void pods_link_open(struct pods_device *d, uint32_t now, struct pods_out *o) {
+	if (d->mode) d->last_mode = d->mode;
 	d->link = PODS_LINK_WAIT_ANSWER;
 	d->link_up_ms = now;
 	d->settings_known = false;
@@ -231,6 +244,7 @@ static inline void pods_link_open(struct pods_device *d, uint32_t now, struct po
 /* The channel has gone. What was read stays, with when it was read; `connected`: BlueZ
  * still has the pair. */
 static inline void pods_link_gone(struct pods_device *d, bool connected) {
+	if (d->mode) d->last_mode = d->mode;
 	d->link = connected ? PODS_LINK_CONNECTED : PODS_LINK_NONE;
 	memset(d->aap_live, 0, sizeof(d->aap_live));
 	d->settings_known = false;
@@ -290,6 +304,7 @@ static inline int pods_link_packet(struct pods_device *d, uint32_t now, long wal
 		return PODS_EV_CHANGED;
 	}
 	if (d->link != PODS_LINK_READY) return 0;
+	d->link_seen = wall;
 	unsigned op;
 	const uint8_t *p;
 	size_t len;
@@ -514,6 +529,41 @@ static inline void pods_ble_coarse(struct pods_device *d, const struct ble_clear
 	}
 }
 
+/* Where a pod is, from a broadcast. A worn pod and one on a desk look alike to the other pod,
+ * and in a closed case it says nothing, so a pod a message doesn't speak for stays as it was. */
+static inline void pods_ble_places(struct pods_device *d, const struct ble_clear *c, long wall) {
+	int self = c->sender_left ? POD_LEFT : POD_RIGHT, other = c->sender_left ? POD_RIGHT : POD_LEFT;
+	int in_case = c->lid == 1 ? EAR_CASE_CLOSED : EAR_CASE_OPEN;
+	if (c->sender_in_case || c->both_in_case) d->ble_place[self] = in_case;
+	else d->ble_place[self] = c->in_ear[self] ? EAR_IN : EAR_OUT;
+	if (c->both_in_case || (c->one_in_case && !c->sender_in_case)) d->ble_place[other] = in_case;
+	else if (c->in_ear[other]) d->ble_place[other] = EAR_IN;
+	else if (c->one_in_case) d->ble_place[other] = EAR_OUT;
+	d->ble_place_seen = wall;
+}
+
+/* A pod the case gives a level for is in it; one it has none for isn't. */
+static inline void pods_case_places(struct pods_device *d, const struct ble_exact *e, long wall) {
+	for (int pod = POD_LEFT; pod <= POD_RIGHT; pod++) {
+		if (e->level[pod] >= 0) d->ble_place[pod] = e->lid == 1 ? EAR_CASE_CLOSED : EAR_CASE_OPEN;
+		else if (d->ble_place[pod] == EAR_CASE_OPEN || d->ble_place[pod] == EAR_CASE_CLOSED) d->ble_place[pod] = EAR_OUT;
+	}
+	d->ble_place_seen = wall;
+}
+
+/* In use, and by whom. A pod in a closed case says 00 whatever its partner is doing, so 00
+ * counts only once no pod has said otherwise for a little while. */
+static inline void pods_ble_host(struct pods_world *w, struct pods_device *d, const struct ble_clear *c, const struct ble_exact *e, long wall) {
+	if (!c->connection) {
+		if (wall - d->host_seen >= 10) d->host = PODS_HOST_NONE;
+		return;
+	}
+	d->connection = c->connection;
+	d->host_seen = wall;
+	if (!w->has_own) d->host = PODS_HOST_UNKNOWN;
+	else d->host = memcmp(e->host, w->own_mac + 3, 3) ? PODS_HOST_OTHER : PODS_HOST_THIS;
+}
+
 /* An advert: `addr` it came from, `mfr` Apple's manufacturer data. Only a pair whose IRK
  * resolves the address and whose ENC_KEY opens it counts as that pair: cleartext can be
  * forged, and says nothing of which pair it is. A case's own advert has an address of its
@@ -529,6 +579,9 @@ static inline int pods_advert(struct pods_world *w, const uint8_t addr[6], const
 			if (!d->has_keys || !ble_decrypt_case(d->enc, kase, &e)) continue;
 			if (which) *which = i;
 			pods_ble_exact(d, &e, wall, 'k');
+			pods_case_places(d, &e, wall);
+			d->lid = e.lid;
+			d->lid_seen = wall;
 			return PODS_ADV_READING;
 		}
 		return PODS_ADV_IGNORED;
@@ -544,7 +597,8 @@ static inline int pods_advert(struct pods_world *w, const uint8_t addr[6], const
 		if (which) *which = i;
 		d->product = c.product;
 		d->color = c.color;
-		d->connection = c.connection;
+		pods_ble_host(w, d, &c, &e, wall);
+		pods_ble_places(d, &c, wall);
 		if (c.lid >= 0) {
 			d->lid = c.lid;
 			d->lid_seen = wall;
@@ -637,10 +691,22 @@ static inline void pods_json_device(FILE *f, const struct pods_device *d, const 
 		d->lid_seen, d->connection);
 	/* the ear report gives the primary pod first: without the primary it names nobody */
 	const char *left = "unknown", *right = "unknown";
-	if (d->primary >= 0) {
+	bool ear_aap = d->link == PODS_LINK_READY && d->primary >= 0;
+	if (ear_aap) {
 		left = pods_place_name(d->place[d->primary == POD_LEFT ? 0 : 1]);
 		right = pods_place_name(d->place[d->primary == POD_LEFT ? 1 : 0]);
+	} else if (d->ble_place_seen) {
+		left = pods_place_name(d->ble_place[POD_LEFT]);
+		right = pods_place_name(d->ble_place[POD_RIGHT]);
 	}
+	static const char *const HOSTS[] = { "unknown", "none", "this", "other" };
+	static const char *const CONNECTS[] = { "idle", "busy", "failed" };
+	fprintf(f, "\"ear_source\":\"%s\",\"ear_seen\":%ld,\"host\":\"%s\",\"host_seen\":%ld,\"connect\":\"%s\",\"last_mode\":", ear_aap ? "aap" : "ble",
+		d->ble_place_seen, HOSTS[d->host], d->host_seen, CONNECTS[d->connect]);
+	int kept = d->mode ? d->mode : d->last_mode;
+	if (kept) fprintf(f, "\"%s\"", pods_mode_name(kept));
+	else fputs("null", f);
+	fprintf(f, ",\"link_seen\":%ld,", d->link_seen);
 	fprintf(f, "\"primary\":\"%s\",\"ear\":{\"left\":\"%s\",\"right\":\"%s\"},\"caps\":[",
 		d->primary == POD_LEFT ? "left" : d->primary == POD_RIGHT ? "right" : "unknown", left, right);
 	static const struct { unsigned cap; const char *name; } CAPS[] = {
@@ -787,6 +853,8 @@ static inline void pods_readings_write(FILE *f, const struct pods_world *w) {
 		if (d->product) fprintf(f, "%s product %u\n", d->mac, d->product);
 		if (d->color >= 0) fprintf(f, "%s color %d\n", d->mac, d->color);
 		if (d->lid >= 0) fprintf(f, "%s lid %d %ld\n", d->mac, d->lid, d->lid_seen);
+		if (d->mode || d->last_mode) fprintf(f, "%s last_mode %d\n", d->mac, d->mode ? d->mode : d->last_mode);
+		if (d->link_seen) fprintf(f, "%s link_seen %ld\n", d->mac, d->link_seen);
 		for (int p = 0; p < POD_PARTS; p++) {
 			const struct pods_battery *b = &d->part[p];
 			if (b->level >= 0) fprintf(f, "%s part %s %d %d %ld %c\n", d->mac, PARTS[p], b->level, b->charging, b->seen, b->source);
@@ -814,6 +882,8 @@ static inline void pods_readings_line(struct pods_world *w, const char *line) {
 	else if (!strcmp(key, "firmware")) snprintf(d->firmware, sizeof(d->firmware), "%s", rest);
 	else if (!strcmp(key, "product")) d->product = (unsigned)strtoul(rest, NULL, 10);
 	else if (!strcmp(key, "color")) d->color = atoi(rest);
+	else if (!strcmp(key, "last_mode")) d->last_mode = atoi(rest) >= AAP_MODE_OFF && atoi(rest) <= AAP_MODE_ADAPTIVE ? atoi(rest) : 0;
+	else if (!strcmp(key, "link_seen")) d->link_seen = atol(rest);
 	else if (!strcmp(key, "lid") && sscanf(rest, "%d %ld", &a, &seen) == 2) { d->lid = a; d->lid_seen = seen; }
 	else if (!strcmp(key, "part") && sscanf(rest, "%11s %d %d %ld %c", part, &a, &b, &seen, &source) == 5) {
 		for (int p = 0; p < POD_PARTS; p++) {

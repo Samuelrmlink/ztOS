@@ -41,7 +41,7 @@ ENC = bytes.fromhex("102132435465768798a9bacbdcedfe0f")
 ADVERT = bytes.fromhex("071901242021784f110000e6d281bd9ac710bf53fc1bfc3e18f136")
 ADAPTER1, DEVICE1 = "org.bluez.Adapter1", "org.bluez.Device1"
 PROPS, OM = "org.freedesktop.DBus.Properties", "org.freedesktop.DBus.ObjectManager"
-ALLOWED = {"GetManagedObjects", "SetDiscoveryFilter", "StartDiscovery", "StopDiscovery", "Get"}
+ALLOWED = {"GetManagedObjects", "SetDiscoveryFilter", "StartDiscovery", "StopDiscovery", "Get", "Connect"}
 
 
 def hdr(op, *payload):
@@ -57,6 +57,7 @@ class Bluez(dbus.service.Object):
         self.name = name
         self.bus = bus
         self.calls = []
+        self.connect_fails = False
         self.adapter = {"Powered": dbus.Boolean(True), "Discovering": dbus.Boolean(False)}
         self.device = {"Address": MAC, "Alias": "Sam's AirPods", "Paired": dbus.Boolean(True),
                        "Connected": dbus.Boolean(False), "Modalias": "bluetooth:v004Cp2024d0100",
@@ -129,6 +130,10 @@ class Device(dbus.service.Object):
     @dbus.service.method(DEVICE1)
     def Connect(self):
         self.world.calls.append(("Connect",))
+        if self.world.connect_fails:
+            raise dbus.DBusException("no", name="org.bluez.Error.Failed")
+        self.world.device["Connected"] = dbus.Boolean(True)
+        self.PropertiesChanged(DEVICE1, {"Connected": dbus.Boolean(True)}, [])
 
     @dbus.service.method(DEVICE1)
     def Pair(self):
@@ -481,6 +486,26 @@ def run(t):
     assert not t.state()["bluetooth"]
     on_loop(lambda: t.bus.request_name("org.bluez"))
     wait("the pair back", lambda: t.device()["in_bluez"])
+
+    # a person taps "connect": BlueZ is asked, once; a failure says so; nothing is asked otherwise
+    assert not t.calls("Connect")
+    t.bz.connect_fails = True
+    assert t.tell("connect %s" % MAC) == "ok"
+    wait("the failure", lambda: t.device()["connect"] == "failed")
+    assert len(t.calls("Connect")) == 1 and t.device()["link"] == "none"
+    t.bz.connect_fails = False
+    assert t.tell("connect %s" % MAC) == "ok"
+    ch, _ = pods.accept()
+    ch.settimeout(5)
+    ch.recv(100)
+    ch.send(bytes.fromhex("01000400"))
+    wait("the link, from the tap", lambda: t.device()["link"] == "aap")
+    assert t.device()["connect"] == "idle" and len(t.calls("Connect")) == 2
+    ch.recv(100), ch.recv(100), ch.recv(100)
+    t.set_device(Connected=dbus.Boolean(False))
+    wait("the link gone", lambda: t.device()["link"] == "none")
+    d = t.device()
+    assert d["last_mode"] and d["mode"] is None and d["link_seen"] and d["settings"]["conversation"] == 1
 
     # keys and readings across a restart; a second one will not run beside it
     second = subprocess.run([DAEMON], env=dict(os.environ, XDG_RUNTIME_DIR=t.run, HOME=t.home, DBUS_SYSTEM_BUS_ADDRESS=t.address),
