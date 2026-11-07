@@ -6002,6 +6002,9 @@ static void plug_over(struct zt_server *server, float oy) {
 static int note_apps(struct zt_server *server, const char **names, int *counts, int cap) {
 	int n = 0;
 	for (int i = 0; i < server->n_notes; i++) {
+		if (server->notes[i].ongoing) {
+			continue;	/* under way, not waiting for anyone */
+		}
 		const char *app = server->notes[i].app[0] ? server->notes[i].app : "System";
 		int k = 0;
 		while (k < n && strcmp(names[k], app) != 0) k++;
@@ -6224,7 +6227,8 @@ static void lock_lift_sync(struct zt_server *server, bool animated) {
 }
 
 /* The notifications changed (one arrived, or they were cleared). */
-/* The front LED (zrn-ledd): lit while a notification that alerted is pending.
+/* The front LED (zrn-ledd): lit while a notification that alerted is pending and
+ * the screen is off, as on Android: with it on, the notification can be seen.
  * Only told when that changes, and only by the running session (see ctl_init):
  * not by --render, whose notifications are pretend. */
 static bool led_notes_live;
@@ -6235,7 +6239,10 @@ static void led_notes_sync(struct zt_server *server) {
 	}
 	int pending = 0;
 	for (int k = 0; k < server->n_notes; k++) {
-		pending |= !server->notes[k].quiet;
+		pending |= !server->notes[k].quiet && !server->notes[k].ongoing;
+	}
+	if (server->screen_on) {
+		pending = 0;
 	}
 	if (pending == told) {
 		return;
@@ -7068,8 +7075,7 @@ static void draw_sensorhub_fail(struct zt_server *server) {
 
 	cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
 	wrap_text(cr, "ztOSCoreSensorFramework failed to initialize Samsung SensorHub. "
-		"Please do a hot reboot (Go to twrp -> Reboot -> System). "
-		"This will initialize the SensorHub.", FONT_REGULAR, 17.0, pad, text_y, content_w, true);
+		"Reboot to try again. Sensors stay off until it starts.", FONT_REGULAR, 17.0, pad, text_y, content_w, true);
 
 	/* Buttons: Reboot & Continue Anyway, positioned comfortably above nav bar */
 	double btn_h = 48.0;
@@ -10802,12 +10808,14 @@ static void note_keyed(struct zt_server *server, const struct note_line *note) {
 		memcpy(server->notes[0].text, text, sizeof(text));
 		snprintf(server->notes[0].who, sizeof(server->notes[0].who), "%s", note->who);
 		server->notes[0].at = time(NULL);
+		server->notes[0].quiet = true;
 		server->notes[0].uid = ++server->note_next_uid;
 		note_store_key(server, 0, note);
 		if (server->n_notes < MAX_NOTES) {
 			server->n_notes++;
 		}
 		server->notes_dirty = true;
+		led_notes_sync(server);
 		if (server->width == 0) {
 			return;
 		}
@@ -10859,6 +10867,7 @@ static void note_closed(struct zt_server *server, const char *key) {
 		return;
 	}
 	note_remove_at(server, i);
+	led_notes_sync(server);
 	if (server->width == 0) {
 		return;
 	}
@@ -12044,6 +12053,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		}
 	}
 	wlr_log(WLR_INFO, "screen %s", on ? "on" : "off");
+	led_notes_sync(server);
 	if (!on) {
 		/* locked as it goes dark (lock() itself runs as it comes back on,
 		 * and waking is silent) */
@@ -12627,7 +12637,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		if (x >= pad && x <= pad + content_w) {
 			if (y >= btn_y1 && y <= btn_y1 + btn_h) {
 				hap(server, HAP_TAP, HG_SYSTEM);
-				reboot_to_recovery();
+				run_detached("/bin/sh", "-c", "sudo -n /usr/bin/systemctl reboot 2>/dev/null || systemctl reboot", NULL);
 				p->role = ROLE_NONE;
 				return;
 			} else if (y >= btn_y2 && y <= btn_y2 + btn_h) {
@@ -14225,8 +14235,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 		bt_pair_ctl(server, line);
 	} else if (strncmp(line, "dialog_sensorhub", 16) == 0) {
 		dialog_show(server, "ztOSCoreSensorFramework",
-			"Sensor hub failed to initialize, please boot into twrp, go to reboot, and select system to hot-boot the sensor hub.",
-			"reboot to recovery", "reboot_recovery",
+			"Sensor hub failed to initialize. Reboot to try again; sensors stay off until it starts.",
+			"reboot", "reboot",
 			"stop sensor hub in this boot", "stop_sensorhub");
 	} else if (strncmp(line, "dialog_close", 12) == 0) {
 		dialog_close(server);

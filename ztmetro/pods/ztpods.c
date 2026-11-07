@@ -67,7 +67,8 @@ static const struct row ROWS[] = {
 	{ "chime_volume", "Chime volume", R_SLIDER, P_CONTROLS },
 	{ "case_tone", "Case sounds", R_SWITCH, P_CONTROLS },
 	{ "case_tone_volume", "Case sounds volume", R_SLIDER, P_CONTROLS },
-	{ "connect_auto", "Connect automatically", R_SWITCH, P_CONTROLS },
+	/* not shown: "connect_auto" (0x20). Only named in LibrePods' table, and it may
+	 * change how the pods reconnect. pods-model.h keeps it for when it's been tried. */
 };
 #define N_ROWS ((int)(sizeof(ROWS) / sizeof(ROWS[0])))
 
