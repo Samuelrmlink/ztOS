@@ -15732,17 +15732,24 @@ static void server_new_surface(struct wl_listener *listener, void *data) {
 	wlr_fractional_scale_v1_notify_scale(surface, server->scale);
 }
 
-/* SIGHUP: the configuration changed (the settings app sends it). Scale stays
- * as it is: apps are already drawing at it. */
+/* Read the files again. Scale stays as it is: apps are already drawing at it.
+ * load_config starts from "automatic" (0), and telling a surface that aborts
+ * wlroots, so it goes back before anything can use it. */
+static void reload_config(struct zt_server *server) {
+	float scale = server->scale;
+	load_config(server);
+	server->scale = scale;
+	app_scales_load(server);
+}
+
+/* SIGHUP: the configuration changed (the settings app sends it). */
 static int reload(int signal_number, void *data) {
 	struct zt_server *server = data;
-	float scale = server->scale;
 	int n = server->n_tiles;
 	uint32_t accent = server->accent;
 	int strength = server->haptic_strength;
 	int ring_before = server->ring_volume;
-	load_config(server);
-	app_scales_load(server);
+	reload_config(server);
 	{
 		struct zt_toplevel *t;
 		wl_list_for_each(t, &server->toplevels, link) {
@@ -15762,7 +15769,6 @@ static int reload(int signal_number, void *data) {
 	}
 	if (ring_before > 0 && server->ring_volume == 0) hap(server, HAP_TAP, HG_SYSTEM);
 	if (ring_before != server->ring_volume) waydroid_ringer();
-	server->scale = scale;
 	retro_setup(server);
 	retro_apps(server);
 	if (server->dm) {
