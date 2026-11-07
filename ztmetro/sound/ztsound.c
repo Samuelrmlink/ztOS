@@ -2,12 +2,14 @@
 /*
  * ztSound: the equalizer and the effects of ztOS, in the Windows Phone 8.1 look.
  *
- * Three pivot pages: "equalizer" (a real graphic EQ: the frequency response is
- * drawn across the screen, ten handles are dragged), "effects" (toggles) and
- * "output" (which device, which profile). The sound itself is made by
- * ztos-soundd (a PipeWire filter chain); this app only edits its settings:
- * one line per change goes to $XDG_RUNTIME_DIR/ztos-sound.sock, and the state
- * comes back in $XDG_RUNTIME_DIR/ztos-sound-state.json.
+ * Four pivot pages: "equalizer" (a real graphic EQ: the frequency response is
+ * drawn across the screen, ten handles are dragged), "effects" (toggles),
+ * "output" (which device, which profile) and "apps" (each app's volume and
+ * output). The sound itself is made by ztos-soundd (a PipeWire filter chain);
+ * this app only edits its settings: one line per change goes to
+ * $XDG_RUNTIME_DIR/ztos-sound.sock, and the state comes back in
+ * $XDG_RUNTIME_DIR/ztos-sound-state.json. The apps page does the same with
+ * ztos-audiod: ztos-audio.sock and ztos-audio-state.json (audio-apps.h).
  *
  * The curve, grid and handles are drawn on the GPU every frame of a drag
  * (zmc_gpu_rect from .overlay); the page itself is drawn once.
@@ -26,6 +28,7 @@
 #include <unistd.h>
 
 #include "zrnmetrocore.h"
+#include "../audio-apps.h"
 
 #define MARGIN ZMC_MARGIN
 #define N_BANDS 10
@@ -38,7 +41,7 @@
 #define PLOT_H 230.0
 #define PLOT_LABEL 26.0	/* the dB labels, left of the plot */
 
-enum page { P_EQ, P_FX, P_OUT };
+enum page { P_EQ, P_FX, P_OUT, P_APPS };
 
 enum action {
 	A_OPEN = 1, A_EDIT_CYCLE, A_ENABLED, A_PRESET, A_SAVE_OPEN, A_SAVE_NAME, A_SAVE_DO, A_DEL_PRESET,
@@ -46,6 +49,9 @@ enum action {
 	A_CROSSFADE, A_CF_LEN, A_SURROUND, A_WIDTH, A_CROSSFEED, A_CFEED_AMT, A_ADV, A_ADV_MODE, A_3D,
 	A_SPATIAL_AMT, A_BASS, A_LOUD, A_LEVELER,
 	A_OUT_AUTO, A_OUT_DEV, A_DEV_PROFILE, A_EDIT_PICK,
+	/* one each per row of the apps page */
+	A_APP_VOL = 1000, A_APP_MUTE = A_APP_VOL + AUDIO_MAX_APPS, A_APP_OUT = A_APP_MUTE + AUDIO_MAX_APPS,
+	A_APP_END = A_APP_OUT + AUDIO_MAX_APPS,
 };
 
 static const char *const PROFILE[N_PROFILES] = { "speaker", "headphones", "bluetooth" };
@@ -113,6 +119,69 @@ static void send_fmt(const char *fmt, ...) {
 
 static struct prof *cur(void) { return &S.p[S.edit_i]; }
 static const char *curname(void) { return PROFILE[S.edit_i]; }
+
+/* ---- each app's volume and output: ztos-audiod ----------------------------- */
+#define APP_QUIET_MS 900	/* after a change here: the file is not read over it */
+
+static struct {
+	struct audio_state st;
+	struct audio_apps a;
+	struct timespec mtime;
+	bool loaded, up, dragging;
+	uint32_t local_ms;
+	int page;		/* the page in front, so nothing is read for the others */
+} AA;
+
+static void audio_sock_addr(struct sockaddr_un *a) {
+	const char *rt = getenv("XDG_RUNTIME_DIR");
+	a->sun_family = AF_UNIX;
+	snprintf(a->sun_path, sizeof(a->sun_path), "%s/ztos-audio.sock", rt ? rt : "/tmp");
+}
+
+static void send_audio(const char *line) {
+	struct sockaddr_un a = { 0 };
+	audio_sock_addr(&a);
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) return;
+	if (sendto(fd, line, strlen(line), MSG_DONTWAIT, (struct sockaddr *)&a, sizeof(a)) < 0) AA.up = false;
+	close(fd);
+	AA.local_ms = zmc_now_ms();
+}
+
+/* A state file outlives a daemon that stopped, so ask its socket. */
+static bool audio_daemon_up(void) {
+	struct sockaddr_un a = { 0 };
+	audio_sock_addr(&a);
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) return false;
+	bool up = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0;
+	close(fd);
+	return up;
+}
+
+/* True if anything shown has changed. */
+static bool load_apps(void) {
+	const char *rt = getenv("XDG_RUNTIME_DIR");
+	char path[320];
+	struct stat st;
+	bool up = audio_daemon_up(), changed = up != AA.up;
+	AA.up = up;
+	snprintf(path, sizeof(path), "%s/ztos-audio-state.json", rt ? rt : "/tmp");
+	if (stat(path, &st) != 0 || st.st_size > AUDIO_STATE_MAX_BYTES) return changed;
+	if (AA.loaded && st.st_mtim.tv_sec == AA.mtime.tv_sec && st.st_mtim.tv_nsec == AA.mtime.tv_nsec) return changed;
+	FILE *f = fopen(path, "r");
+	if (!f) return changed;
+	static char text[AUDIO_STATE_MAX_BYTES];
+	size_t n = fread(text, 1, sizeof(text), f);
+	fclose(f);
+	/* each keeps its last good state if the file is bad */
+	if (audio_state_parse(text, n, &AA.st) && audio_apps_parse(text, n, &AA.a)) {
+		AA.mtime = st.st_mtim;
+		AA.loaded = true;
+		return true;
+	}
+	return changed;
+}
 
 /* ---- state ---------------------------------------------------------------- */
 static double jd(json_object *o, const char *k, double d) {
@@ -441,6 +510,7 @@ static const char *kind_label(void) {
 }
 
 static double draw_eq(cairo_t *cr) {
+	zmc.pivot_after = "output";
 	double y = zmc_pivot_next(cr, "equalizer", "effects", A_OPEN, P_FX);
 	const struct prof *p = cur();
 	char line[200];
@@ -534,6 +604,7 @@ static double picker_row(cairo_t *cr, double y, const char *caption, const char 
 }
 
 static double draw_fx(cairo_t *cr) {
+	zmc.pivot_after = "apps";
 	double y = zmc_pivot_next(cr, "effects", "output", A_OPEN, P_OUT);
 	const struct prof *p = cur();
 	double w = zmc.width - 2 * MARGIN;
@@ -607,7 +678,8 @@ static double draw_fx(cairo_t *cr) {
 }
 
 static double draw_out(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "output", "equalizer", A_OPEN, P_EQ);
+	zmc.pivot_after = "equalizer";
+	double y = zmc_pivot_next(cr, "output", "apps", A_OPEN, P_APPS);
 	char line[200];
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, S.chain ? "sound engine running" : "sound engine not running", FONT_REGULAR, 13, MARGIN, y - 2, 0);
@@ -644,11 +716,54 @@ static double draw_out(cairo_t *cr) {
 	return y + 40;
 }
 
+static double draw_apps(cairo_t *cr) {
+	zmc.pivot_after = "effects";
+	double y = zmc_pivot_next(cr, "apps", "equalizer", A_OPEN, P_EQ);
+	double w = zmc.width - 2 * MARGIN;
+	if (!AA.loaded) load_apps();
+	if (!AA.up) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		y += zmc_text(cr, "The audio service isn't running, so changes here won't take effect.",
+			FONT_REGULAR, 13, MARGIN, y, w) + 14;
+	}
+	if (AA.a.n == 0) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		y += zmc_text(cr, "No apps yet. An app appears here the first time it plays sound.",
+			FONT_REGULAR, 15, MARGIN, y, w);
+		return y + 40;
+	}
+	for (int i = 0; i < AA.a.n; i++) {
+		const struct audio_app *a = &AA.a.app[i];
+		char line[300];
+		const double mute_w = 76;
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		zmc_text_line(cr, a->name, FONT_SEMILIGHT, 26, MARGIN, y, w - mute_w - 12);
+		chip(cr, MARGIN + w - mute_w, y, mute_w, a->mute ? "muted" : "mute", a->mute, A_APP_MUTE + i, 0);
+		audio_app_status(&AA.st, a, line, sizeof(line));
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text_line(cr, line, FONT_REGULAR, 13, MARGIN, y + 36, w - mute_w - 12);
+		y += 66;
+		zmc_slider(cr, MARGIN, y, w, a->percent < 0 ? 100 : a->percent, "Volume", A_APP_VOL + i);
+		y += 62;
+		struct audio_app_choice c[AUDIO_APP_CHOICES];
+		const char *labels[AUDIO_APP_CHOICES];
+		int sel = 0, n = audio_app_choices(&AA.st, a, c, &sel);
+		for (int k = 0; k < n; k++) labels[k] = c[k].label;
+		y = picker_row(cr, y, "Output", labels, n, sel, A_APP_OUT + i) + 22;
+	}
+	cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);
+	y += zmc_text(cr, "Default follows the output chosen in the audio tile. An app set to one output stays there, "
+		"also when Bluetooth connects, and skips the equalizer. If that output goes away, the app plays on "
+		"Default until it returns.", FONT_REGULAR, 12, MARGIN, y, w);
+	return y + 40;
+}
+
 static double render(cairo_t *cr, int page) {
 	switch (page) {
 	case P_EQ: return draw_eq(cr);
 	case P_FX: return draw_fx(cr);
 	case P_OUT: return draw_out(cr);
+	case P_APPS: return draw_apps(cr);
 	}
 	return 0;
 }
@@ -755,13 +870,45 @@ static void set_spatial(const char *mode) {
 	send_fmt("p %s spatial %s", curname(), mode);
 }
 
+/* A tap on the apps page. What it changes shows at once; the daemon's state follows. */
+static void activate_app(int action, int arg) {
+	char line[AUDIO_APP_CMD_MAX];
+	bool ok = false;
+	if (action >= A_APP_OUT) {
+		int i = action - A_APP_OUT;
+		if (i >= AA.a.n) return;
+		struct audio_app *a = &AA.a.app[i];
+		struct audio_app_choice c[AUDIO_APP_CHOICES];
+		int sel = 0, n = audio_app_choices(&AA.st, a, c, &sel);
+		if (arg < 0 || arg >= n || arg == sel) return;
+		ok = audio_cmd_app_output(line, sizeof(line), a->key, c[arg].name);
+		if (ok) {
+			snprintf(a->output, sizeof(a->output), "%s", c[arg].name);
+			if (arg <= AA.st.n) a->output_desc[0] = 0;
+		}
+	} else if (action >= A_APP_MUTE) {
+		int i = action - A_APP_MUTE;
+		if (i >= AA.a.n) return;
+		struct audio_app *a = &AA.a.app[i];
+		ok = audio_cmd_app_mute(line, sizeof(line), a->key, !a->mute);
+		if (ok) a->mute = !a->mute;
+	}
+	if (ok) send_audio(line);
+}
+
 static void activate(int action, int arg) {
-	if ((action == A_CF_LEN || action == A_ADV_MODE || action == A_EDIT_PICK || action == A_DEV_PROFILE) && arg < 0) {
+	bool app_picker = action >= A_APP_OUT && action < A_APP_END;
+	if ((action == A_CF_LEN || action == A_ADV_MODE || action == A_EDIT_PICK || action == A_DEV_PROFILE || app_picker) && arg < 0) {
 		open_picker = open_picker == action ? 0 : action;
 		zmc_redraw();
 		return;
 	}
 	open_picker = 0;
+	if (action >= A_APP_VOL && action < A_APP_END) {
+		activate_app(action, arg);
+		zmc_redraw();
+		return;
+	}
 	struct prof *p = cur();
 	switch (action) {
 	case A_OPEN: break;
@@ -872,6 +1019,20 @@ static void activate(int action, int arg) {
 
 static void slide(int action, int pct, bool done) {
 	static uint32_t sent;
+	if (action >= A_APP_VOL && action < A_APP_MUTE) {
+		int i = action - A_APP_VOL;
+		if (i >= AA.a.n) return;
+		char line[AUDIO_APP_CMD_MAX];
+		AA.a.app[i].percent = pct;
+		AA.dragging = !done;	/* the rows hold still under the finger */
+		/* the daemon runs wpctl for each of these */
+		if ((done || zmc_now_ms() - sent >= AUDIO_SLIDER_GAP_MS) &&
+				audio_cmd_app_volume(line, sizeof(line), AA.a.app[i].key, pct)) {
+			sent = zmc_now_ms();
+			send_audio(line);
+		}
+		return;
+	}
 	struct prof *p = cur();
 	const char *key = NULL;
 	double v = pct;
@@ -919,6 +1080,14 @@ static void typed(const char *t) {
 }
 
 static void tick(void) {
+	if (AA.page == P_APPS) {
+		/* nor while a picker is open: its rows are the list's */
+		if (!AA.dragging && zmc_now_ms() - AA.local_ms >= APP_QUIET_MS &&
+				!(open_picker >= A_APP_OUT && open_picker < A_APP_END) && load_apps()) {
+			zmc_redraw();
+		}
+		return;
+	}
 	if (T.down || zmc_now_ms() - last_local < 900) return;
 	time_t before = state_mtime;
 	load_state(false);
@@ -926,7 +1095,8 @@ static void tick(void) {
 }
 
 static void arrived(int page) {
-	(void)page;
+	AA.page = page;
+	zmc_pivot_changed();	/* four tabs going round: the one just left is not the next */
 	zmc_every(500, tick);
 }
 
@@ -937,7 +1107,7 @@ static const struct zmc_app app = {
 };
 
 static const struct { const char *name; int page; } PAGES[] = {
-	{ "equalizer", P_EQ }, { "effects", P_FX }, { "output", P_OUT },
+	{ "equalizer", P_EQ }, { "effects", P_FX }, { "output", P_OUT }, { "apps", P_APPS },
 };
 
 int main(int argc, char **argv) {
@@ -957,6 +1127,7 @@ int main(int argc, char **argv) {
 		}
 	}
 	S.edit_i = S.active_i;
+	AA.page = first;
 	zmc_every(500, tick);
 	return zmc_run(&app, first);
 }

@@ -92,7 +92,7 @@ devtest/zrndevtest: devtest/zrndevtest.c $(CORE_DEPS)
 
 # Devices and Services: what is running, crashed or missing
 # ztSound: the equalizer and effects (the engine, ztos-soundd, ships in rootfs/overlay/usr/local/bin)
-sound/ztsound: sound/ztsound.c $(CORE_DEPS)
+sound/ztsound: sound/ztsound.c audio-apps.h audio-state.h audio-sync.h $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ sound/ztsound.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devices/ztdevices: devices/ztdevices.c $(CORE_DEPS)
@@ -369,6 +369,17 @@ check-audio-state:
 .PHONY: check-audiod
 check-audiod:
 	python3 tests/audiod.py
+
+# ztos-audiod with a real PipeWire and WirePlumber, private to the test: null sinks
+# and silence, nothing reaches a live session or a sound card
+.PHONY: check-audiod-live
+check-audiod-live:
+	python3 tests/audiod_live.py
+
+.PHONY: check-audio-apps
+check-audio-apps:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-audio-apps-test tests/audio-apps.c
+	/tmp/ztmetro-audio-apps-test
 
 .PHONY: check-power-key
 check-power-key:
