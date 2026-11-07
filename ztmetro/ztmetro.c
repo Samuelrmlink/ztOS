@@ -414,8 +414,13 @@ struct zt_keyboard {
 	struct wl_listener modifiers, key, destroy;
 };
 
-#define CTL_DOTS 48
-#define CTL_DOT_MS 500
+#define CTL_FINGERS 12
+#define CTL_TRAIL 120		/* points kept of each finger's path */
+#define CTL_TRAIL_MS 1000	/* how much of its travel the trail shows */
+#define CTL_DOT_STAY_MS 750	/* the dot and its trail, after the finger lifts */
+#define CTL_DOT_FADE_MS 200	/* the last of that, fading */
+#define CTL_DOT_D 30		/* points across */
+#define CTL_TRAIL_D 5
 
 struct zt_touch_device {
 	struct zt_server *server;
@@ -462,6 +467,7 @@ enum touch_role {
 	ROLE_HYPER,	/* on Hyperscan, the search over everything */
 	ROLE_RETRO,	/* on a ztRetrofit style's home (the DotMatrix launcher) */
 	ROLE_AUDIO,	/* in the audio modal: a row (index), or the slider (index -1) */
+	ROLE_LEVEL,	/* on the slider of the flashlight's or the brightness's modal */
 	ROLE_FS_EDGE,	/* at the top (index 1) or bottom (-1) of a full-screen app, its bars away */
 };
 
@@ -904,9 +910,15 @@ struct zt_server {
 	int hwkey_held;			/* the nav button whose own key is down; -1: none */
 	bool hwkey_long;		/* ... and held long enough to count as a long press */
 	struct wl_event_source *hwkey_timer;
-	struct { float x, y; uint32_t ms; } ctl_dots[CTL_DOTS];
-	int ctl_dot_next;
-	struct zt_layer ctl_dot_layer;
+	struct ctl_finger {
+		bool used, down;
+		int id;
+		float x, y;
+		uint32_t up_ms;
+		struct { float x, y; uint32_t ms; } trail[CTL_TRAIL];
+		int head, n;
+	} ctl_fingers[CTL_FINGERS];
+	struct zt_layer ctl_dot_layer, ctl_trail_layer;
 	struct power_key power_key;
 	struct wl_event_source *power_key_timer;
 
@@ -926,6 +938,15 @@ struct zt_server {
 	/* the audio tile and its modal: what ztos-audiod last said (audio-state.h) */
 	struct audio_state audio_state;
 	bool audio_state_ok;
+	/* held on the flashlight's or the brightness's tile: a modal with a slider */
+	bool level_open;
+	int level_kind;		/* LEVEL_TORCH or LEVEL_BRIGHT */
+	float level_y;
+	double level_h, level_track_y, level_row_y;
+	struct zt_layer level_layer;
+	int level_auto;		/* the light sensor: 1 on, 0 off, -1 there is none */
+	int torch_level;	/* 1..TORCH_LEVEL: what the tile switches on */
+	int torch_level_was;	/* before this drag: it passes every level on its way to off */
 	bool audio_modal_open;
 	bool audio_modal_auto;		/* the volume keys opened it: it goes by itself */
 	bool media_on_volume;		/* and the player's controls come with it (Settings); always from the tile */
@@ -993,6 +1014,10 @@ static void auth_input(struct zt_server *, uint32_t, const char *);
 static void auth_submit(struct zt_server *);
 static void auth_finish(struct zt_server *);
 static void draw_dialog(struct zt_server *);
+enum { LEVEL_TORCH, LEVEL_BRIGHT };
+static void level_modal_show(struct zt_server *, int);
+static void level_modal_close(struct zt_server *);
+static bool torch_write(int);
 static void audio_modal_show(struct zt_server *);
 static void audio_modal_close(struct zt_server *);
 static void ftrace_mark(struct zt_server *server, const char *what, double ms);
@@ -3127,6 +3152,9 @@ static void load_config(struct zt_server *server) {
 			} else if (strcmp(value, "off") == 0) {
 				nav_h = 0;
 			}
+		} else if (strcmp(key, "torch_level") == 0) {
+			int n = atoi(value);
+			server->torch_level = n < 1 ? 1 : n > TORCH_LEVEL ? TORCH_LEVEL : n;
 		} else if (strcmp(key, "volume_media_controls") == 0) {
 			server->media_on_volume = strcmp(value, "on") == 0;
 		} else if (strcmp(key, "fullscreen_bars_secs") == 0) {
@@ -7389,7 +7417,7 @@ static float fs_bars_t(struct zt_server *server) {
 }
 
 static float fs_status_y(struct zt_server *server) {
-	return server->audio_modal_open ? 0.0f : -STATUS_H * (1.0f - fs_bars_t(server));
+	return server->audio_modal_open || server->level_open ? 0.0f : -STATUS_H * (1.0f - fs_bars_t(server));
 }
 
 static void fs_sync(struct zt_server *server) {
@@ -8208,14 +8236,11 @@ static void shade_activate(struct zt_server *server, int index) {
 		break;
 	case 100 + Q_FLASHLIGHT: {
 		/* the rear flash LED at a torch's current (leds/zrn-flash.ko) */
-		FILE *f = fopen(TORCH_PATH, "w");
-		if (!f) {
+		if (!torch_write(server->shade_torch ? 0 : server->torch_level)) {
 			break;	/* not loaded: the tile is drawn faint */
 		}
 		hap(server, HAP_TAP, HG_SYSTEM);
 		server->shade_torch = !server->shade_torch;
-		fprintf(f, "%d\n", server->shade_torch ? TORCH_LEVEL : 0);
-		fclose(f);
 		draw_shade(server);
 		damage(server);
 		break;
@@ -9925,6 +9950,12 @@ static int press_fired(void *data) {
 
 /* A nav button, or the phone's own key for it, pressed and let go. */
 static void nav_activate(struct zt_server *server, int index) {
+	if (server->level_open) {
+		level_modal_close(server);
+		if (index == NAV_BACK) {
+			return;		/* only the modal: the action centre is still under it */
+		}
+	}
 	if (server->audio_modal_open) {
 		audio_modal_close(server);
 		if (index == NAV_BACK) {
@@ -10052,6 +10083,18 @@ static int long_press_fired(void *data) {
             draw_osk(server);
             continue;
         }
+		if (p->used && p->role == ROLE_SHADE && server->shade_open && !p->moved && !p->long_pressed &&
+				p->index >= 0 && p->index < 8 && now - p->down_ms >= LONG_PRESS_MS - 30 &&
+				(server->quick[p->index] == Q_FLASHLIGHT || server->quick[p->index] == Q_BRIGHTNESS)) {
+			int q = server->quick[p->index];
+			hap(server, HAP_HEAVY, HG_SYSTEM);
+			shade_tile_release(server, p->index);
+			server->shade_pressed = -1;
+			p->long_pressed = true;
+			p->role = ROLE_NONE;
+			level_modal_show(server, q == Q_BRIGHTNESS ? LEVEL_BRIGHT : LEVEL_TORCH);
+			continue;
+		}
 		if (p->used && p->role == ROLE_SHADE && !server->shade_open && !p->moved &&
 				!p->long_pressed && p->y0 <= STATUS_H + 12 && now - p->down_ms >= PEEK_HOLD_MS - 30) {
 			/* resting on the status bar: its second line comes down */
@@ -10187,7 +10230,8 @@ static void draw_media_row(struct zt_server *server, cairo_t *cr, double y) {
 		cairo_set_source_rgb(cr, 0.62, 0.62, 0.62);
 		media_time(text, sizeof(text), pos);
 		draw_text(cr, text, FONT_REGULAR, 11.5, 16, ty, box, 14, true);
-		media_time(text, sizeof(text), server->media_len);
+		text[0] = '-';
+		media_time(text + 1, sizeof(text) - 1, server->media_len - pos);
 		draw_text(cr, text, FONT_REGULAR, 11.5, server->width - 16 - box, ty, box, 14, true);
 		cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
 		cairo_rectangle(cr, bar_x, ty + 6, bar_w, 3);
@@ -10553,6 +10597,217 @@ static void audio_modal_redraw(struct zt_server *server) {
 	if (server->audio_modal_open) {
 		draw_audio_modal(server);
 		damage(server);
+	}
+}
+
+/* ---- the flashlight's and the brightness's modal ------------------------- */
+
+static bool torch_write(int level) {
+	FILE *f = fopen(TORCH_PATH, "w");
+	if (!f) {
+		return false;
+	}
+	fprintf(f, "%d\n", level);
+	fclose(f);
+	return true;
+}
+
+static int level_auto_read(void) {
+	char line[64];
+	int on = -1;
+	FILE *f = fopen("/run/ztoscsf-sensors/status", "r");
+	if (!f) f = fopen("/run/zrn-sensors/status", "r");
+	if (!f) return -1;
+	on = 0;
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "auto=", 5) == 0) {
+			on = strncmp(line + 5, "on", 2) == 0;
+		}
+	}
+	fclose(f);
+	return on;
+}
+
+/* A slider's track, thumb and, if it has detents, a mark at each place it can
+ * stop. detents is how many steps from end to end; 0: as fine as a finger. */
+static void draw_slider(struct zt_server *server, cairo_t *cr, double x, double w, double y,
+		double frac, int detents) {
+	cairo_set_source_rgb(cr, 0.3, 0.3, 0.3);
+	cairo_rectangle(cr, x, y - 1.5, w, 3);
+	cairo_fill(cr);
+	set_rgb(cr, server->accent);
+	cairo_rectangle(cr, x, y - 1.5, w * frac, 3);
+	cairo_fill(cr);
+	for (int k = 0; k <= detents && detents > 0; k++) {
+		double at = (double)k / detents;
+		if (at <= frac + 1e-6) {
+			set_rgb(cr, server->accent);
+		} else {
+			cairo_set_source_rgb(cr, 0.45, 0.45, 0.45);
+		}
+		cairo_rectangle(cr, x + w * at - 1, y - 7, 2, 14);
+		cairo_fill(cr);
+	}
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	cairo_rectangle(cr, x + w * frac - 4, y - 12, 8, 24);
+	cairo_fill(cr);
+}
+
+/* Where a finger at x puts a slider: 0..1, on a detent if it has them. */
+static double slider_frac(double x, double left, double w, int detents) {
+	double frac = (x - left) / w;
+	frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
+	return detents > 0 ? round(frac * detents) / detents : frac;
+}
+
+#define TORCH_DETENTS TORCH_LEVEL	/* off, then each level */
+
+static void draw_level_modal(struct zt_server *server) {
+	if (server->width <= 0) return;
+	double w = server->width, content_w = w - 2 * AUDIO_PAD;
+	bool bright = server->level_kind == LEVEL_BRIGHT;
+	double text_y = AUDIO_ROW_TOP, track_y = text_y + 56, row_y = track_y + 28, row_h = 56;
+	double total_h = bright ? row_y + row_h + 14 : track_y + 34;
+	server->level_h = total_h;
+	server->level_track_y = track_y;
+	server->level_row_y = row_y;
+	cairo_t *cr;
+	struct zt_buffer *buffer = zt_buffer_create(server, (int)w, (int)total_h, &cr);
+	cairo_set_source_rgb(cr, 31.0 / 255.0, 31.0 / 255.0, 31.0 / 255.0);
+	cairo_rectangle(cr, 0, 0, w, total_h);
+	cairo_fill(cr);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	draw_text(cr, bright ? "Brightness" : "Flashlight", FONT_SEMIBOLD, 20.0, AUDIO_PAD, 40.0, content_w, 0, false);
+	char value[32];
+	double frac;
+	if (bright) {
+		snprintf(value, sizeof(value), "%d%%", server->shade_brightness);
+		frac = (server->shade_brightness - 1) / 99.0;
+	} else {
+		int level = server->shade_torch ? server->torch_level : 0;
+		if (level) {
+			snprintf(value, sizeof(value), "Level %d of %d", level, TORCH_LEVEL);
+		} else {
+			snprintf(value, sizeof(value), "Off");
+		}
+		frac = level / (double)TORCH_DETENTS;
+	}
+	frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
+	cairo_set_source_rgb(cr, 0.72, 0.72, 0.72);
+	draw_text(cr, value, FONT_REGULAR, 15.0, AUDIO_PAD, text_y, content_w, 0, false);
+	draw_slider(server, cr, AUDIO_PAD, content_w, track_y, frac, bright ? 0 : TORCH_DETENTS);
+	if (bright) {
+		/* the light sensor's switch */
+		bool usable = server->level_auto >= 0, on = server->level_auto > 0;
+		double sw = 50, sh = 24, sx = w - AUDIO_PAD - sw, sy = row_y + (row_h - sh) / 2;
+		double ink = usable ? 1 : 0.45, edge = usable ? 0.75 : 0.35;
+		cairo_set_source_rgb(cr, ink, ink, ink);
+		draw_text(cr, usable ? "Automatic brightness" : "Automatic brightness (no sensor)",
+			FONT_REGULAR, 15.0, AUDIO_PAD, row_y + 18, content_w - sw - 12, 0, false);
+		if (on) {
+			set_rgb(cr, server->accent);
+			cairo_rectangle(cr, sx, sy, sw, sh);
+			cairo_fill(cr);
+		} else {
+			cairo_set_source_rgb(cr, edge, edge, edge);
+			cairo_set_line_width(cr, 2);
+			cairo_rectangle(cr, sx + 1, sy + 1, sw - 2, sh - 2);
+			cairo_stroke(cr);
+		}
+		cairo_set_source_rgb(cr, ink, ink, ink);
+		cairo_rectangle(cr, on ? sx + sw - 14 : sx + 4, sy + 4, 10, sh - 8);
+		cairo_fill(cr);
+	}
+	zt_buffer_show(server, &server->level_layer, buffer, cr, (int)w, (int)total_h);
+}
+
+static void level_modal_redraw(struct zt_server *server) {
+	if (server->level_open) {
+		draw_level_modal(server);
+		damage(server);
+	}
+}
+
+static void level_modal_show(struct zt_server *server, int kind) {
+	if (server->width <= 0 || server->level_open) return;
+	server->level_kind = kind;
+	server->level_auto = kind == LEVEL_BRIGHT ? level_auto_read() : -1;
+	draw_level_modal(server);
+	server->level_open = true;
+	server->level_y = (float)-server->level_h;
+	animate(server, &server->level_y, 0.0f, 260, 0, false);
+	damage(server);
+}
+
+static void level_modal_close(struct zt_server *server) {
+	if (!server->level_open) return;
+	server->level_open = false;
+	animate(server, &server->level_y, (float)-server->level_h, 170, 0, false);
+	if (server->shade_open || server->shade_h > 0.1f) {
+		draw_shade(server);	/* its tile says the level */
+	}
+	damage(server);
+}
+
+static void level_slider_to(struct zt_server *server, double x) {
+	double w = server->width - 2 * AUDIO_PAD;
+	if (server->level_kind == LEVEL_BRIGHT) {
+		int percent = 1 + (int)lround(slider_frac(x, AUDIO_PAD, w, 0) * 99);
+		if (percent == server->shade_brightness) return;
+		server->shade_brightness = percent;
+		if (server->level_auto > 0) {
+			backlight_manual();	/* a hand on it: the light sensor steps back */
+			server->level_auto = 0;
+		}
+		if (bl.mode == BL_TABLE) {
+			ramp_goal(percent, 0.0, false);
+		} else {
+			backlight_set(percent);
+		}
+	} else {
+		/* far left is off; the tile switches back on at the last level used */
+		int level = (int)lround(slider_frac(x, AUDIO_PAD, w, TORCH_DETENTS) * TORCH_DETENTS);
+		if (level == (server->shade_torch ? server->torch_level : 0)) return;
+		if (!torch_write(level)) return;
+		server->shade_torch = level > 0;
+		if (level > 0) {
+			server->torch_level = level;
+		}
+		hap(server, HAP_TICK, HG_SYSTEM);	/* felt as it reaches each mark */
+	}
+	level_modal_redraw(server);
+}
+
+static void level_modal_touch_begin(struct zt_server *server, struct touch_point *p, double x, double y) {
+	p->role = ROLE_NONE;
+	if (y > server->level_y + server->level_h) {
+		hap(server, HAP_TAP, HG_SYSTEM);
+		level_modal_close(server);
+		return;
+	}
+	double dy = y - server->level_y;
+	if (fabs(dy - server->level_track_y) <= 24) {
+		p->role = ROLE_LEVEL;
+		server->torch_level_was = server->torch_level;
+		level_slider_to(server, x);
+	} else if (server->level_kind == LEVEL_BRIGHT && dy >= server->level_row_y) {
+		if (server->level_auto < 0) return;
+		server->level_auto = !server->level_auto;
+		pipe_tell("/run/ztoscsf-sensord.ctl", server->level_auto ? "auto on\n" : "auto off\n");
+		pipe_tell("/run/zrn-sensord.ctl", server->level_auto ? "auto on\n" : "auto off\n");
+		hap(server, HAP_TAP, HG_SYSTEM);
+		level_modal_redraw(server);
+	}
+}
+
+static void level_modal_touch_end(struct zt_server *server) {
+	if (server->level_kind == LEVEL_BRIGHT) {
+		config_keep("brightness", server->shade_brightness);
+	} else {
+		if (!server->shade_torch) {
+			server->torch_level = server->torch_level_was;
+		}
+		config_keep("torch_level", server->torch_level);
 	}
 }
 
@@ -11073,6 +11328,7 @@ static void screen_set(struct zt_server *server, bool on) {
 	}
 	if (!on && server->auth_active) auth_finish(server);
 	if (!on && server->audio_modal_open) audio_modal_close(server);
+	if (!on) level_modal_close(server);
 	bool demoloop = demoloop_active();
 	/* Freeze completes before the display-off transition can let zrn-sleepd
 	 * enter SoC sleep. The configured keep_awake list is honored by the helper. */
@@ -11762,6 +12018,10 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		p->role = ROLE_NONE;
 		return;
 	}
+	if (server->level_open && server->level_y > (float)-server->level_h + 10.0f) {
+		level_modal_touch_begin(server, p, x, y);
+		return;
+	}
 	if (server->audio_modal_open && server->audio_modal_y > (float)-server->audio_modal_h + 10.0f) {
 		audio_modal_touch_begin(server, p, x, y);
 		return;
@@ -11822,6 +12082,11 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		server->shade_pressed = p->index;
 		if (p->index >= 0 && p->index < 8) {
 			shade_tile_press(server, p->index, x, panel_y);
+			if (server->quick[p->index] == Q_FLASHLIGHT || server->quick[p->index] == Q_BRIGHTNESS) {
+				/* held: its modal */
+				p->down_ms = now_ms();
+				wl_event_source_timer_update(server->long_press_timer, LONG_PRESS_MS);
+			}
 		}
 		p->scroll0 = server->shade_h;
 		/* a drag that starts over the notifications scrolls them (see
@@ -12254,6 +12519,9 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 		damage(server);
 		break;
 	}
+	case ROLE_LEVEL:
+		level_slider_to(server, x);
+		break;
 	case ROLE_FS_EDGE:
 		if ((y - p->y0) * p->index > FS_SWIPE) {
 			p->role = ROLE_NONE;
@@ -12642,6 +12910,9 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		wlr_seat_touch_notify_up(server->seat, time, id);
 		wlr_seat_touch_notify_frame(server->seat);
 		break;
+	case ROLE_LEVEL:
+		level_modal_touch_end(server);
+		break;
 	case ROLE_FS_EDGE: {
 		/* no swipe: a tap on the app that happened to be near the edge */
 		double sx, sy;
@@ -12785,13 +13056,77 @@ static void state_file_write(struct zt_server *server) {
  */
 static void ctl_key(struct zt_server *server, unsigned code, const char *how);
 
-/* Input from the control pipe (an agent, ztmirror) shows as a fading dot, so a
- * person holding the phone can tell it isn't them, and where it went. */
-static void ctl_dot_add(struct zt_server *server, double x, double y) {
-	server->ctl_dots[server->ctl_dot_next].x = (float)x;
-	server->ctl_dots[server->ctl_dot_next].y = (float)y;
-	server->ctl_dots[server->ctl_dot_next].ms = now_ms();
-	server->ctl_dot_next = (server->ctl_dot_next + 1) % CTL_DOTS;
+/* Input from the control pipe (an agent, ztmirror) shows on the screen, so a
+ * person holding the phone can tell it isn't them and where it went: a circle
+ * at each finger, a thin trail of its last second of travel, and both stay a
+ * moment after it lifts, then go together. */
+static struct ctl_finger *ctl_finger_find(struct zt_server *server, int id) {
+	for (int i = 0; i < CTL_FINGERS; i++) {
+		struct ctl_finger *f = &server->ctl_fingers[i];
+		if (f->used && f->down && f->id == id) {
+			return f;
+		}
+	}
+	return NULL;
+}
+
+static void ctl_finger_point(struct ctl_finger *f, double x, double y) {
+	f->x = (float)x;
+	f->y = (float)y;
+	if (f->n > 0) {
+		int last = (f->head + CTL_TRAIL - 1) % CTL_TRAIL;
+		if (hypotf(f->trail[last].x - f->x, f->trail[last].y - f->y) < 2.0f) {
+			return;
+		}
+	}
+	f->trail[f->head].x = f->x;
+	f->trail[f->head].y = f->y;
+	f->trail[f->head].ms = now_ms();
+	f->head = (f->head + 1) % CTL_TRAIL;
+	if (f->n < CTL_TRAIL) {
+		f->n++;
+	}
+}
+
+static void ctl_finger_up(struct zt_server *server, int id) {
+	struct ctl_finger *f = ctl_finger_find(server, id);
+	if (f) {
+		f->down = false;
+		f->up_ms = now_ms();
+		damage(server);
+	}
+}
+
+static void ctl_finger_down(struct zt_server *server, int id, double x, double y) {
+	ctl_finger_up(server, id);	/* it never said it lifted */
+	struct ctl_finger *f = NULL;
+	for (int i = 0; i < CTL_FINGERS && !f; i++) {
+		if (!server->ctl_fingers[i].used) {
+			f = &server->ctl_fingers[i];
+		}
+	}
+	for (int i = 0; i < CTL_FINGERS && !f; i++) {
+		if (!server->ctl_fingers[i].down) {
+			f = &server->ctl_fingers[i];	/* the room is needed more than its last moments */
+		}
+	}
+	if (!f) {
+		return;
+	}
+	f->used = f->down = true;
+	f->id = id;
+	f->head = f->n = 0;
+	ctl_finger_point(f, x, y);
+	damage(server);
+}
+
+static void ctl_finger_move(struct zt_server *server, int id, double x, double y) {
+	struct ctl_finger *f = ctl_finger_find(server, id);
+	if (!f) {
+		ctl_finger_down(server, id, x, y);
+		return;
+	}
+	ctl_finger_point(f, x, y);
 	damage(server);
 }
 
@@ -12802,17 +13137,20 @@ static void ctl_command(struct zt_server *server, char *line) {
 	char how[8];
 	uint32_t t = now_ms();
 	if (sscanf(line, "down %d %lf %lf", &id, &x, &y) == 3) {
-		ctl_dot_add(server, x, y);
+		ctl_finger_down(server, id, x, y);
 		touch_begin(server, 1000 + id, x, y, t);
 	} else if (sscanf(line, "move %d %lf %lf", &id, &x, &y) == 3) {
-		ctl_dot_add(server, x, y);
+		ctl_finger_move(server, id, x, y);
 		touch_update(server, 1000 + id, x, y, t);
 	} else if (sscanf(line, "up %d", &id) == 1) {
+		ctl_finger_up(server, id);
 		touch_end(server, 1000 + id, t, false);
 	} else if (sscanf(line, "cancel %d", &id) == 1) {
+		ctl_finger_up(server, id);
 		touch_end(server, 1000 + id, t, true);
 	} else if (sscanf(line, "tap %lf %lf", &x, &y) == 2) {
-		ctl_dot_add(server, x, y);
+		ctl_finger_down(server, -1, x, y);
+		ctl_finger_up(server, -1);
 		touch_begin(server, 1999, x, y, t);
 		touch_end(server, 1999, t + 30, false);
 	} else if (sscanf(line, "key %u %7s", &code, how) == 2) {
@@ -13096,6 +13434,9 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (sscanf(line, "brightness-auto %d", &id) == 1) {
 		/* the light sensor's goal, tenths of a percent: a slow glide here */
 		server->shade_brightness = id < 20 ? 2 : id > 1000 ? 100 : (id + 5) / 10;
+		if (server->level_kind == LEVEL_BRIGHT) {
+			level_modal_redraw(server);
+		}
 		if (bl.mode == BL_TABLE) {
 			ramp_goal(id / 10.0, BL_AUTO_SPEED, true);
 		} else {
@@ -14597,6 +14938,14 @@ static void render_frame(struct zt_server *server) {
 		quad(server, GL_TEXTURE_2D, server->black_tex, m, 0.627f * fminf(1.0f, t), false, false, 1.0f, 1.0f);
 		layer_draw(server, &server->audio_modal_layer, 0, server->audio_modal_y, 1.0f);
 	}
+	if (server->level_y > 1.0f - (float)server->level_h && server->level_layer.tex) {
+		float t = (server->level_y + (float)server->level_h) / (float)server->level_h;
+		float m[16];
+		mat_identity(m);
+		mat_scale(m, server->width, server->height);
+		quad(server, GL_TEXTURE_2D, server->black_tex, m, 0.627f * fminf(1.0f, t), false, false, 1.0f, 1.0f);
+		layer_draw(server, &server->level_layer, 0, server->level_y, 1.0f);
+	}
 	if (server->dialog_y > 1.0f - (float)server->dialog_h && server->dialog_layer.tex) {
 		float t = (server->dialog_y + (float)server->dialog_h) / (float)server->dialog_h;
 		if (t > 0.01f) {
@@ -14609,6 +14958,7 @@ static void render_frame(struct zt_server *server) {
 	}
 	/* the status bar stays above these modals, which leave room for it */
 	if ((server->audio_modal_y > 1.0f - (float)server->audio_modal_h && server->audio_modal_layer.tex) ||
+	    (server->level_y > 1.0f - (float)server->level_h && server->level_layer.tex) ||
 	    (server->dialog_y > 1.0f - (float)server->dialog_h && server->dialog_layer.tex)) {
 		layer_draw(server, &server->status_layer, 0, fs_status_y(server), 1.0f);
 	}
@@ -14625,25 +14975,55 @@ static void render_frame(struct zt_server *server) {
 			quad(server, GL_TEXTURE_2D, server->white_tex, m, 0.55f, false, false, 1.0f, 1.0f);
 		}
 	}
-	{	/* input from the control pipe */
+	{	/* input from the control pipe: see ctl_finger_down */
 		bool live = false;
-		for (int i = 0; i < CTL_DOTS; i++) {
-			uint32_t age = now - server->ctl_dots[i].ms;
-			if (!server->ctl_dots[i].ms || age >= CTL_DOT_MS) {
+		for (int i = 0; i < CTL_FINGERS; i++) {
+			struct ctl_finger *f = &server->ctl_fingers[i];
+			if (!f->used) {
 				continue;
 			}
-			if (!server->ctl_dot_layer.tex) {
+			uint32_t gone = f->down ? 0 : now - f->up_ms;
+			if (gone >= CTL_DOT_STAY_MS) {
+				f->used = false;
+				continue;
+			}
+			float fade = gone > CTL_DOT_STAY_MS - CTL_DOT_FADE_MS ?
+				(float)(CTL_DOT_STAY_MS - gone) / CTL_DOT_FADE_MS : 1.0f;
+			if (!server->ctl_dot_layer.tex || !server->ctl_trail_layer.tex) {
 				cairo_t *dot;
-				int px = 22;
-				struct zt_buffer *buffer = zt_buffer_create(server, px, px, &dot);
+				struct zt_buffer *buffer = zt_buffer_create(server, CTL_DOT_D, CTL_DOT_D, &dot);
 				cairo_set_source_rgba(dot, 0.1, 0.75, 1.0, 1.0);
-				cairo_arc(dot, px / 2.0, px / 2.0, px / 2.0 - 1, 0, 2 * M_PI);
+				cairo_arc(dot, CTL_DOT_D / 2.0, CTL_DOT_D / 2.0, CTL_DOT_D / 2.0 - 1, 0, 2 * M_PI);
 				cairo_fill(dot);
-				zt_buffer_show(server, &server->ctl_dot_layer, buffer, dot, px, px);
+				zt_buffer_show(server, &server->ctl_dot_layer, buffer, dot, CTL_DOT_D, CTL_DOT_D);
+				buffer = zt_buffer_create(server, CTL_TRAIL_D, CTL_TRAIL_D, &dot);
+				cairo_set_source_rgba(dot, 0.1, 0.75, 1.0, 1.0);
+				cairo_arc(dot, CTL_TRAIL_D / 2.0, CTL_TRAIL_D / 2.0, CTL_TRAIL_D / 2.0, 0, 2 * M_PI);
+				cairo_fill(dot);
+				zt_buffer_show(server, &server->ctl_trail_layer, buffer, dot, CTL_TRAIL_D, CTL_TRAIL_D);
+			}
+			/* the trail: small circles close together, oldest first, fainter with age */
+			int start = (f->head + CTL_TRAIL - f->n) % CTL_TRAIL;
+			for (int k = 1; k < f->n && server->ctl_trail_layer.tex; k++) {
+				int a = (start + k - 1) % CTL_TRAIL, b = (start + k) % CTL_TRAIL;
+				uint32_t age = now - f->trail[b].ms;
+				if (age >= CTL_TRAIL_MS) {
+					continue;
+				}
+				float alpha = 0.4f * fade * (1.0f - (float)age / CTL_TRAIL_MS);
+				float dx = f->trail[b].x - f->trail[a].x, dy = f->trail[b].y - f->trail[a].y;
+				int steps = (int)(hypotf(dx, dy) / 2.5f) + 1;
+				steps = steps > 80 ? 80 : steps;
+				for (int n = 0; n < steps; n++) {
+					float u = (float)n / steps;
+					layer_draw(server, &server->ctl_trail_layer,
+						f->trail[a].x + dx * u - CTL_TRAIL_D / 2.0f,
+						f->trail[a].y + dy * u - CTL_TRAIL_D / 2.0f, alpha);
+				}
 			}
 			if (server->ctl_dot_layer.tex) {
-				layer_draw(server, &server->ctl_dot_layer, server->ctl_dots[i].x - 11,
-					server->ctl_dots[i].y - 11, 0.75f * (1.0f - (float)age / CTL_DOT_MS));
+				layer_draw(server, &server->ctl_dot_layer, f->x - CTL_DOT_D / 2.0f,
+					f->y - CTL_DOT_D / 2.0f, 0.8f * fade);
 			}
 			live = true;
 		}
@@ -15262,6 +15642,8 @@ int main(int argc, char *argv[]) {
 	server.volume = 24;
 	server.fs_bars = server.fs_want = 1.0f;
 	server.fs_bars_ms = 3000;
+	server.torch_level = TORCH_LEVEL;
+	server.level_y = -1000.0f;
 	server.toast_y = 0.0f;
 	server.dialog_h = 240;
 	server.dialog_y = -240.0f;
