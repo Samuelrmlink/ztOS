@@ -98,7 +98,7 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 | 6.1 | **Live screen and touch control, same on phone and QEMU.** A `ztmirror` program on the device streams the screen and takes input over a direct TCP socket (USB-NCM in development). `scripts/ztctl.py` already does still captures and multi-touch over SSH, as a stopgap and for scripted tests. Built: `ztmirror`, `ztos mirror` and `ztos touch`; the window client still needs a try. Design notes below. | L | New |
 | 6.2 | Finish input coverage: hardware keys (power, volume, home, back) and a screen-size query. Up to ten overlapping fingers already work through the control pipe, and `cancel ID` is written but not yet on the phone. `ztmirror` must lift any held fingers if its client disconnects. | S | Confirmed (gap) |
 | 6.3 | Check that wlr-screencopy captures the whole screen. The shell registers it but it's untested here, `grim` isn't installed, and windows on the hardware overlay plane may be missing from captures. | S | Unknown |
-| 6.4 | Fix or retire `scripts/phone-shot.sh`, which only looks for KWin, Hyprland and phoc, not ztMETRO, and `scripts/phone-grab.sh`, which reads `/dev/mem` and needs a file the installer doesn't ship. | S | Review |
+| 6.4 | Retired `scripts/phone-shot.sh` (only looked for KWin, Hyprland and phoc, logged in as `alarm`) and `scripts/phone-grab.sh` (read `/dev/mem`, needed a `/root/fbgrab.py` nothing ships). Use `scripts/ztctl.py shot`, or `ztos mirror --snapshot`. | S | Review; done |
 
 ### 6.1 design notes
 
