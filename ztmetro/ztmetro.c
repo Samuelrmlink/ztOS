@@ -855,6 +855,7 @@ struct zt_server {
 	 * WebKit frames) scanned out by the display controller, over the frame
 	 * the GPU draws, which then leaves it out. See plane_pick(). */
 	struct wlr_output_layer *plane_layer;
+	struct wlr_screencopy_manager_v1 *screencopy;	/* a capture wanted: nothing on the plane */
 	struct wlr_surface *plane_surface;	/* on the plane this frame, or NULL */
 	bool plane_off;		/* the backend refused it for 2 s on end: drawn by the GPU from then on */
 	int plane_refusals;	/* frames in a row the backend did not take the plane */
@@ -14667,6 +14668,9 @@ static bool plane_pick(struct zt_server *server, struct zt_toplevel *app, const 
 	const char *why = NULL;
 #define PLANE_NO(reason) do { why = reason; goto no; } while (0)
 	if (server->plane_off || getenv("ZTMETRO_NO_PLANE")) PLANE_NO("off");
+	/* screencopy copies the GPU's buffer, and the plane isn't in it: the app
+	 * would be a hole in the picture (ztmirror, ztctl.py shot) */
+	if (server->screencopy && !wl_list_empty(&server->screencopy->frames)) PLANE_NO("a screen capture is waiting");
 	if (!app_covers || !app || !app->mapped) PLANE_NO("no app at rest in front");
 	if (server->peek > 0.001f || server->shade_h > 0.5f || server->splash ||
 			server->sensorhub_fail_screen || server->osk_slide > 0.003f || server->hyper_t > 0.003f ||
@@ -16243,7 +16247,7 @@ int main(int argc, char *argv[]) {
 	server.new_decoration.notify = server_new_decoration;
 	wl_signal_add(&server.deco_mgr->events.new_toplevel_decoration, &server.new_decoration);
 	/* screenshots (grim): how the shell's look is checked on the phone */
-	wlr_screencopy_manager_v1_create(server.wl_display);
+	server.screencopy = wlr_screencopy_manager_v1_create(server.wl_display);
 	wlr_xdg_output_manager_v1_create(server.wl_display, server.output_layout);
 	server.text_input_mgr = wlr_text_input_manager_v3_create(server.wl_display);
 	server.new_text_input.notify = server_new_text_input;
