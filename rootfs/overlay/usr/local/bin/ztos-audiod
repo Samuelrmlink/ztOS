@@ -79,6 +79,7 @@ WP_STREAMS = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".
                           "wireplumber/stream-properties")
 EQ_SINK = "ztos-eq"            # ztos-soundd's chain: never an output of its own
 STREAM_KEYS = ("application.id", "application.name", "media.name", "node.name")
+RECONNECT_GAP = 10.0           # away this long, an output coming back has connected
 SETTLE = 1.0                   # after a command, when to report the final level
 TOOL_TIMEOUT = 5
 
@@ -171,6 +172,22 @@ def classify(props, route=""):
     return "speaker"
 
 
+def takeover_target(known, sinks):
+    """A Bluetooth output that has just connected takes the audio, unless another
+    Bluetooth or USB output is there already: choosing then is the user's.
+    known: the output names last seen, None before the first look. Everything
+    being new (a PipeWire restart, say) is not a device connecting."""
+    if known is None:
+        return None
+    new = [s for name, s in sinks.items() if name not in known and s["kind"] == "bluetooth"]
+    if len(new) != 1 or not known & set(sinks):
+        return None
+    for name, s in sinks.items():
+        if name != new[0]["name"] and (s["kind"] == "bluetooth" or s.get("usb")):
+            return None
+    return new[0]["name"]
+
+
 def is_app_stream(props):
     if props.get("media.class") != "Stream/Output/Audio":
         return False
@@ -230,6 +247,7 @@ def read_graph(dump):
                 "id": o["id"], "serial": p.get("object.serial"), "name": name,
                 "desc": p.get("node.description") or p.get("node.nick") or name,
                 "kind": classify(p, routes.get(p.get("device.id"), "")),
+                "usb": "usb" in name.lower() or p.get("device.bus") == "usb",
                 "percent": percent_of_gain(vols[0]) if vols else None,
                 "mute": bool(_props_of(info).get("mute", False)),
             }
@@ -386,6 +404,7 @@ class Daemon:
         self.state_text = None
         self.outputs_text = None
         self.pushed = None           # (percent, name) the shell was last told
+        self.sink_seen = None        # output name: when last seen
         self.force_push = True
 
     # ---- what is held for apps
@@ -444,6 +463,18 @@ class Daemon:
         self.stored = read_stream_state()
         self.apply_intents(g)
         self.graph = g
+        # a node that vanishes and returns at once (its id changes when a stream
+        # leaves it) has not connected: known is what was here a little while ago
+        now = time.time()
+        known = None
+        if self.sink_seen is not None:
+            known = {n for n, t in self.sink_seen.items() if now - t < RECONNECT_GAP}
+        arrived = takeover_target(known, g["sinks"])
+        self.sink_seen = {n: t for n, t in (self.sink_seen or {}).items() if now - t < RECONNECT_GAP}
+        self.sink_seen.update((n, now) for n in g["sinks"])
+        if arrived and arrived != g["default"]:
+            log("%s connected: it takes the audio" % arrived)
+            self.cmd_output(arrived)
         self.publish(g)
         return True
 

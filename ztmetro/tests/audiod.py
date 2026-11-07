@@ -150,4 +150,17 @@ for bad in ("", "nonsense", "volume", "volume 1 2 3", "output", "app-volume x", 
     except ValueError:
         pass
 
+
+# a Bluetooth output that connects takes the audio, only if it is the first such
+SP = {"kind": "speaker"}
+def BTS(n): return {"name": n, "kind": "bluetooth"}
+assert a.takeover_target(None, {"sp": SP, "b1": BTS("b1")}) is None          # first look
+assert a.takeover_target({"sp"}, {"sp": SP}) is None                         # nothing new
+assert a.takeover_target({"sp"}, {"sp": SP, "b1": BTS("b1")}) == "b1"        # takes over
+assert a.takeover_target({"sp", "b1"}, {"sp": SP, "b1": BTS("b1"), "b2": BTS("b2")}) is None  # another BT
+assert a.takeover_target({"sp", "u"}, {"sp": SP, "u": {"name": "u", "kind": "headphones", "usb": True}, "b1": BTS("b1")}) is None  # USB there
+assert a.takeover_target({"sp", "h"}, {"sp": SP, "h": {"name": "h", "kind": "headphones"}, "b1": BTS("b1")}) == "b1"  # a plain jack doesn't count
+assert a.takeover_target({"old"}, {"sp": SP, "b1": BTS("b1")}) is None       # all new: a restart
+assert a.takeover_target({"sp"}, {"sp": SP, "b1": BTS("b1"), "b2": BTS("b2")}) is None  # two at once: ask
+
 print("audiod: ok")
