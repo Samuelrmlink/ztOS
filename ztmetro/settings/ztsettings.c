@@ -183,10 +183,10 @@ static const struct { const char *key, *title, *about; } HAPTIC_GROUPS[] = {
 
 /* The quick actions there are, as the shell names them in `quick`. */
 static const char *const QUICK_IDS[] = { "wifi", "data", "bluetooth", "airplane", "rotation",
-	"flashlight", "location", "brightness", "settings", "vibrate", "none" };
+	"flashlight", "location", "brightness", "settings", "vibrate", "audio", "none" };
 static const char *const QUICK_NAMES[] = { "Wi-Fi", "Mobile data", "Bluetooth", "Airplane mode",
-	"Rotation lock", "Flashlight", "Location", "Brightness", "All settings", "Vibration", "(empty)" };
-#define N_QUICK 11
+	"Rotation lock", "Flashlight", "Location", "Brightness", "All settings", "Vibration", "Audio", "(empty)" };
+#define N_QUICK 12
 
 struct network {
 	char ssid[64];
@@ -268,7 +268,7 @@ static struct {
 	.lock_wall = "/usr/local/share/backgrounds/ztos/Lumia Cyan lock screens/Wallpaper_01.jpg",
 	.haptic_strength = 80,
 	.haptic_group = { 100, 100, 100, 100, 100, 100 },
-	.quick = { 0, 1, 2, 3, 4, 5, 7, 8 },
+	.quick = { 0, 1, 2, 3, 10, 5, 7, 8 },
 	.accent = 5,
 	.columns = 3,
 	.haptics = true,
