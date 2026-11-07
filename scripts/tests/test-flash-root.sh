@@ -19,6 +19,7 @@ cat > "$W/psh" <<'EOF'
 cmd=${*//\/dev\/sda25/$FAKE_PART}
 case $cmd in
 *killall*|touch\ /run/*) exit 0 ;;
+cat\ /sys/class/block/*) echo PARTNAME=USERDATA; exit 0 ;;
 blockdev*) stat -c %s "$FAKE_PART"; exit 0 ;;
 "ps | "*) pgrep -f "dd of=$FAKE_PART" > /dev/null && echo running; exit 0 ;;
 esac
