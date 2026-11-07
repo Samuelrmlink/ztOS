@@ -8,10 +8,12 @@
 | `pods-model.h` | State, commands, scan policy, the files. No I/O, no clock. |
 | `ztos-podsd.c` | sd-bus, the L2CAP socket, timers, files |
 | `pods-adv-capture.c` | A standalone capture of every advert in Apple's manufacturer data, for working out what the air carries |
-| `ztpods.c` | The app. JSON and a socket; no Bluetooth. |
+| `ztpods.c`, `pods-pages.c` | The app, in ztMETRO (and the same pages in Settings). JSON and a socket; no Bluetooth. |
+| `pods-ui.h` | What both front ends show: the settings rows, the modes, the colours, the texts made from the state's words. C and C++. |
+| `qt/` | `ztpods-qt`, the same app on a Qt desktop, and how to build and install it and the daemon on a PC: **[qt/README.md](qt/README.md)** |
 | `pods-bar-state.h`, `pods-bar.h` | The short file's reader; the status bar's drawing |
 
-Tests: `make check-pods` (any machine, no libraries), `make check-podsd` (on the phone: the whole daemon against a pretend bluetoothd on a private bus and pretend pods on a unix socket; touches no radio).
+Tests: `make check-pods` (any machine, no libraries), `make check-podsd` (on the phone, or a PC with dbus-python and PyGObject: the whole daemon against a pretend bluetoothd on a private bus and pretend pods on a unix socket; touches no radio).
 
 `ZTOS_PODSD_TRACE=FILE` records every packet in hex, leaving out the key packet and device information (serials). Use it to turn real pods into test data.
 
