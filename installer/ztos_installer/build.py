@@ -374,12 +374,16 @@ for u in greetd NetworkManager systemd-resolved sshd systemd-pstore ztos-pstore-
 		ztos-iald zrnperfd waydroid-container ztos-waydroid-images; do
 	ch systemctl enable "$u" > /dev/null 2>&1
 done
+# (systemd-networkd: only a device layer with a USB link turns it on, for its DHCP.
+# Its wait-online would hold boot up for a cable that may not be plugged in.)
 for u in systemd-networkd getty@tty1; do
 	ch systemctl disable "$u" > /dev/null 2>&1 || true
 done
 for u in $DEVICE_UNITS; do
 	ch systemctl enable "$u" > /dev/null 2>&1 || echo "(no $u)"
 done
+ch systemctl disable systemd-networkd-wait-online > /dev/null 2>&1 || true
+ch systemctl mask systemd-networkd-wait-online > /dev/null 2>&1 || true
 
 step "tidying up"
 rm -f "$R/etc/resolv.conf"; ln -sf /run/systemd/resolve/stub-resolv.conf "$R/etc/resolv.conf"

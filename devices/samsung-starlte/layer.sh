@@ -19,6 +19,10 @@ cp -a "$D/overlay/." "$R/"                   # the phone's own: charger, panel, 
 if [ -f "$R/etc/fstab" ]; then
 	sed -i 's/\([[:space:]]\)default\([,[:space:]]\)/\1defaults\2/g' "$R/etc/fstab"
 fi
+# systemd-networkd answers DHCP on the USB link, and does nothing else: NetworkManager
+# has Wi-Fi and Ethernet. Arch Linux ARM's en.network and eth.network, and the older
+# image's 20-wlan.network, would have both managing the same interface.
+find "$R/etc/systemd/network" -maxdepth 1 -name '*.network' ! -name 10-zboot-usb.network -delete
 # the panel's brightness table is made from its calibration (ztos-panel-bl)
 install -Dm755 "$DEVROOT/kernel/s9p-bl-table.py" "$R/usr/local/lib/ztos/s9p-bl-table.py"
 # SYS_SLEEP needs its backend and RTC/TMU helpers as well as the daemon.
@@ -61,6 +65,6 @@ for moddir in "$R"/usr/lib/modules/*; do
 done
 chmod 755 "$R"/usr/local/sbin/* 2>/dev/null || true
 
-DEVICE_UNITS="zboot-boot-ok zboot-usb-gadget zboot-firstboot zboot-charge-hold zrn-charge zrn-cpuidle ztoscirrusaudio
+DEVICE_UNITS="systemd-networkd zboot-boot-ok zboot-usb-gadget zboot-firstboot zboot-charge-hold zrn-charge zrn-cpuidle ztoscirrusaudio
 	ztoscsf-sensorhub ztoscsf-sensord ztoscorenetworking-modem ztoscorenetworking zrnperfd zrn-sleepd
 	ztos-panel-selfmask ztos-panel-selfmask-again.timer ztos-panel-bl zrn-bluetooth bluetooth ztos-gnss-gate ztos-gnss-lto.timer ztos-waydroid-location"
