@@ -3047,6 +3047,24 @@ static double draw_connections(cairo_t *cr) {
 	return y + 20;
 }
 
+static double draw_sound_touch(cairo_t *cr) {
+	double y = zmc_header(cr, "sound + touch");
+	char detail[128];
+	snprintf(detail, sizeof(detail), "media %d%%, ring %d%%", app.media_vol, app.ring_vol);
+	y = zmc_entry(cr, y, "ringtones + sounds", detail, ACT_OPEN_PAGE, PAGE_AUDIO);
+
+	if (!app.haptics) {
+		snprintf(detail, sizeof(detail), "off");
+	} else {
+		int on = 0;
+		for (int g = 0; g < N_HAPTIC_GROUPS; g++) on += app.haptic_group[g] > 0;
+		snprintf(detail, sizeof(detail), "on, strength %d%%, %d of %d kinds", app.haptic_strength,
+			on, N_HAPTIC_GROUPS);
+	}
+	y = zmc_entry(cr, y, "haptics", detail, ACT_OPEN_PAGE, PAGE_HAPTICS);
+	return y + 20;
+}
+
 static double draw_main(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "system", "applications", ACT_OPEN_PAGE, PAGE_APPS);
 	char detail[128];
@@ -3068,17 +3086,7 @@ static double draw_main(cairo_t *cr) {
 	y = zmc_entry(cr, y, "connections", detail, ACT_OPEN_PAGE, PAGE_CONNECTIONS);
 
 	snprintf(detail, sizeof(detail), "media %d%%, ring %d%%", app.media_vol, app.ring_vol);
-	y = zmc_entry(cr, y, "ringtones + sounds", detail, ACT_OPEN_PAGE, PAGE_AUDIO);
-
-	if (!app.haptics) {
-		snprintf(detail, sizeof(detail), "off");
-	} else {
-		int on = 0;
-		for (int g = 0; g < N_HAPTIC_GROUPS; g++) on += app.haptic_group[g] > 0;
-		snprintf(detail, sizeof(detail), "on, strength %d%%, %d of %d kinds", app.haptic_strength,
-			on, N_HAPTIC_GROUPS);
-	}
-	y = zmc_entry(cr, y, "haptics", detail, ACT_OPEN_PAGE, PAGE_HAPTICS);
+	y = zmc_entry(cr, y, "sound + touch", detail, ACT_OPEN_PAGE, PAGE_SOUND_TOUCH);
 
 	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
 		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
@@ -3114,6 +3122,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_DEV: return draw_dev(cr);
 	case PAGE_MAIN: return draw_main(cr);
 	case PAGE_CONNECTIONS: return draw_connections(cr);
+	case PAGE_SOUND_TOUCH: return draw_sound_touch(cr);
 	case PAGE_APPS: return draw_apps(cr);
 	case PAGE_INSTALLED_APPS: return draw_installed_apps(cr);
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);

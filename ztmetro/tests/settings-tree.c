@@ -19,6 +19,8 @@ int main(void) {
 	assert(page_parent(PAGE_WIFI, PAGE_MAIN) == PAGE_CONNECTIONS);
 	assert(page_parent(PAGE_BLUETOOTH, PAGE_MAIN) == PAGE_CONNECTIONS);
 	assert(page_parent(PAGE_MOBILE, PAGE_MAIN) == PAGE_CONNECTIONS);
+	assert(page_parent(PAGE_AUDIO, PAGE_MAIN) == PAGE_SOUND_TOUCH);
+	assert(page_parent(PAGE_HAPTICS, PAGE_MAIN) == PAGE_SOUND_TOUCH);
 	/* the rest go to the tab they were opened from */
 	assert(page_parent(PAGE_PERF, PAGE_APPS) == PAGE_APPS);
 	assert(page_parent(PAGE_PERF, PAGE_MAIN) == PAGE_MAIN);

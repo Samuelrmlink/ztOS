@@ -36,6 +36,7 @@ enum page {
 	PAGE_NAVIGATION,
 	PAGE_BOOST,	/* Dynamic Boost System: RapidBoost and IntelligentBoost */
 	PAGE_CONNECTIONS,	/* Wi-Fi, Bluetooth, the mobile network */
+	PAGE_SOUND_TOUCH,	/* ringtones + sounds, haptics */
 	N_PAGES
 };
 
@@ -50,7 +51,8 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_CONNECTIONS] = PAGE_HUB_TAB,
 	[PAGE_WIFI] = PAGE_CONNECTIONS,
 	[PAGE_MOBILE] = PAGE_CONNECTIONS,
-	[PAGE_AUDIO] = PAGE_HUB_TAB,
+	[PAGE_SOUND_TOUCH] = PAGE_HUB_TAB,
+	[PAGE_AUDIO] = PAGE_SOUND_TOUCH,
 	[PAGE_BATTERY] = PAGE_HUB_TAB,
 	[PAGE_CPU] = PAGE_HUB_TAB,
 	[PAGE_VM] = PAGE_HUB_TAB,
@@ -61,7 +63,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_DEV] = PAGE_HUB_TAB,
 	[PAGE_INSTALLED_APPS] = PAGE_APPS,
 	[PAGE_APP_DETAIL] = PAGE_INSTALLED_APPS,
-	[PAGE_HAPTICS] = PAGE_HUB_TAB,
+	[PAGE_HAPTICS] = PAGE_SOUND_TOUCH,
 	[PAGE_QUICK] = PAGE_HUB_TAB,
 	[PAGE_APN] = PAGE_MOBILE,
 	[PAGE_WIFI_JOIN] = PAGE_WIFI,
@@ -94,6 +96,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "bluetooth", PAGE_BLUETOOTH },
 	{ "mobile", PAGE_MOBILE },
 	{ "apn", PAGE_APN },
+	{ "sound", PAGE_SOUND_TOUCH },
 	{ "audio", PAGE_AUDIO },
 	{ "haptics", PAGE_HAPTICS },
 	{ "battery", PAGE_BATTERY },
