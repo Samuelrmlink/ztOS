@@ -332,8 +332,12 @@ static DEVICE_ATTR_RW(mcu_power);
  *
  * So: park every line we drive towards the chip low (or as a pulled-down
  * input), hold it in standby, then bring it up in Samsung's order: AP_SLEEP
- * high (ssp_dev.c probe), pins back, enable pin high, 100 ms. If MCU_RESP is
- * still high afterwards the hold is repeated, longer.
+ * high (ssp_dev.c probe), pins back, enable pin high, 100 ms. Once: MCU_RESP
+ * says nothing about whether this worked. It reads high on good and failed
+ * hubs alike, and after a good start too (sensors/README.md, "After a full
+ * power-off"), so it only goes in the log. lhd's patch download is the test
+ * of a good start, and ztoscsf answers one that fails by writing the reset
+ * file again.
  */
 static unsigned int standby_ms = 1000;
 module_param(standby_ms, uint, 0644);
@@ -341,11 +345,6 @@ MODULE_PARM_DESC(standby_ms, "how long the reset path holds the chip in standby 
 static bool supply_cut;
 module_param(supply_cut, bool, 0644);
 MODULE_PARM_DESC(supply_cut, "also switch LDO37 off during the hold (off by default: the stock kernel never does)");
-
-static bool mcu_resp_high(void)
-{
-	return gpiod_get_value(zrn_gpios[ZRN_GPIO_MCU_RESP]) > 0;
-}
 
 static void hub_pins_park(void)
 {
@@ -396,23 +395,17 @@ static int hub_cycle(unsigned int hold_ms)
 	return 0;
 }
 
-static int hub_power_sequence(unsigned int hold_ms)
+/* One standby hold of standby_ms, at each probe and from the reset file. */
+static int hub_power_sequence(void)
 {
-	unsigned int hold = hold_ms;
-	bool stale = mcu_resp_high();
-	int i, ret;
+	int resp = gpiod_get_value(zrn_gpios[ZRN_GPIO_MCU_RESP]);
+	int ret = hub_cycle(standby_ms);
 
-	for (i = 0; i < 3; i++) {
-		ret = hub_cycle(hold);
-		pr_info("zrn-bbd: hub standby %u ms%s: MCU_RESP %d (was %d), SHUB_INT %d\n", hold,
-			supply_cut ? " with supply cut" : "", mcu_resp_high(), stale,
-			gpiod_get_value(zrn_gpios[ZRN_GPIO_SHUB_INT]));
-		if (ret || !mcu_resp_high())
-			return ret;
-		hold = max(hold * 3, standby_ms);
-	}
-	pr_warn("zrn-bbd: MCU_RESP still high with MCU_REQ low; the chip did not reset\n");
-	return 0;
+	/* for the log only: see above */
+	pr_info("zrn-bbd: hub standby %u ms%s: MCU_RESP %d (was %d), SHUB_INT %d\n", standby_ms,
+		supply_cut ? " with supply cut" : "", gpiod_get_value(zrn_gpios[ZRN_GPIO_MCU_RESP]), resp,
+		gpiod_get_value(zrn_gpios[ZRN_GPIO_SHUB_INT]));
+	return ret;
 }
 
 static ssize_t reset_store(struct device *dev, struct device_attribute *attr,
@@ -422,7 +415,7 @@ static ssize_t reset_store(struct device *dev, struct device_attribute *attr,
 
 	if (kstrtoint(buf, 0, &reset) || reset != 1)
 		return -EINVAL;
-	reset = hub_power_sequence(standby_ms);
+	reset = hub_power_sequence();
 	return reset ? reset : size;
 }
 static DEVICE_ATTR_WO(reset);
@@ -833,9 +826,10 @@ static int __init board_init(void)
 	}
 	/* after the probe: it clears the whole bbd state, callbacks included */
 	bbd_register(NULL, &ssp_callbacks);
-	/* Match Samsung's power-up order on every probe, including module reload;
-	 * a chip left running by a warm reboot gets the long hold */
-	ret = hub_power_sequence(mcu_resp_high() ? standby_ms : 100);
+	/* Match Samsung's power-up order on every probe, including module reload.
+	 * Always the full hold: a warm reboot leaves the chip running, and nothing
+	 * we can read tells that apart from a cold start. */
+	ret = hub_power_sequence();
 	if (ret)
 		goto err;
 	{

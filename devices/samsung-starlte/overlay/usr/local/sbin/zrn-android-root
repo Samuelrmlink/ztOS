@@ -13,6 +13,17 @@ R=/run/android
 # the other, and the modem never booted (2026-10-26). One at a time.
 exec 9>/run/zrn-android-root.lock
 flock 9
+take_down() {
+	while mountpoint -q $R; do umount -R $R 2>/dev/null || umount -l $R; done
+}
+# One mount refused: no half-made root, and the caller is told. A root without
+# its vendor files only shows up later, as a daemon that won't start.
+must() {
+	"$@" && return 0
+	echo "zrn-android-root: failed: $*" >&2
+	take_down
+	exit 1
+}
 case "${1:-up}" in
 up)
 	# already up (linker64 itself is a link that only resolves inside the
@@ -23,29 +34,31 @@ up)
 		exit 0
 	fi
 	# a root left half made (mounted, nothing in it): take it down first
-	while mountpoint -q $R; do umount -R $R 2>/dev/null || umount -l $R; done
+	take_down
 	mkdir -p /mnt/system /mnt/vendor /var/lib/zrn-android/data/vendor/gps /var/lib/zrn-android/data/system/gps
-	mountpoint -q /mnt/system || mount -o ro /dev/disk/by-partlabel/SYSTEM /mnt/system
-	mountpoint -q /mnt/vendor || mount -o ro /dev/disk/by-partlabel/VENDOR /mnt/vendor
-	mkdir -p $R && mount -t tmpfs -o mode=755,size=1m tmpfs $R
+	mountpoint -q /mnt/system || must mount -o ro /dev/disk/by-partlabel/SYSTEM /mnt/system
+	mountpoint -q /mnt/vendor || must mount -o ro /dev/disk/by-partlabel/VENDOR /mnt/vendor
+	mkdir -p $R && must mount -t tmpfs -o mode=755,size=1m tmpfs $R
 	mkdir -p $R/system $R/vendor $R/apex/com.android.runtime $R/dev $R/proc $R/sys $R/data $R/tmp
-	mount --bind /mnt/system/system $R/system
-	mount --bind /mnt/vendor $R/vendor
-	mount --bind /mnt/system/system/apex/com.android.runtime.release $R/apex/com.android.runtime
-	mount --rbind /dev $R/dev
+	must mount --bind /mnt/system/system $R/system
+	must mount --bind /mnt/vendor $R/vendor
+	# (an Android 10 layout; a SYSTEM from before apex has its linker in /system/bin)
+	apex=/mnt/system/system/apex/com.android.runtime.release
+	[ ! -d $apex ] || must mount --bind $apex $R/apex/com.android.runtime
+	must mount --rbind /dev $R/dev
 	# No binder in here. /dev/hwbinder is Waydroid's (binderfs): seeing it,
 	# lhd went to register with a hardware service manager and waited for
 	# ever, and the sensor hub never started (26 to 27 Oct 2026). A slave
 	# copy first, so taking binderfs off here leaves the host's (and
 	# Waydroid's) alone.
-	mount --make-rslave $R/dev
+	must mount --make-rslave $R/dev
 	umount -l $R/dev/binderfs 2>/dev/null || true
 	# Private as well: Waydroid's container can mount binderfs after this
 	# (a slave would receive it), and lhd hung again at every boot (30 Oct).
-	mount --make-rprivate $R/dev
-	mount -t proc proc $R/proc
-	mount --rbind /sys $R/sys
-	mount --bind /var/lib/zrn-android/data $R/data
+	must mount --make-rprivate $R/dev
+	must mount -t proc proc $R/proc
+	must mount --rbind /sys $R/sys
+	must mount --bind /var/lib/zrn-android/data $R/data
 	ln -sfn system/bin $R/bin; ln -sfn system/etc $R/etc
 	;;
 down)

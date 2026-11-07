@@ -79,6 +79,7 @@ enum action {
 	ACT_HAPTICS,
 	ACT_WIFI_RADIO,
 	ACT_WIFI_SUSPEND,
+	ACT_AIRPLANE_RADIOS,
 	ACT_WIFI_CONNECT,
 	ACT_WIFI_RESCAN,
 	ACT_WIFI_PASSWORD,	/* the box */
@@ -202,6 +203,7 @@ static struct {
 
 	bool wifi_on, wifi_loading;
 	bool wifi_suspend;
+	bool airplane_radios;
 	struct network networks[MAX_NETWORKS];
 	int n_networks;
 	char wifi_status[96];
@@ -408,6 +410,8 @@ static void config_load(void) {
 			else app.timeout_idx = 4;
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			app.wifi_suspend = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
+		} else if (strcmp(key, "airplane_radios") == 0) {
+			app.airplane_radios = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
 		}
 	}
 	if (f) fclose(f);
@@ -537,7 +541,7 @@ static void auto_load(void) {
 }
 
 /* Every key Settings can write, as it would write it now. */
-enum { N_CONFIG_KEYS = 25 + N_HAPTIC_GROUPS };
+enum { N_CONFIG_KEYS = 26 + N_HAPTIC_GROUPS };
 static struct config_key config_keys[N_CONFIG_KEYS];
 
 static struct config_key *config_key_named(const char *name) {
@@ -573,6 +577,7 @@ static void config_format(void) {
 	}
 	KEY("quick", "%s", quick);
 	KEY("wifi_suspend", "%s", app.wifi_suspend ? "on" : "off");
+	KEY("airplane_radios", "%s", app.airplane_radios ? "on" : "off");
 	KEY("key_height", "%d", app.key_height);
 	KEY("key_sound", "%s", app.key_sound ? "on" : "off");
 	KEY("ring_volume", "%d", app.ring_vol);
@@ -1936,10 +1941,13 @@ static struct {
 	struct bt_device dev[MAX_BT];
 	int n;
 	char status[120];
+	char name[64];		/* this phone's, as others see it: bluetoothd takes it from the hostname */
 } bt;
 
-/* "yes|no", then "@devices" and one "MAC|name|paired|connected|icon" each */
-#define BT_QUERY "p=$(bluetoothctl show 2>/dev/null | sed -n 's/.*Powered: //p'); echo \"${p:-no}\"; " \
+/* "yes|no", "name=" what others see this phone as, then "@devices" and one
+ * "MAC|name|paired|connected|icon" each */
+#define BT_QUERY "s=$(bluetoothctl show 2>/dev/null); p=$(echo \"$s\" | sed -n 's/.*Powered: //p'); echo \"${p:-no}\"; " \
+	"echo \"name=$(echo \"$s\" | sed -n 's/.*Alias: //p' | head -n 1)\"; " \
 	"echo @devices; bluetoothctl devices 2>/dev/null | while read -r _ mac name; do " \
 	"i=$(bluetoothctl info \"$mac\" 2>/dev/null); " \
 	"echo \"$mac|$name|$(echo \"$i\" | sed -n 's/.*Paired: //p')|$(echo \"$i\" | sed -n 's/.*Connected: //p')|" \
@@ -1975,6 +1983,8 @@ static void bt_parse(char *text) {
 	for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
 		if (strcmp(line, "@devices") == 0) {
 			devices = true;
+		} else if (!devices && strncmp(line, "name=", 5) == 0) {
+			snprintf(bt.name, sizeof(bt.name), "%s", line + 5);
 		} else if (!devices) {
 			bt.on = strncmp(line, "yes", 3) == 0;
 		} else if (n_fresh < MAX_BT) {
@@ -2114,8 +2124,14 @@ static double draw_bluetooth(cairo_t *cr) {
 	if (!bt.on) {
 		return y;
 	}
-	y += zmc_text(cr, "Now discoverable as \"ztOS Bluetooth Device\". Your phone is searching for "
-		"Bluetooth devices.", FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 18;
+	char found[160];
+	if (bt.name[0]) {
+		snprintf(found, sizeof(found), "Now discoverable as \"%s\". Your phone is searching for "
+			"Bluetooth devices.", bt.name);
+	} else {
+		snprintf(found, sizeof(found), "Now discoverable. Your phone is searching for Bluetooth devices.");
+	}
+	y += zmc_text(cr, found, FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 18;
 	if (bt.status[0]) {
 		zmc_set_rgb(cr, ACCENTS[app.accent].color);
 		y += zmc_text(cr, bt.status, FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 14;
@@ -2418,6 +2434,10 @@ static double draw_mobile(cairo_t *cr) {
 
 	snprintf(value, sizeof(value), "%s%s", apn_field[0], apn_field[1][0] ? ", with a user name" : "");
 	y = zmc_entry(cr, y, "access point", value, ACT_OPEN_PAGE, PAGE_APN);
+	y = zmc_switch(cr, y, "Airplane mode: all radios", app.airplane_radios, ACT_AIRPLANE_RADIOS);
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	y += zmc_text(cr, "Airplane mode also turns off Wi-Fi and Bluetooth, and puts them back when it ends.",
+		FONT_REGULAR, 13.5, MARGIN, y, zmc.width - 2 * MARGIN) + 20;
 	return y + 20;
 }
 
@@ -3586,6 +3606,10 @@ static void activate(int action, int arg) {
 		}
 		app.wifi_on = !app.wifi_on;
 		wifi_refresh(app.wifi_on ? "sleep 3" : NULL);
+		break;
+	case ACT_AIRPLANE_RADIOS:
+		app.airplane_radios = !app.airplane_radios;
+		config_save();	/* the shell reads it on SIGHUP */
 		break;
 	case ACT_WIFI_SUSPEND:
 		app.wifi_suspend = !app.wifi_suspend;

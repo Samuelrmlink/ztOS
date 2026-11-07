@@ -28,7 +28,8 @@ log=$state/log
 
 id=0
 status() { printf '%s %s\n' "$id" "$*" > "$state/status.new" && mv -f "$state/status.new" "$state/status"; }
-fail() { status "failed $*"; exit 1; }
+# (also to the journal: the log above is in /run, and gone after a reboot)
+fail() { status "failed $*"; echo "ztstore-helper: $*" >&2; exit 1; }
 
 # a word to the person's shell (a notification), if it is running
 tell() {

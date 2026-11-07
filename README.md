@@ -37,7 +37,7 @@ tree, and `scripts/split/split.py` cuts it into them.
 
 ## Screenshots
 
-From a Galaxy S9 running ztOS (taken from the live display with `scripts/phone-grab.sh`).
+From a Galaxy S9 running ztOS (taken from the live display's scanout buffer).
 
 <table>
 <tr>

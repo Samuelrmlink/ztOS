@@ -24,6 +24,12 @@ tell() {
 	done
 }
 
+# what pacman last complained of, for the journal
+why() {
+	line=$(tail -n 40 "$LOG" | grep '^error:' | tail -1)
+	echo "ztos-update: ${line:-failed; see $LOG}" >&2
+}
+
 exec 9> "$STATE/lock"
 flock -n 9 || { echo "ztos-update: already running" >&2; exit 1; }
 
@@ -33,6 +39,7 @@ check)
 	echo "== check $(date)" >> "$LOG"
 	if ! pacman -Sy --noconfirm >> "$LOG" 2>&1; then
 		status "failed check"
+		why	# (for the journal: the unit's failure said nothing else)
 		exit 1
 	fi
 	pacman -Qu > "$LIST.new" 2>> "$LOG"
@@ -67,6 +74,7 @@ apply)
 		tell "ztOS is up to date" "$n updates were installed."
 	else
 		status "failed install"
+		why
 		tell "Updates did not install" "See /var/log/ztos-update.log."
 		exit 1
 	fi

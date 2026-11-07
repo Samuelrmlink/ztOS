@@ -53,13 +53,16 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "../ztos-user.h"
 
 #define NAME		"ztOSCoreSensorFramework"
 #define COMPONENTS	"/etc/ztoscoresensorframework/components"
 #define MARKS		"/var/lib/ztoscsf"
 #define RUN_DIR		"/run/ztoscsf"
 #define STATUS		RUN_DIR "/status"
+#ifndef CSF_CTL
 #define CSF_CTL		"/run/ztoscsf.ctl"
+#endif
 #define PERIOD_S	60	/* (every look runs a program or two: not more often than this) */
 #define QUIET_S		600	/* one report per piece in this long */
 #define START_GRACE_S	100	/* how long a unit may take to come up at first */
@@ -494,35 +497,110 @@ static void hub_release(void)
 	unlink(HUB_HOLD);
 }
 
+/* Samsung's sensor hub comes with the device's own files (the S9's overlay has
+ * this unit; a phone without the hub, or QEMU, does not): nothing to check, and
+ * nothing to retry and then warn about, anywhere else. */
+#define HUB_UNIT	"ztoscsf-sensorhub.service"
+static bool hub_expected(void)
+{
+	return access("/etc/systemd/system/" HUB_UNIT, F_OK) == 0 ||
+		access("/usr/lib/systemd/system/" HUB_UNIT, F_OK) == 0;
+}
+
+static bool hub_stopped(void)
+{
+	return access("/run/ztoscsf-sensorhub.stopped", F_OK) == 0 ||
+		access("/run/sensorhub.stopped", F_OK) == 0;
+}
+
+static int hub_ready_value(void)
+{
+	int value = 0;
+	FILE *f = fopen("/sys/class/sec/sensorhub/ready", "r");
+	if (!f)
+		return -1;
+	if (fscanf(f, "%d", &value) != 1)
+		value = 0;
+	fclose(f);
+	return value;
+}
+
+/* A hub recovery runs a step at a time: the main loop goes on reading the
+ * control pipe and watching everything else while the firmware downloads. */
+#define HUB_ATTEMPTS	2
+#define HUB_WAIT_S	25	/* for the firmware after each reset */
+static int hub_attempt;		/* the one under way; 0 when none is */
+static long hub_deadline;
+static bool hub_dialog_shown;
+
+static bool hub_recovering(void)
+{
+	return hub_attempt > 0;
+}
+
+/* The next reset, or if there are no more, stop and say so. */
+static void hub_retry(void)
+{
+	while (++hub_attempt <= HUB_ATTEMPTS) {
+		say("Sensor hub initialization failed; power retry %d/%d", hub_attempt, HUB_ATTEMPTS);
+		/* no SoC sleep in the middle of a reset and patch download */
+		hub_hold(45);
+		run("systemctl stop ztoscsf-sensord.service");
+		/* No daemon may talk to the hub while its power is reset. */
+		run("systemctl stop " HUB_UNIT);
+		if (run("echo 1 > /sys/class/sec/sensorhub/reset") != 0 ||
+		    run("systemctl restart --no-block " HUB_UNIT) != 0)
+			continue;
+		hub_deadline = now_s() + HUB_WAIT_S;
+		return;
+	}
+	hub_attempt = 0;
+	/* A dialog must never leave the failed vendor daemon spinning. */
+	run("systemctl stop ztoscsf-sensord.service " HUB_UNIT);
+	hub_release();
+	say("Sensor hub failed to initialize; stopped sensor services: showing Lumia Metro dialog");
+	hub_dialog_shown = true;
+	char cmd[512];
+	snprintf(cmd, sizeof(cmd),
+		"dialog ztOSCoreSensorFramework|Sensor hub failed to initialize.|stop sensor hub in this boot:stop_sensorhub\n");
+	if (!shell_tell(cmd)) {
+		if (q_len < MAX_QUEUE) {
+			snprintf(queue[q_len++], sizeof(queue[0]), "%s", cmd);
+		}
+	}
+}
+
+/* While a recovery runs: called about once a second. */
+static void hub_recovery_step(void)
+{
+	if (hub_stopped()) {
+		/* asked to stop while it was trying (ctl_handle stopped the units) */
+		hub_attempt = 0;
+		hub_release();
+		return;
+	}
+	if (hub_ready_value() == 1) {
+		run("systemctl restart --no-block ztoscsf-sensord.service");
+		say("Sensor hub recovered after power retry %d", hub_attempt);
+		hub_attempt = 0;
+		return;
+	}
+	if (now_s() >= hub_deadline)
+		hub_retry();
+}
+
 static void sensorhub_look(void)
 {
-	static bool dialog_shown = false;
-	if (access("/run/ztoscsf-sensorhub.stopped", F_OK) == 0 ||
-	    access("/run/sensorhub.stopped", F_OK) == 0) {
+	if (hub_recovering() || hub_dialog_shown || hub_stopped() || !hub_expected())
 		return;
-	}
-	if (dialog_shown) {
-		return;
-	}
 
 	/* Wait at least 25 seconds after boot for BCM4773 patch attempt */
 	if (now_s() - started_at < 25) {
 		return;
 	}
 
-	bool failed = false;
-
 	/* 1. Check if ready != 1 */
-	FILE *rf = fopen("/sys/class/sec/sensorhub/ready", "r");
-	if (rf) {
-		int ready = 0;
-		if (fscanf(rf, "%d", &ready) != 1 || ready != 1) {
-			failed = true;
-		}
-		fclose(rf);
-	} else {
-		failed = true;
-	}
+	bool failed = hub_ready_value() != 1;
 
 	/* 2. Check if sensorhub units failed */
 	if (!failed) {
@@ -534,48 +612,8 @@ static void sensorhub_look(void)
 		}
 	}
 
-	if (failed) {
-		int attempt;
-
-		for (attempt = 1; attempt <= 2; attempt++) {
-			say("Sensor hub initialization failed; power retry %d/2", attempt);
-			/* no SoC sleep in the middle of a reset and patch download */
-			hub_hold(45);
-			run("systemctl stop ztoscsf-sensord.service");
-			/* No daemon may talk to the hub while its power is reset. */
-			run("systemctl stop ztoscsf-sensorhub.service");
-			if (run("echo 1 > /sys/class/sec/sensorhub/reset") != 0 ||
-			    run("systemctl restart ztoscsf-sensorhub.service") != 0)
-				continue;
-			for (int i = 0; i < 25; i++) {
-				FILE *ready = fopen("/sys/class/sec/sensorhub/ready", "r");
-				int value = 0;
-				if (ready) {
-					fscanf(ready, "%d", &value);
-					fclose(ready);
-				}
-				if (value == 1) {
-					run("systemctl restart ztoscsf-sensord.service");
-					say("Sensor hub recovered after power retry %d", attempt);
-					return;
-				}
-				sleep(1);
-			}
-		}
-		/* A dialog must never leave the failed vendor daemon spinning. */
-		run("systemctl stop ztoscsf-sensord.service ztoscsf-sensorhub.service");
-		hub_release();
-		say("Sensor hub failed to initialize; stopped sensor services: showing Lumia Metro dialog");
-		dialog_shown = true;
-		char cmd[512];
-		snprintf(cmd, sizeof(cmd),
-			"dialog ztOSCoreSensorFramework|Sensor hub failed to initialize.|stop sensor hub in this boot:stop_sensorhub\n");
-		if (!shell_tell(cmd)) {
-			if (q_len < MAX_QUEUE) {
-				snprintf(queue[q_len++], sizeof(queue[0]), "%s", cmd);
-			}
-		}
-	}
+	if (failed)
+		hub_retry();
 }
 
 static void ctl_handle(const char *cmd)
@@ -589,6 +627,22 @@ static void ctl_handle(const char *cmd)
 		if (fd >= 0) close(fd);
 		run("systemctl stop zrn-sensorhub.service ztoscsf-sensorhub.service zrnsensord.service ztoscsf-sensord.service 2>/dev/null");
 	}
+}
+
+/* The shell's way in: its "stop sensor hub" button runs as the phone's user.
+ * Only that user may write here, so no other local account can stop the hub.
+ * If the group can't be set it stays root's alone, and the button still stops
+ * the units through its sudo rule (99-ztos-shell). */
+static int ctl_open(void)
+{
+	unlink(CSF_CTL);
+	if (mkfifo(CSF_CTL, 0600) == 0) {
+		if (chown(CSF_CTL, -1, ztos_user()->gid) == 0)
+			chmod(CSF_CTL, 0620);
+		else
+			say("%s: cannot give it to the phone's user: %s", CSF_CTL, strerror(errno));
+	}
+	return open(CSF_CTL, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 }
 
 static void look(bool first)
@@ -706,17 +760,21 @@ int main(int argc, char **argv)
 	say("%s: %d components", NAME, n_parts);
 	start_all();
 
-	unlink(CSF_CTL);
-	if (mkfifo(CSF_CTL, 0666) == 0) {
-		chmod(CSF_CTL, 0666);
-	}
-	int ctl_fd = open(CSF_CTL, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+	int ctl_fd = ctl_open();
 
 	sleep(3);
 	look(true);
+	long next_look = 0;
 	for (;;) {
-		/* closer together while things are still coming up */
-		int wait_s = now_s() - started_at < START_GRACE_S ? 6 : PERIOD_S;
+		long now = now_s();
+		if (!next_look)
+			/* closer together while things are still coming up */
+			next_look = now + (now - started_at < START_GRACE_S ? 6 : PERIOD_S);
+		long wait_s = next_look - now;
+		if (hub_recovering() && wait_s > 1)
+			wait_s = 1;
+		if (wait_s < 0)
+			wait_s = 0;
 		if (ctl_fd >= 0) {
 			struct pollfd pfd = { .fd = ctl_fd, .events = POLLIN };
 			int ret = poll(&pfd, 1, wait_s * 1000);
@@ -734,7 +792,12 @@ int main(int argc, char **argv)
 		} else {
 			sleep(wait_s);
 		}
-		look(false);
+		if (hub_recovering())
+			hub_recovery_step();
+		if (now_s() >= next_look) {
+			look(false);
+			next_look = 0;
+		}
 	}
 	if (ctl_fd >= 0) close(ctl_fd);
 	unlink(CSF_CTL);
