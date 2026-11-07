@@ -676,13 +676,17 @@ static inline void pods_bar_write(FILE *f, const struct pods_world *w) {
 	if (p[POD_HEADSET].level >= 0) fprintf(f, "left=%d\n", p[POD_HEADSET].level);
 	fprintf(f, "charge_left=%d\ncharge_right=%d\n", p[POD_LEFT].charging, p[POD_RIGHT].charging);
 	/* the ear report gives the primary pod first: without the primary it names nobody.
-	 * In use means in an ear: a pod in a hand or the case isn't, so one in an ear alone
-	 * is on its own, and neither in an ear shows both. */
+	 * In use means out of the case, in an ear or a hand: one out with the other in the
+	 * case is on its own. Both in the case shows both, as there's no better answer. */
 	if (linked->primary >= 0) {
 		int place_left = linked->place[linked->primary == POD_LEFT ? 0 : 1];
 		int place_right = linked->place[linked->primary == POD_LEFT ? 1 : 0];
-		if (place_left == EAR_IN && place_right != EAR_IN && place_right >= 0) fputs("single=left\n", f);
-		else if (place_right == EAR_IN && place_left != EAR_IN && place_left >= 0) fputs("single=right\n", f);
+		bool case_left = place_left == EAR_CASE_OPEN || place_left == EAR_CASE_CLOSED;
+		bool case_right = place_right == EAR_CASE_OPEN || place_right == EAR_CASE_CLOSED;
+		if (place_left >= 0 && place_right >= 0) {
+			if (!case_left && case_right) fputs("single=left\n", f);
+			else if (case_left && !case_right) fputs("single=right\n", f);
+		}
 	}
 	fprintf(f, "charging=%d\n", p[POD_LEFT].charging || p[POD_RIGHT].charging || p[POD_HEADSET].charging);
 }

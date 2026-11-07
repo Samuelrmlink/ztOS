@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 /* The status bar's AirPods icon, its own icon beside Bluetooth's: both buds with a thin
- * meter either side, each its own pod's, or, with only one pod in an ear, that pod with a
+ * meter either side, each its own pod's, or, with only one pod out of the case, that pod with a
  * tiny L or R by its stem and its meter to the right. Fed by ztos-podsd, not BlueZ. */
 #ifndef PODS_BAR_H
 #define PODS_BAR_H

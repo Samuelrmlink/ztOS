@@ -551,17 +551,19 @@ static void test_files(void) {
 	unlink(tmp);
 	assert(bar.link && bar.left == 80 && bar.right == -1 && bar.kase == 33 && bar.charging);
 	assert(pods_bar_knows(&bar, MAC) && !pods_bar_knows(&bar, "00:00:00:00:00:00"));
-	/* the writer: only one pod in an ear is on its own, by which pod is primary */
+	/* the writer: a pod out of the case, ear or hand, is in use, by which is primary */
 	{
 		struct pods_device *d = &w.dev[0];
 		int primary = d->primary, p0 = d->place[0], p1 = d->place[1];
 		const struct { int primary, p0, p1; const char *want; } ears[] = {
 			{ POD_RIGHT, EAR_IN, EAR_CASE_CLOSED, "single=right\n" },
 			{ POD_LEFT, EAR_CASE_CLOSED, EAR_IN, "single=right\n" },
-			{ POD_LEFT, EAR_IN, EAR_OUT, "single=left\n" },
+			{ POD_LEFT, EAR_OUT, EAR_CASE_OPEN, "single=left\n" },
+			{ POD_LEFT, EAR_IN, EAR_OUT, NULL },
 			{ POD_LEFT, EAR_IN, EAR_IN, NULL },
-			{ POD_LEFT, EAR_OUT, EAR_CASE_OPEN, NULL },
-			{ -1, EAR_IN, EAR_OUT, NULL },
+			{ POD_LEFT, EAR_OUT, EAR_OUT, NULL },
+			{ POD_LEFT, EAR_CASE_OPEN, EAR_CASE_CLOSED, NULL },
+			{ -1, EAR_IN, EAR_CASE_OPEN, NULL },
 			{ POD_LEFT, EAR_IN, -1, NULL },
 		};
 		for (size_t k = 0; k < sizeof(ears) / sizeof(ears[0]); k++) {

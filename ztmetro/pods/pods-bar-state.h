@@ -5,7 +5,7 @@
  *   left= right= case=   percent; absent: not known
  *   charging=0|1
  *   charge_left=0|1 charge_right=0|1   that pod is charging
- *   single=left|right   the one pod in an ear, the other not; absent: both, or not known
+ *   single=left|right   the one pod out of the case, the other in it; absent: both, or not known
  * The shell and Settings read it; neither links a JSON parser. */
 #ifndef PODS_BAR_STATE_H
 #define PODS_BAR_STATE_H
