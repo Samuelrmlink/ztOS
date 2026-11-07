@@ -118,12 +118,13 @@ int main(void) {
     touch_update(&s, 5, x+30, y, now_ms());
     s.osk_cursor_touch->down_ms = now_ms()-LONG_PRESS_MS;
     long_press_fired(&s);
-    assert(!s.osk_trackpad);
+    assert(s.osk_trackpad);	/* a drag off the dot starts it too, without the hold */
     touch_end(&s, 5, now_ms(), false);
+    assert(!s.osk_trackpad);
     hold_dot(&s, 6);
     osk_show(&s, false);
     assert(!s.osk_trackpad && !s.osk_cursor_touch);
     touch_end(&s, 6, now_ms(), false);
-    puts("PASS: aligned rows at all heights, hold, fractional cursor movement, modifiers, extra finger, release, cancel, short tap, movement before hold, keyboard hide");
+    puts("PASS: aligned rows at all heights, hold, fractional cursor movement, modifiers, extra finger, release, cancel, short tap, drag off the dot, keyboard hide, number pads");
     return 0;
 }

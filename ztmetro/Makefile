@@ -269,21 +269,21 @@ clean:
 
 # Uses a private Wayland seat; does not touch the running compositor or display.
 .PHONY: check-arch check-keyboard
-check-keyboard: xdg-shell-protocol.h
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
-		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(shell pkg-config --libs $(PKGS)) -lm
+check-keyboard: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-keyboard-test
 
 .PHONY: check-launch
-check-launch: xdg-shell-protocol.h
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
-		-o /tmp/ztmetro-launch-test tests/launch-state.c $(shell pkg-config --libs $(PKGS)) -lm
+check-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-launch-test tests/launch-state.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-launch-test
 
 .PHONY: check-auth
-check-auth: xdg-shell-protocol.h
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
-		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(shell pkg-config --libs $(PKGS)) -lm
+check-auth: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-auth-test
 
 .PHONY: check-bt-list
