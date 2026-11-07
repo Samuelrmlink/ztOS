@@ -1,0 +1,2 @@
+# the front LED has appeared, perhaps after zrn-ledd started: it writes the light again
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="blue:status", RUN+="/usr/bin/systemctl kill -s HUP zrn-ledd.service"

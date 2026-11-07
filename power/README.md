@@ -172,8 +172,12 @@ mainline's leds-max77705 would bind to it but reads its LEDs from the device
 tree. zrn-led binds by name instead and registers `red:status`,
 `green:status`, `blue:status` (0..255, the channel current); blinking is done
 by the chip (`timer` trigger, period shared by the channels). Installed in
-`/lib/modules/7.1.0-zboot/extra`, loaded by udev. `zrn-charge` sets it: red
-while charging, green when full or on a cable that does not charge.
+`/lib/modules/7.1.0-zboot/extra`, loaded by udev. `zrn-ledd`
+(`ztmetro/ledd/`) is the only program that writes it. The others say what they
+want in a file under `/run/zrn-led`, and it shows the most important: a
+notification, then low battery, then charging or full, then RapidBoost. By
+default: red while charging, green when full or on a cable that does not charge,
+and no RapidBoost blink. Settings' "notification light" page changes that.
 
 Since 2026-10-13: full brightness is 60 % of the chip's (`max_percent`), and
 the chip's own ramp makes it breathe (`ramp` beside `brightness`, "UP DOWN"

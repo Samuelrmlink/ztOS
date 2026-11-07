@@ -35,6 +35,7 @@ ztmetro/apps/ztapps
 ztmetro/settings/ztsettings
 ztmetro/devtest/zrndevtest
 ztmetro/perfd/zrnperfd
+ztmetro/ledd/zrn-ledd
 ztmetro/sensord/ztoscsf-sensord
 ztmetro/modemd/ztoscorenetworkingd
 ztmetro/csf/ztoscsf

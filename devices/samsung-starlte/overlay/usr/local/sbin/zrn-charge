@@ -10,49 +10,33 @@
 #	wall charger or charging port	1500 mA in, 1500 mA into the battery
 #	a computer, or nothing		 500 mA in,  450 mA (the driver's own)
 #
-# It also sets the front LED as Samsung's own system does: red while
-# charging, green once full, off otherwise; and, discharging with the
-# battery at 15 % or less, a slow red breathing (the chip ramps the light up
-# and down itself, so it costs the processor nothing).
+# It also tells zrn-ledd, which owns the front LED, what the battery is doing:
+# charging, full, low (discharging with the battery at 15 % or less) or none.
+# By default that is drawn as Samsung's own system does: red while charging,
+# green once full, off otherwise, and a slow red breathing when low.
 #
 # Run by udev on every power-supply change and once at boot. Detection takes
 # up to ten seconds after the plug goes in, hence the wait.
 C=/sys/class/power_supply/max77705-charger
 [ -w "$C/input_current_limit" ] || exit 0
 
-led() {	# red green: 0..255 each, steady
-	L=/sys/class/leds
-	[ -w $L/red:status/brightness ] || return 0
-	for c in red green blue; do echo none > $L/$c:status/trigger 2>/dev/null; done
-	[ -w $L/red:status/ramp ] && echo 0 > $L/red:status/ramp
-	echo "$1" > $L/red:status/brightness; echo "$2" > $L/green:status/brightness
-	echo 0 > $L/blue:status/brightness
+led() {	# what the front LED should show: zrn-ledd draws it. Only when it changes.
+	S=/run/zrn-led/charge
+	[ "$(cat $S 2>/dev/null)" = "$1" ] || { echo "$1" > $S; } 2>/dev/null
 }
-breathe() {	# red, slowly up and down: the battery is low. Done by the chip itself.
-	L=/sys/class/leds
-	[ -w $L/red:status/ramp ] || { led 40 0; return 0; }
-	[ "$(cat $L/red:status/trigger 2>/dev/null | grep -o '\[timer\]')" = "[timer]" ] && return 0
-	echo 0 > $L/green:status/brightness; echo 0 > $L/blue:status/brightness
-	echo 120 > $L/red:status/brightness
-	# one breath a second: up 400 ms, lit 100, down 400, dark 100
-	echo "400 400" > $L/red:status/ramp
-	echo timer > $L/red:status/trigger
-	echo 500 > $L/red:status/delay_on
-	echo 500 > $L/red:status/delay_off
-}
-LOW=15	# per cent: below this, off the charger, the light breathes
+LOW=15	# per cent: at this or below, off the charger, the battery is low
 # Green means "on a charger and full (or held full)", never just "a cable is
 # in": a computer's port that gives less than the phone uses leaves the
 # battery discharging, and that is shown as what it is.
 level=$(cat /sys/class/power_supply/max170xx_battery/capacity 2>/dev/null || echo 100)
 case "$(cat /sys/class/power_supply/max170xx_battery/status 2>/dev/null)" in
-Charging) led 24 0 ;;
-Full) led 0 24 ;;
+Charging) led charging ;;
+Full) led full ;;
 Discharging)
-	if [ "$level" -le $LOW ]; then breathe; else led 0 0; fi ;;
-*)	if [ "$(cat $C/online)" = 1 ] && [ "$level" -ge 95 ]; then led 0 24
-	elif [ "$level" -le $LOW ] && [ "$(cat $C/online)" != 1 ]; then breathe
-	else led 0 0; fi ;;
+	if [ "$level" -le $LOW ]; then led low; else led none; fi ;;
+*)	if [ "$(cat $C/online)" = 1 ] && [ "$level" -ge 95 ]; then led full
+	elif [ "$level" -le $LOW ] && [ "$(cat $C/online)" != 1 ]; then led low
+	else led none; fi ;;
 esac
 type=0 vbus=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do

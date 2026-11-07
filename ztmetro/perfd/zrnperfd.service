@@ -8,6 +8,8 @@ After=ztos-iald.service
 [Service]
 ExecStart=/usr/local/sbin/zrnperfd
 Restart=on-failure
+# no boost left claimed on the front LED
+ExecStopPost=-/bin/rm -f /run/zrn-led/boost
 
 [Install]
 WantedBy=multi-user.target

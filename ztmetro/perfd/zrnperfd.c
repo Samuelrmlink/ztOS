@@ -419,10 +419,6 @@ enum boost { IDLE0, NOMINAL, INTERACTIVE, BIG, RAPID };
 static const char *const boost_names[] = { "idle0", "nominal", "interactive", "big", "rapid" };
 static int thermal_level;		/* the thermal limit (thermal_update): 0 cool, 1-3 marks passed */
 static enum boost boost = IDLE0;	/* the resting state: two cores near 1.3 GHz */
-static bool boost_extreme;	/* rapid, and still pinned for a second */
-static bool led_lit;
-static long led_next;		/* when the light next changes; 0: not blinking */
-#define LED_WHITE	40	/* of 255, each of the three colours */
 #define BOOST_SAMPLE_MS	250
 /* up a rung: above this share of one core, held this long (eco apps only
  * ever reach nominal); down a rung: under BOOST_DOWN for 3 s (2 s from rapid) */
@@ -665,15 +661,16 @@ static void tree_release(void) {
 	tree_root = 0;
 }
 
-/* The front light, all three colours together: white, or dark. */
-static void led_white(bool on) {
-	static const char *const colours[] = { "red", "green", "blue" };
-	char path[80];
-	for (int i = 0; i < 3; i++) {
-		snprintf(path, sizeof(path), "/sys/class/leds/%s:status/brightness", colours[i]);
-		put_long(path, on ? LED_WHITE : 0);
+/* What zrn-ledd is told. Quietly nothing on a phone without it. */
+static void led_claim(int on) {
+	int fd = open("/run/zrn-led/boost", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		return;
 	}
-	led_lit = on;
+	if (write(fd, on ? "1\n" : "0\n", 2) < 0) {
+		fprintf(stderr, "zrnperfd: telling zrn-ledd: %s\n", strerror(errno));
+	}
+	close(fd);
 }
 
 static long little_floor, little_ceiling;	/* policy0's lowest step and current max */
@@ -964,7 +961,6 @@ static bool boost_sample(void) {
 	/* idle0 is only the Start screen's resting state; the moment an app is in
 	 * front the floor is nominal (idle1). */
 	enum boost floor = front_pid > 0 ? NOMINAL : IDLE0;
-	static int pinned_looks;
 	static long above_since;
 	/* up a rung once the load has stayed over that rung's mark long enough:
 	 * idle0 -> nominal at once (eco apps too); then not eco apps only */
@@ -981,15 +977,10 @@ static bool boost_sample(void) {
 			if (now - above_since >= up_hold[boost]) {
 				boost++;
 				above_since = 0;
-				pinned_looks = 0;
 			}
-		} else if (boost == RAPID && ++pinned_looks >= 1000 / BOOST_SAMPLE_MS) {
-			boost_extreme = true;	/* flat out for a second and still not enough */
 		}
 	} else {
 		above_since = 0;
-		pinned_looks = 0;
-		boost_extreme = false;
 		/* down a rung when it has been easy a while (the floor is idle0 on the
 		 * Start screen, nominal with an app in front) */
 		double u = boost <= NOMINAL ? used_any : used;
@@ -1149,19 +1140,13 @@ static void apply(void) {
 	cores_allowed(set);
 	waydroid_cores(set);
 	idle_two_cores(park);		/* only idle0, screen off, parks cpu2+ of the efficiency cluster */
-	/* the light: blinking while rapid boost is on (the loop does the blinking) */
-	bool blink = boost == RAPID && !low && profile != PERFORMANCE;
-	if (blink && !led_next) {
-		put("/sys/class/leds/red:status/trigger", "none");
-		put("/sys/class/leds/green:status/trigger", "none");
-		put("/sys/class/leds/blue:status/trigger", "none");
-		led_next = boost_ms();
-	} else if (!blink && led_next) {
-		led_next = 0;
-		led_white(false);
-		/* back to red for charging, green for full, or nothing */
-		if (system("/usr/local/sbin/zrn-charge >/dev/null 2>&1 &") != 0) {
-		}
+	/* the light is zrn-ledd's: say only whether rapid boost is on, and only when
+	 * that changes. Settings says whether it shows (off unless asked for). */
+	static int led_told = -1;
+	int blink = boost == RAPID && !low && profile != PERFORMANCE;
+	if (blink != led_told) {
+		led_told = blink;
+		led_claim(blink);
 	}
 	fprintf(stderr, "zrnperfd: %s, boost %s, deep sleep %s, screen %s\n", names[profile],
 		boost_names[boost], deepsleep ? "on" : "off", screen_on ? "on" : "off");
@@ -1478,18 +1463,6 @@ int main(void) {
 				wait = (int)left;
 			}
 		}
-		if (led_next) {
-			/* the light's next change: every 100 ms, every 50 in the extreme phase */
-			long now = boost_ms();
-			if (now >= led_next) {
-				led_white(!led_lit);
-				led_next = now + (boost_extreme ? 50 : 100);
-			}
-			long left = led_next - now;
-			if (wait < 0 || wait > left) {
-				wait = left < 1 ? 1 : (int)left;
-			}
-		}
 		if (touch_until) {
 			long left = touch_until - boost_ms();
 			if (wait < 0 || wait > left) {
@@ -1534,9 +1507,8 @@ int main(void) {
 		if (touch_until && boost_ms() >= touch_until) {
 			touch_release();
 		}
-		/* (the light wakes this loop more often than the load is looked at) */
 		static long sampled_at;
-		if (!led_next || boost_ms() - sampled_at >= BOOST_SAMPLE_MS) {
+		{
 			static long last_sampled;
 			static enum boost last_rung;
 			if (last_sampled && screen_on)
@@ -1649,7 +1621,7 @@ int main(void) {
 	}
 	tickle_stop();
 	iblog_flush();
-	led_white(false);
+	led_claim(0);
 	if (wifi_asleep) {
 		wifi_radio(true);	/* nothing is left switched off behind us */
 	}
