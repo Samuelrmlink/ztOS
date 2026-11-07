@@ -223,7 +223,8 @@ static struct {
 	int brightness;
 	bool autobrightness;
 	bool opentone;
-	int timeout_idx;
+	int timeout_idx;	/* the picker's place, the nearest if the file says another */
+	int timeout_s;		/* what the file says: seconds, 0 never */
 	int nav_size_idx;
 	int nav_icon_idx;
 	int scale_idx;
@@ -276,6 +277,7 @@ static struct {
 	.brightness = 50,
 	.autobrightness = true,
 	.timeout_idx = 1,
+	.timeout_s = 60,
 	.nav_size_idx = 0,
 	.scale_idx = 1,
 	.mobile_data = true,
@@ -318,6 +320,17 @@ static void read_sys_file(const char *path, char *out, size_t size) {
 		}
 		fclose(f);
 	}
+}
+
+/* The picker's screen timeouts: seconds, the last one never. */
+static const int TIMEOUT_SECONDS[] = { 30, 60, 180, 300, 0 };
+
+/* The timeout the shell is really using, however the file came to say it. */
+static const char *timeout_text(char *out, size_t size, int seconds) {
+	if (seconds <= 0) snprintf(out, size, "no timeout");
+	else if (seconds % 60) snprintf(out, size, "%d s timeout", seconds);
+	else snprintf(out, size, "%d min timeout", seconds / 60);
+	return out;
 }
 
 /* The whole UI's animation speed, percent of what was measured on the Lumia */
@@ -420,7 +433,9 @@ static void config_load(void) {
 			app.dev_lock = strcmp(val, "off") != 0;
 		} else if (strcmp(key, "timeout") == 0) {
 			int t = atoi(val);
-			if (t <= 30) app.timeout_idx = 0;
+			app.timeout_s = t;
+			if (t <= 0) app.timeout_idx = 4;	/* 0: never, as the shell reads it */
+			else if (t <= 30) app.timeout_idx = 0;
 			else if (t <= 60) app.timeout_idx = 1;
 			else if (t <= 180) app.timeout_idx = 2;
 			else if (t <= 300) app.timeout_idx = 3;
@@ -565,7 +580,6 @@ static struct config_key *config_key_named(const char *name) {
 }
 
 static void config_format(void) {
-	static const int timeouts[] = { 30, 60, 180, 300, 0 };
 	static const char *const sizes[] = { "compact", "standard", "large" };
 	int n = 0;
 #define KEY(name, ...) do { \
@@ -577,7 +591,7 @@ static void config_format(void) {
 	KEY("columns", "%d", app.columns);
 	KEY("haptics", "%s", app.haptics ? "on" : "off");
 	KEY("brightness", "%d", app.brightness);
-	KEY("timeout", "%d", timeouts[app.timeout_idx]);
+	KEY("timeout", "%d", TIMEOUT_SECONDS[app.timeout_idx]);
 	KEY("demo_tiles", "%s", app.dev_demo_tiles ? "on" : "off");
 	KEY("slow_motion", "%s", app.dev_slow ? "on" : "off");
 	KEY("show_touches", "%s", app.dev_touches ? "on" : "off");
@@ -929,8 +943,9 @@ static double draw_main(cairo_t *cr) {
 	/* the screen's real level: the config's is only where it last started,
 	 * and auto brightness moves on from it */
 	int bright_now = brightness_now();
-	snprintf(detail, sizeof(detail), "%d%% brightness, %s timeout",
-		bright_now > 0 ? bright_now : app.brightness, app.timeout_idx == 4 ? "Never" : "1 min");
+	char timeout[32];
+	snprintf(detail, sizeof(detail), "%d%% brightness, %s", bright_now > 0 ? bright_now : app.brightness,
+		timeout_text(timeout, sizeof(timeout), app.timeout_s));
 	y = zmc_entry(cr, y, "display", detail, ACT_OPEN_PAGE, PAGE_DISPLAY);
 
 	wifi_summary(wifi, sizeof(wifi));
@@ -3660,6 +3675,7 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_TIMEOUT_CYCLE:
 		app.timeout_idx = arg;
+		app.timeout_s = TIMEOUT_SECONDS[arg];
 		config_save();
 		break;
 	case ACT_SCALE_CYCLE:
