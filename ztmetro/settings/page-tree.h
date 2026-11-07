@@ -40,6 +40,7 @@ enum page {
 	PAGE_SYSTEM,	/* date + region, keyboard, developer, about */
 	PAGE_ANIMATION,	/* animation speeds */
 	PAGE_STYLE,	/* the shell's style: chosen, then applied with a warning */
+	PAGE_TILES,	/* Tiles Shell: the start screen's columns and background */
 	N_PAGES
 };
 
@@ -74,7 +75,8 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_DATE] = PAGE_SYSTEM,
 	[PAGE_BLUETOOTH] = PAGE_CONNECTIONS,
 	[PAGE_ACCENTS] = PAGE_THEME,
-	[PAGE_WALLS] = PAGE_THEME,
+	[PAGE_TILES] = PAGE_THEME,
+	[PAGE_WALLS] = PAGE_TILES,
 	[PAGE_ANIMATION] = PAGE_THEME,
 	[PAGE_STYLE] = PAGE_THEME,
 	[PAGE_NAVIGATION] = PAGE_THEME,
@@ -94,6 +96,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "wallpapers", PAGE_WALLS },
 	{ "animation", PAGE_ANIMATION },
 	{ "style", PAGE_STYLE },
+	{ "tiles", PAGE_TILES },
 	{ "navigation", PAGE_NAVIGATION },
 	{ "quick", PAGE_QUICK },
 	{ "display", PAGE_DISPLAY },

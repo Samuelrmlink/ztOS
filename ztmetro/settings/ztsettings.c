@@ -1718,8 +1718,23 @@ static double draw_theme(cairo_t *cr) {
 	snprintf(detail, sizeof(detail), "%d %%%s", menu_speeds[app.menu_speed_idx], app.dev_slow ? ", slow motion" : "");
 	y = zmc_entry(cr, y, "animation speeds", detail, ACT_OPEN_PAGE, PAGE_ANIMATION);
 	y += 4;
-	double gap = 8;
+	static const char *const styles[] = { "Metro", "DotMatrix" };
+	y = zmc_entry(cr, y, "shell style", styles[app.style], ACT_OPEN_PAGE, PAGE_STYLE);
+	y += 4;
+	snprintf(detail, sizeof(detail), "%d columns", app.columns);
+	y = zmc_entry(cr, y, "Tiles Shell", detail, ACT_OPEN_PAGE, PAGE_TILES);
+	y = zmc_entry(cr, y, "navigation bar", "choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
+	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
+		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
+	y = zmc_entry(cr, y, "quick tiles", detail, ACT_OPEN_PAGE, PAGE_QUICK);
+	return y + 20;
+}
 
+/* What the start screen looks like. Going through its photos on the home
+ * screen itself is still to come (ROADMAP 7.8): this opens the picker. */
+static double draw_tiles(cairo_t *cr) {
+	double y = zmc_header(cr, "Tiles Shell");
+	double gap = 8;
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Start screen columns", FONT_REGULAR, 13.5, MARGIN, y, 0);
 	y += 24;
@@ -1728,13 +1743,11 @@ static double draw_theme(cairo_t *cr) {
 		double bx = MARGIN + (c - 2) * (btn_w + gap);
 		if (app.columns == c) {
 			zmc_set_rgb(cr, ACCENTS[app.accent].color);
-			cairo_rectangle(cr, bx, y, btn_w, 36);
-			cairo_fill(cr);
 		} else {
 			cairo_set_source_rgb(cr, 0.18, 0.18, 0.18);
-			cairo_rectangle(cr, bx, y, btn_w, 36);
-			cairo_fill(cr);
 		}
+		cairo_rectangle(cr, bx, y, btn_w, 36);
+		cairo_fill(cr);
 		cairo_set_source_rgb(cr, 1, 1, 1);
 		char label[16];
 		snprintf(label, sizeof(label), "%d columns", c);
@@ -1742,16 +1755,7 @@ static double draw_theme(cairo_t *cr) {
 		zmc_add_hit(bx, y, btn_w, 36, ACT_COLUMNS, c);
 	}
 	y += 60;
-
-	static const char *const styles[] = { "Metro", "DotMatrix" };
-	y = zmc_entry(cr, y, "shell style", styles[app.style], ACT_OPEN_PAGE, PAGE_STYLE);
-	y += 4;
-	y = draw_wall_row(cr, y);
-	y = zmc_entry(cr, y, "navigation bar", "choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
-	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
-		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
-	y = zmc_entry(cr, y, "quick tiles", detail, ACT_OPEN_PAGE, PAGE_QUICK);
-	return y + 20;
+	return draw_wall_row(cr, y);
 }
 
 /* The brightness as it is now, in percent (the shell or sensord may have
@@ -3170,6 +3174,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);
 	case PAGE_THEME: return draw_theme(cr);
 	case PAGE_STYLE: return draw_style(cr);
+	case PAGE_TILES: return draw_tiles(cr);
 	case PAGE_ACCENTS: return draw_accents(cr);
 	case PAGE_WALLS: return draw_wallpapers(cr);
 	case PAGE_NAVIGATION: {
@@ -3346,6 +3351,7 @@ static void activate(int action, int arg) {
 		if (arg == PAGE_INSTALLED_APPS) installed_load();
 		if (arg == PAGE_STYLE) app.style_pending = app.style;	/* what was left unapplied is forgotten */
 		if (arg == PAGE_WALLS) {
+			app.wall_target = 1;	/* from Tiles Shell: Start's photo */
 			wall_cat_open = -1;	/* opens on the categories */
 			wall_leave_at = 0;
 			if (n_walls < 0) walls_scan();
