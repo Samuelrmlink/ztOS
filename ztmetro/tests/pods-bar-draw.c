@@ -4,15 +4,21 @@
 #include "../pods/pods-bar.h"
 
 int main(int argc, char **argv) {
-	const int levels[][3] = { { 87, 92, 0 }, { 12, 50, 0 }, { 12, 50, 1 }, { -1, -1, 0 } };
-	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 560, 120);
+	const struct pods_bar shots[] = {
+		{ .link = true, .left = 87, .right = 92, .kase = -1, .single = -1 },
+		{ .link = true, .left = 12, .right = 50, .kase = -1, .single = -1 },
+		{ .link = true, .left = 12, .right = 50, .kase = -1, .single = -1, .charge_left = true },
+		{ .link = true, .left = 100, .right = 60, .kase = 27, .single = 1, .charge_left = true },
+		{ .link = true, .left = 70, .right = 100, .kase = 27, .single = 0, .charge_right = true },
+		{ .link = true, .left = -1, .right = -1, .kase = -1, .single = -1 },
+	};
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 840, 120);
 	cairo_t *cr = cairo_create(s);
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_paint(cr);
 	cairo_scale(cr, 4, 4);
-	for (int i = 0; i < 4; i++) {
-		struct pods_bar b = { .link = true, .left = levels[i][0], .right = levels[i][1], .kase = -1, .charging = levels[i][2] };
-		pods_bar_draw(cr, &b, 6 + i * 34, 24, 15, 140);
+	for (int i = 0; i < 6; i++) {
+		pods_bar_draw(cr, &shots[i], 6 + i * 34, 24, 15, 6 + (i + 1) * 34);
 	}
 	cairo_destroy(cr);
 	int r = cairo_surface_write_to_png(s, argc > 1 ? argv[1] : "pods-bar.png");

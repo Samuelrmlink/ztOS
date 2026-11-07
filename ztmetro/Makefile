@@ -409,7 +409,7 @@ check-audio-apps:
 .PHONY: check-pods
 # the AirPods protocol layer against bytes (no phone, no pods, no libraries)
 check-pods:
-	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-pods-test tests/pods-proto.c
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-pods-test tests/pods-proto.c
 	/tmp/ztmetro-pods-test
 
 # the daemon itself against a pretend bluetoothd on a private bus, and pretend pods on a

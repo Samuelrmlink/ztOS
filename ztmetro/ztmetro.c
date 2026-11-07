@@ -5714,7 +5714,8 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	 * icon, filling from the bottom, and steady while the icon beside it blinks.
 	 * Left out rather than run into the battery on a screen too narrow for it. */
 	if (server->bt_on && server->bt_name[0] && server->pods_bar.link) {
-		pods_bar_draw(cr, &server->pods_bar, x + cell * 1.25 * 0.55 + 1.5, base, cell, bx - cell * 0.5);
+		/* its own icon: clear of Bluetooth's, not hard against it as the meter below is */
+		pods_bar_draw(cr, &server->pods_bar, x + cell * 1.25 * 0.55 + cell * 0.55, base, cell, bx - cell * 0.5);
 	} else if (server->bt_on && server->bt_name[0] && !server->bt_apple &&
 	    server->bt_battery >= 0 && server->bt_battery <= 100) {
 		double bar_w = cell * 0.2, bar_h = cell * 1.05;

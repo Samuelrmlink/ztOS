@@ -538,7 +538,7 @@ static void test_files(void) {
 
 	const char *b = to_string(w_bar, &w);
 	assert(strstr(b, "link=1\n") && strstr(b, "left=80\n") && strstr(b, "case=33\n") && strstr(b, "charging=1\n"));
-	assert(strstr(b, "known=" MAC "\n") && !strstr(b, "right="));
+	assert(strstr(b, "known=" MAC "\n") && !strstr(b, "\nright="));
 	char tmp[] = "/tmp/pods-bar-XXXXXX";
 	int fd = mkstemp(tmp);
 	assert(fd >= 0);
@@ -551,11 +551,46 @@ static void test_files(void) {
 	unlink(tmp);
 	assert(bar.link && bar.left == 80 && bar.right == -1 && bar.kase == 33 && bar.charging);
 	assert(pods_bar_knows(&bar, MAC) && !pods_bar_knows(&bar, "00:00:00:00:00:00"));
-	assert(pods_bar_level(&bar) == 80);
-	bar.right = 20;
-	assert(pods_bar_level(&bar) == 20);
-	bar.left = bar.right = -1;
-	assert(pods_bar_level(&bar) == -1);
+	/* the writer: only one pod in an ear is on its own, by which pod is primary */
+	{
+		struct pods_device *d = &w.dev[0];
+		int primary = d->primary, p0 = d->place[0], p1 = d->place[1];
+		const struct { int primary, p0, p1; const char *want; } ears[] = {
+			{ POD_RIGHT, EAR_IN, EAR_CASE_CLOSED, "single=right\n" },
+			{ POD_LEFT, EAR_CASE_CLOSED, EAR_IN, "single=right\n" },
+			{ POD_LEFT, EAR_IN, EAR_OUT, "single=left\n" },
+			{ POD_LEFT, EAR_IN, EAR_IN, NULL },
+			{ POD_LEFT, EAR_OUT, EAR_CASE_OPEN, NULL },
+			{ -1, EAR_IN, EAR_OUT, NULL },
+			{ POD_LEFT, EAR_IN, -1, NULL },
+		};
+		for (size_t k = 0; k < sizeof(ears) / sizeof(ears[0]); k++) {
+			d->primary = ears[k].primary;
+			d->place[0] = ears[k].p0;
+			d->place[1] = ears[k].p1;
+			const char *got = to_string(w_bar, &w);
+			if (ears[k].want) assert(strstr(got, ears[k].want));
+			else assert(!strstr(got, "single="));
+		}
+		d->primary = primary;
+		d->place[0] = p0;
+		d->place[1] = p1;
+	}
+	/* which pods are in use, by what the file says */
+	{
+		const struct { const char *text; int single; bool cl, cr; } cases[] = {
+			{ "link=1\nsingle=right\ncharge_left=1\ncharge_right=0\n", 1, true, false },
+			{ "link=1\nsingle=left\ncharge_left=0\ncharge_right=1\n", 0, false, true },
+			{ "link=1\nsingle=both\n", -1, false, false },
+		};
+		for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+			FILE *m = fmemopen((void *)cases[k].text, strlen(cases[k].text), "r");
+			struct pods_bar v;
+			pods_bar_parse(m, &v);
+			fclose(m);
+			assert(v.single == cases[k].single && v.charge_left == cases[k].cl && v.charge_right == cases[k].cr);
+		}
+	}
 
 	/* out of the keys file and back; a broken line is skipped */
 	char *k = to_string(w_keys, &w);
