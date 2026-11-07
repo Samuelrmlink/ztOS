@@ -34,6 +34,7 @@ want Discharging 50 0 none
 want Discharging 16 0 none
 want Discharging 15 0 low
 want Discharging 3 1 low		# a computer's port that gives too little
+want Discharging 50 1 charging	# the same port, with charge to spare: a cable in is a light on
 want "Not charging" 96 1 full
 want "Not charging" 50 1 none
 want "Not charging" 10 0 low

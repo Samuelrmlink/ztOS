@@ -25,16 +25,20 @@ led() {	# what the front LED should show: zrn-ledd draws it. Only when it change
 	[ "$(cat $S 2>/dev/null)" = "$1" ] || { echo "$1" > $S; } 2>/dev/null
 }
 LOW=15	# per cent: at this or below, off the charger, the battery is low
-# Green means "on a charger and full (or held full)", never just "a cable is
-# in": a computer's port that gives less than the phone uses leaves the
-# battery discharging, and that is shown as what it is.
+# Green means "on a charger and full (or held full)", never just "a cable is in".
 led_now() {
 	level=$(cat /sys/class/power_supply/max170xx_battery/capacity 2>/dev/null || echo 100)
 	case "$(cat /sys/class/power_supply/max170xx_battery/status 2>/dev/null)" in
 	Charging) led charging ;;
 	Full) led full ;;
 	Discharging)
-		if [ "$level" -le $LOW ]; then led low; else led none; fi ;;
+		# Plugged in counts as charging: on a computer's port the phone can use more
+		# than the port gives, and the gauge flips between the two with the load. The
+		# light says a cable is doing its job, and doesn't flicker with the screen.
+		# Low stays low: on such a port it's still running down.
+		if [ "$level" -le $LOW ]; then led low
+		elif [ "$(cat $C/online)" = 1 ]; then led charging
+		else led none; fi ;;
 	*)	if [ "$(cat $C/online)" = 1 ] && [ "$level" -ge 95 ]; then led full
 		elif [ "$level" -le $LOW ] && [ "$(cat $C/online)" != 1 ]; then led low
 		else led none; fi ;;
@@ -65,12 +69,11 @@ if [ "$diff" -gt 60000 ]; then
 	fi
 	echo "zrn-charge: vbus=$vbus type=$type -> input ${in} uA, charge ${cc} uA"
 fi
-# the plug and the battery's status agree, or give it a few seconds to
+# the charger's own view catches up with the plug, or give it a few seconds to
 for _ in 1 2 3 4 5 6 7 8; do
 	led_now
-	st=$(cat /sys/class/power_supply/max170xx_battery/status 2>/dev/null)
-	case "$(cat "$C/online"):$st" in
-	1:Charging|1:Full|0:Discharging) break ;;
+	case "$vbus:$(cat "$C/online")" in
+	1:1|0:0) break ;;
 	esac
 	sleep 1
 done
