@@ -439,6 +439,8 @@ def run_stage(s: Settings, log: Path) -> None:
         # checkout of the device's own repository (ZTOS_DEVICE=<path>)
         "DEVSRC": os.environ.get("ZTOS_DEVICE") or str(ROOT / "devices" / DEVICES.get(s.target, "none")),
         "DEVROOT": os.environ.get("ZTOS_DEVICE") or str(ROOT),
+        # modules built for the kernel being installed (devices/samsung-starlte/pick-modules.sh)
+        "ZTOS_MODULES": os.environ.get("ZTOS_MODULES", ""),
         "GSITAR": str(s.dir / f"ztos-gsi-{gsi_version()}-aarch64.tar.zst"),
         "PATH": os.environ.get("PATH", "/usr/bin"),
     }

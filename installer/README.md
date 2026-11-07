@@ -114,6 +114,13 @@ retries. Check the result with `df -h /`.
 If the phone ever fails to start, it falls back to TWRP by itself. Run the
 installer again from step 3.
 
+The kernel modules come from `prebuilts/modules/`. A module built in your own tree
+replaces its prebuilt only if it is newer than its source, and the build stops if a
+module was made for another kernel. Modules built for the exact kernel you are
+installing (`scripts/build-bt-modules.sh <its .config> <dir>`) go in with
+`ZTOS_MODULES=<dir>`. Matching the version string alone is not proof of a match:
+see `power/BT-FIX.md`.
+
 The Wi-Fi resume support is part of the phone kernel/device tree, not a
 separate package. A fresh install that rebuilds the boot image includes it.
 Choosing to reuse a previously built `out/ztos-boot.img` reuses that image as

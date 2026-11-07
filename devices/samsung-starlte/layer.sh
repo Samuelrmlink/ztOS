@@ -38,18 +38,11 @@ for f in "$DEVROOT"/firmware/calliope_*.bin; do
 done
 install -d "$R/usr/lib/modules/7.1.0-zboot/extra"
 install -d "$R/usr/local/lib"
-if [ -f "$DEVROOT/modem/zrn-modem/zrn-modem.ko" ]; then
-	install -m644 "$DEVROOT/modem/zrn-modem/zrn-modem.ko" "$R/usr/local/lib/zrn-modem.ko"
-	install -m644 "$DEVROOT/modem/zrn-modem/zrn-modem.ko" "$R/usr/lib/modules/7.1.0-zboot/extra/"
-elif [ -f "$DEVROOT/prebuilts/modules/zrn-modem.ko" ]; then
-	install -m644 "$DEVROOT/prebuilts/modules/zrn-modem.ko" "$R/usr/local/lib/zrn-modem.ko"
-	install -m644 "$DEVROOT/prebuilts/modules/zrn-modem.ko" "$R/usr/lib/modules/7.1.0-zboot/extra/"
-fi
-MODULES="$DEVROOT/prebuilts/modules/*.ko $DEVROOT/power/idle/zrn-cpuidle.ko $DEVROOT/haptics/zrn-haptic.ko
-	$DEVROOT/power/hotplug/zrn-hotplug.ko $DEVROOT/leds/zrn-led.ko $DEVROOT/leds/zrn-flash.ko $DEVROOT/sensors/driver/zrn-bbd.ko
-	$DEVROOT/audio/driver/snd-zrn-abox.ko $DEVROOT/audio/modules/*.ko $DEVROOT/score/driver/zrn-score.ko"
+# which modules: pick-modules.sh, which refuses stale and wrong-kernel ones
+MODULES=$(sh "$D/pick-modules.sh" "$DEVROOT") || exit 1
 for k in $MODULES; do
-	[ -f "$k" ] && install -m644 "$k" "$R/usr/lib/modules/7.1.0-zboot/extra/"
+	install -m644 "$k" "$R/usr/lib/modules/7.1.0-zboot/extra/"
+	case $k in */zrn-modem.ko) install -m644 "$k" "$R/usr/local/lib/zrn-modem.ko" ;; esac
 done
 if [ -f "$DEVROOT/build/linux-7.1/out/modules.builtin" ]; then
 	install -m644 "$DEVROOT/build/linux-7.1/out/modules.builtin" "$R/usr/lib/modules/7.1.0-zboot/"
@@ -62,7 +55,7 @@ for moddir in "$R"/usr/lib/modules/*; do
 	[ "$kver" = "7.1.0-zboot" ] && continue
 	install -d "$moddir/extra"
 	for k in $MODULES; do
-		[ -f "$k" ] && install -m644 "$k" "$moddir/extra/"
+		install -m644 "$k" "$moddir/extra/"
 	done
 	ch depmod -a "$kver" > /dev/null 2>&1 || true
 done
