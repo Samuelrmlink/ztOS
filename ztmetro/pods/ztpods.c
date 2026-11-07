@@ -54,7 +54,7 @@ static const struct row ROWS[] = {
 	{ "conversation", "Conversation Awareness", R_SWITCH, P_LISTEN },
 	{ "adaptive_strength", "Adaptive strength", R_SLIDER, P_LISTEN },
 	{ "personalized_volume", "Personalized Volume", R_SWITCH, P_LISTEN },
-	{ "one_bud_anc", "Noise control with one AirPod", R_SWITCH, P_LISTEN },
+	{ "one_bud_anc", "ANC with one AirPod", R_SWITCH, P_LISTEN },
 	{ "hold_left", "Press and hold, left", R_PICKER, P_CONTROLS, O_HOLD, V_HOLD, 2 },
 	{ "hold_right", "Press and hold, right", R_PICKER, P_CONTROLS, O_HOLD, V_HOLD, 2 },
 	{ "press_speed", "Press speed", R_PICKER, P_CONTROLS, O_SPEED, V_012, 3 },
@@ -371,12 +371,15 @@ static double rows(cairo_t *cr, double y, int page) {
 		const struct row *r = &ROWS[i];
 		if (r->page != page || !in_list(dev, "visible", r->key)) continue;
 		int value = setting(r->key);
+		/* a value the pods never reported is not shown as if they had */
+		char caption[64];
+		snprintf(caption, sizeof(caption), "%s%s", r->title, value < 0 ? " (not reported)" : "");
 		switch (r->kind) {
 		case R_SWITCH:
 			y = switch_row(cr, y, r->title, value, A_ROW + i);
 			break;
 		case R_SLIDER:
-			zmc_slider(cr, MARGIN, y, w, value < 0 ? 0 : value, r->title, A_ROW + i);
+			zmc_slider(cr, MARGIN, y, w, value < 0 ? 0 : value, caption, A_ROW + i);
 			y += 66;
 			break;
 		case R_PICKER: {
@@ -384,7 +387,7 @@ static double rows(cairo_t *cr, double y, int page) {
 			for (int k = 0; k < r->count; k++) {
 				if (r->values[k] == value) sel = k;
 			}
-			y = zmc_picker(cr, y, r->title, r->options, r->count, sel, open_picker == A_ROW + i, A_ROW + i);
+			y = zmc_picker(cr, y, caption, r->options, r->count, sel, open_picker == A_ROW + i, A_ROW + i);
 			break;
 		}
 		}
