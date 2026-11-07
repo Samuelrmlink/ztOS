@@ -225,8 +225,7 @@ Then check `dmesg | grep -E 'p2p|-52'` against the table above (3.7) and run tes
 if it fails.
 
 **4. Firmware roaming (1.7).** Done: the firmware reports a roam with `LINK` up and `BSSID`, not `E_ROAM`, and
-`kernel/patch-brcmfmac-roam.py` passes that on. To compare with roaming off, set the firmware's `roam_off` live
-(see ROADMAP 1.7) or build with `--cmdline "brcmfmac.roamoff=1"`.
+`kernel/patch-brcmfmac-roam.py` passes that on.
 
 **5. Reads when Wi-Fi goes silent (1.7).** Read-only, and useful in every test above.
 
