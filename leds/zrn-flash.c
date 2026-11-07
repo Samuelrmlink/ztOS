@@ -22,6 +22,12 @@
  *
  *	echo 9 > /sys/class/leds/white:torch/brightness
  *	echo 0 > /sys/class/leds/white:torch/brightness
+ *
+ * This is also the only driver of this PMIC, so it switches on LDO9, which
+ * Samsung's tree marks always-on. The sensor hub (BCM4773) does not answer
+ * without it: a power-off clears the rail, and a warm reboot keeps whatever
+ * Samsung's kernel set, which is why a pass through TWRP cured a dead hub. It
+ * stays on when this module is removed. See sensors/README.md.
  */
 #include <linux/gpio/machine.h>
 #include <linux/i2c.h>
@@ -39,6 +45,8 @@
 #define CTRL1_TORCH	0xc0
 #define CTRL1_LV_EN	0x08
 #define CUR1_TORCH	0x0f
+#define REG_L9CTRL	0x26
+#define L9_ON		0x80
 
 static struct gpiod_lookup_table flash_gpios = {
 	.dev_id = "i2c-gpio.97",
@@ -111,6 +119,17 @@ static int __init zrn_flash_init(void)
 		goto err_client;
 	}
 	pr_info("zrn-flash: S2MPB02 id 0x%02x\n", id);
+	/* before the hub's driver: it must power up with this rail present */
+	{
+		int was = i2c_smbus_read_byte_data(pmic, REG_L9CTRL);
+
+		ret = update(REG_L9CTRL, L9_ON, L9_ON);
+		if (ret)
+			pr_err("zrn-flash: LDO9 not switched on (%d): the sensor hub may not start\n", ret);
+		else
+			pr_info("zrn-flash: LDO9 control %02x -> %02x\n", was,
+				i2c_smbus_read_byte_data(pmic, REG_L9CTRL));
+	}
 	/* off, normal-voltage mode, as Samsung's setup leaves it */
 	ret = update(REG_FLED_CTRL1, CTRL1_MODE | CTRL1_LV_EN, 0);
 	if (ret)

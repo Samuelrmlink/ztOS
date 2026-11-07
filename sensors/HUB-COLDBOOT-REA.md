@@ -1,5 +1,8 @@
 # Sensor hub after a warm reboot: what the stock firmware does
 
+> **Superseded for the power-off failure (2026-11-07):** the cause was LDO9 on the
+> S2MPB02, not a running chip. See "After a full power-off" in `README.md`.
+
 The stock firmware does not run a reset sequence that our driver is missing.
 Samsung's kernel never cuts the hub supply and never resets the chip. lhd does
 one thing: a 20 ms low pulse on the enable pin (`gpg0-2`, nSTANDBY). Our driver

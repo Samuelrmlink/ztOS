@@ -100,6 +100,38 @@ clear (2 each), integration time, gain. Numbers and sizes are in
    notifier behind on unload, which crashed the kernel on the next load; all
    three are released now.
 
+### After a full power-off: LDO9 (found 2026-11-07)
+
+**The hub needs LDO9 on the S2MPB02 camera PMIC (I2C 0x59, bus 97, register 0x26,
+bit 7).** A power-off clears it and nothing in our kernel set it, so the chip stayed
+silent: `bcm_spi_open`'s `REG` lines read all zero, `lhd` logged `FD_TIMEOUT_SYNC`,
+and `ready` stayed 0. Samsung's tree marks the rail always-on, so TWRP's kernel turned
+it on, and warm reboots kept it. That is why a pass through TWRP cured a dead hub
+until the next power-off. `leds/zrn-flash.c`, the only driver of this PMIC, now turns
+it on at load, and `softdep zrn_bbd pre: zrn-flash` keeps the order.
+
+Evidence, G960F, USB connected throughout:
+
+| Test on a failed hub | Result |
+|---|---|
+| MISO pull-up instead of pull-down | reads go from all `00` to all `FF`: undriven |
+| `bitbang=1`, bypassing the SPI controller | still zeros: not the SoC's controller |
+| Cycle with LDO37 cut, nothing else changed | still zeros |
+| The same cycle after LDO9 on (0x26 `30` to `b0`) | registers match stock (`[40104098] 00000007`), then `ready=1` |
+| A full power-off and boot with the fix | `LDO9 control 30 -> b0`, hub ready at 18.5 s, no warning |
+
+One cold boot has passed so far. The fix has not been run on a G960N; the rail is
+marked always-on in Samsung's tree for this family, and the failed snapshots from
+that phone match, so the same cause is likely.
+
+The S2MPB02's other differences weren't needed: LDO17, BUCK1 and the buck-boost stay
+as they come up, with the hub working.
+
+`MCU_RESP` isn't a health signal. On good and failed hubs alike it reads high, and
+stays high with the chip in standby and LDO37 off for over a minute, and a weak
+pull-down takes it low. So `hub_power_sequence`'s "the chip did not reset" is
+misleading, and its longer holds only cost boot time (ROADMAP 1.1).
+
 ### Cold-boot start: verified
 
 The failing boot had LDO37 on but `gpg0-2` (GPS_PWR_EN) low. `zrn-bbd` now
