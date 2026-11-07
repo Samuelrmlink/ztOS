@@ -156,6 +156,7 @@ static void board_touch_cancel(void);
 static void board_paint(cairo_t *cr);
 static void back_forget(void);
 static void pivot_drop_all(void);
+static int back_queued;
 static bool wheel_has(long k);
 static bool drawing_page_in_front;	/* a page being drawn is the one in front, not a picture of another */
 static void marquee_title(const char *title);
@@ -2751,8 +2752,14 @@ static void present(void) {
 		zmc.anim_from_surface = zmc.anim_to_surface = NULL;
 		if (zmc.quit_after_anim) {
 			zmc.running = false;	/* closing: the hub has left the screen */
-		} else if (zmc.app->arrived) {
-			zmc.app->arrived(zmc.page);
+		} else {
+			if (zmc.app->arrived) {
+				zmc.app->arrived(zmc.page);
+			}
+			while (back_queued > 0 && !zmc.anim_active) {	/* (one may only close a picker) */
+				back_queued--;
+				zmc_back();
+			}
 		}
 	}
 	if (zmc.frame) return;	/* arrived() may have committed an updated page */
@@ -2942,6 +2949,9 @@ static void begin_animation(bool have_from, bool have_to, int target, double tap
 	marquee_stop();
 	mq.text[0] = 0;	/* whichever page comes in says what its title is */
 	pivot_drop_all();
+	/* tabs still moving end here: left going, they went on on whichever page came in */
+	zmc.slide_active = zmc.swiping = false;
+	zmc.swipe_dx = 0;
 	uint32_t t0 = now_ms();
 	begin_animation_(have_from, have_to, target, tapped, requested_start);
 	uint32_t took = now_ms() - t0;
@@ -3690,6 +3700,11 @@ static void xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel
 	toplevel_active = active;
 	zmc.active = active;	/* apps pause what they hold when they lose the front */
 	if (width > 0 && height > 0) {
+		if (zmc.width != width || zmc.height != height) {
+			/* pictures of the old window: stretched to the new one, if kept */
+			pivot_drop_all();
+			back_forget();
+		}
 		configure_resized |= zmc.width != width || zmc.height != height;
 		zmc.width = width;
 		zmc.height = height;
@@ -3868,8 +3883,11 @@ void zmc_quit(void) {
 	begin_animation(true, false, zmc.page, -1, 0);
 }
 
+/* Back pressed while a page turns counts, once the page has arrived (back_queued),
+ * or two quick presses went up only one page. */
 void zmc_back(void) {
 	if (zmc.anim_active) {
+		if (!zmc.quit_after_anim && back_queued < 8) back_queued++;
 		return;
 	}
 	if (zmc_board_up()) {

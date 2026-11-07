@@ -31,12 +31,17 @@ static double render(cairo_t *cr, int page) {
 	return y + 900;
 }
 static void arrived(int page) { arrivals++; }
+static int backs;
+static bool back(void) {
+	backs++;
+	return true;
+}
 static bool touch(int phase, int id, double x, double y, uint32_t time) {
 	if (phase == 0 && (!with_plot || zmc.page != 0 || y < PLOT_TOP)) return false;
 	plot_touches++;
 	return true;
 }
-static const struct zmc_app app = { .app_id = "t", .caps = "T", .render = render, .arrived = arrived, .touch = touch };
+static const struct zmc_app app = { .app_id = "t", .caps = "T", .render = render, .arrived = arrived, .touch = touch, .back = back };
 
 static uint32_t t_ms = 1000;
 static void down(double x, double y) {
@@ -404,12 +409,29 @@ int main(void) {
 	CHECK(zmc.page == 0, "the plot's drag changed the tab: %d", zmc.page);
 	with_plot = false;
 
-	/* ---- the page's pictures do not outlive a page turn */
+	/* ---- the page's pictures do not outlive a page turn, and tabs in motion end there */
 	start(4, 0);
+	flick_left();
+	CHECK(zmc.slide_active, "not sliding");
 	zmc_go(2, 1);
 	CHECK(!zmc.piv_cur && !zmc.piv_next && !zmc.piv_prev, "pictures kept across a page turn");
-	zmc.anim_active = false;
-	zmc.anim_target_pending = false;
+	CHECK(!zmc.slide_active, "tabs still moving under a page turn");
+	/* ---- back pressed during a turn counts, when it has arrived */
+	backs = 0;
+	zmc_back();
+	zmc_back();
+	CHECK(backs == 0, "back acted in the middle of a turn");
+	for (int i = 0; i < 3000 && (zmc.anim_active || backs < 2); i++) {
+		usleep(1000);
+		frame();
+	}
+	CHECK(backs == 2, "two presses of back during a turn: %d", backs);
+	/* ---- a window of another size: nothing of the old size is kept */
+	start(4, 0);
+	uint32_t active[1] = { XDG_TOPLEVEL_STATE_ACTIVATED };
+	struct wl_array states = { sizeof(active), sizeof(active), active };
+	xdg_toplevel_configure(NULL, NULL, 360, 500, &states);
+	CHECK(!zmc.piv_cur && !zmc.piv_next && !zmc.piv_prev, "pictures of the old size kept");
 
 	if (failures) {
 		printf("FAIL: %d\n", failures);
