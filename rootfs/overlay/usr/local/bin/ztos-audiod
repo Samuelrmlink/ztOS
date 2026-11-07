@@ -85,6 +85,7 @@ EQ_SINK = "ztos-eq"            # ztos-soundd's chain: never an output of its own
 STREAM_KEYS = ("application.id", "application.name", "media.name", "node.name")
 RECONNECT_GAP = 10.0           # away this long, an output coming back has connected
 SETTLE = 1.0                   # after a command, when to report the final level
+ECHO_QUIET = 3.0               # and for how long a change is its echo, not the device's buttons (Bluetooth is slow)
 APP_SETTLE = 0.4               # an app's slider moving: look again once it stops
 # what apps call themselves that says nothing about which app it is
 GENERIC_APP_NAMES = {"chromium", "playback", "audio stream", "sdl application", "pulseaudio"}
@@ -660,7 +661,7 @@ class Daemon:
             return
         # the device's own buttons: same device, a new level, and nothing asked here for it
         external = bool(not self.force_push and self.pushed and self.pushed[1] == active["name"]
-                        and self.pushed[0] != percent and time.time() - self.commanded_at > SETTLE)
+                        and self.pushed[0] != percent and time.time() - self.commanded_at > ECHO_QUIET)
         if self.send_shell("audio-volume %d %d\n" % (percent, 1 if external else 0)):
             self.pushed = now_key
             self.force_push = False
