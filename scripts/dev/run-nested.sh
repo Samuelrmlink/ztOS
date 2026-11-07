@@ -39,7 +39,7 @@ export LD_LIBRARY_PATH="$(dirname "$lib")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # the shell must build; an app that does not (a library missing) only loses its tile
 make -s -C "$root/ztmetro" ztmetro
-apps="apps/ztapps settings/ztsettings devtest/zrndevtest contacts/ztcontacts files/ztfiles sound/ztsound"
+apps="apps/ztapps settings/ztsettings devtest/zrndevtest contacts/ztcontacts files/ztfiles gallery/ztgallery sound/ztsound"
 for a in $apps; do
 	make -s -C "$root/ztmetro" "$a" || echo "run-nested: $a did not build, its tile will not start"
 done

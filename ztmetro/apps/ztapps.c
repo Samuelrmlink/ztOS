@@ -616,7 +616,7 @@ static bool system_glyph(const char *id, char *key, size_t key_size) {
 		{ "ztsettings.desktop", "\xee\x84\x95", 0xe115 },
 		{ "ztpower.desktop", "\xf0\x9f\x94\x8b", 0x1f50b },
 		{ "ztcamera.desktop", "\xee\x84\x94", 0xe114 },
-		{ "ztphotos.desktop", "\xee\x85\x98", 0xe158 },
+		{ "ztgallery.desktop", "\xee\x85\x98", 0xe158 },
 		{ "ztstore.desktop", "\xee\x85\x8d", 0xe14d },
 		{ "com.zerone.music.desktop", "\xee\x85\x82", 0xe142 },
 		{ "ztfiles.desktop", "\xee\x86\x88", 0xe188 },
