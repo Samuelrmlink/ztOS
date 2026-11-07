@@ -70,7 +70,6 @@ enum action {
 	ACT_BT_POWER,
 	ACT_BT_DEVICE,		/* arg: which device: pair, connect or disconnect it */
 	ACT_BT_FORGET,		/* arg: which device */
-	ACT_BT_SCAN,
 	ACT_BT_MENU,		/* an item of a held device's menu */
 	ACT_BT_MENU_CLOSE,
 	ACT_COLUMNS,
@@ -96,13 +95,10 @@ enum action {
 	ACT_OPENTONE,
 	ACT_TIMEOUT_CYCLE,
 	ACT_SCALE_CYCLE,
-	ACT_NAV_SIZE_CYCLE,
 	ACT_NAV_ICON,
 	ACT_KEY_HEIGHT,
 	ACT_KEY_SOUND,
 	ACT_MOBILE_DATA,
-	ACT_ROAMING,
-	ACT_NETWORK_MODE,
 	ACT_MEDIA_VOL_STEP,
 	ACT_RING_VOL_STEP,
 	ACT_VIBRATE_RING,
@@ -111,9 +107,7 @@ enum action {
 	ACT_VIBE_PREVIEW,
 	ACT_OPEN_SOUND,
 	ACT_CPU_GOVERNOR,
-	ACT_ZRAM_TOGGLE,
 	ACT_SWAPPINESS_STEP,
-	ACT_COMP_ALGO_CYCLE,
 	ACT_GPU_GOVERNOR,
 	ACT_PERF_PROFILE,
 	ACT_PERF_DEEPSLEEP,
@@ -198,7 +192,6 @@ static struct {
 	bool opentone;
 	int timeout_idx;	/* the picker's place, the nearest if the file says another */
 	int timeout_s;		/* what the file says: seconds, 0 never */
-	int nav_size_idx;
 	int nav_icon_idx;
 	int scale_idx;
 
@@ -209,8 +202,6 @@ static struct {
 	char wifi_status[96];
 
 	bool mobile_data;
-	bool roaming;
-	int network_mode;
 
 	int key_height;
 	bool key_sound;
@@ -220,9 +211,7 @@ static struct {
 	bool vibrate_silent;
 
 	char cpu_gov[32];
-	bool zram_enabled;
 	int swappiness;
-	int comp_algo_idx;
 	char gpu_gov[32];
 
 	int perf_profile;	/* 0 power saver, 1 balanced, 2 performance */
@@ -251,11 +240,8 @@ static struct {
 	.autobrightness = true,
 	.timeout_idx = 1,
 	.timeout_s = 60,
-	.nav_size_idx = 0,
 	.scale_idx = 1,
 	.mobile_data = true,
-	.roaming = false,
-	.network_mode = 0,
 	.key_height = 56,
 	.key_sound = true,
 	.media_vol = 80,
@@ -263,7 +249,6 @@ static struct {
 	.vibrate_ring = true,
 	.vibrate_silent = true,
 	.swappiness = 60,
-	.comp_algo_idx = 0,
 	.perf_profile = 1,
 	.perf_deepsleep = true,
 	.menu_speed_idx = 1,
@@ -1818,8 +1803,6 @@ static double draw_display(cairo_t *cr) {
 	if (app.scale_pending != app.scale_idx) {
 		y = restart_warning(cr, y, true, ACT_SCALE_APPLY) + 10;
 	}
-	static const char *const nav_sizes[] = { "Standard (48 pt)", "Compact (40 pt)", "Expanded (56 pt)" };
-	y = picker(cr, y, "Navigation bar widget size", nav_sizes, 3, app.nav_size_idx, ACT_NAV_SIZE_CYCLE);
 
 	return y + 20;
 }
@@ -2787,9 +2770,6 @@ static double draw_vm(cairo_t *cr) {
 	zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.swappiness, "Kernel swappiness", ACT_SWAPPINESS_STEP);
 	y += 62;
 
-	static const char *const algos[] = { "lzo-rle (Fastest)", "zstd (High Ratio)", "lz4 (Balanced)" };
-	y = picker(cr, y, "ZRAM compression algorithm", algos, 3, app.comp_algo_idx, ACT_COMP_ALGO_CYCLE);
-
 	struct statvfs fs;
 	if (statvfs("/", &fs) == 0) {
 		double total_disk = (double)fs.f_blocks * fs.f_frsize / 1e9;
@@ -3214,8 +3194,8 @@ static double render_page_content(cairo_t *cr, int p) {
 
 static bool is_picker(int action) {
 	switch (action) {
-	case ACT_TIMEOUT_CYCLE: case ACT_SCALE_CYCLE: case ACT_NAV_SIZE_CYCLE:
-	case ACT_NETWORK_MODE: case ACT_COMP_ALGO_CYCLE: case ACT_PERF_PROFILE: case ACT_IB_MODE: case ACT_IB_ENGINE:
+	case ACT_TIMEOUT_CYCLE: case ACT_SCALE_CYCLE:
+	case ACT_PERF_PROFILE: case ACT_IB_MODE: case ACT_IB_ENGINE:
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
 	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
@@ -3442,11 +3422,6 @@ static void activate(int action, int arg) {
 		activate(arg == 1 ? ACT_BT_FORGET : ACT_BT_DEVICE, which);
 		return;
 	}
-	case ACT_BT_SCAN:
-		snprintf(bt.status, sizeof(bt.status), "searching for 10 seconds…");
-		bt_request("bluetoothctl --timeout 10 scan on >/dev/null 2>&1");
-		zmc_redraw();
-		break;
 	case ACT_BT_DEVICE:
 	case ACT_BT_FORGET: {
 		/* the device that was on the screen in that row, wherever it is now */
@@ -3734,21 +3709,12 @@ static void activate(int action, int arg) {
 		app.key_sound = !app.key_sound;
 		config_save();
 		break;
-	case ACT_NAV_SIZE_CYCLE:
-		app.nav_size_idx = arg;
-		break;
 	case ACT_MOBILE_DATA:
 		/* ztoscorenetworkingd's: the same thing the action centre's tile asks */
 		app.mobile_data = !app.mobile_data;
 		cell.data_on = app.mobile_data;
 		pipe_tell("/run/ztoscorenetworking.ctl", app.mobile_data ? "data on\n" : "data off\n");
 		pipe_tell("/run/zrn-modem.ctl", app.mobile_data ? "data on\n" : "data off\n");
-		break;
-	case ACT_ROAMING:
-		app.roaming = !app.roaming;
-		break;
-	case ACT_NETWORK_MODE:
-		app.network_mode = arg;
 		break;
 	case ACT_MEDIA_VOL_STEP:
 		app.media_vol = (app.media_vol >= 100) ? 0 : app.media_vol + 20;
@@ -3803,9 +3769,6 @@ static void activate(int action, int arg) {
 			if (system(cmd) != 0) {}
 		}
 		break;
-	case ACT_ZRAM_TOGGLE:
-		app.zram_enabled = !app.zram_enabled;
-		break;
 	case ACT_SWAPPINESS_STEP:
 		app.swappiness = (app.swappiness >= 100) ? 10 : app.swappiness + 20;
 		{
@@ -3813,9 +3776,6 @@ static void activate(int action, int arg) {
 			snprintf(cmd, sizeof(cmd), "ztos-auth sh -c 'echo %d > /proc/sys/vm/swappiness' 2>/dev/null &", app.swappiness);
 			if (system(cmd) != 0) {}
 		}
-		break;
-	case ACT_COMP_ALGO_CYCLE:
-		app.comp_algo_idx = arg;
 		break;
 	case ACT_GPU_GOVERNOR:
 		if (strcmp(app.gpu_gov, "simple_ondemand") == 0) {
