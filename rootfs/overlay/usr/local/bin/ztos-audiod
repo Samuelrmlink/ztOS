@@ -1,0 +1,790 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""ztos-audiod: which output is in use, its volume, and each app's audio.
+
+It sits beside the audio path, never in it: it only watches PipeWire and asks
+WirePlumber for changes. If it stops, sound keeps playing.
+
+WirePlumber remembers the volumes:
+    a Bluetooth or ALSA device    default-routes     (per device)
+    the phone speaker's chain     stream-properties  (Audio/Sink:media.name:Speaker)
+    an app's stream               stream-properties  (Output/Audio:application.*)
+    the global output             default-nodes
+This daemon adds what WirePlumber doesn't do:
+  - tells the shell the active device's volume, so the volume banner follows
+    the speaker's own buttons and the next output when a device goes away;
+  - sends an app back to its chosen output when that output returns.
+    WirePlumber restores a target only if it exists as the stream starts;
+  - holds changes for apps that aren't running, because WirePlumber only saves
+    what it sees on a live stream. They apply when the app next plays.
+
+Volumes are percent on the same scale as wpctl: 100 is unity, and PipeWire
+keeps the cube of it as the linear gain.
+
+COMMANDS: one UTF-8 datagram per command, to $XDG_RUNTIME_DIR/ztos-audio.sock.
+Words split as in a shell, so quote names with spaces. A sender with a bound
+address gets a reply, "ok" or "err WHY". `ztos-audiod ctl COMMAND...` does this.
+
+    volume PERCENT [OUTPUT]     set the active output's volume, or OUTPUT's
+    mute 0|1 [OUTPUT]           the same for mute
+    output OUTPUT               make OUTPUT the global output
+    app-volume APP PERCENT      an app's volume (held if it isn't running)
+    app-mute APP 0|1            an app's mute (held if it isn't running)
+    app-output APP OUTPUT       send an app to OUTPUT, even one not connected now
+    app-output APP default      the app follows the global output again
+    refresh                     look again now
+    hello                       tell the shell the volume again (it just started)
+
+OUTPUT is a node name from "outputs" below; APP is a "key" from "apps".
+
+STATE: $XDG_RUNTIME_DIR/ztos-audio-state.json, replaced whole on any change:
+
+    {"version": 1,
+     "active": {"name", "desc", "kind", "percent", "mute"} or null,
+     "outputs": [{"name", "desc", "kind", "percent", "mute", "current"}],
+     "apps": [{"key", "name", "running", "streams": [node ids], "percent", "mute",
+               "output": "default" or OUTPUT,
+               "output_present": bool,
+               "playing_on": OUTPUT or null}]}
+
+kind is speaker, headphones or bluetooth. An app's percent is null if nothing
+is known yet. An app with a pending change shows the pending values.
+
+Also kept up to date, for the shell's banner:
+    $XDG_RUNTIME_DIR/ztos-outputs    "*|name|desc" (current), "-|name|desc" (others)
+    $XDG_RUNTIME_DIR/ztmetro.ctl     gets "audio-volume PERCENT EXTERNAL"; EXTERNAL
+                                     is 1 if the change came from outside the
+                                     phone, such as the speaker's own buttons
+"""
+import json
+import os
+import select
+import shlex
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+RUN = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+SOCK = os.path.join(RUN, "ztos-audio.sock")
+STATE = os.path.join(RUN, "ztos-audio-state.json")
+OUTPUTS = os.path.join(RUN, "ztos-outputs")
+SHELL_CTL = os.path.join(RUN, "ztmetro.ctl")
+SOUND_STATE = os.path.join(RUN, "ztos-sound-state.json")
+CONFIG = os.path.join(HOME, ".config/ztmetro/audio-apps.json")
+WP_STREAMS = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")),
+                          "wireplumber/stream-properties")
+EQ_SINK = "ztos-eq"            # ztos-soundd's chain: never an output of its own
+STREAM_KEYS = ("application.id", "application.name", "media.name", "node.name")
+SETTLE = 1.0                   # after a command, when to report the final level
+TOOL_TIMEOUT = 5
+
+
+def log(*a):
+    print("ztos-audiod:", *a, file=sys.stderr, flush=True)
+
+
+# ---- what WirePlumber keeps ------------------------------------------------
+def wp_unescape(s):
+    """WirePlumber's state file keys: \\s space, \\e =, \\o [, \\c ], \\\\ backslash."""
+    out, i = [], 0
+    table = {"s": " ", "e": "=", "o": "[", "c": "]", "\\": "\\"}
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s) and s[i + 1] in table:
+            out.append(table[s[i + 1]])
+            i += 2
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+def parse_stream_state(text):
+    """stream-properties: {key: {"percent", "mute", "target"}} for app playback."""
+    stored = {}
+    for line in text.splitlines():
+        if not line.startswith("Output/Audio:") or "=" not in line:
+            continue
+        raw, value = line.split("=", 1)
+        try:
+            v = json.loads(value)
+        except ValueError:
+            continue
+        if not isinstance(v, dict):
+            continue
+        vols = v.get("channelVolumes") or []
+        stored[wp_unescape(raw)] = {
+            "percent": percent_of_gain(vols[0]) if vols else None,
+            "mute": bool(v.get("mute", False)),
+            "target": v.get("target"),
+        }
+    return stored
+
+
+def read_stream_state(path=WP_STREAMS):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return parse_stream_state(f.read())
+    except OSError:
+        return {}
+
+
+def percent_of_gain(gain):
+    """PipeWire's linear channel gain as wpctl's percent (the cube root)."""
+    return int(round(max(0.0, float(gain)) ** (1.0 / 3.0) * 100.0))
+
+
+def form_key(props):
+    """The key WirePlumber's state-stream.lua saves this stream under."""
+    if props.get("media.role") == "Notification":
+        return "Output/Audio:media.role:Notification"
+    for k in STREAM_KEYS:
+        if props.get(k):
+            return "Output/Audio:%s:%s" % (k, props[k])
+    return None
+
+
+def app_name_of_key(key):
+    return key.split(":", 2)[2] if key.count(":") >= 2 else key
+
+
+def is_app_key(key):
+    """Only keys that name an app: filter chains are saved by media or node name."""
+    return key.startswith(("Output/Audio:application.id:", "Output/Audio:application.name:"))
+
+
+# ---- reading the graph -----------------------------------------------------
+def classify(props, route=""):
+    """speaker | headphones | bluetooth"""
+    name = props.get("node.name", "")
+    if name.startswith("bluez_") or props.get("api.bluez5.address") or props.get("device.api") == "bluez5":
+        return "bluetooth"
+    if props.get("device.form-factor", "") in ("headphone", "headset", "hands-free", "handsfree"):
+        return "headphones"
+    if "usb" in name.lower() or props.get("device.bus") == "usb":
+        return "headphones"
+    if any(k in route.lower() for k in ("headphone", "headset", "earphone")):
+        return "headphones"
+    return "speaker"
+
+
+def is_app_stream(props):
+    if props.get("media.class") != "Stream/Output/Audio":
+        return False
+    # filter chains (ztos-speaker.out, ztos-eq.out) and system sounds are not apps
+    if props.get("node.link-group") or props.get("node.virtual") in (True, "true"):
+        return False
+    if props.get("media.role") == "Notification":
+        return False
+    return form_key(props) is not None
+
+
+def read_graph(dump):
+    """pw-dump's objects as what this daemon needs."""
+    g = {"sinks": {}, "default": None, "streams": [], "targets": {}, "links": [], "chains": {}}
+    routes, nodes = {}, []
+    for o in dump:
+        t = o.get("type", "")
+        if t.endswith(":Metadata") and o.get("props", {}).get("metadata.name") == "default":
+            for m in o.get("metadata") or []:
+                if m.get("key") == "default.audio.sink" and isinstance(m.get("value"), dict):
+                    g["default"] = m["value"].get("name")
+                elif m.get("key") in ("target.object", "target.node"):
+                    g["targets"].setdefault(m.get("subject"), {})[m["key"]] = m.get("value")
+        elif t.endswith(":Device"):
+            for r in (o.get("info") or {}).get("params", {}).get("Route", []) or []:
+                if r.get("direction") == "Output":
+                    routes[o["id"]] = "%s %s" % (r.get("name") or "", r.get("description") or "")
+        elif t.endswith(":Node"):
+            nodes.append(o)
+        elif t.endswith(":Link"):
+            info = o.get("info") or {}
+            g["links"].append((info.get("output-node-id"), info.get("input-node-id")))
+    hidden = set()
+    groups = {}
+    for o in nodes:
+        p = (o.get("info") or {}).get("props") or {}
+        if p.get("node.link-group"):
+            groups.setdefault(p["node.link-group"], []).append(o["id"])
+        # the raw device behind a fixed filter chain (the speaker's crossover and
+        # protection limiter) is not somewhere to send sound
+        if p.get("node.link-group") and p.get("target.object") and p.get("media.class") == "Stream/Output/Audio" \
+                and not p.get("node.name", "").startswith(EQ_SINK):
+            hidden.add(p["target.object"])
+    # a filter chain crosses from its sink to its output stream with no link
+    for ids in groups.values():
+        for i in ids:
+            g["chains"][i] = [j for j in ids if j != i]
+    for o in nodes:
+        info = o.get("info") or {}
+        p = info.get("props") or {}
+        name = p.get("node.name", "")
+        if p.get("media.class") == "Audio/Sink":
+            if name.startswith(EQ_SINK) or name in hidden:
+                continue
+            vols = _props_of(info).get("channelVolumes") or []
+            g["sinks"][name] = {
+                "id": o["id"], "serial": p.get("object.serial"), "name": name,
+                "desc": p.get("node.description") or p.get("node.nick") or name,
+                "kind": classify(p, routes.get(p.get("device.id"), "")),
+                "percent": percent_of_gain(vols[0]) if vols else None,
+                "mute": bool(_props_of(info).get("mute", False)),
+            }
+        elif is_app_stream(p):
+            vols = _props_of(info).get("channelVolumes") or []
+            g["streams"].append({
+                "id": o["id"], "key": form_key(p),
+                "name": p.get("application.name") or app_name_of_key(form_key(p)),
+                "state": info.get("state"),
+                "percent": percent_of_gain(vols[0]) if vols else None,
+                "mute": bool(_props_of(info).get("mute", False)),
+            })
+    return g
+
+
+def _props_of(info):
+    params = (info.get("params") or {}).get("Props") or []
+    for p in params:
+        if isinstance(p, dict) and ("channelVolumes" in p or "mute" in p):
+            return p
+    return {}
+
+
+def real_output(default, sinks, sound_state):
+    """The device a change of volume belongs on: with the EQ chain as the default
+    sink, it's the device the chain plays into, so Bluetooth stays hardware volume."""
+    if default in sinks:
+        return default
+    if default == EQ_SINK and sound_state and sound_state.get("target") in sinks:
+        return sound_state["target"]
+    return None
+
+
+def playing_on(stream_id, links, sink_ids, chains):
+    """The output a stream is linked to, seen through ztos-eq if it goes there."""
+    seen = set()
+    cur = [stream_id]
+    while cur:
+        n = cur.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        for a, b in links:
+            if a == n:
+                if b in sink_ids:
+                    return sink_ids[b]
+                cur.append(b)
+        if n in chains:
+            cur.extend(chains[n])
+    return None
+
+
+def build_apps(streams, stored, intents, sinks, on):
+    """Everything known about apps: what is running, and what WirePlumber or a
+    held change remembers. A running stream's own values beat the saved ones."""
+    apps = {}
+    for s in streams:
+        a = apps.setdefault(s["key"], {"key": s["key"], "name": s["name"], "running": True, "streams": [],
+                                       "percent": s["percent"], "mute": s["mute"], "playing_on": None})
+        a["streams"].append(s["id"])
+        a["playing_on"] = a["playing_on"] or on.get(s["id"])
+    for key, v in stored.items():
+        if key not in apps and is_app_key(key):
+            apps[key] = {"key": key, "name": app_name_of_key(key), "running": False, "streams": [],
+                         "percent": v["percent"], "mute": v["mute"], "playing_on": None}
+    for key in intents:
+        if key not in apps:
+            apps[key] = {"key": key, "name": app_name_of_key(key), "running": False, "streams": [],
+                         "percent": None, "mute": False, "playing_on": None}
+    for key, a in apps.items():
+        i = intents.get(key, {})
+        if "percent" in i:
+            a["percent"] = i["percent"]
+        if "mute" in i:
+            a["mute"] = i["mute"]
+        out = i.get("output") or (stored.get(key) or {}).get("target") or "default"
+        a["output"] = out
+        a["output_present"] = out == "default" or out in sinks
+    return sorted(apps.values(), key=lambda a: (not a["running"], a["name"].lower(), a["key"]))
+
+
+def target_actions(streams, targets, stored, intents, sinks):
+    """What the default metadata needs so that each stream is where it should be:
+    [("set", stream id, serial)] or [("clear", stream id)]. A change asked for here
+    is enforced. A target only WirePlumber remembers is restored just if the stream
+    has no live target, so a move made by another tool is left alone."""
+    live = {str(s["serial"]) for s in sinks.values()}
+    out = []
+    for s in streams:
+        have = targets.get(s["id"], {})
+        held = intents.get(s["key"], {}).get("output")
+        if held == "default":
+            if have:
+                out.append(("clear", s["id"]))
+            continue
+        want = held or (stored.get(s["key"]) or {}).get("target")
+        if not want or want not in sinks:
+            continue
+        serial = str(sinks[want]["serial"])
+        if held:
+            if str(have.get("target.object")) != serial:
+                out.append(("set", s["id"], serial))
+        elif str(have.get("target.object")) not in live and "target.node" not in have:
+            out.append(("set", s["id"], serial))
+    return out
+
+
+def outputs_file_text(outputs):
+    return "".join("%s|%s|%s\n" % ("*" if o["current"] else "-", o["name"], o["desc"].replace("\n", " "))
+                   for o in outputs)
+
+
+def clamp_percent(text):
+    v = float(text)
+    if v != v:
+        raise ValueError("not a number")
+    return int(round(max(0.0, min(100.0, v))))
+
+
+def parse_bool(text):
+    if text in ("1", "true", "on"):
+        return True
+    if text in ("0", "false", "off"):
+        return False
+    raise ValueError("expected 0 or 1")
+
+
+def parse_wpctl_volume(text):
+    """"Volume: 0.40 [MUTED]" as (40, True), or None."""
+    parts = text.split()
+    if len(parts) < 2 or parts[0] != "Volume:":
+        return None
+    try:
+        return int(round(float(parts[1]) * 100.0)), "[MUTED]" in text
+    except ValueError:
+        return None
+
+
+# ---- the daemon ------------------------------------------------------------
+class Daemon:
+    def __init__(self):
+        self.intents = {}
+        self.load()
+        self.sock = None
+        self.sub = None
+        self.running = True
+        self.eval_at = 0.0
+        self.settle_at = 0.0
+        self.last_eval = 0.0
+        self.commanded_at = 0.0
+        self.graph = None
+        self.stored = {}
+        self.active = None
+        self.state_text = None
+        self.outputs_text = None
+        self.pushed = None           # (percent, name) the shell was last told
+        self.force_push = True
+
+    # ---- what is held for apps
+    def load(self):
+        try:
+            with open(CONFIG) as f:
+                v = json.load(f)
+            if isinstance(v, dict) and isinstance(v.get("apps"), dict):
+                self.intents = {k: i for k, i in v["apps"].items() if isinstance(i, dict)}
+        except (OSError, ValueError):
+            pass
+
+    def save(self):
+        os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+        tmp = CONFIG + ".new"
+        with open(tmp, "w") as f:
+            json.dump({"version": 1, "apps": self.intents}, f, indent=1)
+        os.replace(tmp, CONFIG)
+
+    # ---- tools
+    def tool(self, *argv, out=False):
+        try:
+            r = subprocess.run(argv, stdout=subprocess.PIPE if out else subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=TOOL_TIMEOUT, text=True)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log("%s: %s" % (argv[0], e))
+            return None if out else False
+        if out:
+            return r.stdout if r.returncode == 0 else None
+        return r.returncode == 0
+
+    def sound_state(self):
+        try:
+            with open(SOUND_STATE) as f:
+                st = json.load(f)
+            # a state file left by a stopped ztos-soundd says nothing
+            return st if st.get("chain") else None
+        except (OSError, ValueError):
+            return None
+
+    # ---- looking
+    def evaluate(self):
+        text = self.tool("pw-dump", out=True)
+        if text is None:
+            return False
+        try:
+            g = read_graph(json.loads(text))
+        except ValueError:
+            return False
+        # wpctl asks the same mixer that sets volumes, so it's right for Bluetooth
+        # and ALSA routes as well as for plain nodes
+        for s in g["sinks"].values():
+            got = parse_wpctl_volume(self.tool("wpctl", "get-volume", str(s["id"]), out=True) or "")
+            if got:
+                s["percent"], s["mute"] = got
+        self.stored = read_stream_state()
+        self.apply_intents(g)
+        self.graph = g
+        self.publish(g)
+        return True
+
+    def apply_intents(self, g):
+        """Bring running streams in line; a held volume or mute is spent once it is set,
+        because WirePlumber saves it from there."""
+        changed = False
+        for key in {s["key"] for s in g["streams"]}:
+            i = self.intents.get(key)
+            if not i:
+                continue
+            streams = [s for s in g["streams"] if s["key"] == key]
+            if "percent" in i and any([self.tool("wpctl", "set-volume", str(s["id"]), "%d%%" % i["percent"])
+                                       for s in streams]):
+                for s in streams:
+                    s["percent"] = i["percent"]
+                del i["percent"]
+                changed = True
+            if "mute" in i and any([self.tool("wpctl", "set-mute", str(s["id"]), "1" if i["mute"] else "0")
+                                    for s in streams]):
+                for s in streams:
+                    s["mute"] = i["mute"]
+                del i["mute"]
+                changed = True
+        for act in target_actions(g["streams"], g["targets"], self.stored, self.intents, g["sinks"]):
+            if act[0] == "set":
+                self.tool("pw-metadata", "-n", "default", str(act[1]), "target.object", str(act[2]), "Spa:Id")
+                g["targets"][act[1]] = {"target.object": act[2]}
+            else:
+                self.clear_target(act[1])
+                g["targets"].pop(act[1], None)
+        # a route is WirePlumber's to keep once it has saved it: only what it can't
+        # hold stays here. "default" is done when nothing is saved to undo.
+        for key, i in list(self.intents.items()):
+            out = i.get("output")
+            st = (self.stored.get(key) or {}).get("target")
+            if out and out == st or out == "default" and not st:
+                del i["output"]
+                changed = True
+            if not i:
+                del self.intents[key]
+                changed = True
+        if changed:
+            try:
+                self.save()
+            except OSError as e:
+                log("save failed", e)
+
+    def clear_target(self, stream_id):
+        # -1 makes WirePlumber forget the saved target; then no target at all
+        self.tool("pw-metadata", "-n", "default", str(stream_id), "target.object", "-1", "Spa:Id")
+        self.tool("pw-metadata", "-n", "default", "-d", str(stream_id), "target.object")
+        self.tool("pw-metadata", "-n", "default", "-d", str(stream_id), "target.node")
+
+    def publish(self, g):
+        cur = real_output(g["default"], g["sinks"], self.sound_state() if g["default"] == EQ_SINK else None)
+        outputs = [{"name": s["name"], "desc": s["desc"], "kind": s["kind"], "percent": s["percent"],
+                    "mute": s["mute"], "current": s["name"] == cur} for s in g["sinks"].values()]
+        outputs.sort(key=lambda o: o["name"])
+        active = next((o for o in outputs if o["current"]), None)
+        sink_ids = {s["id"]: s["name"] for s in g["sinks"].values()}
+        on = {s["id"]: playing_on(s["id"], g["links"], sink_ids, g["chains"]) for s in g["streams"]}
+        apps = build_apps(g["streams"], self.stored, self.intents, g["sinks"], on)
+        state = {"version": 1, "active": active and {k: active[k] for k in ("name", "desc", "kind", "percent", "mute")},
+                 "outputs": outputs, "apps": apps}
+        text = json.dumps(state)
+        if text != self.state_text:
+            write_atomic(STATE, text)
+            self.state_text = text
+        text = outputs_file_text(outputs)
+        if text != self.outputs_text:
+            write_atomic(OUTPUTS, text)
+            self.outputs_text = text
+        self.active = active
+        self.tell_shell(active)
+
+    def tell_shell(self, active):
+        if not active or active.get("percent") is None:
+            return
+        percent = 0 if active["mute"] else active["percent"]
+        now_key = (percent, active["name"], active["desc"])
+        if now_key == self.pushed and not self.force_push:
+            return
+        # the device's own buttons: same device, a new level, and nothing asked here for it
+        external = bool(not self.force_push and self.pushed and self.pushed[1] == active["name"]
+                        and self.pushed[0] != percent and time.time() - self.commanded_at > SETTLE)
+        if self.send_shell("audio-volume %d %d\n" % (percent, 1 if external else 0)):
+            self.pushed = now_key
+            self.force_push = False
+            log("volume %d%% on %s%s" % (percent, active["name"], " (from the device)" if external else ""))
+
+    def send_shell(self, line):
+        try:
+            if not stat.S_ISFIFO(os.stat(SHELL_CTL).st_mode):
+                return False
+            fd = os.open(SHELL_CTL, os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError:
+            return False             # no shell right now: it says hello when it starts
+        try:
+            return os.write(fd, line.encode()) == len(line)
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+
+    # ---- commands
+    def command(self, line):
+        """Runs one command; returns None or raises ValueError with the reason."""
+        words = shlex.split(line)
+        if not words:
+            raise ValueError("empty")
+        cmd, args = words[0], words[1:]
+        need = {"volume": (1, 2), "mute": (1, 2), "output": (1, 1), "app-volume": (2, 2), "app-mute": (2, 2),
+                "app-output": (2, 2), "refresh": (0, 0), "hello": (0, 0)}.get(cmd)
+        if need is None:
+            raise ValueError("unknown command %s" % cmd)
+        if not need[0] <= len(args) <= need[1]:
+            raise ValueError("%s: wrong arguments" % cmd)
+        if cmd == "refresh":
+            self.outputs_text = None     # the shell may have written the file itself
+            self.eval_at = time.time()
+        elif cmd == "hello":
+            self.force_push = True
+            self.pushed = None
+            self.eval_at = time.time()
+        else:
+            getattr(self, "cmd_" + cmd.replace("-", "_"))(*args)
+            # a volume key can repeat every 90 ms: those are looked at once, on settling
+            if cmd not in ("volume", "mute"):
+                self.eval_at = time.time()
+
+    def find_output(self, name):
+        if self.graph is None:
+            self.evaluate()
+        g = self.graph
+        if g is None:
+            raise ValueError("no PipeWire")
+        if name is None:
+            if not self.active:
+                raise ValueError("no active output")
+            name = self.active["name"]
+        s = g["sinks"].get(name)
+        if s is None:
+            raise ValueError("no output %s" % name)
+        return s
+
+    def commanded(self):
+        self.commanded_at = time.time()
+        self.settle_at = self.commanded_at + SETTLE
+
+    def cmd_volume(self, percent, name=None):
+        p = clamp_percent(percent)
+        s = self.find_output(name)
+        self.commanded()
+        if not self.tool("wpctl", "set-volume", str(s["id"]), "%d%%" % p):
+            raise ValueError("wpctl failed")
+        if s["mute"] and p > 0:
+            self.tool("wpctl", "set-mute", str(s["id"]), "0")
+
+    def cmd_mute(self, value, name=None):
+        m = parse_bool(value)
+        s = self.find_output(name)
+        self.commanded()
+        if not self.tool("wpctl", "set-mute", str(s["id"]), "1" if m else "0"):
+            raise ValueError("wpctl failed")
+
+    def cmd_output(self, name):
+        s = self.find_output(name)
+        self.commanded()
+        # only the default: a stream that follows it moves by itself, and one sent
+        # to its own output stays there
+        if not self.tool("wpctl", "set-default", str(s["id"])):
+            raise ValueError("wpctl failed")
+
+    def streams_of(self, key):
+        return [s for s in (self.graph or {"streams": []})["streams"] if s["key"] == key]
+
+    def check_app_key(self, key):
+        if not key.startswith("Output/Audio:") or key.count(":") < 2:
+            raise ValueError("bad app key")
+
+    def hold(self, key, field, value):
+        self.intents.setdefault(key, {})[field] = value
+        self.save()
+
+    def cmd_app_volume(self, key, percent):
+        self.check_app_key(key)
+        p = clamp_percent(percent)
+        self.find_graph()
+        streams = self.streams_of(key)
+        if not streams:
+            self.hold(key, "percent", p)
+        for s in streams:
+            self.tool("wpctl", "set-volume", str(s["id"]), "%d%%" % p)
+
+    def cmd_app_mute(self, key, value):
+        self.check_app_key(key)
+        m = parse_bool(value)
+        self.find_graph()
+        streams = self.streams_of(key)
+        if not streams:
+            self.hold(key, "mute", m)
+        for s in streams:
+            self.tool("wpctl", "set-mute", str(s["id"]), "1" if m else "0")
+
+    def cmd_app_output(self, key, name):
+        self.check_app_key(key)
+        if name == EQ_SINK:
+            raise ValueError("not an output")
+        self.find_graph()
+        # applied by the next look, including when this output returns later
+        self.hold(key, "output", name)
+
+    def find_graph(self):
+        if self.graph is None:
+            self.evaluate()
+        if self.graph is None:
+            raise ValueError("no PipeWire")
+
+    # ---- main loop
+    def start(self):
+        os.makedirs(RUN, exist_ok=True)
+        try:
+            os.unlink(SOCK)
+        except OSError:
+            pass
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC)
+        self.sock.bind(SOCK)
+        self.sock.setblocking(False)
+
+    def open_sub(self):
+        if self.sub and self.sub.poll() is None:
+            return
+        try:
+            self.sub = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, text=True)
+            os.set_blocking(self.sub.stdout.fileno(), False)
+            self.eval_at = time.time()
+        except OSError:
+            self.sub = None
+
+    def read_commands(self):
+        while True:
+            try:
+                data, addr = self.sock.recvfrom(4096)
+            except BlockingIOError:
+                return
+            reply = b"ok\n"
+            try:
+                self.command(data.decode("utf-8", "replace"))
+            except ValueError as e:
+                log("command %r: %s" % (data[:200], e))
+                reply = ("err %s\n" % e).encode()
+            except OSError as e:
+                log("command %r: %s" % (data[:200], e))
+                reply = ("err %s\n" % e).encode()
+            if addr:
+                try:
+                    self.sock.sendto(reply, addr)
+                except OSError:
+                    pass
+
+    def read_events(self):
+        try:
+            data = self.sub.stdout.read() or ""
+        except (BlockingIOError, TypeError, ValueError):
+            data = ""
+        if data == "" and self.sub.poll() is not None:
+            self.sub = None
+            return
+        # never on the clients this daemon's own tools come and go as
+        if " on sink" in data or " on card" in data or " on server" in data:
+            if not self.settle_at:
+                self.eval_at = self.eval_at or time.time() + 0.1
+
+    def run(self):
+        self.start()
+        signal.signal(signal.SIGTERM, lambda *a: setattr(self, "running", False))
+        signal.signal(signal.SIGINT, lambda *a: setattr(self, "running", False))
+        self.eval_at = time.time()
+        while self.running:
+            self.open_sub()
+            fds = [self.sock]
+            if self.sub:
+                fds.append(self.sub.stdout)
+            now = time.time()
+            timeout = 2.0 if not self.sub else 60.0
+            for t in (self.eval_at, self.settle_at):
+                if t:
+                    timeout = min(timeout, max(0.0, t - now))
+            try:
+                r, _, _ = select.select(fds, [], [], timeout)
+            except InterruptedError:
+                continue
+            for f in r:
+                if f is self.sock:
+                    self.read_commands()
+                elif self.sub:
+                    self.read_events()
+            now = time.time()
+            if self.settle_at and now >= self.settle_at:
+                self.settle_at = 0.0
+                self.force_push = True       # the key's echo was ignored: say where it came to rest
+                self.eval_at = self.eval_at or now
+            if self.eval_at and now >= self.eval_at and now - self.last_eval >= 0.12:
+                self.eval_at = 0.0
+                self.last_eval = now
+                if not self.evaluate():
+                    self.eval_at = now + 2
+            elif self.eval_at and now >= self.eval_at:
+                time.sleep(0.02)
+        if self.sub:
+            self.sub.terminate()
+        try:
+            os.unlink(SOCK)
+        except OSError:
+            pass
+
+
+def write_atomic(path, text):
+    tmp = path + ".new"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def ctl(words):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    s.bind("")
+    s.settimeout(TOOL_TIMEOUT)
+    s.sendto(" ".join(shlex.quote(w) for w in words).encode(), SOCK)
+    reply = s.recv(4096).decode().strip()
+    print(reply)
+    return 0 if reply == "ok" else 1
+
+
+def main():
+    if len(sys.argv) > 2 and sys.argv[1] == "ctl":
+        sys.exit(ctl(sys.argv[2:]))
+    Daemon().run()
+
+
+if __name__ == "__main__":
+    main()

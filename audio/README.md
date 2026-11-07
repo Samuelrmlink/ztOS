@@ -162,6 +162,44 @@ not a physical speaker latency measurement. Evidence:
 `build/power-analysis/typing-responsive-top.log`, and
 `build/power-analysis/typing-transitions-top.log`.
 
+## Volume and per-app audio: ztos-audiod
+
+`rootfs/overlay/usr/local/bin/ztos-audiod` (a user service) watches PipeWire
+from beside the audio path. Its docstring is the API a UI calls: commands on
+`$XDG_RUNTIME_DIR/ztos-audio.sock` and the state in
+`$XDG_RUNTIME_DIR/ztos-audio-state.json`. To try one by hand:
+
+    ztos-audiod ctl app-volume Output/Audio:application.name:Firefox 40
+    ztos-audiod ctl app-output Output/Audio:application.name:Firefox default
+
+**Volume.** Each output has its own volume, and WirePlumber remembers it:
+`default-routes` for a Bluetooth or ALSA device, `stream-properties` for the
+speaker's filter chain. The shell's banner only shows what the daemon reports,
+and the volume keys ask the daemon to set it on the active output. So a change
+from the speaker's buttons reaches the banner, and when an output goes away,
+the next output's own level is what is shown and stepped from.
+
+**Apps.** WirePlumber's `state-stream.lua` already saves an app's volume, mute
+and output under one key per app and restores them when the app plays. The
+limits, and what the daemon does about them:
+
+- An output is restored only if it exists as the stream starts, and a stream
+  doesn't return to an output that comes back later. The daemon sets the target
+  again whenever the output appears.
+- Only a live stream can change what's saved, and WirePlumber overwrites its
+  state file, so nothing else may edit it. Changes for an app that isn't running
+  wait in `~/.config/ztmetro/audio-apps.json` until it next plays. The app can
+  start at the old volume for a moment, until the change lands.
+- The key is `application.id`, else `application.name`, then `media.name`. An
+  app's streams share it, so they share one setting. All notification-role
+  streams share one key whichever app they come from, and the daemon doesn't
+  list them as apps.
+
+"Default" means no target: the stream follows the global output by itself
+(`linking.follow-default-target`). So nothing should call `pactl
+move-sink-input` to change the global output: that pins each stream, and
+WirePlumber saves the pin. The shell and `ztos-soundd` no longer do it.
+
 ## Not done
 
 - **Speaker protection.** On the stock system the DSP runs Maxim's DSM

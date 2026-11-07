@@ -233,6 +233,7 @@ rm -rf "$R/usr/src/zrn-pushd"
 step "adding ztOS's files"
 cp -a "$SRC/os/overlay/." "$R/"
 cp -a "$SRC/rootfs/overlay/." "$R/"         # every phone's: USB link, session, memory and fs recovery
+ch systemctl --global enable ztos-audiod.service
 # the wallpapers and ringtones: scripts/pack-media.sh
 if [ -f "$SRC/prebuilts/ztos-media/ztos-media.tar.xz.partaa" ]; then
 	cat "$SRC"/prebuilts/ztos-media/ztos-media.tar.xz.part* | tar -C "$R" --no-same-owner -xJf -

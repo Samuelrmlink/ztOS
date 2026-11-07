@@ -667,20 +667,6 @@ class Daemon:
             else:
                 time.sleep(0.3)
 
-    def move_inputs(self):
-        """Streams that were sent to a real output by hand go through the chain
-        again; never the chain's own output stream."""
-        try:
-            out = json.loads(subprocess.check_output(["pactl", "-f", "json", "list", "sink-inputs"],
-                                                     timeout=5, stderr=subprocess.DEVNULL))
-        except Exception:
-            return
-        for si in out:
-            pr = si.get("properties", {})
-            if pr.get("node.name", "").startswith(SINK) or pr.get("node.link-group"):
-                continue
-            subprocess.run(["pactl", "move-sink-input", str(si["index"]), SINK], stderr=subprocess.DEVNULL)
-
     def push(self, changes):
         if not changes or self.node_id is None:
             return
@@ -910,8 +896,9 @@ class Daemon:
                 self.cfg["output"] = cur
                 self.touch_save()
                 self.target = None
+            # only the default: streams that follow it come along, and an app
+            # sent to its own output (ztos-audiod) stays there
             self.set_default()
-            self.move_inputs()
             self.eval_at = time.time() + 0.2
 
     def shutdown(self):

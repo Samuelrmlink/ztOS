@@ -280,6 +280,15 @@ check-bt-list:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-list-test tests/bt-list.c
 	/tmp/ztmetro-bt-list-test
 
+.PHONY: check-audio-sync
+check-audio-sync:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-audio-sync-test tests/audio-sync.c
+	/tmp/ztmetro-audio-sync-test
+
+.PHONY: check-audiod
+check-audiod:
+	python3 tests/audiod.py
+
 .PHONY: check-power-key
 check-power-key:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-power-key-test tests/power-key.c

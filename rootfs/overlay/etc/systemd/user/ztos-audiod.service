@@ -1,0 +1,14 @@
+[Unit]
+Description=ztOS audio: active output's volume and per-app audio
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service pipewire-pulse.service wireplumber.service
+
+[Service]
+ExecStart=/usr/local/bin/ztos-audiod
+Restart=always
+RestartSec=2
+# watching, not playing: the efficiency cores are enough
+CPUAffinity=0-3
+
+[Install]
+WantedBy=default.target
