@@ -28,16 +28,23 @@ LOW=15	# per cent: at this or below, off the charger, the battery is low
 # Green means "on a charger and full (or held full)", never just "a cable is
 # in": a computer's port that gives less than the phone uses leaves the
 # battery discharging, and that is shown as what it is.
-level=$(cat /sys/class/power_supply/max170xx_battery/capacity 2>/dev/null || echo 100)
-case "$(cat /sys/class/power_supply/max170xx_battery/status 2>/dev/null)" in
-Charging) led charging ;;
-Full) led full ;;
-Discharging)
-	if [ "$level" -le $LOW ]; then led low; else led none; fi ;;
-*)	if [ "$(cat $C/online)" = 1 ] && [ "$level" -ge 95 ]; then led full
-	elif [ "$level" -le $LOW ] && [ "$(cat $C/online)" != 1 ]; then led low
-	else led none; fi ;;
-esac
+led_now() {
+	level=$(cat /sys/class/power_supply/max170xx_battery/capacity 2>/dev/null || echo 100)
+	case "$(cat /sys/class/power_supply/max170xx_battery/status 2>/dev/null)" in
+	Charging) led charging ;;
+	Full) led full ;;
+	Discharging)
+		if [ "$level" -le $LOW ]; then led low; else led none; fi ;;
+	*)	if [ "$(cat $C/online)" = 1 ] && [ "$level" -ge 95 ]; then led full
+		elif [ "$level" -le $LOW ] && [ "$(cat $C/online)" != 1 ]; then led low
+		else led none; fi ;;
+	esac
+}
+led_now
+# The event comes before the battery's status has caught up with the plug, and any
+# event while this runs is swallowed, so a look now can be a look too soon: the LED
+# stayed dark on a charging phone. So look again when this ends, whichever way it does.
+trap led_now EXIT
 type=0 vbus=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
 	bc=$(i2cget -f -y 1 0x25 0x08 2>/dev/null) || exit 0
@@ -58,3 +65,12 @@ if [ "$diff" -gt 60000 ]; then
 	fi
 	echo "zrn-charge: vbus=$vbus type=$type -> input ${in} uA, charge ${cc} uA"
 fi
+# the plug and the battery's status agree, or give it a few seconds to
+for _ in 1 2 3 4 5 6 7 8; do
+	led_now
+	st=$(cat /sys/class/power_supply/max170xx_battery/status 2>/dev/null)
+	case "$(cat "$C/online"):$st" in
+	1:Charging|1:Full|0:Discharging) break ;;
+	esac
+	sleep 1
+done
