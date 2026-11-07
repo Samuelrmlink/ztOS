@@ -9701,8 +9701,10 @@ static void nav_activate(struct zt_server *server, int index) {
 		if (server->shown) {
 			show_toplevel(server, NULL);
 		} else if (retro_on(server)) {
+	bool closed_hyper = false;
 			dm_launcher_home(server->dm, wall_ms());
 			damage(server);
+		closed_hyper = true;
 		} else {
 			home_reset(server);
 		}
@@ -9714,6 +9716,9 @@ static void nav_activate(struct zt_server *server, int index) {
 		}
 		if (server->shown && server->shown->android_runtime && server->osk_visible) {
 			osk_show(server, false);
+		} else if (!closed_hyper && !server->menu_open && !server->editing && !server->board_state &&
+				!server->shade_open && server->page <= 0.5f && server->scroll <= 1) {
+			switcher_open(server);	/* already home, at the top of the tiles */
 			const char *id = server->shown->xdg_toplevel->app_id;
 			if (id && !strncmp(id, "waydroid.", 9)) {
 				vkbd_send(server, KEY_ESC, false);
