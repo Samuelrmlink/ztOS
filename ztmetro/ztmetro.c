@@ -374,6 +374,7 @@ struct zt_toplevel {
 	int sent_h;		/* the height it was last asked to take */
 	int sent_w;		/* and the width */
 	float zoom;		/* its own scale from Settings; 0 until looked up */
+	bool suspended_sent;	/* told it can't be seen (xdg_shell's suspended) */
 	bool fullscreen;	/* it asked for the whole screen, and has it */
 	struct wl_listener request_fullscreen;
 	struct wl_listener map, unmap, commit, destroy;
@@ -6333,11 +6334,33 @@ static void ui_sound(struct zt_server *server, enum ui_sound sound) {
 	sendto(server->key_sound_fd, packet, sizeof(packet), MSG_DONTWAIT, (struct sockaddr *)&addr, sizeof(addr));
 }
 
+static const char *app_name(struct zt_toplevel *toplevel);
+
+/* Tell each app whether it can be seen. It isn't drawn while hidden either way,
+ * and gets no frame callbacks; this is what lets one stop the work behind them: a
+ * browser engine can drop a video's picture and keep its sound. The Android
+ * runtimes have a freeze policy of their own. */
+static void apps_suspend_sync(struct zt_server *server) {
+	struct zt_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (!t->xdg_toplevel->base->initialized || t->android_runtime) {
+			continue;
+		}
+		bool hidden = t != server->shown || server->locked || !server->screen_on;
+		if (hidden != t->suspended_sent) {
+			t->suspended_sent = hidden;
+			wlr_xdg_toplevel_set_suspended(t->xdg_toplevel, hidden);
+			wlr_log(WLR_INFO, "app %s: %s", app_name(t), hidden ? "suspended" : "visible");
+		}
+	}
+}
+
 static void lock(struct zt_server *server) {
 	if (server->width == 0 || !server->lock_enabled) {
 		return;
 	}
 	server->locked = true;
+	apps_suspend_sync(server);
 	server->switcher = false;
 	server->switch_t = 0.0f;
 	animate(server, &server->switch_t, 0.0f, 1, 0, true);
@@ -8007,6 +8030,7 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 	}
 	wl_event_source_timer_update(server->launch_timer, 0);
 	server->shown = toplevel;
+	apps_suspend_sync(server);
 	server->fs_reveal = false;
 	fs_sync(server);
 	waydroid_rewaking = false;
@@ -9392,6 +9416,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 		return;
 	}
 	toplevel->mapped = true;
+	apps_suspend_sync(server);
 	{
 		/* (android_runtime is known by now) */
 		float zoom = app_zoom_for(server, toplevel);
@@ -9454,6 +9479,7 @@ static bool waydroid_rewake(struct zt_server *server, struct zt_toplevel *toplev
 	server->launch_ms = server->loading_since = now;
 	prepare_loading(server);
 	server->shown = NULL;
+	apps_suspend_sync(server);
 	server->leaving = NULL;
 	wlr_seat_keyboard_notify_clear_focus(server->seat);
 	text_inputs_focus(server, NULL);
@@ -12054,6 +12080,7 @@ static void screen_set(struct zt_server *server, bool on) {
 	}
 	wlr_log(WLR_INFO, "screen %s", on ? "on" : "off");
 	led_notes_sync(server);
+	apps_suspend_sync(server);
 	if (!on) {
 		/* locked as it goes dark (lock() itself runs as it comes back on,
 		 * and waking is silent) */
@@ -13403,6 +13430,7 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		}
 		if (dm_swiped || (!retro_on(server) && !cancelled && p->y - p->y0 < -server->height / 5.0)) {
 			server->locked = false;
+			apps_suspend_sync(server);
 			bt_pair_sync(server);
 			if (!server->boot_logo_done) {
 				char marker[256];
@@ -16663,7 +16691,7 @@ int main(int argc, char *argv[]) {
 	server.new_output.notify = server_new_output;
 	wl_signal_add(&server.backend->events.new_output, &server.new_output);
 
-	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
+	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 6);
 	server.new_xdg_toplevel.notify = server_new_xdg_toplevel;
 	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
 	server.new_xdg_popup.notify = server_new_xdg_popup;
