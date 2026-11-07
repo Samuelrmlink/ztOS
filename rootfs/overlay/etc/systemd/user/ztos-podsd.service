@@ -1,0 +1,14 @@
+[Unit]
+Description=ztOS AirPods: batteries, listening modes and settings
+After=dbus.socket
+
+[Service]
+ExecStart=/usr/local/bin/ztos-podsd
+ExecStopPost=/bin/rm -f %t/ztos-pods
+Restart=always
+RestartSec=5
+# listening, not computing: the efficiency cores are enough
+CPUAffinity=0-3
+
+[Install]
+WantedBy=default.target

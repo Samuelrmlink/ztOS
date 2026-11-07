@@ -71,6 +71,7 @@ enum action {
 	ACT_BT_POWER,
 	ACT_BT_DEVICE,		/* arg: which device: pair, connect or disconnect it */
 	ACT_BT_FORGET,		/* arg: which device */
+	ACT_BT_PODS,		/* arg: which device: AirPods' own settings */
 	ACT_BT_MENU,		/* an item of a held device's menu */
 	ACT_BT_MENU_CLOSE,
 	ACT_COLUMNS,
@@ -1949,7 +1950,9 @@ static int wifi_menu_items(const struct network *n, const char *items[3]) {
 
 #define MAX_BT 24
 #include "bt-list.h"
+#include "../pods/pods-bar-state.h"
 #define BT_ROW_H 70.0
+#define BT_PODS_W 96.0
 static struct {
 	bool on, loading;
 	struct bt_device dev[MAX_BT];
@@ -2151,6 +2154,9 @@ static double draw_bluetooth(cairo_t *cr) {
 		y += zmc_text(cr, bt.status, FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 14;
 	}
 	int battery = bt_battery();
+	/* AirPods that have connected here: ztos-podsd lists them, and ztpods has their settings */
+	struct pods_bar pods;
+	pods_bar_read(&pods);
 	double menu_at = -1;
 	double list_top = y;
 	/* rows in motion last, on a plain ground, so that they pass over the others */
@@ -2166,8 +2172,9 @@ static double draw_bluetooth(cairo_t *cr) {
 			cairo_fill(cr);
 		}
 		snprintf(bt_drawn[i], sizeof(bt_drawn[i]), "%s", d->mac);
+		bool is_pods = !d->gone && pods_bar_knows(&pods, d->mac);
 		cairo_set_source_rgb(cr, 1, 1, 1);
-		zmc_text_line(cr, d->name, FONT_SEMILIGHT, 26, MARGIN, y, zmc.width - 2 * MARGIN);
+		zmc_text_line(cr, d->name, FONT_SEMILIGHT, 26, MARGIN, y, zmc.width - 2 * MARGIN - (is_pods ? BT_PODS_W + 8 : 0));
 		char line[64];
 		if (d->connected && battery >= 0 && strcmp(d->mac, bt_busy_mac)) {
 			snprintf(line, sizeof(line), "Connected, battery %d%%", battery);
@@ -2182,6 +2189,8 @@ static double draw_bluetooth(cairo_t *cr) {
 			cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 		}
 		zmc_text(cr, line, FONT_REGULAR, 14, MARGIN, y + 34, 0);
+		/* first: the first hit under a finger takes it, and the row's would disconnect */
+		if (is_pods) zmc_button(cr, zmc.width - MARGIN - BT_PODS_W, y + 6, BT_PODS_W, "settings", ACT_BT_PODS, i);
 		zmc_add_hit(0, y - 4, zmc.width, 64, ACT_BT_DEVICE, i);
 		if (i == bt_menu) {
 			menu_at = list_top + i * BT_ROW_H + 60;
@@ -2195,8 +2204,8 @@ static double draw_bluetooth(cairo_t *cr) {
 	}
 	if (bt_menu >= 0 && bt_menu < bt.n && menu_at >= 0) {
 		struct bt_device *d = &bt.dev[bt_menu];
-		const char *items[2] = { d->connected ? "disconnect" : d->paired ? "connect" : "pair", "delete" };
-		zmc_menu(cr, menu_at, items, d->paired ? 2 : 1, ACT_BT_MENU, ACT_BT_MENU_CLOSE);
+		const char *items[3] = { d->connected ? "disconnect" : d->paired ? "connect" : "pair", "delete", "airpods settings" };
+		zmc_menu(cr, menu_at, items, d->paired ? (pods_bar_knows(&pods, d->mac) ? 3 : 2) : 1, ACT_BT_MENU, ACT_BT_MENU_CLOSE);
 	}
 	return y + 20;
 }
@@ -3636,8 +3645,15 @@ static void activate(int action, int arg) {
 		int which = bt_menu;
 		bt_menu = -1;
 		if (which < 0 || which >= bt.n) break;
-		activate(arg == 1 ? ACT_BT_FORGET : ACT_BT_DEVICE, which);
+		activate(arg == 2 ? ACT_BT_PODS : arg == 1 ? ACT_BT_FORGET : ACT_BT_DEVICE, which);
 		return;
+	}
+	case ACT_BT_PODS: {
+		if (arg < 0 || arg >= MAX_BT || !bt_mac_ok(bt_drawn[arg])) break;
+		char cmd[64];
+		snprintf(cmd, sizeof(cmd), "ztpods %s >/dev/null 2>&1 &", bt_drawn[arg]);
+		if (system(cmd) != 0) {}
+		break;
 	}
 	case ACT_BT_DEVICE:
 	case ACT_BT_FORGET: {
@@ -4353,6 +4369,15 @@ static int render_to_file(const char *name, const char *path) {
 	if (page == PAGE_INSTALLED_APPS || page == PAGE_APP_DETAIL) installed_load();
 	if (page == PAGE_APP_SCALE) app_scale_load();
 	if (page == PAGE_BOOST) ib_render_prepare();
+	/* ZT_BT_SAMPLE="yes~@devices~MAC|name|yes|yes|icon~...": the Bluetooth page's list, for reviews */
+	if (page == PAGE_BLUETOOTH && getenv("ZT_BT_SAMPLE")) {
+		char text[2048];
+		snprintf(text, sizeof(text), "%s", getenv("ZT_BT_SAMPLE"));
+		for (char *c = text; *c; c++) {
+			if (*c == '~') *c = '\n';
+		}
+		bt_parse(text);
+	}
 	/* 664 points: the app area on the phone; ZT_RENDER_HEIGHT for a whole long page */
 	int height = getenv("ZT_RENDER_HEIGHT") ? atoi(getenv("ZT_RENDER_HEIGHT")) : 664;
 	return zmc_render_png(&settings, page, height > 0 ? height : 664, path);
