@@ -67,7 +67,7 @@ APP_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(APP_PKGS)) $(IAL_LIBS)
 camera/ztcamera: camera/ztcamera.c $(CORE_DEPS)
 	$(APP_BUILD) -o $@ camera/ztcamera.c $(CORE) $(APP_LIBS)
 
-settings/ztsettings: settings/ztsettings.c settings/boostpage.h $(CORE_DEPS)
+settings/ztsettings: settings/ztsettings.c settings/boostpage.h settings/config-merge.h settings/bt-list.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ settings/ztsettings.c $(CORE) $(APP_LIBS)
 
 devtest/zrndevtest: devtest/zrndevtest.c $(CORE_DEPS)
@@ -279,6 +279,11 @@ check-auth: xdg-shell-protocol.h
 check-bt-list:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-list-test tests/bt-list.c
 	/tmp/ztmetro-bt-list-test
+
+.PHONY: check-settings-config
+check-settings-config:
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-settings-config-test tests/settings-config.c
+	/tmp/ztmetro-settings-config-test
 
 .PHONY: check-audio-sync
 check-audio-sync:

@@ -41,6 +41,7 @@
 #include "zrnmetrocore.h"
 #include "zrnboard.h"
 #include "../background-apps.h"
+#include "config-merge.h"
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -325,6 +326,7 @@ static const int menu_speeds[] = { 50, 75, 100, 125, 150, 200 };
 
 static void perf_load(void);
 static void auto_load(void);
+static void config_remember_loaded(void);
 
 /* The hub tab last shown: PAGE_MAIN (system) or PAGE_APPS (applications). */
 static int hub_tab;
@@ -443,6 +445,7 @@ static void config_load(void) {
 	if (buf[0]) app.swappiness = atoi(buf);
 	perf_load();
 	auto_load();
+	config_remember_loaded();
 }
 
 /* What zrnperfd is set to: it keeps its state where anyone can read it. */
@@ -550,58 +553,84 @@ static void auto_load(void) {
 	if (f) fclose(f);
 }
 
-static void config_save(void) {
-	static const int timeouts[] = { 30, 60, 180, 300, 0 };
-	enum { N_KEYS = 23 + N_HAPTIC_GROUPS };
-	struct { const char *key; char value[300]; bool written; } keys[N_KEYS] = {
-		{ .key = "accent" }, { .key = "columns" }, { .key = "haptics" },
-		{ .key = "brightness" }, { .key = "timeout" }, { .key = "demo_tiles" },
-		{ .key = "slow_motion" }, { .key = "show_touches" }, { .key = "lock" },
-		{ .key = "menu_speed" }, { .key = "haptic_strength" }, { .key = "quick" },
-		{ .key = "wifi_suspend" },
-		{ .key = "key_height" }, { .key = "key_sound" },
-		{ .key = "ring_volume" }, { .key = "media_volume" }, { .key = "nav_center_icon" },
-	};
-	snprintf(keys[13].value, 32, "%d", app.key_height);
-    snprintf(keys[14].value, 32, "%s", app.key_sound ? "on" : "off");
-    snprintf(keys[15].value, 32, "%d", app.ring_vol);
-    snprintf(keys[16].value, 32, "%d", app.media_vol);
-    snprintf(keys[10].value, 32, "%d", app.haptic_strength);
-	for (int i = 0; i < 8; i++) {
-		size_t at = strlen(keys[11].value);
-		snprintf(keys[11].value + at, sizeof(keys[11].value) - at, "%s%s", i ? "," : "", QUICK_IDS[app.quick[i]]);
-	}
-	snprintf(keys[12].value, 32, "%s", app.wifi_suspend ? "on" : "off");
-	for (int g = 0; g < N_HAPTIC_GROUPS; g++) {
-		keys[17 + g].key = HAPTIC_GROUPS[g].key;
-		snprintf(keys[17 + g].value, 32, "%d", app.haptic_group[g]);
-	}
-	keys[17 + N_HAPTIC_GROUPS].key = "start_wallpaper";
-	snprintf(keys[17 + N_HAPTIC_GROUPS].value, sizeof(keys[0].value), "%s", app.start_wall);
-	keys[18 + N_HAPTIC_GROUPS].key = "lock_wallpaper";
-	snprintf(keys[18 + N_HAPTIC_GROUPS].value, sizeof(keys[0].value), "%s", app.lock_wall);
-	keys[19 + N_HAPTIC_GROUPS].key = "nav_center_icon";
-	snprintf(keys[19 + N_HAPTIC_GROUPS].value, 32, "%d", app.nav_icon_idx);
-	static const char *const sizes[] = { "compact", "standard", "large" };
-	keys[20 + N_HAPTIC_GROUPS].key = "display_size";
-	snprintf(keys[20 + N_HAPTIC_GROUPS].value, 32, "%s", sizes[app.scale_idx]);
-	keys[21 + N_HAPTIC_GROUPS].key = "style";
-	snprintf(keys[21 + N_HAPTIC_GROUPS].value, 32, "%s", app.style ? "dotmatrix" : "metro");
-	keys[22 + N_HAPTIC_GROUPS].key = "dotmatrix_palette";
-	snprintf(keys[22 + N_HAPTIC_GROUPS].value, 32, "%s", dm_palette_names[app.palette]);
-	snprintf(keys[0].value, 32, "%s", ACCENTS[app.accent].name);
-	snprintf(keys[1].value, 32, "%d", app.columns);
-	snprintf(keys[2].value, 32, "%s", app.haptics ? "on" : "off");
-	snprintf(keys[3].value, 32, "%d", app.brightness);
-	snprintf(keys[4].value, 32, "%d", timeouts[app.timeout_idx]);
-	snprintf(keys[5].value, 32, "%s", app.dev_demo_tiles ? "on" : "off");
-	snprintf(keys[6].value, 32, "%s", app.dev_slow ? "on" : "off");
-	snprintf(keys[7].value, 32, "%s", app.dev_touches ? "on" : "off");
-	snprintf(keys[8].value, 32, "%s", app.dev_lock ? "on" : "off");
-	snprintf(keys[9].value, 32, "%d", menu_speeds[app.menu_speed_idx]);
-	zmc.accent = ACCENTS[app.accent].color;
+/* Every key Settings can write, as it would write it now. */
+enum { N_CONFIG_KEYS = 23 + N_HAPTIC_GROUPS };
+static struct config_key config_keys[N_CONFIG_KEYS];
 
-	char path[512], tmp[512], line[256];
+static struct config_key *config_key_named(const char *name) {
+	for (int i = 0; i < N_CONFIG_KEYS; i++) {
+		if (config_keys[i].key && strcmp(config_keys[i].key, name) == 0) return &config_keys[i];
+	}
+	return NULL;
+}
+
+static void config_format(void) {
+	static const int timeouts[] = { 30, 60, 180, 300, 0 };
+	static const char *const sizes[] = { "compact", "standard", "large" };
+	int n = 0;
+#define KEY(name, ...) do { \
+		config_keys[n].key = (name); \
+		snprintf(config_keys[n].value, sizeof(config_keys[n].value), __VA_ARGS__); \
+		n++; \
+	} while (0)
+	KEY("accent", "%s", ACCENTS[app.accent].name);
+	KEY("columns", "%d", app.columns);
+	KEY("haptics", "%s", app.haptics ? "on" : "off");
+	KEY("brightness", "%d", app.brightness);
+	KEY("timeout", "%d", timeouts[app.timeout_idx]);
+	KEY("demo_tiles", "%s", app.dev_demo_tiles ? "on" : "off");
+	KEY("slow_motion", "%s", app.dev_slow ? "on" : "off");
+	KEY("show_touches", "%s", app.dev_touches ? "on" : "off");
+	KEY("lock", "%s", app.dev_lock ? "on" : "off");
+	KEY("menu_speed", "%d", menu_speeds[app.menu_speed_idx]);
+	KEY("haptic_strength", "%d", app.haptic_strength);
+	char quick[CONFIG_VALUE_MAX - 8] = "";
+	for (int i = 0; i < 8; i++) {
+		size_t at = strlen(quick);
+		snprintf(quick + at, sizeof(quick) - at, "%s%s", i ? "," : "", QUICK_IDS[app.quick[i]]);
+	}
+	KEY("quick", "%s", quick);
+	KEY("wifi_suspend", "%s", app.wifi_suspend ? "on" : "off");
+	KEY("key_height", "%d", app.key_height);
+	KEY("key_sound", "%s", app.key_sound ? "on" : "off");
+	KEY("ring_volume", "%d", app.ring_vol);
+	KEY("media_volume", "%d", app.media_vol);
+	for (int g = 0; g < N_HAPTIC_GROUPS; g++) KEY(HAPTIC_GROUPS[g].key, "%d", app.haptic_group[g]);
+	KEY("start_wallpaper", "%s", app.start_wall);
+	KEY("lock_wallpaper", "%s", app.lock_wall);
+	KEY("nav_center_icon", "%d", app.nav_icon_idx);
+	KEY("display_size", "%s", sizes[app.scale_idx]);
+	KEY("style", "%s", app.style ? "dotmatrix" : "metro");
+	KEY("dotmatrix_palette", "%s", dm_palette_names[app.palette]);
+#undef KEY
+}
+
+/* Each key's value as loaded: nothing is written until it differs from this. */
+static void config_remember_loaded(void) {
+	config_format();
+	config_keys_written(config_keys, N_CONFIG_KEYS);
+}
+
+/* The screen's brightness moved by itself (the light sensor, the pull-down) and
+ * the slider follows it: that is nothing to write. */
+static void config_brightness_followed(void) {
+	struct config_key *k = config_key_named("brightness");
+	if (k) snprintf(k->loaded, sizeof(k->loaded), "%d", app.brightness);
+}
+
+/* A hand set the brightness: it goes in the file even if it reads the same as
+ * the level followed, since the shell sets the screen from the file. */
+static void config_brightness_chosen(void) {
+	struct config_key *k = config_key_named("brightness");
+	if (k) k->force = true;
+}
+
+static void config_save(void) {
+	config_format();
+	zmc.accent = ACCENTS[app.accent].color;
+	if (!config_keys_changed(config_keys, N_CONFIG_KEYS)) return;
+
+	char path[512], tmp[512];
 	config_path(path, sizeof(path));
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 	FILE *in = fopen(path, "r"), *out = fopen(tmp, "w");
@@ -609,32 +638,11 @@ static void config_save(void) {
 		if (in) fclose(in);
 		return;
 	}
-	/* lines we do not know are kept as they are */
-	while (in && fgets(line, sizeof(line), in)) {
-		char copy[256];
-		snprintf(copy, sizeof(copy), "%s", line);
-		char *eq = strchr(copy, '=');
-		bool ours = false;
-		if (copy[0] != '#' && eq) {
-			*eq = 0;
-			char *key = trim(copy);
-			for (int i = 0; i < N_KEYS; i++) {
-				if (strcmp(key, keys[i].key) == 0) {
-					if (!keys[i].written) {
-						fprintf(out, "%s = %s\n", keys[i].key, keys[i].value);
-					}
-					keys[i].written = ours = true;
-				}
-			}
-		}
-		if (!ours) fputs(line, out);
-	}
+	config_merge(in, out, config_keys, N_CONFIG_KEYS);
 	if (in) fclose(in);
-	for (int i = 0; i < N_KEYS; i++) {
-		if (!keys[i].written) fprintf(out, "%s = %s\n", keys[i].key, keys[i].value);
-	}
 	fclose(out);
-	rename(tmp, path);
+	if (rename(tmp, path) != 0) return;
+	config_keys_written(config_keys, N_CONFIG_KEYS);
 
 	if (system("pkill -HUP -x ztmetro 2>/dev/null") != 0) {}
 }
@@ -1852,6 +1860,7 @@ static void display_tick(void) {
 	int now = brightness_now();
 	if (zmc.page == PAGE_DISPLAY && !zmc.sliding && now > 0 && now != app.brightness) {
 		app.brightness = now < 1 ? 1 : now;
+		config_brightness_followed();
 		zmc_redraw();
 	}
 }
@@ -3633,6 +3642,7 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_BRIGHTNESS_STEP:
 		app.brightness = (app.brightness >= 100) ? 25 : app.brightness + 25;
+		config_brightness_chosen();
 		config_save();
 		break;
 	case ACT_OPENTONE:
@@ -3644,6 +3654,7 @@ static void activate(int action, int arg) {
 		pipe_tell("/run/ztoscsf-sensord.ctl", app.autobrightness ? "auto on\n" : "auto off\n");
 		pipe_tell("/run/zrn-sensord.ctl", app.autobrightness ? "auto on\n" : "auto off\n");
 		if (!app.autobrightness) {
+			config_brightness_chosen();
 			config_save();	/* back to the level the slider shows */
 		}
 		break;
@@ -3820,6 +3831,7 @@ static void slide(int action, int value, bool done) {
 			brightness_tell(zmc.slider_permille < 20 ? 20 : zmc.slider_permille);
 		}
 		if (done) {
+			config_brightness_chosen();
 			config_save();
 		}
 		break;
