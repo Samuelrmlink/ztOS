@@ -411,6 +411,9 @@ struct zt_keyboard {
 	struct wl_listener modifiers, key, destroy;
 };
 
+#define CTL_DOTS 48
+#define CTL_DOT_MS 500
+
 struct zt_touch_device {
 	struct zt_server *server;
 	struct wlr_touch *touch;
@@ -712,6 +715,8 @@ struct zt_server {
 	bool tone_dirty;
 	struct wlr_idle_notifier_v1 *idle_notifier;	/* for hypridle and the like */
 	uint32_t wifi_read_ms;
+	uint32_t wifi_off_ms;		/* when the tile switched Wi-Fi off: reports just after are stale */
+	uint32_t bt_tile_ms;		/* when the tile changed Bluetooth: the state file is behind it */
 	bool wifi_suspend;
 	bool wifi_suspended_by_sleep;
 	float lock_y;			/* 0 covering the screen, -height pushed off the top */
@@ -887,6 +892,9 @@ struct zt_server {
 	int hwkey_held;			/* the nav button whose own key is down; -1: none */
 	bool hwkey_long;		/* ... and held long enough to count as a long press */
 	struct wl_event_source *hwkey_timer;
+	struct { float x, y; uint32_t ms; } ctl_dots[CTL_DOTS];
+	int ctl_dot_next;
+	struct zt_layer ctl_dot_layer;
 	struct power_key power_key;
 	struct wl_event_source *power_key_timer;
 
@@ -5416,8 +5424,14 @@ static void status_pop_end(cairo_t *cr, float t) {
  * Asked of the driver when the status row is drawn anyway (the minute, a
  * power event, the action centre) and kept for a few seconds, as the row is
  * drawn in three places; nothing wakes up to ask. */
+#define WIFI_OFF_HOLD_MS 12000
+
 static int wifi_bars(struct zt_server *server) {
 	uint32_t now = now_ms();
+	if (server->wifi_off_ms && now - server->wifi_off_ms < WIFI_OFF_HOLD_MS) {
+		server->wifi_bars = -1;
+		return -1;
+	}
 	/* If ztoscorenetworkingd reported active bars, use it */
 	if (server->wifi_read_ms && now - server->wifi_read_ms < 40000 && server->wifi_bars >= 0) {
 		return server->wifi_bars;
@@ -6213,7 +6227,9 @@ static bool bt_state_read(struct zt_server *server) {
 	bool changed = on != server->bt_on || streaming != server->bt_streaming ||
 		battery != server->bt_battery || apple != server->bt_apple || strcmp(name, server->bt_name) != 0;
 	server->bt_on = on;
-	server->shade_bt = on;
+	if (!server->bt_tile_ms || now_ms() - server->bt_tile_ms > 4000) {
+		server->shade_bt = on;
+	}
 	server->bt_streaming = streaming;
 	server->bt_battery = battery;
 	server->bt_apple = apple;
@@ -6266,6 +6282,9 @@ static int net_tick(void *data) {
 
 	if (bt_state_read(server)) {
 		redraw = true;
+		if (server->shade_open || server->shade_h > 0.1f) {
+			draw_shade(server);	/* its tile follows */
+		}
 	}
 	live_tick(server);
 	if (server->bt_streaming) {
@@ -8066,6 +8085,7 @@ static void shade_activate(struct zt_server *server, int index) {
 		hap(server, HAP_TAP, HG_SYSTEM);
 		server->shade_wifi = !server->shade_wifi;
 		run_detached("nmcli", "radio", "wifi", server->shade_wifi ? "on" : "off");
+		server->wifi_off_ms = server->shade_wifi ? 0 : now_ms();
 		if (!server->shade_wifi) {
 			/* gone now, whatever was last measured */
 			server->wifi_bars = -1;
@@ -8104,6 +8124,7 @@ static void shade_activate(struct zt_server *server, int index) {
 		}
 		hap(server, HAP_TAP, HG_SYSTEM);
 		server->shade_bt = !server->shade_bt;
+		server->bt_tile_ms = now_ms();
 		run_detached("bluetoothctl", "power", server->shade_bt ? "on" : "off", NULL);
 		draw_shade(server);
 		damage(server);
@@ -12623,6 +12644,16 @@ static void state_file_write(struct zt_server *server) {
  */
 static void ctl_key(struct zt_server *server, unsigned code, const char *how);
 
+/* Input from the control pipe (an agent, ztmirror) shows as a fading dot, so a
+ * person holding the phone can tell it isn't them, and where it went. */
+static void ctl_dot_add(struct zt_server *server, double x, double y) {
+	server->ctl_dots[server->ctl_dot_next].x = (float)x;
+	server->ctl_dots[server->ctl_dot_next].y = (float)y;
+	server->ctl_dots[server->ctl_dot_next].ms = now_ms();
+	server->ctl_dot_next = (server->ctl_dot_next + 1) % CTL_DOTS;
+	damage(server);
+}
+
 static void ctl_command(struct zt_server *server, char *line) {
 	int id;
 	double x, y;
@@ -12630,14 +12661,17 @@ static void ctl_command(struct zt_server *server, char *line) {
 	char how[8];
 	uint32_t t = now_ms();
 	if (sscanf(line, "down %d %lf %lf", &id, &x, &y) == 3) {
+		ctl_dot_add(server, x, y);
 		touch_begin(server, 1000 + id, x, y, t);
 	} else if (sscanf(line, "move %d %lf %lf", &id, &x, &y) == 3) {
+		ctl_dot_add(server, x, y);
 		touch_update(server, 1000 + id, x, y, t);
 	} else if (sscanf(line, "up %d", &id) == 1) {
 		touch_end(server, 1000 + id, t, false);
 	} else if (sscanf(line, "cancel %d", &id) == 1) {
 		touch_end(server, 1000 + id, t, true);
 	} else if (sscanf(line, "tap %lf %lf", &x, &y) == 2) {
+		ctl_dot_add(server, x, y);
 		touch_begin(server, 1999, x, y, t);
 		touch_end(server, 1999, t + 30, false);
 	} else if (sscanf(line, "key %u %7s", &code, how) == 2) {
@@ -14442,6 +14476,32 @@ static void render_frame(struct zt_server *server) {
 			mat_translate(m, (float)p->x - 9, (float)p->y - 9);
 			mat_scale(m, 18, 18);
 			quad(server, GL_TEXTURE_2D, server->white_tex, m, 0.55f, false, false, 1.0f, 1.0f);
+		}
+	}
+	{	/* input from the control pipe */
+		bool live = false;
+		for (int i = 0; i < CTL_DOTS; i++) {
+			uint32_t age = now - server->ctl_dots[i].ms;
+			if (!server->ctl_dots[i].ms || age >= CTL_DOT_MS) {
+				continue;
+			}
+			if (!server->ctl_dot_layer.tex) {
+				cairo_t *dot;
+				int px = 22;
+				struct zt_buffer *buffer = zt_buffer_create(server, px, px, &dot);
+				cairo_set_source_rgba(dot, 0.1, 0.75, 1.0, 1.0);
+				cairo_arc(dot, px / 2.0, px / 2.0, px / 2.0 - 1, 0, 2 * M_PI);
+				cairo_fill(dot);
+				zt_buffer_show(server, &server->ctl_dot_layer, buffer, dot, px, px);
+			}
+			if (server->ctl_dot_layer.tex) {
+				layer_draw(server, &server->ctl_dot_layer, server->ctl_dots[i].x - 11,
+					server->ctl_dots[i].y - 11, 0.75f * (1.0f - (float)age / CTL_DOT_MS));
+			}
+			live = true;
+		}
+		if (live) {
+			damage(server);
 		}
 	}
 	/* the colour temperature and the software brightness are not drawn here:
