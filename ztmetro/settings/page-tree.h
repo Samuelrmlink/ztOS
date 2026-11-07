@@ -35,6 +35,7 @@ enum page {
 	PAGE_WALLS,	/* the background photo picker: categories, then one */
 	PAGE_NAVIGATION,
 	PAGE_BOOST,	/* Dynamic Boost System: RapidBoost and IntelligentBoost */
+	PAGE_CONNECTIONS,	/* Wi-Fi, Bluetooth, the mobile network */
 	N_PAGES
 };
 
@@ -46,8 +47,9 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_APPS] = PAGE_NO_PARENT,
 	[PAGE_THEME] = PAGE_HUB_TAB,
 	[PAGE_DISPLAY] = PAGE_HUB_TAB,
-	[PAGE_WIFI] = PAGE_HUB_TAB,
-	[PAGE_MOBILE] = PAGE_HUB_TAB,
+	[PAGE_CONNECTIONS] = PAGE_HUB_TAB,
+	[PAGE_WIFI] = PAGE_CONNECTIONS,
+	[PAGE_MOBILE] = PAGE_CONNECTIONS,
 	[PAGE_AUDIO] = PAGE_HUB_TAB,
 	[PAGE_BATTERY] = PAGE_HUB_TAB,
 	[PAGE_CPU] = PAGE_HUB_TAB,
@@ -65,7 +67,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_WIFI_JOIN] = PAGE_WIFI,
 	[PAGE_WIFI_NET] = PAGE_WIFI,
 	[PAGE_DATE] = PAGE_HUB_TAB,
-	[PAGE_BLUETOOTH] = PAGE_HUB_TAB,
+	[PAGE_BLUETOOTH] = PAGE_CONNECTIONS,
 	[PAGE_ACCENTS] = PAGE_THEME,
 	[PAGE_WALLS] = PAGE_THEME,
 	[PAGE_NAVIGATION] = PAGE_HUB_TAB,
@@ -85,6 +87,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "navigation", PAGE_NAVIGATION },
 	{ "quick", PAGE_QUICK },
 	{ "display", PAGE_DISPLAY },
+	{ "connections", PAGE_CONNECTIONS },
 	{ "wifi", PAGE_WIFI },
 	{ "wifinet", PAGE_WIFI_NET },
 	{ "wifijoin", PAGE_WIFI_JOIN },

@@ -901,74 +901,6 @@ static void cell_load(void) {
 
 static int brightness_now(void);
 
-static double draw_main(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "system", "applications", ACT_OPEN_PAGE, PAGE_APPS);
-	char detail[128], wifi[96];
-
-	snprintf(detail, sizeof(detail), "accent: %s, %d columns",
-		ACCENTS[app.accent].name, app.columns);
-	y = zmc_entry(cr, y, "theme", detail, ACT_OPEN_PAGE, PAGE_THEME);
-	y = zmc_entry(cr, y, "navigation bar", "choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
-
-	/* the screen's real level: the config's is only where it last started,
-	 * and auto brightness moves on from it */
-	int bright_now = brightness_now();
-	char timeout[32];
-	snprintf(detail, sizeof(detail), "%d%% brightness, %s", bright_now > 0 ? bright_now : app.brightness,
-		timeout_text(timeout, sizeof(timeout), app.timeout_s));
-	y = zmc_entry(cr, y, "display", detail, ACT_OPEN_PAGE, PAGE_DISPLAY);
-
-	wifi_summary(wifi, sizeof(wifi));
-	y = zmc_entry(cr, y, "Wi-Fi", wifi, ACT_OPEN_PAGE, PAGE_WIFI);
-
-	bt_summary(detail, sizeof(detail));
-	y = zmc_entry(cr, y, "Bluetooth", detail, ACT_OPEN_PAGE, PAGE_BLUETOOTH);
-
-	cell_load();
-	snprintf(detail, sizeof(detail), "%s%s%s%s", cell.operator[0] ? cell.operator : "no service",
-		cell.tech[0] ? ", " : "", cell.tech, !cell.data_on ? ", data off" : cell.data ?
-		", data connected" : ", data on");
-	y = zmc_entry(cr, y, "cellular + SIM", detail, ACT_OPEN_PAGE, PAGE_MOBILE);
-
-	snprintf(detail, sizeof(detail), "media %d%%, ring %d%%", app.media_vol, app.ring_vol);
-	y = zmc_entry(cr, y, "ringtones + sounds", detail, ACT_OPEN_PAGE, PAGE_AUDIO);
-
-	if (!app.haptics) {
-		snprintf(detail, sizeof(detail), "off");
-	} else {
-		int on = 0;
-		for (int g = 0; g < N_HAPTIC_GROUPS; g++) on += app.haptic_group[g] > 0;
-		snprintf(detail, sizeof(detail), "on, strength %d%%, %d of %d kinds", app.haptic_strength,
-			on, N_HAPTIC_GROUPS);
-	}
-	y = zmc_entry(cr, y, "haptics", detail, ACT_OPEN_PAGE, PAGE_HAPTICS);
-
-	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
-		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
-	y = zmc_entry(cr, y, "notifications + actions", detail, ACT_OPEN_PAGE, PAGE_QUICK);
-
-	char bat_buf[32];
-	read_sys_file(hw_file(hw_battery(), "capacity"), bat_buf, sizeof(bat_buf));
-	int bat = bat_buf[0] ? atoi(bat_buf) : 51;
-	snprintf(detail, sizeof(detail), "%d%%, %s", bat, app.battery_saver ? "battery saver on" : "discharging");
-	y = zmc_entry(cr, y, "battery saver", detail, ACT_OPEN_PAGE, PAGE_BATTERY);
-
-	snprintf(detail, sizeof(detail), "Exynos 9810 (8 cores), %s", app.cpu_gov);
-	y = zmc_entry(cr, y, "processor", detail, ACT_OPEN_PAGE, PAGE_CPU);
-
-	snprintf(detail, sizeof(detail), "3.5 GB RAM, swappiness %d", app.swappiness);
-	y = zmc_entry(cr, y, "virtual memory", detail, ACT_OPEN_PAGE, PAGE_VM);
-
-	snprintf(detail, sizeof(detail), "Mali-G72 MP18 (%s), 60 FPS", app.gpu_gov);
-	y = zmc_entry(cr, y, "graphics", detail, ACT_OPEN_PAGE, PAGE_GPU);
-
-	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
-
-	y = zmc_entry(cr, y, "about", "Samsung Galaxy S9, ztOS Mobile", ACT_OPEN_PAGE, PAGE_ABOUT);
-
-	return y + 20;
-}
-
 /* Read ztapps' already sorted and deduplicated list and its cached glyphs.
  * Keep each list page below the core's hit and texture limits. */
 #define SETTINGS_MAX_APPS 1024
@@ -3089,6 +3021,91 @@ static double draw_dev(cairo_t *cr) {
 	return y + 20;
 }
 
+/* The hub's line for connections. The hub is drawn again at idle under every
+ * page, so it asks nothing: what wifi_summary and Bluetooth said last. */
+static void connections_line(char *out, size_t size) {
+	char wifi[96];
+	wifi_summary(wifi, sizeof(wifi));
+	bool named = strcmp(wifi, "off") && strcmp(wifi, "not connected") && strcmp(wifi, "\u2026");
+	snprintf(out, size, "%s%s, Bluetooth %s", named ? "" : "Wi-Fi ", wifi, bt.on ? "on" : "off");
+}
+
+static double draw_connections(cairo_t *cr) {
+	double y = zmc_header(cr, "connections");
+	char detail[128];
+	wifi_summary(detail, sizeof(detail));
+	y = zmc_entry(cr, y, "Wi-Fi", detail, ACT_OPEN_PAGE, PAGE_WIFI);
+
+	bt_summary(detail, sizeof(detail));
+	y = zmc_entry(cr, y, "Bluetooth", detail, ACT_OPEN_PAGE, PAGE_BLUETOOTH);
+
+	cell_load();
+	snprintf(detail, sizeof(detail), "%s%s%s%s", cell.operator[0] ? cell.operator : "no service",
+		cell.tech[0] ? ", " : "", cell.tech, !cell.data_on ? ", data off" : cell.data ?
+		", data connected" : ", data on");
+	y = zmc_entry(cr, y, "cellular + SIM", detail, ACT_OPEN_PAGE, PAGE_MOBILE);
+	return y + 20;
+}
+
+static double draw_main(cairo_t *cr) {
+	double y = zmc_pivot_next(cr, "system", "applications", ACT_OPEN_PAGE, PAGE_APPS);
+	char detail[128];
+
+	snprintf(detail, sizeof(detail), "accent: %s, %d columns",
+		ACCENTS[app.accent].name, app.columns);
+	y = zmc_entry(cr, y, "theme", detail, ACT_OPEN_PAGE, PAGE_THEME);
+	y = zmc_entry(cr, y, "navigation bar", "choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
+
+	/* the screen's real level: the config's is only where it last started,
+	 * and auto brightness moves on from it */
+	int bright_now = brightness_now();
+	char timeout[32];
+	snprintf(detail, sizeof(detail), "%d%% brightness, %s", bright_now > 0 ? bright_now : app.brightness,
+		timeout_text(timeout, sizeof(timeout), app.timeout_s));
+	y = zmc_entry(cr, y, "display", detail, ACT_OPEN_PAGE, PAGE_DISPLAY);
+
+	connections_line(detail, sizeof(detail));
+	y = zmc_entry(cr, y, "connections", detail, ACT_OPEN_PAGE, PAGE_CONNECTIONS);
+
+	snprintf(detail, sizeof(detail), "media %d%%, ring %d%%", app.media_vol, app.ring_vol);
+	y = zmc_entry(cr, y, "ringtones + sounds", detail, ACT_OPEN_PAGE, PAGE_AUDIO);
+
+	if (!app.haptics) {
+		snprintf(detail, sizeof(detail), "off");
+	} else {
+		int on = 0;
+		for (int g = 0; g < N_HAPTIC_GROUPS; g++) on += app.haptic_group[g] > 0;
+		snprintf(detail, sizeof(detail), "on, strength %d%%, %d of %d kinds", app.haptic_strength,
+			on, N_HAPTIC_GROUPS);
+	}
+	y = zmc_entry(cr, y, "haptics", detail, ACT_OPEN_PAGE, PAGE_HAPTICS);
+
+	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
+		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
+	y = zmc_entry(cr, y, "notifications + actions", detail, ACT_OPEN_PAGE, PAGE_QUICK);
+
+	char bat_buf[32];
+	read_sys_file(hw_file(hw_battery(), "capacity"), bat_buf, sizeof(bat_buf));
+	int bat = bat_buf[0] ? atoi(bat_buf) : 51;
+	snprintf(detail, sizeof(detail), "%d%%, %s", bat, app.battery_saver ? "battery saver on" : "discharging");
+	y = zmc_entry(cr, y, "battery saver", detail, ACT_OPEN_PAGE, PAGE_BATTERY);
+
+	snprintf(detail, sizeof(detail), "Exynos 9810 (8 cores), %s", app.cpu_gov);
+	y = zmc_entry(cr, y, "processor", detail, ACT_OPEN_PAGE, PAGE_CPU);
+
+	snprintf(detail, sizeof(detail), "3.5 GB RAM, swappiness %d", app.swappiness);
+	y = zmc_entry(cr, y, "virtual memory", detail, ACT_OPEN_PAGE, PAGE_VM);
+
+	snprintf(detail, sizeof(detail), "Mali-G72 MP18 (%s), 60 FPS", app.gpu_gov);
+	y = zmc_entry(cr, y, "graphics", detail, ACT_OPEN_PAGE, PAGE_GPU);
+
+	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
+
+	y = zmc_entry(cr, y, "about", "Samsung Galaxy S9, ztOS Mobile", ACT_OPEN_PAGE, PAGE_ABOUT);
+
+	return y + 20;
+}
+
 static double render_page_content(cairo_t *cr, int p) {
 	switch (p) {
 	case PAGE_DATE: return draw_date(cr);
@@ -3096,6 +3113,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_BOOST: return draw_boost(cr);
 	case PAGE_DEV: return draw_dev(cr);
 	case PAGE_MAIN: return draw_main(cr);
+	case PAGE_CONNECTIONS: return draw_connections(cr);
 	case PAGE_APPS: return draw_apps(cr);
 	case PAGE_INSTALLED_APPS: return draw_installed_apps(cr);
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);
@@ -4022,8 +4040,9 @@ static void arrived(int page) {
 		bt_request("bluetoothctl pairable on >/dev/null 2>&1; bluetoothctl discoverable on >/dev/null 2>&1; "
 			"bluetoothctl --timeout 8 scan on >/dev/null 2>&1");
 		zmc_every(15000, bt_tick);
-	} else if (page == PAGE_MAIN) {
-		bt_refresh(NULL);	/* the hub's line says whether it is on */
+	} else if (page == PAGE_MAIN || page == PAGE_CONNECTIONS) {
+		/* their lines say whether it is on; entering Bluetooth clears its list */
+		bt_refresh(NULL);
 	}
 	if (page == PAGE_WIFI) {
 		wifi_refresh(NULL);

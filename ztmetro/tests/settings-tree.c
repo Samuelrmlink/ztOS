@@ -16,6 +16,9 @@ int main(void) {
 	assert(page_parent(PAGE_ACCENTS, PAGE_MAIN) == PAGE_THEME);
 	assert(page_parent(PAGE_WALLS, PAGE_MAIN) == PAGE_THEME);
 	assert(page_parent(PAGE_APN, PAGE_MAIN) == PAGE_MOBILE);
+	assert(page_parent(PAGE_WIFI, PAGE_MAIN) == PAGE_CONNECTIONS);
+	assert(page_parent(PAGE_BLUETOOTH, PAGE_MAIN) == PAGE_CONNECTIONS);
+	assert(page_parent(PAGE_MOBILE, PAGE_MAIN) == PAGE_CONNECTIONS);
 	/* the rest go to the tab they were opened from */
 	assert(page_parent(PAGE_PERF, PAGE_APPS) == PAGE_APPS);
 	assert(page_parent(PAGE_PERF, PAGE_MAIN) == PAGE_MAIN);
