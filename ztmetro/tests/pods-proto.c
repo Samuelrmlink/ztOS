@@ -569,20 +569,7 @@ static void test_scan(void) {
 	s.ui_open = true;
 	p = pods_scan_policy(&s);
 	assert(p.on_s == 4 && p.every_s == 10);
-	/* never beside music to pods we hold a link to, app open or not */
-	s.audio_active = true;
-	assert(pods_scan_policy(&s).on_s == 0);
-	s.audio_active = false;
 	s.keyed_linked = 0;
-	/* music playing elsewhere: no background scanning beside A2DP, only for an open app */
-	s.linked = 0;
-	s.keyed_unlinked = 1;
-	s.ui_open = false;
-	s.audio_active = true;
-	assert(pods_scan_policy(&s).on_s == 0);
-	s.ui_open = true;
-	p = pods_scan_policy(&s);
-	assert(p.on_s == 2 && p.every_s == 20);	/* looking at the app: little, and less */
 	/* no keys: only while the app is open */
 	struct pods_scan_in n = { .powered = true, .screen_on = true };
 	assert(pods_scan_policy(&n).on_s == 0);

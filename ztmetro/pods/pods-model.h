@@ -560,21 +560,20 @@ static inline int pods_advert(struct pods_world *w, const uint8_t addr[6], const
 /* ---- when to look for broadcasts ---- */
 
 struct pods_scan_in {
-	bool powered, screen_on, ui_open, audio_active;
+	bool powered, screen_on, ui_open;
 	int keyed_unlinked;	/* pairs with keys and no open link */
 	int keyed_linked;	/* with keys and a link: the case's own broadcasts say what the link can't */
 	int known, linked;
 };
 struct pods_scan_plan { int on_s, every_s; };	/* 0: no scanning */
 
-/* Discovery costs radio time beside A2DP and holds up LE devices reconnecting, so bursts, and
- * only when a broadcast has something to say to someone.
- * Never with the screen off. Never beside music to a pair we hold a link to: nobody has measured
- * what a burst does to it on this chip, and audio already hiccups here. */
+/* Discovery holds up LE devices reconnecting, so bursts, and only when a broadcast has something
+ * to say to someone. Never with the screen off. Whether audio is playing has no say, by the
+ * owner's decision: broadcasts are a separate channel from the audio link. A burst does cost
+ * radio time beside A2DP, and that cost hasn't been measured on this chip. */
 static inline struct pods_scan_plan pods_scan_policy(const struct pods_scan_in *s) {
-	struct pods_scan_plan none = { 0, 0 }, ui = { 4, 10 }, ui_audio = { 2, 20 }, background = { 3, 60 };
+	struct pods_scan_plan none = { 0, 0 }, ui = { 4, 10 }, background = { 3, 60 };
 	if (!s->powered || !s->screen_on) return none;
-	if (s->audio_active) return s->ui_open && !s->linked ? ui_audio : none;
 	if (s->ui_open) return ui;
 	if (s->keyed_unlinked > 0 || s->keyed_linked > 0) return background;
 	return none;

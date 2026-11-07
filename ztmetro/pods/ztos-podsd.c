@@ -517,16 +517,9 @@ static bool screen_on(void) {
 	return on;
 }
 
-static bool audio_active(void) {
-	for (size_t i = 0; i < sizeof(transports) / sizeof(transports[0]); i++) {
-		if (transports[i][0]) return true;
-	}
-	return false;
-}
-
 static struct pods_scan_plan scan_plan(void) {
 	struct pods_scan_in s = { .powered = powered && bluez_up && adapter[0], .screen_on = screen_on(),
-		.ui_open = time(NULL) < hint_until, .audio_active = audio_active(), .known = world.n };
+		.ui_open = time(NULL) < hint_until, .known = world.n };
 	for (int i = 0; i < world.n; i++) {
 		bool linked = world.dev[i].link == PODS_LINK_READY;
 		if (linked) s.linked++;

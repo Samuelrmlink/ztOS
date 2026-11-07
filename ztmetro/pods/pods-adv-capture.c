@@ -10,7 +10,7 @@
  *
  * It runs beside ztos-podsd as a discovery client of its own. It asks BlueZ for discovery and
  * nothing else: it never powers Bluetooth, connects or pairs. It refuses to start while
- * Bluetooth is off, or while A2DP is playing, and stops if A2DP starts.
+ * Bluetooth is off. A2DP playing doesn't stop it.
  *
  * With the daemon's keys file it also tries each key on what it hears, printing what opens
  * (the plaintext). The keys themselves are never printed.
@@ -29,8 +29,7 @@
 #define MAX_PAIRS 6
 #define MAX_ADDRS 256
 
-static const char BLUEZ[] = "org.bluez", DEVICE1[] = "org.bluez.Device1", ADAPTER1[] = "org.bluez.Adapter1",
-	TRANSPORT1[] = "org.bluez.MediaTransport1";
+static const char BLUEZ[] = "org.bluez", DEVICE1[] = "org.bluez.Device1", ADAPTER1[] = "org.bluez.Adapter1";
 
 static struct { char mac[18]; uint8_t mac_b[6], irk[16], enc[16]; } pairs[MAX_PAIRS];
 static int n_pairs;
@@ -160,7 +159,7 @@ static void heard(const char *path, const char *address, const char *type, int r
 static int read_props(const char *path, const char *iface, sd_bus_message *m) {
 	const uint8_t *mfr = NULL;
 	size_t mfr_len = 0;
-	const char *address = NULL, *type = NULL, *state = NULL;
+	const char *address = NULL, *type = NULL;
 	int16_t rssi = 0;
 	bool has_rssi = false;
 	int pow = -1;
@@ -171,8 +170,6 @@ static int read_props(const char *path, const char *iface, sd_bus_message *m) {
 		if ((r = sd_bus_message_read(m, "s", &key)) < 0) return r;
 		if (!strcmp(iface, ADAPTER1) && !strcmp(key, "Powered")) {
 			sd_bus_message_read(m, "v", "b", &pow);
-		} else if (!strcmp(iface, TRANSPORT1) && !strcmp(key, "State")) {
-			sd_bus_message_read(m, "v", "s", &state);
 		} else if (strcmp(iface, DEVICE1)) {
 			sd_bus_message_skip(m, "v");
 		} else if (!strcmp(key, "Address")) {
@@ -212,10 +209,6 @@ static int read_props(const char *path, const char *iface, sd_bus_message *m) {
 	if (!strcmp(iface, ADAPTER1)) {
 		if (!adapter[0]) snprintf(adapter, sizeof(adapter), "%s", path);
 		if (pow >= 0) powered = pow;
-	} else if (!strcmp(iface, TRANSPORT1) && state && !strcmp(state, "active")) {
-		fprintf(stderr, "pods-adv-capture: A2DP is playing: stopping\n");
-		exit_code = 3;
-		sd_event_exit(event, 3);
 	} else if (!strcmp(iface, DEVICE1) && started && (mfr || has_rssi)) {
 		heard(path, address, type, rssi, mfr, mfr_len);
 	}
