@@ -194,6 +194,25 @@ limits, and what the daemon does about them:
   app's streams share it, so they share one setting. All notification-role
   streams share one key whichever app they come from, and the daemon doesn't
   list them as apps.
+- That key is what the app calls itself. Brave reports `application.name` Brave,
+  binary `brave`. Grayjay (CEF in a flatpak) reports `application.name` Chromium,
+  binary `justcefnative`, and PipeWire adds `pipewire.access.portal.app_id`
+  `app.grayjay.Grayjay`. Its key stays `application.name:Chromium`, and the name
+  shown comes from the flatpak id or, for a generic name, the binary. The daemon
+  keeps those names in `audio-apps.json` for when the app isn't running. Two apps
+  that report one name share one setting, and their row shows both names. A
+  WirePlumber `stream.rules` entry setting `application.id` would separate them.
+
+The Sound app's "apps" page is the UI (`ztsound apps`, also from Settings >
+ringtones + sounds). An app sent to its own output doesn't go through `ztos-eq`,
+so with the sound engine on it skips the equalizer.
+
+An app set to one output stays there when Bluetooth connects (3.0a6 only moves
+the default). If its output goes away it plays on Default, and it goes back
+without restarting when the output returns.
+
+`make check-audiod-live` runs the daemon against a real PipeWire and WirePlumber,
+private to the test: null sinks, silence, no D-Bus and no device monitors.
 
 "Default" means no target: the stream follows the global output by itself
 (`linking.follow-default-target`). So nothing should call `pactl

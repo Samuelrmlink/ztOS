@@ -2711,6 +2711,7 @@ static double draw_audio(cairo_t *cr) {
 
 	/* the equalizer and effects live in their own app */
 	y = zmc_entry(cr, y, "equalizer + effects", "presets, surround, crossfade: the Sound app", ACT_OPEN_SOUND, 0);
+	y = zmc_entry(cr, y, "app volume + output", "set for each app: the Sound app", ACT_OPEN_SOUND, 1);
 	y += 10;
 
 	/* the ringtone: one box that opens into the list, not the list itself */
@@ -3858,7 +3859,7 @@ static void activate(int action, int arg) {
 		}
 		break;
 	case ACT_OPEN_SOUND:
-		if (system("ztsound >/dev/null 2>&1 &") != 0) {}
+		if (system(arg ? "ztsound apps >/dev/null 2>&1 &" : "ztsound >/dev/null 2>&1 &") != 0) {}
 		break;
 	case ACT_VIBE_PREVIEW:
 		ringtone_stop();
