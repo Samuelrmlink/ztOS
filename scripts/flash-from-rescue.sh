@@ -13,12 +13,14 @@ PART=/dev/sda11          # RECOVERY
 HOST=172.16.42.2
 PORT=5558
 PSH=$ROOT/scripts/psh.py
+. "$ROOT/scripts/lib-partlabel.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 [ "$(head -c 8 "$IMG")" = "ANDROID!" ] || { echo "not an Android boot image" >&2; exit 1; }
 SIZE=$(stat -c %s "$IMG")
 SUM=$(sha256sum "$IMG" | cut -d' ' -f1)
+require_part_label RECOVERY "$PART" "$PSH" -t 20 || exit 1
 psize=$("$PSH" -t 20 "blockdev --getsize64 $PART" | tr -dc 0-9)
 [ -n "$psize" ] && [ "$SIZE" -le "$psize" ] || { echo "does not fit RECOVERY ($psize)" >&2; exit 1; }
 

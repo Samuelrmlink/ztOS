@@ -15,10 +15,14 @@ HOST=172.16.42.2
 PHONE=172.16.42.1
 PORT=5559
 SSH="$ROOT/scripts/ssh-pw.py alarm "${ZT_PW:-alarm},root" $PHONE"
+. "$ROOT/scripts/lib-partlabel.sh"
 
 [ "$(head -c 8 "$IMG")" = "ANDROID!" ] || { echo "not an Android boot image" >&2; exit 1; }
 SIZE=$(stat -c %s "$IMG")
 SUM=$(sha256sum "$IMG" | cut -d' ' -f1)
+
+require_part_label BOOT "$PART" $SSH || exit 1
+require_part_label RECOVERY /dev/sda11 $SSH || exit 1
 
 # RECOVERY has to hold a bootable TWRP before BOOT is overwritten.
 rec=$($SSH "su -c 'head -c 8 /dev/sda11'" | tail -1)

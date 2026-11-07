@@ -24,6 +24,7 @@ PART=/dev/sda25
 HOST=172.16.42.2
 PORT=5557
 PSH=$ROOT/scripts/psh.py
+. "$ROOT/scripts/lib-partlabel.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -33,6 +34,7 @@ SIZE=$(stat -c %s "$IMG")
 N=$(( SIZE / (CHUNK * 1048576) ))
 echo "image $IMG: $SIZE bytes, $N chunks of ${CHUNK}M -> $PART"
 
+require_part_label USERDATA "$PART" "$PSH" -t 20 || exit 1
 psize=$("$PSH" -t 20 "blockdev --getsize64 $PART" | tr -dc 0-9)
 [ -n "$psize" ] && [ "$psize" -ge "$SIZE" ] ||
 	{ echo "partition too small or unreachable ($psize)" >&2; exit 1; }
