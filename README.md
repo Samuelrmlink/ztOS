@@ -294,6 +294,21 @@ Arch is on `BOOT` and TWRP on `RECOVERY`, so: a normal power-on or
 Power) lands in TWRP, and from TWRP a plain `adb reboot` comes back to Arch.
 All three were tested on the device.
 
+### The rescue shell has no password
+
+`initramfs/init` starts `telnetd -l /bin/sh` on the USB network: a root shell with no
+login, so that a phone that won't start can still be reached. This is deliberate. What
+it means:
+
+- It runs from early boot until the handover to the system, on every boot, and it stays
+  only if the system fails to start. Running ztOS does not listen on port 23.
+- Only USB is up at that stage, so reaching it takes a cable, and no Wi-Fi network can.
+- It gives away little today: whoever has the phone in hand can already boot TWRP, which
+  is also a root shell, and `USERDATA` is not encrypted.
+
+That last point is what could change: with encrypted storage, or a locked way into
+TWRP, this shell would become the easy way in, and should then be reviewed.
+
 ## Scripts
 
 Everything runs unprivileged on the build host; nothing needs sudo.
