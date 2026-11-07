@@ -24,3 +24,5 @@ if [[ -S $ZTOS_RUNTIME_DIR/bus ]]; then
     ztos_as_user systemctl --user restart zrn-pushd.service
 fi
 echo 'Installed: zrn-pushd runs in the session (systemctl --user status zrn-pushd).'
+[[ -x /usr/local/libexec/ztos-waydroid-recover ]] ||
+    echo 'Waydroid is not set up (android/waydroid/install.sh): zrn-pushd waits for it, for its device identity.'

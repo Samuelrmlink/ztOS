@@ -493,6 +493,18 @@ static void identity_refresh(void)
 {
 	if (identity_running)
 		return;
+	/* Waydroid's helpers come with android/waydroid/install.sh, run once its
+	 * images are there. Until then there's no microG to ask: said once, and
+	 * looked for again without starting sudo every time something reconnects. */
+	if (access(RECOVER, X_OK) != 0) {
+		static bool said;
+		if (!said)
+			say("%s isn't installed: no microG identity until Waydroid is set up", RECOVER);
+		said = true;
+		if (!identity_known())
+			timer_arm(&identity_timer, 10 * 60 * 1000);
+		return;
+	}
 	char *argv[] = { "/usr/bin/sudo", "-n", RECOVER, "microg", NULL };
 	if (spawn(argv, NULL, 0, true, identity_done, NULL))
 		identity_running = true;
@@ -755,6 +767,8 @@ static void hold_release(void)
 		return;
 	}
 	unlink(path);
+	if (access(WAYDROID_POWER, X_OK) != 0)
+		return;		/* no Waydroid set up: nothing to freeze */
 	char *argv[] = { WAYDROID_POWER, "sync", NULL };
 	spawn(argv, NULL, 0, false, NULL, NULL);
 }
