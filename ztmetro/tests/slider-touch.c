@@ -121,6 +121,15 @@ int main(void) {
 	assert(!zmc.slider_pending && !zmc.sliding && slides == 0);
 	zmc.fling = false;
 
+	/* taken away in the middle of a drag: the app hears that it is over */
+	reset();
+	down(100, y0);
+	to(130, y0);
+	assert(zmc.sliding && lifts == 0);
+	touch_cancel(NULL, NULL);
+	assert(!zmc.sliding && lifts == 1);
+	zmc.fling = false;
+
 	/* a row beside it still answers */
 	reset();
 	down(100, 120);

@@ -3473,11 +3473,15 @@ static void touch_cancel(void *data, struct wl_touch *touch) {
 		zmc.button_down = false;
 		zmc_redraw();
 	}
-	if (zmc.sliding && slider_live >= 0) {
-		slider_live = -1;	/* the page shows where it was left */
-		zmc_redraw();
+	hold_at = 0;
+	held = false;	/* or the next lift, of another finger, is taken for this hold's */
+	if (zmc.sliding) {
+		/* The app is told it is over, as at a lift: without it, it held on to
+		 * "being dragged" (ztsound's rows stopped following the daemon's) and
+		 * saved nothing. */
+		zmc.sliding = false;
+		slider_set(zmc.last_y, true);
 	}
-	zmc.sliding = false;
 	zmc.slider_pending = false;
 	if (zmc.swiping) {
 		zmc.swipe_caught = false;
