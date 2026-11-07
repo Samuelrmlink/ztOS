@@ -10736,6 +10736,12 @@ static void dialog_close(struct zt_server *server) {
 	damage(server);
 }
 
+/* One command, tried in order. (Three started together raced, and a plain
+ * "systemctl reboot" among them could win and restart into ztOS instead.) */
+static void reboot_to_recovery(void) {
+	run_detached("/bin/sh", "-c", "sudo -n systemctl reboot --reboot-argument=recovery 2>/dev/null || reboot recovery 2>/dev/null || reboot 2>/dev/null", NULL);
+}
+
 static void dialog_handle_action(struct zt_server *server, const char *act) {
 	if (!act || !act[0]) return;
     if (bt_pair_action(server, act)) return;
@@ -10750,10 +10756,9 @@ static void dialog_handle_action(struct zt_server *server, const char *act) {
 	} else if (strcmp(act, "reboot") == 0) {
 		run_detached("/bin/sh", "-c", "sudo -n /usr/bin/systemctl reboot 2>/dev/null || systemctl reboot", NULL);
 	} else if (strcmp(act, "reboot_recovery") == 0) {
-		pipe_tell("/run/ztoscsf.ctl", "reboot_recovery\n");
-		run_detached("reboot", "recovery", NULL, NULL);
-		run_detached("systemctl", "reboot", NULL, NULL);
-		run_detached("/bin/sh", "-c", "sudo -n systemctl reboot --reboot-argument=recovery 2>/dev/null", NULL);
+		/* the person asked, so the shell does it: ztoscsf never reboots to
+		 * recovery by itself (sensors/README.md) and has no command for it */
+		reboot_to_recovery();
 	} else if (strcmp(act, "stop_sensorhub") == 0) {
 		pipe_tell("/run/ztoscsf.ctl", "stop_sensorhub\n");
 		run_detached("/bin/sh", "-c",
@@ -12260,7 +12265,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		if (x >= pad && x <= pad + content_w) {
 			if (y >= btn_y1 && y <= btn_y1 + btn_h) {
 				hap(server, HAP_TAP, HG_SYSTEM);
-				run_detached("/bin/sh", "-c", "sudo -n systemctl reboot --reboot-argument=recovery 2>/dev/null || reboot recovery 2>/dev/null || reboot 2>/dev/null", NULL);
+				reboot_to_recovery();
 				p->role = ROLE_NONE;
 				return;
 			} else if (y >= btn_y2 && y <= btn_y2 + btn_h) {
