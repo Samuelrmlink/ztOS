@@ -193,9 +193,10 @@ firewall**. The host listens and the phone connects to it:
 | `scripts/flash-boot-from-arch.sh` | 5559 |
 | Development tools | 5561, 5576, 5581, 5583, 5596, 8080 |
 
-**A blocked port hangs with no error.** `flash-root.sh` waits on `socat` at line 77
-with no timeout. In a test with a stub phone over a veth pair it was still waiting
-when killed after 120 s, and printed nothing about why.
+**A blocked port stops the install with a message.** `flash-root.sh` tries the link
+before it writes anything, and says what to do if the phone cannot connect. Before that
+check it waited forever and printed nothing (in a test with a stub phone over a veth pair
+it was still waiting when killed after 120 s).
 
 The better fix is to put only the USB interface in the `trusted` zone, through its
 NetworkManager connection (next section), and open nothing else:
