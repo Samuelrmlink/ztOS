@@ -5514,6 +5514,17 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	double nub_w = round(cell * 0.16);
 	double nub_h = round(cell * 0.38);
 	double bx = right - clock_w - cell * 0.9 - (bw + gap + nub_w);
+	/* the connected device's charge, if it tells: on the clock's baseline, and
+	 * steady while the icon beside it blinks. Left out rather than run into
+	 * the battery on a screen too narrow for it. */
+	if (server->bt_on && server->bt_name[0] && server->bt_battery >= 0 && server->bt_battery <= 100) {
+		char level[16];
+		snprintf(level, sizeof(level), "%d%%", server->bt_battery);
+		double size = cell * 1.05, at = x + cell * 1.25 * 0.55 + 5;
+		if (at + text_width(level, FONT_REGULAR, size) < bx - cell * 0.5) {
+			draw_text(cr, level, FONT_REGULAR, size, at, base - clock_baseline * size / clock_size, 0, 0, false);
+		}
+	}
 	if (battery >= 0) {
 		double cx = bx + bw / 2.0;
 		double cy = base - cell / 2.0;
@@ -6121,7 +6132,7 @@ static bool bt_state_read(struct zt_server *server) {
 		line[strcspn(line, "\n")] = 0;
 		if (strncmp(line, "on=", 3) == 0) on = line[3] == '1';
 		else if (strncmp(line, "connected=", 10) == 0) snprintf(name, sizeof(name), "%s", line + 10);
-		else if (strncmp(line, "battery=", 8) == 0 && line[8]) battery = atoi(line + 8);
+		else if (strncmp(line, "battery=", 8) == 0 && line[8] >= '0' && line[8] <= '9') battery = atoi(line + 8);
 		else if (strncmp(line, "streaming=", 10) == 0) streaming = line[10] == '1';
 	}
 	fclose(f);
