@@ -86,7 +86,7 @@ gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
 EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c
-EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h devtest/devtest-pages.h audio-apps.h audio-state.h audio-sync.h
+EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h audio-apps.h audio-state.h audio-sync.h
 settings/ztsettings: settings/ztsettings.c pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
@@ -145,7 +145,7 @@ pods/pods-adv-capture: pods/pods-adv-capture.c $(PODS_DEPS)
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd) -o $@ pods/pods-adv-capture.c \
 		$(shell pkg-config --libs libsystemd)
 
-pods/ztpods: pods/ztpods.c pods/pods-pages.c pods/pods-pages.h $(CORE_DEPS)
+pods/ztpods: pods/ztpods.c pods/pods-pages.c pods/pods-pages.h pods/pods-ui.h $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ pods/ztpods.c pods/pods-pages.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 # ntfy: pushes from outside (ntfy/README.md)

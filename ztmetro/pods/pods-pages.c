@@ -24,56 +24,18 @@
 
 #include "zrnmetrocore.h"
 #include "pods-pages.h"
+#include "pods-ui.h"
 #include "zmc-gesture.h"
 
 #define MARGIN ZMC_MARGIN
 #define MAX_NAME 127
 
-enum page { P_STATUS, P_LISTEN, P_CONTROLS, P_ABOUT };
+enum page { P_STATUS = PODS_UI_STATUS, P_LISTEN = PODS_UI_LISTEN, P_CONTROLS = PODS_UI_CONTROLS, P_ABOUT = PODS_UI_ABOUT };
 
 enum {
 	A_PICK = PODS_ACTIONS + 1, A_MODE, A_CYCLE, A_NAME, A_NAME_SAVE, A_FORGET, A_FORGET_YES, A_BLUETOOTH, A_CONNECT,
-	A_ROW = PODS_ACTIONS + 100,	/* + which row of ROWS */
+	A_ROW = PODS_ACTIONS + 100,	/* + which row of PODS_ROWS */
 };
-
-enum row_kind { R_SWITCH, R_SLIDER, R_PICKER };
-struct row {
-	const char *key, *title;
-	enum row_kind kind;
-	int page;
-	const char *const *options;	/* R_PICKER */
-	const int *values;
-	int count;
-};
-
-static const char *const O_MIC[] = { "Automatic", "Always right", "Always left" };
-static const int V_012[] = { 0, 1, 2 };
-static const char *const O_HOLD[] = { "Noise control", "Siri" };
-static const int V_HOLD[] = { 1, 5 };
-static const char *const O_SPEED[] = { "Default", "Slower", "Slowest" };
-static const char *const O_SWIPE[] = { "Default", "Longer", "Longest" };
-
-static const struct row ROWS[] = {
-	{ "conversation", "Conversation Awareness", R_SWITCH, P_LISTEN },
-	{ "adaptive_strength", "Adaptive strength", R_SLIDER, P_LISTEN },
-	{ "personalized_volume", "Personalized Volume", R_SWITCH, P_LISTEN },
-	{ "one_bud_anc", "ANC with one AirPod", R_SWITCH, P_LISTEN },
-	{ "hold_left", "Press and hold, left", R_PICKER, P_CONTROLS, O_HOLD, V_HOLD, 2 },
-	{ "hold_right", "Press and hold, right", R_PICKER, P_CONTROLS, O_HOLD, V_HOLD, 2 },
-	{ "press_speed", "Press speed", R_PICKER, P_CONTROLS, O_SPEED, V_012, 3 },
-	{ "hold_duration", "Press and hold duration", R_PICKER, P_CONTROLS, O_SPEED, V_012, 3 },
-	{ "swipe_volume", "Swipe for volume", R_SWITCH, P_CONTROLS },
-	{ "swipe_length", "Swipe length", R_PICKER, P_CONTROLS, O_SWIPE, V_012, 3 },
-	{ "ear_detection", "Automatic ear detection", R_SWITCH, P_CONTROLS },
-	{ "mic", "Microphone", R_PICKER, P_CONTROLS, O_MIC, V_012, 3 },
-	{ "sleep_detection", "Pause when you fall asleep", R_SWITCH, P_CONTROLS },
-	{ "chime_volume", "Chime volume", R_SLIDER, P_CONTROLS },
-	{ "case_tone", "Case sounds", R_SWITCH, P_CONTROLS },
-	{ "case_tone_volume", "Case sounds volume", R_SLIDER, P_CONTROLS },
-	/* not shown: "connect_auto" (0x20). Only named in LibrePods' table, and it may
-	 * change how the pods reconnect. pods-model.h keeps it for when it's been tried. */
-};
-#define N_ROWS ((int)(sizeof(ROWS) / sizeof(ROWS[0])))
 
 static int first_page;
 static void (*open_bluetooth)(void);
@@ -204,12 +166,7 @@ static void set_setting(const char *key, int value) {
 static long now_s(void) { return fixture_now ? fixture_now : (long)time(NULL); }
 
 static void age_text(char *out, size_t size, long seen) {
-	long s = now_s() - seen;
-	if (s < 0) s = 0;
-	if (s < 90) snprintf(out, size, "just now");
-	else if (s < 5400) snprintf(out, size, "%ld minutes ago", (s + 30) / 60);
-	else if (s < 129600) snprintf(out, size, "%ld hours ago", (s + 1800) / 3600);
-	else snprintf(out, size, "%ld days ago", (s + 43200) / 86400);
+	pods_age_text(out, size, now_s() - seen);
 }
 
 /* ---- drawing ---- */
@@ -269,14 +226,6 @@ static double battery_row(cairo_t *cr, double y, const char *label, json_object 
 	return y + 10;
 }
 
-static const char *place_text(const char *place) {
-	if (!strcmp(place, "in_ear")) return "in your ear";
-	if (!strcmp(place, "out")) return "out";
-	if (!strcmp(place, "case")) return "in the open case";
-	if (!strcmp(place, "case_closed")) return "in the closed case";
-	return NULL;
-}
-
 static double draw_nearby(cairo_t *cr, double y) {
 	json_object *list = jo(root, "nearby");
 	int n = list ? (int)json_object_array_length(list) : 0, shown = 0;
@@ -308,13 +257,7 @@ static double draw_nearby(cairo_t *cr, double y) {
 /* What a broadcast says of who has them. */
 static const char *where_in_use(void) {
 	static char text[96];
-	const char *host = js(dev, "host", "unknown");
-	long conn = jl(dev, "connection", -1);
-	const char *doing = conn == 5 ? ", playing music" : conn == 6 ? ", on a call" : conn == 7 ? ", ringing" : "";
-	if (!strcmp(host, "other")) snprintf(text, sizeof(text), "In use by another device%s", doing);
-	else if (!strcmp(host, "this")) snprintf(text, sizeof(text), "Not connected. Last used with this phone%s", doing);
-	else if (!strcmp(host, "none")) snprintf(text, sizeof(text), "Not connected to anything");
-	else snprintf(text, sizeof(text), "Not connected to this phone");
+	pods_where_in_use(text, sizeof(text), js(dev, "host", "unknown"), jl(dev, "connection", -1), "this phone");
 	return text;
 }
 
@@ -379,7 +322,7 @@ static double draw_status(cairo_t *cr) {
 	}
 
 	char where[96] = "";
-	const char *lp = place_text(js(jo(dev, "ear"), "left", "")), *rp = place_text(js(jo(dev, "ear"), "right", ""));
+	const char *lp = pods_place_text(js(jo(dev, "ear"), "left", "")), *rp = pods_place_text(js(jo(dev, "ear"), "right", ""));
 	if (lp && rp) snprintf(where, sizeof(where), "Left %s, right %s", lp, rp);
 	else if (lp) snprintf(where, sizeof(where), "Left %s", lp);
 	else if (rp) snprintf(where, sizeof(where), "Right %s", rp);
@@ -428,22 +371,22 @@ static double switch_row(cairo_t *cr, double y, const char *title, int value, in
 
 static double rows(cairo_t *cr, double y, int page) {
 	double w = zmc.width - 2 * MARGIN;
-	for (int i = 0; i < N_ROWS; i++) {
-		const struct row *r = &ROWS[i];
+	for (int i = 0; i < PODS_N_ROWS; i++) {
+		const struct pods_row *r = &PODS_ROWS[i];
 		if (r->page != page || !in_list(dev, "visible", r->key)) continue;
 		int value = setting(r->key);
 		/* a value the pods never reported is not shown as if they had */
 		char caption[64];
 		snprintf(caption, sizeof(caption), "%s%s", r->title, value < 0 ? " (not reported)" : "");
 		switch (r->kind) {
-		case R_SWITCH:
+		case PODS_R_SWITCH:
 			y = switch_row(cr, y, r->title, value, A_ROW + i);
 			break;
-		case R_SLIDER:
+		case PODS_R_SLIDER:
 			zmc_slider(cr, MARGIN, y, w, value < 0 ? 0 : value, caption, A_ROW + i);
 			y += 66;
 			break;
-		case R_PICKER: {
+		case PODS_R_PICKER: {
 			int sel = 0;
 			for (int k = 0; k < r->count; k++) {
 				if (r->values[k] == value) sel = k;
@@ -485,13 +428,8 @@ static void read_only_end(cairo_t *cr, double y0, double y1, int hits) {
 	}
 }
 
-static const struct { const char *name, *label; int bit; } MODES[] = {
-	{ "off", "Off", 1 }, { "anc", "Noise Cancellation", 2 },
-	{ "transparency", "Transparency", 4 }, { "adaptive", "Adaptive", 8 },
-};
-
 static bool mode_available(int i) {
-	if (!strcmp(MODES[i].name, "adaptive") && !in_list(dev, "caps", "adaptive")) {
+	if (!strcmp(PODS_MODES[i].name, "adaptive") && !in_list(dev, "caps", "adaptive")) {
 		return !strcmp(js(dev, "mode", ""), "adaptive");
 	}
 	return true;
@@ -508,10 +446,10 @@ static double draw_listening(cairo_t *cr) {
 		if (!mode[0]) mode = js(dev, "last_mode", "");
 		for (int i = 0; i < 4; i++) {
 			if (!mode_available(i)) continue;
-			bool on = !strcmp(mode, MODES[i].name);
+			bool on = !strcmp(mode, PODS_MODES[i].name);
 			if (on) zmc_set_rgb(cr, zmc.accent);
 			else cairo_set_source_rgb(cr, 1, 1, 1);
-			zmc_text(cr, MODES[i].label, FONT_SEMILIGHT, 26, MARGIN, y, 0);
+			zmc_text(cr, PODS_MODES[i].label, FONT_SEMILIGHT, 26, MARGIN, y, 0);
 			zmc_add_hit(0, y - 4, zmc.width, 44, A_MODE, i);
 			y += 44;
 		}
@@ -526,7 +464,7 @@ static double draw_listening(cairo_t *cr) {
 		if (mask < 0) y = note(cr, y, "The AirPods don't report this. Choosing here replaces their list. At least two.");
 		for (int i = 0; i < 4; i++) {
 			if (!mode_available(i)) continue;
-			y = zmc_switch_arg(cr, y, MODES[i].label, mask > 0 && (mask & MODES[i].bit), A_CYCLE, i);
+			y = zmc_switch_arg(cr, y, PODS_MODES[i].label, mask > 0 && (mask & PODS_MODES[i].bit), A_CYCLE, i);
 		}
 	}
 	read_only_end(cr, top, y, hits);
@@ -562,10 +500,8 @@ static double draw_about(cairo_t *cr) {
 	if (number[0]) y = zmc_field(cr, y, "Model number", number);
 	const char *fw = js(dev, "firmware", "");
 	if (fw[0]) y = zmc_field(cr, y, "Version", fw);
-	static const char *const COLOURS[] = { "White", "Black", "Red", "Blue", "Pink", "Gray", "Silver", "Gold", "Rose Gold",
-		"Space Gray", "Dark Blue", "Light Blue", "Yellow" };
 	long colour = jl(dev, "color", -1);
-	if (colour >= 0 && colour < 13) y = zmc_field(cr, y, "Colour", COLOURS[colour]);
+	if (colour >= 0 && colour < PODS_N_COLOURS) y = zmc_field(cr, y, "Colour", PODS_COLOURS[colour]);
 	y = zmc_field(cr, y, "Address", js(dev, "mac", ""));
 	y = zmc_field(cr, y, "Broadcasts", jb(dev, "has_keys") ? "Can be read: this phone has their keys" : "Can't be read until they have connected here once");
 	if (jl(dev, "link_seen", 0) && !ready()) {
@@ -607,11 +543,11 @@ static void save_name(void) {
 }
 
 void pods_activate(int action, int arg) {
-	if (action >= A_ROW && action < A_ROW + N_ROWS && dev) {
-		const struct row *r = &ROWS[action - A_ROW];
-		if (r->kind == R_SWITCH) {
+	if (action >= A_ROW && action < A_ROW + PODS_N_ROWS && dev) {
+		const struct pods_row *r = &PODS_ROWS[action - A_ROW];
+		if (r->kind == PODS_R_SWITCH) {
 			set_setting(r->key, setting(r->key) == 1 ? 0 : 1);
-		} else if (r->kind == R_PICKER) {
+		} else if (r->kind == PODS_R_PICKER) {
 			if (arg < 0) {
 				open_picker = open_picker == action ? 0 : action;
 			} else {
@@ -633,15 +569,15 @@ void pods_activate(int action, int arg) {
 	}
 	case A_MODE:
 		if (dev && arg >= 0 && arg < 4) {
-			send_fmt("set %s listening_mode %s", js(dev, "mac", ""), MODES[arg].name);
-			json_object_object_add(dev, "mode", json_object_new_string(MODES[arg].name));
+			send_fmt("set %s listening_mode %s", js(dev, "mac", ""), PODS_MODES[arg].name);
+			json_object_object_add(dev, "mode", json_object_new_string(PODS_MODES[arg].name));
 		}
 		break;
 	case A_CYCLE: {
 		if (!dev || arg < 0 || arg >= 4) break;
 		int mask = setting("mode_cycle");
 		if (mask < 0) mask = 0;
-		mask ^= MODES[arg].bit;
+		mask ^= PODS_MODES[arg].bit;
 		/* with fewer than two the daemon would refuse it: shown, sent when there are two */
 		set_local("mode_cycle", mask);
 		if (mask & (mask - 1)) send_fmt("set %s mode_cycle %d", js(dev, "mac", ""), mask);
@@ -679,8 +615,8 @@ void pods_activate(int action, int arg) {
 
 void pods_slide(int action, int pct, bool done) {
 	static uint32_t sent;
-	if (action < A_ROW || action >= A_ROW + N_ROWS || !dev) return;
-	const struct row *r = &ROWS[action - A_ROW];
+	if (action < A_ROW || action >= A_ROW + PODS_N_ROWS || !dev) return;
+	const struct pods_row *r = &PODS_ROWS[action - A_ROW];
 	set_local(r->key, pct);
 	if (done || zmc_now_ms() - sent > 120) {
 		sent = zmc_now_ms();
