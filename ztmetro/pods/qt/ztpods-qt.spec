@@ -69,7 +69,7 @@ export QT_QPA_PLATFORM=offscreen
 
 %files
 %license LICENSE
-%doc ztmetro/pods/README.md ztmetro/pods/qt/README.md
+%doc ztmetro/pods/qt/README.md
 %{_bindir}/ztpods-qt
 %{_bindir}/ztos-podsd
 %{_userunitdir}/ztos-podsd.service
