@@ -1,2 +1,0 @@
-# Allow alarm user to perform power management and service controls from ztMETRO shell
-alarm ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/bin/reboot, /usr/bin/touch

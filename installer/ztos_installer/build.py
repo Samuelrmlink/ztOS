@@ -339,11 +339,10 @@ ch passwd -l root > /dev/null
 install -Dm440 /dev/stdin "$R/etc/sudoers.d/10-wheel" <<'SUDO'
 %wheel ALL=(ALL:ALL) ALL
 SUDO
+# (an older build tree may still hold 99-ztos-alarm: its passwordless systemctl was root)
+rm -f "$R/etc/sudoers.d/99-ztos-alarm"
 if [ -d "$R/etc/sudoers.d" ]; then
 	chmod 440 "$R"/etc/sudoers.d/* 2>/dev/null || true
-	if [ "$USERNAME" != alarm ] && [ -f "$R/etc/sudoers.d/99-ztos-alarm" ]; then
-		sed -i "s/^alarm /$USERNAME /" "$R/etc/sudoers.d/99-ztos-alarm"
-	fi
 fi
 # The one place the system learns who its user is (user.sh, ztos_user.py and
 # ztos-user.h read it). ztos-user-dropins then writes what cannot read it:
