@@ -10,15 +10,15 @@ namespace (mke2fs -d, mtools), so nothing is ever mounted for real.
 from __future__ import annotations
 
 import os
-import platform
 import re
-import shlex
 import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import host
 
 ROOT = Path(__file__).resolve().parents[2]          # the repository
 OS = ROOT / "os"
@@ -80,25 +80,11 @@ def packages(target: str) -> list:
 
 
 def check_host():
-    """What building needs on this computer."""
-    missing = []
-    for tool in ("unshare", "newuidmap", "bsdtar", "mkfs.fat", "mcopy", "mmd", "sfdisk", "python3"):
-        if shutil.which(tool) is None:
-            missing.append(tool)
-    if not Path("/usr/bin/mke2fs").exists() and not Path("/usr/sbin/mke2fs").exists():
-        missing.append("mke2fs (e2fsprogs)")
-    if platform.machine() not in ("aarch64", "arm64") and not Path(
-        "/proc/sys/fs/binfmt_misc/qemu-aarch64"
-    ).exists():
-        missing.append("qemu-user-static + qemu-user-static-binfmt (to run aarch64 programs)")
-    user = os.environ.get("USER", "")
-    subuid = Path("/etc/subuid").read_text() if Path("/etc/subuid").exists() else ""
-    if os.geteuid() != 0 and not re.search(rf"^{re.escape(user)}:", subuid, re.M):
-        missing.append(f"a /etc/subuid range for {user} (usermod --add-subuids 100000-165535 {user})")
-    if missing:
-        raise Fail("this computer is missing what building ztOS needs:\n  " + "\n  ".join(missing) +
-                   "\nOn Arch Linux: sudo pacman -S --needed util-linux libarchive dosfstools mtools e2fsprogs "
-                   "qemu-user-static qemu-user-static-binfmt")
+    """What building needs on this computer (host.py; `ztos doctor` shows it all)."""
+    failed = host.problems(host.build_checks())
+    if failed:
+        raise Fail("this computer is missing what building ztOS needs (ztos doctor shows it all):\n  " +
+                   "\n  ".join(host.describe(c) for c in failed))
 
 
 def fetch_tarball():

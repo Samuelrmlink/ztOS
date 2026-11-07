@@ -250,11 +250,26 @@ except BaseException as e:
 '''
 
 
-def compile_ui(path: Path) -> str:
+# where Qt's own uic is: Arch; Debian and Ubuntu; Fedora, Rocky, Alma and RHEL
+QT_UIC = ("/usr/lib/qt6/uic", "/usr/lib/qt6/libexec/uic", "/usr/lib64/qt6/libexec/uic")
+
+
+def find_uic() -> list | None:
+    """The command that writes a .ui file out as Python, or None."""
     uic = shutil.which("pyside6-uic")
-    command = [uic] if uic else (["/usr/lib/qt6/uic", "-g", "python"] if Path("/usr/lib/qt6/uic").exists() else None)
+    if uic:
+        return [uic]
+    for path in QT_UIC:
+        if Path(path).exists():
+            return [path, "-g", "python"]
+    return None
+
+
+def compile_ui(path: Path) -> str:
+    command = find_uic()
     if command is None:
-        raise Fail("no uic to compile .ui files with (pacman -S pyside6 or qt6-base)")
+        raise Fail("no uic to compile .ui files with: install PySide6's tools or Qt 6's own "
+                   "(pyside6 or qt6-base on Arch, qt6-qtbase-devel on Fedora, qt6-base-dev-tools on Debian)")
     result = subprocess.run([*command, str(path)], capture_output=True, text=True)
     if result.returncode != 0:
         raise Fail(f"{path.name}: {result.stderr.strip()}")

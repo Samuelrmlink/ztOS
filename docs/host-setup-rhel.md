@@ -293,15 +293,11 @@ for this on a Rocky host; that was not repeated here.
 
 ## Known traps
 
-- **`doctor` says yes and the build still fails.** It does not check for `uic`, a
-  `/etc/subgid` range, the binfmt F flag, the interpreter file, or the `mke2fs` version.
-  With no `uic` the build stops after downloading the tarball, with a Python traceback.
-- **Its advice is for Arch.** The `pacman` lines it prints name Arch packages. Use the
-  lists above.
 - **Removing qemu leaves it working until a reboot.** With the F flag the kernel keeps
-  the binary open, so the entry stays after `dnf remove` and `doctor` still passes. With
+  the binary open, so the entry stays after `dnf remove` and ARM programs still run. With
   the binary gone, restarting `systemd-binfmt` fails and the entry disappears (tested on
-  Rocky), and a reboot should do the same (not tested). If a build stops working after a reboot, check this first.
+  Rocky), and a reboot should do the same (not tested). `doctor` warns about this: "the
+  qemu interpreter is installed: warning".
 - **Only one `uic` location is checked.** `sdk/ztos_sdk/cli.py:254` looks for
   `pyside6-uic`, then `/usr/lib/qt6/uic`, which is why the symlink is needed.
 - **The tarball is not verified.** It comes over plain HTTP with no checksum
