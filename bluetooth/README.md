@@ -3,8 +3,9 @@
 Up at boot: `zrn-bluetooth.service` loads `driver/zrn-bt.ko` and runs
 `btattach` (Broadcom protocol); `zrn-bluetooth-addr.service` gives the
 controller the phone's own address from EFS (`50:77:05:8E:75:B9` here,
-cached in `/var/lib/zrn-bluetooth`) before bluetoothd starts. bluetoothd shows
-it as "ztOS Bluetooth Device". The firmware patch is
+cached in `/var/lib/zrn-bluetooth`) before bluetoothd starts. Other devices see
+the phone's hostname (`ztos`): bluetoothd's hostname plugin overrides the `Name`
+in `main.conf`, and Settings shows what's really in use. The firmware patch is
 `brcm/BCM.samsung,starlte.hcd` (= `third_party/s9plus/firmware/bcm4361B2_semco.hcd`);
 the chip reports BCM4361B2 "Crown E32A ANT1", version 0110.0232. Scanning
 finds devices; ztMETRO's Bluetooth quick action switches it.

@@ -1941,10 +1941,13 @@ static struct {
 	struct bt_device dev[MAX_BT];
 	int n;
 	char status[120];
+	char name[64];		/* this phone's, as others see it: bluetoothd takes it from the hostname */
 } bt;
 
-/* "yes|no", then "@devices" and one "MAC|name|paired|connected|icon" each */
-#define BT_QUERY "p=$(bluetoothctl show 2>/dev/null | sed -n 's/.*Powered: //p'); echo \"${p:-no}\"; " \
+/* "yes|no", "name=" what others see this phone as, then "@devices" and one
+ * "MAC|name|paired|connected|icon" each */
+#define BT_QUERY "s=$(bluetoothctl show 2>/dev/null); p=$(echo \"$s\" | sed -n 's/.*Powered: //p'); echo \"${p:-no}\"; " \
+	"echo \"name=$(echo \"$s\" | sed -n 's/.*Alias: //p' | head -n 1)\"; " \
 	"echo @devices; bluetoothctl devices 2>/dev/null | while read -r _ mac name; do " \
 	"i=$(bluetoothctl info \"$mac\" 2>/dev/null); " \
 	"echo \"$mac|$name|$(echo \"$i\" | sed -n 's/.*Paired: //p')|$(echo \"$i\" | sed -n 's/.*Connected: //p')|" \
@@ -1980,6 +1983,8 @@ static void bt_parse(char *text) {
 	for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
 		if (strcmp(line, "@devices") == 0) {
 			devices = true;
+		} else if (!devices && strncmp(line, "name=", 5) == 0) {
+			snprintf(bt.name, sizeof(bt.name), "%s", line + 5);
 		} else if (!devices) {
 			bt.on = strncmp(line, "yes", 3) == 0;
 		} else if (n_fresh < MAX_BT) {
@@ -2119,8 +2124,14 @@ static double draw_bluetooth(cairo_t *cr) {
 	if (!bt.on) {
 		return y;
 	}
-	y += zmc_text(cr, "Now discoverable as \"ztOS Bluetooth Device\". Your phone is searching for "
-		"Bluetooth devices.", FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 18;
+	char found[160];
+	if (bt.name[0]) {
+		snprintf(found, sizeof(found), "Now discoverable as \"%s\". Your phone is searching for "
+			"Bluetooth devices.", bt.name);
+	} else {
+		snprintf(found, sizeof(found), "Now discoverable. Your phone is searching for Bluetooth devices.");
+	}
+	y += zmc_text(cr, found, FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 18;
 	if (bt.status[0]) {
 		zmc_set_rgb(cr, ACCENTS[app.accent].color);
 		y += zmc_text(cr, bt.status, FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 14;
