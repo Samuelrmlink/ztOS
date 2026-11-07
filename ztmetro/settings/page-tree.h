@@ -72,6 +72,40 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_BOOST] = PAGE_HUB_TAB,
 };
 
+/* Pages by name: `ztsettings NAME` (Hyperscan opens one), --render NAME FILE,
+ * and --list-pages for a script that wants them all. */
+static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
+	{ "main", PAGE_MAIN },
+	{ "apps", PAGE_APPS },
+	{ "installed-apps", PAGE_INSTALLED_APPS },
+	{ "app", PAGE_APP_DETAIL },
+	{ "theme", PAGE_THEME },
+	{ "accents", PAGE_ACCENTS },
+	{ "wallpapers", PAGE_WALLS },
+	{ "navigation", PAGE_NAVIGATION },
+	{ "quick", PAGE_QUICK },
+	{ "display", PAGE_DISPLAY },
+	{ "wifi", PAGE_WIFI },
+	{ "wifinet", PAGE_WIFI_NET },
+	{ "wifijoin", PAGE_WIFI_JOIN },
+	{ "bluetooth", PAGE_BLUETOOTH },
+	{ "mobile", PAGE_MOBILE },
+	{ "apn", PAGE_APN },
+	{ "audio", PAGE_AUDIO },
+	{ "haptics", PAGE_HAPTICS },
+	{ "battery", PAGE_BATTERY },
+	{ "perf", PAGE_PERF },
+	{ "boost", PAGE_BOOST },
+	{ "cpu", PAGE_CPU },
+	{ "gpu", PAGE_GPU },
+	{ "vm", PAGE_VM },
+	{ "date", PAGE_DATE },
+	{ "keyboard", PAGE_KEYBOARD },
+	{ "dev", PAGE_DEV },
+	{ "about", PAGE_ABOUT },
+};
+#define N_PAGE_NAMES (int)(sizeof(PAGE_NAMES) / sizeof(PAGE_NAMES[0]))
+
 /* Where back goes from a page. */
 static inline int page_parent(int page, int hub_tab) {
 	int up = page >= 0 && page < N_PAGES ? PAGE_PARENTS[page] : PAGE_NO_PARENT;

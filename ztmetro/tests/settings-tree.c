@@ -2,6 +2,7 @@
  * the top of it. */
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 #include "../settings/page-tree.h"
 
 int main(void) {
@@ -30,6 +31,24 @@ int main(void) {
 			}
 			assert(at == PAGE_MAIN || at == PAGE_APPS);
 		}
+	}
+	/* every page has a name, and no name means two pages */
+	for (int p = 0; p < N_PAGES; p++) {
+		int named = 0;
+		for (int n = 0; n < N_PAGE_NAMES; n++) named += PAGE_NAMES[n].page == (enum page)p;
+		assert(named >= 1);
+	}
+	for (int a = 0; a < N_PAGE_NAMES; a++) {
+		for (int b = a + 1; b < N_PAGE_NAMES; b++) assert(strcmp(PAGE_NAMES[a].name, PAGE_NAMES[b].name));
+	}
+	/* what the shell's search and people's scripts already use */
+	static const char *const old[] = { "date", "main", "apps", "installed-apps", "theme", "accents",
+		"wallpapers", "display", "wifi", "bluetooth", "mobile", "audio", "battery", "cpu", "vm", "gpu",
+		"keyboard", "about", "perf", "boost", "dev", "haptics", "quick", "apn", "wifijoin", "wifinet" };
+	for (size_t i = 0; i < sizeof(old) / sizeof(old[0]); i++) {
+		int found = 0;
+		for (int n = 0; n < N_PAGE_NAMES; n++) found += !strcmp(PAGE_NAMES[n].name, old[i]);
+		assert(found == 1);
 	}
 	puts("PASS: back goes up the tree from every page");
 	return 0;

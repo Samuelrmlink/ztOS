@@ -3984,6 +3984,15 @@ static bool back(void) {
 }
 
 static void arrived(int page) {
+	if (getenv("ZTSETTINGS_TRACE_PAGES")) {
+		/* a script walking the tree can see where it is without looking */
+		for (int i = 0; i < N_PAGE_NAMES; i++) {
+			if ((int)PAGE_NAMES[i].page == page) {
+				fprintf(stderr, "page %s\n", PAGE_NAMES[i].name);
+				break;
+			}
+		}
+	}
 	if (page != PAGE_AUDIO) ringtone_stop();
 	if (page != PAGE_BLUETOOTH && bt_discoverable) {
 		bt_discoverable = false;
@@ -4053,40 +4062,34 @@ static const struct zmc_app settings = {
 
 /* --render PAGE FILE: draw one page into a PNG and leave, touching no display.
  * That is how the look is checked without opening the app on the phone. */
-/* Pages by name: --render PAGE, and `ztsettings PAGE` (Hyperscan opens one). */
-static const struct { const char *name; enum page page; } pages[] = {
-	{ "date", PAGE_DATE }, { "main", PAGE_MAIN }, { "apps", PAGE_APPS }, { "installed-apps", PAGE_INSTALLED_APPS }, { "theme", PAGE_THEME }, { "accents", PAGE_ACCENTS }, { "wallpapers", PAGE_WALLS }, { "display", PAGE_DISPLAY },
-	{ "wifi", PAGE_WIFI }, { "bluetooth", PAGE_BLUETOOTH }, { "mobile", PAGE_MOBILE }, { "audio", PAGE_AUDIO },
-	{ "battery", PAGE_BATTERY }, { "cpu", PAGE_CPU }, { "vm", PAGE_VM },
-	{ "gpu", PAGE_GPU }, { "keyboard", PAGE_KEYBOARD }, { "about", PAGE_ABOUT },
-	{ "perf", PAGE_PERF }, { "boost", PAGE_BOOST }, { "dev", PAGE_DEV }, { "haptics", PAGE_HAPTICS }, { "quick", PAGE_QUICK }, { "apn", PAGE_APN }, { "wifijoin", PAGE_WIFI_JOIN }, { "wifinet", PAGE_WIFI_NET },
-};
-
 static int page_named(const char *name) {
-	for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
-		if (strcmp(pages[i].name, name) == 0) return pages[i].page;
+	for (int i = 0; i < N_PAGE_NAMES; i++) {
+		if (strcmp(PAGE_NAMES[i].name, name) == 0) return PAGE_NAMES[i].page;
 	}
 	return -1;
 }
 
 static int render_to_file(const char *name, const char *path) {
-	for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
-		if (strcmp(pages[i].name, name) == 0) {
-			if (pages[i].page == PAGE_WIFI) {
-				wifi_load();
-			}
-			if (pages[i].page == PAGE_INSTALLED_APPS) installed_load();
-			if (pages[i].page == PAGE_BOOST) ib_render_prepare();
-			/* 664 points: the app area on the phone; ZT_RENDER_HEIGHT for a whole long page */
-			int height = getenv("ZT_RENDER_HEIGHT") ? atoi(getenv("ZT_RENDER_HEIGHT")) : 664;
-			return zmc_render_png(&settings, pages[i].page, height > 0 ? height : 664, path);
-		}
+	int page = page_named(name);
+	if (page < 0) {
+		fprintf(stderr, "ztsettings: no page called %s\n", name);
+		return 2;
 	}
-	fprintf(stderr, "ztsettings: no page called %s\n", name);
-	return 2;
+	if (page == PAGE_WIFI) {
+		wifi_load();
+	}
+	if (page == PAGE_INSTALLED_APPS || page == PAGE_APP_DETAIL) installed_load();
+	if (page == PAGE_BOOST) ib_render_prepare();
+	/* 664 points: the app area on the phone; ZT_RENDER_HEIGHT for a whole long page */
+	int height = getenv("ZT_RENDER_HEIGHT") ? atoi(getenv("ZT_RENDER_HEIGHT")) : 664;
+	return zmc_render_png(&settings, page, height > 0 ? height : 664, path);
 }
 
 int main(int argc, char **argv) {
+	if (argc == 2 && strcmp(argv[1], "--list-pages") == 0) {
+		for (int i = 0; i < N_PAGE_NAMES; i++) puts(PAGE_NAMES[i].name);
+		return 0;
+	}
 	signal(SIGCHLD, SIG_DFL);
 	config_load();
 	wifi_on_seed();
@@ -4106,11 +4109,11 @@ int main(int argc, char **argv) {
 	if (argc == 2 && page_named(argv[1]) >= 0) {
 		int page = page_named(argv[1]);
 		if (page == PAGE_WIFI) wifi_load();
-		if (page == PAGE_INSTALLED_APPS) installed_load();
+		if (page == PAGE_INSTALLED_APPS || page == PAGE_APP_DETAIL) installed_load();
 		return zmc_run(&settings, page);
 	}
 	if (argc > 1) {
-		fprintf(stderr, "usage: ztsettings [PAGE] [--render PAGE FILE]\n");
+		fprintf(stderr, "usage: ztsettings [PAGE] [--render PAGE FILE] [--list-pages]\n");
 		return 2;
 	}
 	return zmc_run(&settings, PAGE_MAIN);
