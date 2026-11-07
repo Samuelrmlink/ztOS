@@ -9,6 +9,8 @@
     ztos build --target gsi      the generic system image alone, for ztConflo (--gsi)
     ztos guide                   how installing on the phone goes, step by step
     ztos doctor                  is this computer ready to build ztOS?
+    ztos mirror --target T       the screen in a window, the mouse as a finger (phone or qemu)
+    ztos touch --target T ...    fingers and keys from a script, for tests
 """
 from __future__ import annotations
 
@@ -207,6 +209,16 @@ def cmd_doctor(args):
     print(f"  phones over USB (adb): {'yes' if shutil.which('adb') else 'no (only for installing on a phone)'}")
 
 
+def cmd_mirror(args):
+    from . import mirror
+    mirror.cmd_mirror(args)
+
+
+def cmd_touch(args):
+    from . import mirror
+    mirror.cmd_touch(args)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="ztos", description="the ztOS installer",
                                      formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -240,6 +252,37 @@ def main(argv=None):
     p.set_defaults(func=cmd_screenshots)
     sub.add_parser("guide", help="installing on the phone, step by step").set_defaults(func=cmd_guide)
     sub.add_parser("doctor", help="is this computer ready?").set_defaults(func=cmd_doctor)
+
+    def with_device(p):
+        p.add_argument("--target", choices=["phone", "qemu"], default="phone")
+        p.add_argument("--host", help="its address, if not the usual one")
+        p.add_argument("--port", type=int, default=27183)
+        p.add_argument("--token", help="ztmirror's token: for one you started yourself, without ssh")
+        p.add_argument("--ssh", help="ssh arguments to reach it (default: the target's, or $ZT_SSH)")
+        p.add_argument("--keep", action="store_true", help="leave ztmirror running afterwards")
+
+    p = sub.add_parser("mirror", help="the device's screen in a window, the mouse as a finger")
+    with_device(p)
+    p.add_argument("--scale", type=int, choices=[1, 2, 4], default=2, help="1/N of the screen's pixels (default 2)")
+    p.add_argument("--quality", type=int, default=70, help="JPEG quality, 10 to 100 (default 70)")
+    p.add_argument("--fps", type=int, default=30, help="at most this many frames a second (default 30)")
+    p.add_argument("--snapshot", metavar="FILE", help="no window: save one frame (.jpg, or .png with PySide6)")
+    p.add_argument("--stats", type=float, metavar="SECONDS", help="no window: count frames and bytes for a while")
+    p.set_defaults(func=cmd_mirror)
+    p = sub.add_parser("touch", help="fingers and keys from a script, in points",
+                       formatter_class=argparse.RawDescriptionHelpFormatter, description="""\
+  tap X Y                  one tap
+  swipe X0 Y0 X1 Y1 [MS]   drag one finger
+  pinch CX CY R0 R1 [MS]   move two fingers apart (or together)
+  key NAME [down|up]       power, volup, voldown, home, back (a press if neither)
+  play FILE|-              a timeline, as for scripts/ztctl.py: one "MS LINE" per line, with
+                           LINE down ID X Y, move ID X Y, up ID, cancel ID, tap X Y, key NAME down|up
+""")
+    with_device(p)
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("what", choices=["tap", "swipe", "pinch", "key", "play"])
+    p.add_argument("args", nargs="*")
+    p.set_defaults(func=cmd_touch)
 
     args = parser.parse_args(argv)
     if not args.command:

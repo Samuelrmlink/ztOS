@@ -20,7 +20,7 @@ endif
 
 all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
-	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial
+	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror
 
 sounds/ztos-sounds: sounds/ztos-sounds.c
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libpulse) -o $@ $< $(shell pkg-config --libs libpulse) -lm
@@ -37,7 +37,7 @@ RETRO_DEPS = $(RETRO) core/zrnboard.h retro/dotmatrix.h retro/dm-launcher.h retr
 DM_WRAP = retro/dm-wrap.c
 DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
 
-ztmetro: ztmetro.c auth/prompt.c xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
+ztmetro: ztmetro.c audio-state.h audio-sync.h auth/prompt.c xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -61,6 +61,15 @@ CORE = core/zrnmetrocore.c core/zrnmetrogpu.c core/xdg-shell-protocol.c core/vie
 CORE_DEPS = $(CORE) core/zrnboard.h retro/dotmatrix.h retro/dm-chrome.h retro/dm-glyphs.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h
 APP_BUILD = $(CC) $(CFLAGS) $(WARN) -Icore $(shell pkg-config --cflags $(APP_PKGS)) $(IAL_FLAGS)
 APP_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(APP_PKGS)) $(IAL_LIBS) -lm
+
+# ztmirror: the screen and touch over USB (or QEMU's forwarded port)
+mirror/wlr-screencopy-client.h: mirror/wlr-screencopy-unstable-v1.xml
+	wayland-scanner client-header $< $@
+mirror/wlr-screencopy.c: mirror/wlr-screencopy-unstable-v1.xml
+	wayland-scanner private-code $< $@
+mirror/ztmirror: mirror/ztmirror.c mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h
+	$(CC) $(CFLAGS) $(WARN) -Imirror $(shell pkg-config --cflags wayland-client libturbojpeg) -o $@ mirror/ztmirror.c mirror/wlr-screencopy.c \
+		$(shell pkg-config --libs wayland-client libturbojpeg) -lpthread
 
 # ztCamera: the camera, in the Lumia Camera look (see camera/CAMERA-DRIVERS.md
 # for why its viewfinder runs against a source that is not a sensor)
@@ -203,6 +212,8 @@ check-arch: all
 	done; exit $$bad
 
 install: check-arch
+	install -Dm755 mirror/ztmirror /usr/local/bin/ztmirror
+	install -Dm644 mirror/ztmirror.service /usr/lib/systemd/user/ztmirror.service
 	install -Dm755 demoloop/ztos-demoloop /usr/local/bin/ztos-demoloop
 	install -Dm644 demoloop/ztos-demoloop.service /usr/lib/systemd/user/ztos-demoloop.service
 	install -Dm755 auth/ztos-polkit-agent /usr/local/bin/ztos-polkit-agent
@@ -265,7 +276,7 @@ install: check-arch
 clean:
 	rm -f sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
-		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c
+		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h
 
 # Uses a private Wayland seat; does not touch the running compositor or display.
 .PHONY: check-arch check-keyboard
@@ -301,6 +312,11 @@ check-gallery:
 check-audio-sync:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-audio-sync-test tests/audio-sync.c
 	/tmp/ztmetro-audio-sync-test
+
+.PHONY: check-audio-state
+check-audio-state:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-audio-state-test tests/audio-state.c
+	/tmp/ztmetro-audio-state-test
 
 .PHONY: check-audiod
 check-audiod:
