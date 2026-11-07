@@ -1401,6 +1401,25 @@ static void im_cursor_area(WebKitInputMethodContext *c, int x, int y, int w, int
 		im_tell(im);	/* the field moved, or the caret went to another line */
 	}
 }
+/* a focused field can become another kind of field without losing focus */
+static void im_purpose_changed(GObject *o, GParamSpec *p, gpointer data) {
+	(void)p; (void)data;
+	ZtIm *im = (ZtIm *)o;
+	if (im->focused) {
+		im_tell(im);
+	}
+}
+const char *webview_keyboard_mode(struct webview *wv) {
+	if (!wv || !wv->im) {
+		return NULL;
+	}
+	switch (webkit_input_method_context_get_input_purpose(WEBKIT_INPUT_METHOD_CONTEXT(wv->im))) {
+	case WEBKIT_INPUT_PURPOSE_DIGITS: return "digits";
+	case WEBKIT_INPUT_PURPOSE_NUMBER: return "number";
+	case WEBKIT_INPUT_PURPOSE_PHONE: return "phone";
+	default: return NULL;
+	}
+}
 static void im_get_preedit(WebKitInputMethodContext *c, gchar **text, GList **underlines, guint *cursor) {
 	(void)c;
 	if (text) *text = g_strdup("");
@@ -1421,7 +1440,10 @@ static void zt_im_class_init(ZtImClass *k) {
 	c->reset = im_reset;
 	c->set_enable_preedit = im_set_preedit;
 }
-static void zt_im_init(ZtIm *im) { im->caret_bottom = -1; }
+static void zt_im_init(ZtIm *im) {
+	im->caret_bottom = -1;
+	g_signal_connect(im, "notify::input-purpose", G_CALLBACK(im_purpose_changed), NULL);
+}
 
 struct webview *webview_create(struct wl_display *display, struct wl_compositor *compositor,
 			       struct wl_surface *parent, const char *data_dir, bool private,

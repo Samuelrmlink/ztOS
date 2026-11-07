@@ -777,7 +777,7 @@ static void on_ime(void *user, bool active, int caret_bottom) {
 			B.editing = false;
 			B.select_all = false;
 		}
-		zmc_keyboard(true);
+		zmc_keyboard_numeric(webview_keyboard_mode(t->view));	/* NULL: the letters */
 		if (caret_bottom >= 0) {
 			zmc_osk_box(caret_bottom + 8);	/* lift the page just enough */
 		}

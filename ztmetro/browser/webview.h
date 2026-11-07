@@ -71,6 +71,10 @@ void webview_download_info(int index, char *name, size_t name_size, char *path, 
 	unsigned long long *received, unsigned long long *total, unsigned long long *speed, int *state);
 
 /* input in the content area, in points relative to the view's top-left */
+/* the shell keyboard's number pad for the page's focused field ("digits",
+ * "number", "phone": see zmc_keyboard_numeric), or NULL for the full keyboard */
+const char *webview_keyboard_mode(struct webview *wv);
+
 /* a finger on the page: a drag scrolls it, a tap clicks; time in ms */
 void webview_touch_down(struct webview *wv, int id, double x, double y, unsigned time);
 void webview_touch_motion(struct webview *wv, int id, double x, double y, unsigned time);

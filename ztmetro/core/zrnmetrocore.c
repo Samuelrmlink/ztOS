@@ -3531,6 +3531,18 @@ void zmc_keyboard(bool show) {
 	osk_tell(show ? "osk show\n" : "osk hide\n");
 }
 
+void zmc_keyboard_numeric(const char *mode) {
+	if (!mode) {
+		zmc_keyboard(true);
+		return;
+	}
+	char line[48];
+	osk_wanted = true;
+	osk_told = -1;
+	snprintf(line, sizeof(line), "osk numeric %s\n", mode);
+	osk_tell(line);
+}
+
 void zmc_osk_box(int bottom) {
 	if (!osk_wanted || bottom == osk_told) {
 		return;

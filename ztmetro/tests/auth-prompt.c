@@ -9,6 +9,7 @@ int main(void) {
     int peers[2]; assert(socketpair(AF_UNIX,SOCK_STREAM,0,peers)==0); s.auth_fd=peers[0];
     char prompt[]="PROMPT\tTest authentication"; auth_line(&s,prompt);
     assert(s.auth_active && s.dialog_open && s.osk_visible && !s.auth_busy);
+    assert(s.osk_mode==OSK_MODE_FULL);
     dialog_close(&s); assert(s.dialog_open);
     auth_input(&s,KEY_A,"a"); auth_input(&s,KEY_B,"B"); auth_input(&s,KEY_3,"#");
     auth_input(&s,KEY_E,"é"); assert(s.auth_len==5);
@@ -24,6 +25,16 @@ int main(void) {
     assert(s.auth_busy && s.auth_success);
     auth_input(&s,KEY_ESC,"");
     assert(!s.auth_active && !s.dialog_open && !s.auth_len && !s.auth_password[0]);
+    /* A password prompt over an app's number field has the letters, and the
+     * pad comes back with the prompt gone. A PIN prompt asks, and doesn't leave
+     * its pad for the next password. */
+    s.osk_field_mode=OSK_MODE_NUMBER; s.auth_fd=peers[0];
+    auth_line(&s,prompt); assert(s.auth_active && s.osk_mode==OSK_MODE_FULL && s.n_keys>12);
+    osk_show_mode(&s,OSK_MODE_DIGITS); assert(s.osk_mode==OSK_MODE_DIGITS && s.n_keys==12);
+    auth_input(&s,s.keys[0].keycode,s.keys[0].label); assert(s.auth_len==1 && s.auth_password[0]=='1');
+    osk_show(&s,true); assert(s.osk_mode==OSK_MODE_FULL);
+    s.auth_active=false; osk_show(&s,true); assert(s.osk_mode==OSK_MODE_NUMBER);
+    s.auth_len=0; s.osk_field_mode=OSK_MODE_FULL; osk_show(&s,false);
     close(peers[1]);
     puts("PASS: modal prompt, masked UTF-8 input and deletion, submit clears secret, busy input suppressed, failure retry, success, cancel");
     return 0;

@@ -141,6 +141,7 @@ void zmc_every(int ms, void (*t)(void)) {}
 void zmc_go(int page, int dir) { zmc.page = page; }
 void zmc_redraw(void) {}
 void zmc_keyboard(bool s) {}
+void zmc_keyboard_numeric(const char *mode) {}
 void zmc_haptic(const char *k) {}
 void zmc_read_file(const char *path, char *out, size_t size) {
 	out[0] = 0;
