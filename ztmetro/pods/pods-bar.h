@@ -61,13 +61,17 @@ static inline void pods_bar_draw(cairo_t *cr, const struct pods_bar *b, double x
 				left ? b->charge_left : b->charge_right);
 		}
 	} else {
-		double end = x + bar_w + space + gap * 2 + space + bar_w;
+		/* as one icon: the two stems side by side, touching. A bud reaches 1.25 heads
+		 * out from its middle, and stands (0.45 heads + half a stem) from its stem's edge */
+		double head = h * 0.27, stem = h * 0.17;
+		double pair = head * 0.9 + stem, reach = head * 1.25;
+		double end = x + bar_w + space + reach + pair + reach + space + bar_w;
 		if (end <= limit) {	/* left out rather than run into the battery */
-			double buds = x + bar_w + space;
+			double left_bud = x + bar_w + space + reach;
 			pods_bar_meter(cr, x, base, h, bar_w, b->left, b->charge_left);
 			cairo_set_source_rgb(cr, 1, 1, 1);
-			pods_bar_bud(cr, buds + gap * 0.5, base, h, -1);
-			pods_bar_bud(cr, buds + gap * 1.5, base, h, 1);
+			pods_bar_bud(cr, left_bud, base, h, -1);
+			pods_bar_bud(cr, left_bud + pair, base, h, 1);
 			pods_bar_meter(cr, end - bar_w, base, h, bar_w, b->right, b->charge_right);
 		}
 	}
