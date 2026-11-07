@@ -37,6 +37,7 @@ enum page {
 	PAGE_BOOST,	/* Dynamic Boost System: RapidBoost and IntelligentBoost */
 	PAGE_CONNECTIONS,	/* Wi-Fi, Bluetooth, the mobile network */
 	PAGE_SOUND_TOUCH,	/* ringtones + sounds, haptics */
+	PAGE_POWER,	/* battery + performance: power, then hardware */
 	N_PAGES
 };
 
@@ -53,13 +54,14 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_MOBILE] = PAGE_CONNECTIONS,
 	[PAGE_SOUND_TOUCH] = PAGE_HUB_TAB,
 	[PAGE_AUDIO] = PAGE_SOUND_TOUCH,
-	[PAGE_BATTERY] = PAGE_HUB_TAB,
-	[PAGE_CPU] = PAGE_HUB_TAB,
-	[PAGE_VM] = PAGE_HUB_TAB,
-	[PAGE_GPU] = PAGE_HUB_TAB,
+	[PAGE_POWER] = PAGE_HUB_TAB,
+	[PAGE_BATTERY] = PAGE_POWER,
+	[PAGE_CPU] = PAGE_POWER,
+	[PAGE_VM] = PAGE_POWER,
+	[PAGE_GPU] = PAGE_POWER,
 	[PAGE_KEYBOARD] = PAGE_HUB_TAB,
 	[PAGE_ABOUT] = PAGE_HUB_TAB,
-	[PAGE_PERF] = PAGE_HUB_TAB,
+	[PAGE_PERF] = PAGE_POWER,
 	[PAGE_DEV] = PAGE_HUB_TAB,
 	[PAGE_INSTALLED_APPS] = PAGE_APPS,
 	[PAGE_APP_DETAIL] = PAGE_INSTALLED_APPS,
@@ -73,7 +75,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_ACCENTS] = PAGE_THEME,
 	[PAGE_WALLS] = PAGE_THEME,
 	[PAGE_NAVIGATION] = PAGE_HUB_TAB,
-	[PAGE_BOOST] = PAGE_HUB_TAB,
+	[PAGE_BOOST] = PAGE_POWER,
 };
 
 /* Pages by name: `ztsettings NAME` (Hyperscan opens one), --render NAME FILE,
@@ -99,6 +101,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "sound", PAGE_SOUND_TOUCH },
 	{ "audio", PAGE_AUDIO },
 	{ "haptics", PAGE_HAPTICS },
+	{ "power", PAGE_POWER },
 	{ "battery", PAGE_BATTERY },
 	{ "perf", PAGE_PERF },
 	{ "boost", PAGE_BOOST },

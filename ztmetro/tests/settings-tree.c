@@ -21,9 +21,13 @@ int main(void) {
 	assert(page_parent(PAGE_MOBILE, PAGE_MAIN) == PAGE_CONNECTIONS);
 	assert(page_parent(PAGE_AUDIO, PAGE_MAIN) == PAGE_SOUND_TOUCH);
 	assert(page_parent(PAGE_HAPTICS, PAGE_MAIN) == PAGE_SOUND_TOUCH);
+	assert(page_parent(PAGE_PERF, PAGE_MAIN) == PAGE_POWER);
+	assert(page_parent(PAGE_BOOST, PAGE_MAIN) == PAGE_POWER);
+	assert(page_parent(PAGE_BATTERY, PAGE_MAIN) == PAGE_POWER);
+	assert(page_parent(PAGE_VM, PAGE_MAIN) == PAGE_POWER);
 	/* the rest go to the tab they were opened from */
-	assert(page_parent(PAGE_PERF, PAGE_APPS) == PAGE_APPS);
-	assert(page_parent(PAGE_PERF, PAGE_MAIN) == PAGE_MAIN);
+	assert(page_parent(PAGE_DEV, PAGE_APPS) == PAGE_APPS);
+	assert(page_parent(PAGE_DEV, PAGE_MAIN) == PAGE_MAIN);
 
 	/* every page gets to the top in at most 3 steps, whichever tab it was */
 	for (int hub = PAGE_MAIN; hub <= PAGE_APPS; hub += PAGE_APPS - PAGE_MAIN) {

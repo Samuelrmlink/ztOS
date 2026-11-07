@@ -108,7 +108,6 @@ enum action {
 	ACT_VIBE_PATTERN,
 	ACT_VIBE_PREVIEW,
 	ACT_OPEN_SOUND,
-	ACT_BATTERY_SAVER,
 	ACT_CPU_GOVERNOR,
 	ACT_ZRAM_TOGGLE,
 	ACT_SWAPPINESS_STEP,
@@ -216,7 +215,6 @@ static struct {
 	bool vibrate_ring;
 	bool vibrate_silent;
 
-	bool battery_saver;
 	char cpu_gov[32];
 	bool zram_enabled;
 	int swappiness;
@@ -259,7 +257,6 @@ static struct {
 	.ring_vol = 70,
 	.vibrate_ring = true,
 	.vibrate_silent = true,
-	.battery_saver = false,
 	.swappiness = 60,
 	.comp_algo_idx = 0,
 	.perf_profile = 1,
@@ -1046,17 +1043,9 @@ static double draw_app_detail(cairo_t *cr) {
 /* The hub's second tab: what belongs to the system's own programs. */
 static double draw_apps(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "applications", "system", ACT_OPEN_PAGE, PAGE_MAIN);
-	char detail[128];
 	y = zmc_entry(cr, y, "apps", "choose apps that run in the background", ACT_OPEN_PAGE, PAGE_INSTALLED_APPS);
 	y = zmc_entry(cr, y, "keyboard", app.haptics ? "vibrate on touch: on" : "vibrate on touch: off",
 		ACT_OPEN_PAGE, PAGE_KEYBOARD);
-
-	static const char *const profiles[] = { "Power saver", "Balanced", "Performance" };
-	snprintf(detail, sizeof(detail), "%s, low power when off: %s", profiles[app.perf_profile],
-		app.perf_deepsleep ? "on" : "off");
-	y = zmc_entry(cr, y, "performance", detail, ACT_OPEN_PAGE, PAGE_PERF);
-	y = zmc_entry(cr, y, "Dynamic Boost System", "RapidBoost and IntelligentBoost: what they do, live",
-		ACT_OPEN_PAGE, PAGE_BOOST);
 
 	y = zmc_entry(cr, y, "developer tests", "demo tiles, slow motion, ZrnDevTest", ACT_OPEN_PAGE, PAGE_DEV);
 
@@ -2685,7 +2674,7 @@ static double draw_audio(cairo_t *cr) {
 }
 
 static double draw_battery(cairo_t *cr) {
-	double y = zmc_header(cr, "battery saver");
+	double y = zmc_header(cr, "battery");
 
 	char cap[32], stat[32], volt[32];
 	read_sys_file(hw_file(hw_battery(), "capacity"), cap, sizeof(cap));
@@ -2705,14 +2694,6 @@ static double draw_battery(cairo_t *cr) {
 	snprintf(est, sizeof(est), "%s, %.2f V, Maxim MAX17055", stat[0] ? stat : "Discharging", v);
 	zmc_text(cr, est, FONT_REGULAR, 14, MARGIN, y, 0);
 	y += 36;
-
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "Battery Saver mode", FONT_SEMILIGHT, 21, MARGIN, y, 0);
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, app.battery_saver ? "Conserving power" : "Standard performance", FONT_REGULAR, 13, MARGIN, y + 26, 0);
-	zmc_toggle(cr, zmc.width - MARGIN - 54, y + 4, app.battery_saver);
-	zmc_add_hit(0, y - 4, zmc.width, 52, ACT_BATTERY_SAVER, 0);
-	y += 72;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Battery information", FONT_REGULAR, 13, MARGIN, y, 0);
@@ -3065,6 +3046,38 @@ static double draw_sound_touch(cairo_t *cr) {
 	return y + 20;
 }
 
+static double draw_power(cairo_t *cr) {
+	double y = zmc_header(cr, "battery + performance");
+	static const char *const profiles[] = { "Power saver", "Balanced", "Performance" };
+	char detail[128], cap[32], stat[32];
+
+	y = audio_section(cr, y, "power");
+	read_sys_file(hw_file(hw_battery(), "capacity"), cap, sizeof(cap));
+	read_sys_file(hw_file(hw_battery(), "status"), stat, sizeof(stat));
+	snprintf(detail, sizeof(detail), "%s%s%s", cap, cap[0] ? "%" : "", cap[0] && stat[0] ? ", " : "");
+	for (char *c = stat; *c; c++) *c = (char)tolower((unsigned char)*c);
+	snprintf(detail + strlen(detail), sizeof(detail) - strlen(detail), "%s", stat);
+	y = zmc_entry(cr, y, "battery", detail, ACT_OPEN_PAGE, PAGE_BATTERY);
+
+	snprintf(detail, sizeof(detail), "%s, low power when off: %s", profiles[app.perf_profile],
+		app.perf_deepsleep ? "on" : "off");
+	y = zmc_entry(cr, y, "performance", detail, ACT_OPEN_PAGE, PAGE_PERF);
+	y = zmc_entry(cr, y, "Dynamic Boost System", "RapidBoost and IntelligentBoost: what they do, live",
+		ACT_OPEN_PAGE, PAGE_BOOST);
+	y += 10;
+
+	y = audio_section(cr, y, "hardware");
+	snprintf(detail, sizeof(detail), "Exynos 9810 (8 cores), %s", app.cpu_gov);
+	y = zmc_entry(cr, y, "processor", detail, ACT_OPEN_PAGE, PAGE_CPU);
+
+	snprintf(detail, sizeof(detail), "Mali-G72 MP18 (%s), 60 FPS", app.gpu_gov);
+	y = zmc_entry(cr, y, "graphics", detail, ACT_OPEN_PAGE, PAGE_GPU);
+
+	snprintf(detail, sizeof(detail), "3.5 GB RAM, swappiness %d", app.swappiness);
+	y = zmc_entry(cr, y, "virtual memory", detail, ACT_OPEN_PAGE, PAGE_VM);
+	return y + 20;
+}
+
 static double draw_main(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "system", "applications", ACT_OPEN_PAGE, PAGE_APPS);
 	char detail[128];
@@ -3092,20 +3105,12 @@ static double draw_main(cairo_t *cr) {
 		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
 	y = zmc_entry(cr, y, "notifications + actions", detail, ACT_OPEN_PAGE, PAGE_QUICK);
 
+	static const char *const profiles[] = { "Power saver", "Balanced", "Performance" };
 	char bat_buf[32];
 	read_sys_file(hw_file(hw_battery(), "capacity"), bat_buf, sizeof(bat_buf));
-	int bat = bat_buf[0] ? atoi(bat_buf) : 51;
-	snprintf(detail, sizeof(detail), "%d%%, %s", bat, app.battery_saver ? "battery saver on" : "discharging");
-	y = zmc_entry(cr, y, "battery saver", detail, ACT_OPEN_PAGE, PAGE_BATTERY);
-
-	snprintf(detail, sizeof(detail), "Exynos 9810 (8 cores), %s", app.cpu_gov);
-	y = zmc_entry(cr, y, "processor", detail, ACT_OPEN_PAGE, PAGE_CPU);
-
-	snprintf(detail, sizeof(detail), "3.5 GB RAM, swappiness %d", app.swappiness);
-	y = zmc_entry(cr, y, "virtual memory", detail, ACT_OPEN_PAGE, PAGE_VM);
-
-	snprintf(detail, sizeof(detail), "Mali-G72 MP18 (%s), 60 FPS", app.gpu_gov);
-	y = zmc_entry(cr, y, "graphics", detail, ACT_OPEN_PAGE, PAGE_GPU);
+	if (bat_buf[0]) snprintf(detail, sizeof(detail), "%d%%, %s", atoi(bat_buf), profiles[app.perf_profile]);
+	else snprintf(detail, sizeof(detail), "%s", profiles[app.perf_profile]);
+	y = zmc_entry(cr, y, "battery + performance", detail, ACT_OPEN_PAGE, PAGE_POWER);
 
 	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
 
@@ -3123,6 +3128,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_MAIN: return draw_main(cr);
 	case PAGE_CONNECTIONS: return draw_connections(cr);
 	case PAGE_SOUND_TOUCH: return draw_sound_touch(cr);
+	case PAGE_POWER: return draw_power(cr);
 	case PAGE_APPS: return draw_apps(cr);
 	case PAGE_INSTALLED_APPS: return draw_installed_apps(cr);
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);
@@ -3743,9 +3749,6 @@ static void activate(int action, int arg) {
 	case ACT_VIBRATE_SILENT:
 		app.vibrate_silent = !app.vibrate_silent;
 		ring_preferences(true);
-		break;
-	case ACT_BATTERY_SAVER:
-		app.battery_saver = !app.battery_saver;
 		break;
 	case ACT_CPU_GOVERNOR:
 		if (strcmp(app.cpu_gov, "schedutil") == 0) {
