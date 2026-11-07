@@ -78,6 +78,25 @@ cmake -S . -B build && cmake --build build -j   # AUTO finds ../ztos-podsd: "zto
 
 The container is Rocky Linux 10, so its glibc and libsystemd match a Rocky 10 / RHEL 10 host, and the binary runs there. For another distribution, build the daemon natively instead. A binary built on an older glibc runs on a newer one, but not the other way round. The container mounts the source with `--security-opt label=disable` rather than relabelling it for SELinux.
 
+## As an RPM (Rocky, RHEL, Fedora)
+
+`ztmetro/pods/qt/rpm.sh` builds what is committed in a Rocky Linux 10 container
+(podman, rootless; nothing installed on the host) and runs the tests in `%check`:
+
+```sh
+ztmetro/pods/qt/rpm.sh                         # out/rpm/ztpods-qt-0.1.0-1.el10.x86_64.rpm
+sudo dnf install ./out/rpm/ztpods-qt-0.1.0-1.el10.x86_64.rpm
+systemctl --user enable --now ztos-podsd       # this login; new logins get it from the preset
+```
+
+It installs `/usr/bin/ztpods-qt`, `/usr/bin/ztos-podsd`, the user unit in
+`/usr/lib/systemd/user` (enabled for new logins by
+`/usr/lib/systemd/user-preset/80-ztpods-qt.preset`), the desktop entry and the icon.
+It requires `bluez`, `dbus`, `qt6-qtbase-gui`, `qt6-qtwayland` and
+`hicolor-icon-theme`; Qt, libsystemd and glibc come in from what the binaries link
+against. For Fedora, pass its image: `rpm.sh registry.fedoraproject.org/fedora:43`.
+Remove with `systemctl --user disable --now ztos-podsd; sudo dnf remove ztpods-qt`.
+
 ## Install, run and uninstall (KDE Plasma)
 
 ```sh
