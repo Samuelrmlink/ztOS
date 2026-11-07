@@ -5,6 +5,7 @@
  */
 #ifndef ZTSETTINGS_PAGE_TREE_H
 #define ZTSETTINGS_PAGE_TREE_H
+#include <stdbool.h>
 
 enum page {
 	PAGE_MAIN,
@@ -44,6 +45,13 @@ enum page {
 	PAGE_LOCK,	/* Lock Screen: its photo, and whether waking shows it */
 	PAGE_APP_SCALE,	/* app scaling: a size for each app */
 	PAGE_LED,	/* the front LED: what lights it, and in what colour */
+	/* Sound's pages (sound/sound-pages.h), in its order: two pivots of two tabs */
+	PAGE_SOUND_EQ, PAGE_SOUND_FX, PAGE_SOUND_OUT, PAGE_SOUND_APPS,
+	/* AirPods' (pods/pods-pages.h), in its order: four tabs */
+	PAGE_PODS_STATUS, PAGE_PODS_LISTEN, PAGE_PODS_CONTROLS, PAGE_PODS_ABOUT,
+	/* ZrnDevTest's (devtest/devtest-pages.h), in its order */
+	PAGE_DEVTEST, PAGE_DEVTEST_SYSTEM, PAGE_DEVTEST_SENSORS, PAGE_DEVTEST_JOURNAL, PAGE_DEVTEST_KERNEL,
+	PAGE_DEVTEST_SHELL, PAGE_DEVTEST_HARDWARE, PAGE_DEVTEST_LOGS, PAGE_DEVTEST_ANIM, PAGE_DEVTEST_PREVIEW,
 	N_PAGES
 };
 
@@ -87,6 +95,24 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_STYLE] = PAGE_THEME,
 	[PAGE_NAVIGATION] = PAGE_THEME,
 	[PAGE_BOOST] = PAGE_POWER,
+	[PAGE_SOUND_EQ] = PAGE_AUDIO,
+	[PAGE_SOUND_FX] = PAGE_AUDIO,
+	[PAGE_SOUND_OUT] = PAGE_AUDIO,
+	[PAGE_SOUND_APPS] = PAGE_AUDIO,
+	[PAGE_PODS_STATUS] = PAGE_BLUETOOTH,
+	[PAGE_PODS_LISTEN] = PAGE_BLUETOOTH,
+	[PAGE_PODS_CONTROLS] = PAGE_BLUETOOTH,
+	[PAGE_PODS_ABOUT] = PAGE_BLUETOOTH,
+	[PAGE_DEVTEST] = PAGE_DEV,
+	[PAGE_DEVTEST_LOGS] = PAGE_DEV,
+	[PAGE_DEVTEST_SYSTEM] = PAGE_DEVTEST,
+	[PAGE_DEVTEST_SENSORS] = PAGE_DEVTEST,
+	[PAGE_DEVTEST_HARDWARE] = PAGE_DEVTEST,
+	[PAGE_DEVTEST_ANIM] = PAGE_DEVTEST,
+	[PAGE_DEVTEST_PREVIEW] = PAGE_DEVTEST_ANIM,
+	[PAGE_DEVTEST_JOURNAL] = PAGE_DEVTEST_LOGS,
+	[PAGE_DEVTEST_KERNEL] = PAGE_DEVTEST_LOGS,
+	[PAGE_DEVTEST_SHELL] = PAGE_DEVTEST_LOGS,
 };
 
 /* Pages by name: `ztsettings NAME` (Hyperscan opens one), --render NAME FILE,
@@ -131,11 +157,34 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "keyboard", PAGE_KEYBOARD },
 	{ "dev", PAGE_DEV },
 	{ "about", PAGE_ABOUT },
+	{ "equalizer", PAGE_SOUND_EQ },
+	{ "effects", PAGE_SOUND_FX },
+	{ "audio-output", PAGE_SOUND_OUT },
+	{ "app-volume", PAGE_SOUND_APPS },
+	{ "airpods", PAGE_PODS_STATUS },
+	{ "airpods-listening", PAGE_PODS_LISTEN },
+	{ "airpods-controls", PAGE_PODS_CONTROLS },
+	{ "airpods-about", PAGE_PODS_ABOUT },
+	{ "devtest", PAGE_DEVTEST },
+	{ "devtest-system", PAGE_DEVTEST_SYSTEM },
+	{ "devtest-sensors", PAGE_DEVTEST_SENSORS },
+	{ "devtest-journal", PAGE_DEVTEST_JOURNAL },
+	{ "devtest-kernel", PAGE_DEVTEST_KERNEL },
+	{ "devtest-shell", PAGE_DEVTEST_SHELL },
+	{ "devtest-hardware", PAGE_DEVTEST_HARDWARE },
+	{ "devtest-logs", PAGE_DEVTEST_LOGS },
+	{ "devtest-animations", PAGE_DEVTEST_ANIM },
+	{ "devtest-preview", PAGE_DEVTEST_PREVIEW },
 };
 #define N_PAGE_NAMES (int)(sizeof(PAGE_NAMES) / sizeof(PAGE_NAMES[0]))
 
 /* Whose photo the picker is choosing, and so where it goes back to. */
 enum { WALL_TARGET_TILES = 1, WALL_TARGET_LOCK = 2 };
+
+/* Pages that are another module's, in a row. */
+static inline bool page_is_sound(int page) { return page >= PAGE_SOUND_EQ && page <= PAGE_SOUND_APPS; }
+static inline bool page_is_pods(int page) { return page >= PAGE_PODS_STATUS && page <= PAGE_PODS_ABOUT; }
+static inline bool page_is_devtest(int page) { return page >= PAGE_DEVTEST && page <= PAGE_DEVTEST_PREVIEW; }
 
 /* Where back goes from a page. */
 static inline int page_parent(int page, int wall_target) {

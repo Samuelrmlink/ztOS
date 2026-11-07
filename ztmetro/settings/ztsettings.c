@@ -22,7 +22,9 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include "ztos-hw.h"
 #include "zrnvibe.h"
@@ -44,6 +46,9 @@
 #include "config-merge.h"
 #include "page-tree.h"
 #include "../ledd/led-policy.h"
+#include "../sound/sound-pages.h"
+#include "../pods/pods-pages.h"
+#include "../devtest/devtest-pages.h"
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -81,7 +86,6 @@ enum action {
 	ACT_HAPTICS,
 	ACT_WIFI_RADIO,
 	ACT_WIFI_SUSPEND,
-	ACT_AIRPLANE_RADIOS,
 	ACT_WIFI_CONNECT,
 	ACT_WIFI_RESCAN,
 	ACT_WIFI_PASSWORD,	/* the box */
@@ -110,7 +114,6 @@ enum action {
 	ACT_VIBRATE_SILENT,
 	ACT_VIBE_PATTERN,
 	ACT_VIBE_PREVIEW,
-	ACT_OPEN_SOUND,
 	ACT_CPU_GOVERNOR,
 	ACT_SWAPPINESS_STEP,
 	ACT_GPU_GOVERNOR,
@@ -126,7 +129,6 @@ enum action {
 	ACT_DEV_LOCK,
 	ACT_DEV_DEMOLOOP,
 	ACT_DEV_DEMOLOOP_STOP,
-	ACT_DEV_OPEN_TEST,
 	ACT_HAPTIC_STRENGTH,
 	ACT_HAPTIC_GROUP,	/* a slider each: this + 1000 * its index into HAPTIC_GROUPS */
 	ACT_HAPTIC_TRY,		/* arg: which pulse */
@@ -209,7 +211,6 @@ static struct {
 
 	bool wifi_on, wifi_loading;
 	bool wifi_suspend;
-	bool airplane_radios;
 	struct network networks[MAX_NETWORKS];
 	int n_networks;
 	char wifi_status[96];
@@ -420,8 +421,6 @@ static void config_load(void) {
 			else app.timeout_idx = 4;
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			app.wifi_suspend = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
-		} else if (strcmp(key, "airplane_radios") == 0) {
-			app.airplane_radios = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
 		}
 	}
 	if (f) fclose(f);
@@ -587,7 +586,6 @@ static void config_format(void) {
 	}
 	KEY("quick", "%s", quick);
 	KEY("wifi_suspend", "%s", app.wifi_suspend ? "on" : "off");
-	KEY("airplane_radios", "%s", app.airplane_radios ? "on" : "off");
 	KEY("key_height", "%d", app.key_height);
 	KEY("key_sound", "%s", app.key_sound ? "on" : "off");
 	KEY("ring_volume", "%d", app.ring_vol);
@@ -891,7 +889,7 @@ static void wifi_summary(char *out, size_t size) {
 
 static struct {
 	char sim[16], operator[48], registered[16], tech[8];
-	bool data, data_on, known;
+	bool data, data_on, airplane, known;
 } cell;
 static char apn_field[3][102] = { "dialogbb", "", "" };	/* apn, user, password */
 static int apn_auth, apn_focus = -1;
@@ -915,6 +913,7 @@ static void cell_load(void) {
 		else if (!strcmp(line, "tech")) snprintf(cell.tech, sizeof(cell.tech), "%s", v);
 		else if (!strcmp(line, "data")) cell.data = atoi(v) > 0;
 		else if (!strcmp(line, "data_on")) cell.data_on = atoi(v) > 0;
+		else if (!strcmp(line, "airplane")) cell.airplane = atoi(v) > 0;
 	}
 	if (f) fclose(f);
 	app.mobile_data = cell.data_on;
@@ -1507,6 +1506,8 @@ static void wall_overlay(int page) {
 static void settings_overlay(int page) {
 	wall_overlay(page);
 	ib_overlay(page);
+	if (page == PAGE_SOUND_EQ) sound_overlay(page);
+	if (page_is_devtest(page)) devtest_overlay(page);
 }
 
 /* a thumbnail covering a w x h box at (x, y), its image as drawn */
@@ -2154,7 +2155,7 @@ static double draw_bluetooth(cairo_t *cr) {
 		y += zmc_text(cr, bt.status, FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 14;
 	}
 	int battery = bt_battery();
-	/* AirPods that have connected here: ztos-podsd lists them, and ztpods has their settings */
+	/* AirPods that have connected here: ztos-podsd lists them, and their settings are pages under this one */
 	struct pods_bar pods;
 	pods_bar_read(&pods);
 	double menu_at = -1;
@@ -2442,10 +2443,15 @@ static double draw_mobile(cairo_t *cr) {
 			zmc.width - 2 * MARGIN) + 20;
 		return y;
 	}
-	y = zmc_switch(cr, y, "Data connection", app.mobile_data, ACT_MOBILE_DATA);
-	snprintf(value, sizeof(value), "%s", !app.mobile_data ? "Off" : cell.data ? "Connected" :
-		"Connecting, or no connection yet");
-	y = zmc_field(cr, y, "Mobile data", value);
+	/* Off stops the data and leaves calls and texts be. Airplane mode is its own
+	 * thing: the switch stays as it was set, the connection is just not there. */
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "Mobile Data", FONT_REGULAR, 13, MARGIN, y, 0);
+	y = zmc_switch(cr, y + 22, "Mobile Data", app.mobile_data, ACT_MOBILE_DATA) - 18;
+	snprintf(value, sizeof(value), "%s", !app.mobile_data ? "Off" : cell.airplane ? "Not active in airplane mode" :
+		cell.data ? "Connected" : "Connecting, or no connection yet");
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	y += zmc_text(cr, value, FONT_REGULAR, 16, MARGIN, y, zmc.width - 2 * MARGIN) + 14;
 
 	snprintf(value, sizeof(value), "%s%s%s", strcmp(cell.sim, "ready") ? "No SIM" :
 		cell.operator[0] ? cell.operator : "No service", cell.tech[0] ? ", " : "", cell.tech);
@@ -2457,10 +2463,6 @@ static double draw_mobile(cairo_t *cr) {
 
 	snprintf(value, sizeof(value), "%s%s", apn_field[0], apn_field[1][0] ? ", with a user name" : "");
 	y = zmc_entry(cr, y, "access point", value, ACT_OPEN_PAGE, PAGE_APN);
-	y = zmc_switch(cr, y, "Airplane mode: all radios", app.airplane_radios, ACT_AIRPLANE_RADIOS);
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	y += zmc_text(cr, "Airplane mode also turns off Wi-Fi and Bluetooth, and puts them back when it ends.",
-		FONT_REGULAR, 13.5, MARGIN, y, zmc.width - 2 * MARGIN) + 20;
 	return y + 20;
 }
 
@@ -2593,6 +2595,8 @@ static double draw_date(cairo_t *cr) {
 }
 
 static void typed(const char *text) {
+    if (page_is_sound(zmc.page)) { sound_text(text); return; }
+    if (page_is_pods(zmc.page)) { pods_text(text); return; }
     if (zmc.page == PAGE_DATE && date_focus >= 0 && !date_pipe) {
         char *field = date_fields[date_focus]; size_t len = strlen(field);
         if (text[0] == '\b') { if (len) field[len-1] = 0; }
@@ -2752,9 +2756,8 @@ static double draw_audio(cairo_t *cr) {
 	zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.ring_vol, "Ringer + Notifications", ACT_RING_VOL_STEP);
 	y += 74;
 
-	/* the equalizer and effects live in their own app */
-	y = zmc_entry(cr, y, "equalizer + effects", "presets, surround, crossfade: the Sound app", ACT_OPEN_SOUND, 0);
-	y = zmc_entry(cr, y, "app volume + output", "set for each app: the Sound app", ACT_OPEN_SOUND, 1);
+	y = zmc_entry(cr, y, "equalizer + effects", "presets, surround, crossfade", ACT_OPEN_PAGE, PAGE_SOUND_EQ);
+	y = zmc_entry(cr, y, "app volume + output", "set for each app", ACT_OPEN_PAGE, PAGE_SOUND_APPS);
 	y += 10;
 
 	/* the ringtone: one box that opens into the list, not the list itself */
@@ -3157,7 +3160,7 @@ static double draw_dev(cairo_t *cr) {
 	bool demoloop = access(runtime_file(demo_flag, sizeof(demo_flag), "ztos-demoloop.active"), F_OK) == 0;
 	y = zmc_entry(cr, y, "DemoLoop", demoloop ? "running: tap to stop" : "start the repeating demo", ACT_DEV_DEMOLOOP, 0);
 	y = zmc_entry(cr, y, "Stop DemoLoop", demoloop ? "stop and restore normal policies" : "stop a running demo", ACT_DEV_DEMOLOOP_STOP, 0);
-	y = zmc_entry(cr, y, "ZrnDevTest", "logs, sensors and system state", ACT_DEV_OPEN_TEST, 0);
+	y = zmc_entry(cr, y, "ZrnDevTest", "logs, sensors and system state", ACT_OPEN_PAGE, PAGE_DEVTEST);
 	return y + 20;
 }
 
@@ -3357,6 +3360,14 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_SYSTEM: return draw_system(cr);
 	case PAGE_INSTALLED_APPS: return draw_installed_apps(cr);
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);
+	case PAGE_SOUND_EQ: case PAGE_SOUND_FX: case PAGE_SOUND_OUT: case PAGE_SOUND_APPS:
+		return sound_render(cr, p);
+	case PAGE_PODS_STATUS: case PAGE_PODS_LISTEN: case PAGE_PODS_CONTROLS: case PAGE_PODS_ABOUT:
+		return pods_render(cr, p);
+	case PAGE_DEVTEST: case PAGE_DEVTEST_SYSTEM: case PAGE_DEVTEST_SENSORS: case PAGE_DEVTEST_JOURNAL:
+	case PAGE_DEVTEST_KERNEL: case PAGE_DEVTEST_SHELL: case PAGE_DEVTEST_HARDWARE: case PAGE_DEVTEST_LOGS:
+	case PAGE_DEVTEST_ANIM: case PAGE_DEVTEST_PREVIEW:
+		return devtest_render(cr, p);
 	case PAGE_APP_SCALE: return draw_app_scale(cr);
 	case PAGE_THEME: return draw_theme(cr);
 	case PAGE_STYLE: return draw_style(cr);
@@ -3439,7 +3450,22 @@ static void palette_apply(void) {
 	board_unsaved = false;
 }
 
+static bool rendering_to_file;
+
+/* What a page needs before it can be drawn, however it came to be opened. */
+static void page_prepare(int page) {
+	if (page == PAGE_INSTALLED_APPS || page == PAGE_APP_DETAIL || page == PAGE_APP_SCALE) installed_load();
+	if (page == PAGE_STYLE) app.style_pending = app.style;	/* what was left unapplied is forgotten */
+	if (page == PAGE_APP_SCALE) app_scale_load();
+	if (page_is_sound(page)) sound_pages_setup(PAGE_SOUND_EQ, true, rendering_to_file, page);
+	if (page_is_pods(page)) pods_show(NULL);
+	if (page_is_devtest(page)) devtest_pages_setup(PAGE_DEVTEST, getenv("ZT_ANIM") ? atoi(getenv("ZT_ANIM")) : -1, 0);
+}
+
 static void activate(int action, int arg) {
+	if (action >= SOUND_ACTIONS && action < SOUND_ACTIONS_END) { sound_activate(action, arg); return; }
+	if (action >= PODS_ACTIONS && action < PODS_ACTIONS_END) { pods_activate(action, arg); return; }
+	if (action >= DEVTEST_ACTIONS && action < DEVTEST_ACTIONS_END) { devtest_activate(action, arg); return; }
 	/* a picker's box opens or closes it; one of its options is the choice */
 	if (is_picker(action) && arg < 0) {
 		open_picker = open_picker == action ? 0 : action;
@@ -3545,9 +3571,7 @@ static void activate(int action, int arg) {
 		}
 		break;
 	case ACT_OPEN_PAGE:
-		if (arg == PAGE_INSTALLED_APPS) installed_load();
-		if (arg == PAGE_STYLE) app.style_pending = app.style;	/* what was left unapplied is forgotten */
-		if (arg == PAGE_APP_SCALE) app_scale_load();
+		page_prepare(arg);
 		zmc_go(arg, 1);
 		break;
 	case ACT_WALL_OPEN:
@@ -3650,9 +3674,8 @@ static void activate(int action, int arg) {
 	}
 	case ACT_BT_PODS: {
 		if (arg < 0 || arg >= MAX_BT || !bt_mac_ok(bt_drawn[arg])) break;
-		char cmd[64];
-		snprintf(cmd, sizeof(cmd), "ztpods %s >/dev/null 2>&1 &", bt_drawn[arg]);
-		if (system(cmd) != 0) {}
+		pods_show(bt_drawn[arg]);
+		zmc_go(PAGE_PODS_STATUS, 1);
 		break;
 	}
 	case ACT_BT_DEVICE:
@@ -3710,10 +3733,6 @@ static void activate(int action, int arg) {
 		}
 		app.wifi_on = !app.wifi_on;
 		wifi_refresh(app.wifi_on ? "sleep 3" : NULL);
-		break;
-	case ACT_AIRPLANE_RADIOS:
-		app.airplane_radios = !app.airplane_radios;
-		config_save();	/* the shell reads it on SIGHUP */
 		break;
 	case ACT_WIFI_SUSPEND:
 		app.wifi_suspend = !app.wifi_suspend;
@@ -3903,9 +3922,6 @@ static void activate(int action, int arg) {
 	case ACT_DEV_DEMOLOOP_STOP:
 		system("systemctl --user stop ztos-demoloop.service >/dev/null 2>&1");
 		break;
-	case ACT_DEV_OPEN_TEST:
-		if (system("zrndevtest >/dev/null 2>&1 &") != 0) {}
-		break;
 	case ACT_BRIGHTNESS_STEP:
 		app.brightness = (app.brightness >= 100) ? 25 : app.brightness + 25;
 		config_brightness_chosen();
@@ -3961,19 +3977,6 @@ static void activate(int action, int arg) {
 		pipe_tell("/run/ztoscorenetworking.ctl", app.mobile_data ? "data on\n" : "data off\n");
 		pipe_tell("/run/zrn-modem.ctl", app.mobile_data ? "data on\n" : "data off\n");
 		break;
-	case ACT_MEDIA_VOL_STEP:
-		app.media_vol = (app.media_vol >= 100) ? 0 : app.media_vol + 20;
-		config_save();
-		{
-			char cmd[64];
-			snprintf(cmd, sizeof(cmd), "pactl set-sink-volume @DEFAULT_SINK@ %d%% 2>/dev/null &", app.media_vol);
-			if (system(cmd) != 0) {}
-		}
-		break;
-	case ACT_RING_VOL_STEP:
-		app.ring_vol = (app.ring_vol >= 100) ? 0 : app.ring_vol + 20;
-		config_save();
-		break;
 	case ACT_RINGTONE:
 		ringtone_choose(arg);
 		break;
@@ -3984,9 +3987,6 @@ static void activate(int action, int arg) {
 			ringtone_stop();
 			vibe_preview_play(true);
 		}
-		break;
-	case ACT_OPEN_SOUND:
-		if (system(arg ? "ztsound apps >/dev/null 2>&1 &" : "ztsound >/dev/null 2>&1 &") != 0) {}
 		break;
 	case ACT_VIBE_PREVIEW:
 		ringtone_stop();
@@ -4054,6 +4054,25 @@ static void activate(int action, int arg) {
 
 /* Where a point on the screen is on the page: the title does not scroll. */
 
+/* The media volume, from here: told to ztos-audiod as the shell's own slider tells
+ * it. Set behind its back (pactl), the daemon saw a level nobody had asked it for,
+ * took it for the device's own buttons, and the shell's volume modal came up. With
+ * no daemon there is no one to report it, and no modal. */
+static void media_volume_set(int percent) {
+	char path[256], line[32];
+	struct sockaddr_un a = { .sun_family = AF_UNIX };
+	snprintf(a.sun_path, sizeof(a.sun_path), "%s", runtime_file(path, sizeof(path), "ztos-audio.sock"));
+	int n = snprintf(line, sizeof(line), "volume %d", percent);
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	bool told = fd >= 0 && sendto(fd, line, (size_t)n, MSG_DONTWAIT, (struct sockaddr *)&a, sizeof(a)) == n;
+	if (fd >= 0) close(fd);
+	if (!told) {
+		char cmd[96];
+		snprintf(cmd, sizeof(cmd), "pactl set-sink-volume @DEFAULT_SINK@ %d%% 2>/dev/null &", percent);
+		if (system(cmd) != 0) {}
+	}
+}
+
 /* A slider is being dragged, or has just been let go. */
 /* The shell's control pipe stays open for a drag's sixty lines a second, and
  * is opened again if the shell has gone. */
@@ -4079,6 +4098,8 @@ static void brightness_tell(int permille) {
 static void slide(int action, int value, bool done) {
 	static uint32_t saved;
 	char cmd[160];
+	if (action >= SOUND_ACTIONS && action < SOUND_ACTIONS_END) { sound_slide(action, value, done); return; }
+	if (action >= PODS_ACTIONS && action < PODS_ACTIONS_END) { pods_slide(action, value, done); return; }
 	if (action >= ACT_HAPTIC_GROUP && action % 1000 == ACT_HAPTIC_GROUP && action / 1000 < N_HAPTIC_GROUPS) {
 		/* one kind of touch's own strength; under 5 % is off */
 		int g = action / 1000;
@@ -4124,8 +4145,7 @@ static void slide(int action, int value, bool done) {
         app.media_vol = value;
 		if (done) {
 			config_save();
-			snprintf(cmd, sizeof(cmd), "pactl set-sink-volume @DEFAULT_SINK@ %d%% 2>/dev/null &", value);
-			if (system(cmd) != 0) {}
+			media_volume_set(value);
 		}
 		break;
 	case ACT_RING_VOL_STEP:
@@ -4236,6 +4256,10 @@ static bool back(void) {
 		zmc_redraw();
 		return true;
 	}
+	if ((page_is_sound(zmc.page) && sound_back()) || (page_is_pods(zmc.page) && pods_back())) {
+		return true;	/* their own picker or keyboard, put away first */
+	}
+	if (page_is_devtest(zmc.page)) devtest_leave();
 	int up = page_parent(zmc.page, app.wall_target);
 	if (up == PAGE_NO_PARENT) {
 		return false;	/* the top of the tree: back leaves the app */
@@ -4272,6 +4296,29 @@ static bool back(void) {
 	return true;
 }
 
+/* From the status page of the AirPods, "open Bluetooth": up the tree. */
+static void pods_open_bluetooth(void) {
+	zmc_every(0, NULL);
+	zmc_go(PAGE_BLUETOOTH, -1);
+}
+
+/* The page someone asked for from outside (see instance_tell), once nothing is turning. */
+static int outside_page = -1;
+
+static void go_to_outside_page(void) {
+	int page = outside_page;
+	outside_page = -1;
+	if (page < 0 || page == zmc.page) return;
+	open_picker = 0;
+	if (page_is_devtest(zmc.page)) devtest_leave();
+	zmc_every(0, NULL);	/* whichever page's refresh was running */
+	wall_ticking = false;
+	bt_animating = false;
+	zmc_keyboard(false);
+	page_prepare(page);
+	zmc_go(page, 1);
+}
+
 static void arrived(int page) {
 	if (getenv("ZTSETTINGS_TRACE_PAGES")) {
 		/* a script walking the tree can see where it is without looking */
@@ -4282,6 +4329,13 @@ static void arrived(int page) {
 			}
 		}
 	}
+	if (outside_page >= 0) {
+		go_to_outside_page();
+		return;
+	}
+	if (page_is_sound(page)) sound_arrived(page);
+	if (page_is_pods(page)) pods_arrived(page);
+	if (page_is_devtest(page)) devtest_arrived(page);
 	if (page != PAGE_AUDIO) ringtone_stop();
 	if (page != PAGE_BLUETOOTH && bt_discoverable) {
 		bt_discoverable = false;
@@ -4342,14 +4396,17 @@ static bool held(int action, int arg) {
 	return false;
 }
 
+static bool settings_touch(int phase, int id, double x, double y, uint32_t time) {
+	return zmc.page == PAGE_SOUND_EQ && sound_touch(phase, id, x, y, time);
+}
+
 static const struct zmc_app settings = {
 	.app_id = "ztsettings", .title = "Settings", .caps = "SETTINGS",
 	.render = render_page_content, .activate = activate, .slide = slide,
 	.back = back, .arrived = arrived, .text = typed, .hold = held, .overlay = settings_overlay,
+	.touch = settings_touch,
 };
 
-/* --render PAGE FILE: draw one page into a PNG and leave, touching no display.
- * That is how the look is checked without opening the app on the phone. */
 static int page_named(const char *name) {
 	for (int i = 0; i < N_PAGE_NAMES; i++) {
 		if (strcmp(PAGE_NAMES[i].name, name) == 0) return PAGE_NAMES[i].page;
@@ -4357,17 +4414,68 @@ static int page_named(const char *name) {
 	return -1;
 }
 
+/* Settings is one window. `ztsettings wifi` with Settings open, from the shell, from
+ * the AirPods app or from a script, turns the open one to that page and brings it
+ * to the front: a second one would be a second entry in the task switcher, with a
+ * tree of its own. */
+static void instance_path(char *out, size_t size) {
+	runtime_file(out, size, "ztsettings.sock");
+}
+
+static void instance_ready(int fd, void *data) {
+	char name[64];
+	ssize_t n = recv(fd, name, sizeof(name) - 1, MSG_DONTWAIT);
+	if (n <= 0) return;
+	name[n] = 0;
+	int page = page_named(name);
+	if (page < 0) return;
+	outside_page = page;
+	if (!zmc.anim_active) go_to_outside_page();	/* else when the page in turn has arrived */
+}
+
+/* Is one running? Then it has been told: its page, and to the front. */
+static bool instance_tell(const char *name) {
+	char path[256], ctl[256];
+	struct sockaddr_un a = { .sun_family = AF_UNIX };
+	instance_path(path, sizeof(path));
+	snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) return false;
+	bool there = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0;
+	if (there) {
+		if (send(fd, name, strlen(name), MSG_DONTWAIT) < 0) {}
+		pipe_tell(runtime_file(ctl, sizeof(ctl), "ztmetro.ctl"), "launch ztsettings\n");
+	}
+	close(fd);
+	return there;
+}
+
+static void instance_listen(void) {
+	char path[256];
+	struct sockaddr_un a = { .sun_family = AF_UNIX };
+	instance_path(path, sizeof(path));
+	snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (fd < 0) return;
+	unlink(path);	/* (no one answered it: it was left behind) */
+	if (bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+		close(fd);
+		return;
+	}
+	zmc_watch_fd(fd, instance_ready, NULL);
+}
+
+/* --render PAGE FILE: draw one page into a PNG and leave, touching no display.
+ * That is how the look is checked without opening the app on the phone. */
 static int render_to_file(const char *name, const char *path) {
 	int page = page_named(name);
 	if (page < 0) {
 		fprintf(stderr, "ztsettings: no page called %s\n", name);
 		return 2;
 	}
-	if (page == PAGE_WIFI) {
-		wifi_load();
-	}
-	if (page == PAGE_INSTALLED_APPS || page == PAGE_APP_DETAIL) installed_load();
-	if (page == PAGE_APP_SCALE) app_scale_load();
+	rendering_to_file = true;
+	page_prepare(page);
+	if (page == PAGE_WIFI) wifi_load();
 	if (page == PAGE_BOOST) ib_render_prepare();
 	/* ZT_BT_SAMPLE="yes~@devices~MAC|name|yes|yes|icon~...": the Bluetooth page's list, for reviews */
 	if (page == PAGE_BLUETOOTH && getenv("ZT_BT_SAMPLE")) {
@@ -4389,6 +4497,11 @@ int main(int argc, char **argv) {
 		return 0;
 	}
 	signal(SIGCHLD, SIG_DFL);
+	bool to_file = argc == 4 && strcmp(argv[1], "--render") == 0;
+	if (!to_file && argc <= 2 && (argc < 2 || page_named(argv[1]) >= 0) && instance_tell(argc == 2 ? argv[1] : "")) {
+		return 0;
+	}
+	pods_pages_setup(PAGE_PODS_STATUS, pods_open_bluetooth);
 	config_load();
 	wifi_on_seed();
 	bt_on_seed();
@@ -4410,16 +4523,13 @@ int main(int argc, char **argv) {
 		}
 		return render_to_file(argv[2], argv[3]);
 	}
-	if (argc == 2 && page_named(argv[1]) >= 0) {
-		int page = page_named(argv[1]);
-		if (page == PAGE_WIFI) wifi_load();
-		if (page == PAGE_INSTALLED_APPS || page == PAGE_APP_DETAIL || page == PAGE_APP_SCALE) installed_load();	/* back goes through its list */
-		if (page == PAGE_APP_SCALE) app_scale_load();
-		return zmc_run(&settings, page);
-	}
-	if (argc > 1) {
+	if (argc > 2 || (argc == 2 && page_named(argv[1]) < 0)) {
 		fprintf(stderr, "usage: ztsettings [PAGE] [--render PAGE FILE] [--list-pages]\n");
 		return 2;
 	}
-	return zmc_run(&settings, PAGE_MAIN);
+	int first = argc == 2 ? page_named(argv[1]) : PAGE_MAIN;
+	page_prepare(first);	/* (back goes through a page's list) */
+	if (first == PAGE_WIFI) wifi_load();	/* (once running, arrived() asks in the background) */
+	instance_listen();
+	return zmc_run(&settings, first);
 }

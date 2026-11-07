@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <ctype.h>
+#include <malloc.h>
 #include <math.h>
 #include <poll.h>
 #include <signal.h>
@@ -28,6 +29,7 @@
 #include "viewporter-client-protocol.h"
 #include "../retro/dm-chrome.h"
 #include "zrnmetrocore.h"
+#include "zmc-gesture.h"
 #include "zrnboard.h"
 #include "zrnmetrogpu.h"
 #include "zrnmetrorender.h"
@@ -37,6 +39,7 @@
 #define MAX_HITS	ZMC_MAX_HITS
 #define MAX_ROWS	ZMC_MAX_ROWS
 #define SLOP		8
+#define CAPS_H		32	/* includes Segoe UI caps descenders; stays fixed during pivots */
 /*
  * Page changes, timed off a 30 fps recording of the phone itself (Windows
  * Central, "Notification and Actions on Windows Phone 8.1"). Going into an
@@ -129,6 +132,7 @@ static double press_amount(void);
 static void fling_step(void);
 static double page_y(double y);
 static void slider_set(double x, bool done);
+static void slider_tapped(double x);
 static void zmc_trace(const char *what);
 static int slider_live = -1;		/* percent while dragging, -1 otherwise */
 static void draw_slider_live(double s);
@@ -151,6 +155,8 @@ static bool board_touch_up(int32_t id);
 static void board_touch_cancel(void);
 static void board_paint(cairo_t *cr);
 static void back_forget(void);
+static bool drawing_page_in_front;	/* a page being drawn is the one in front, not a picture of another */
+static void marquee_title(const char *title);
 static cairo_surface_t *pivot_snapshot(int page, double scroll, int scale, struct zmc_rowset *rows,
 		double *its_next_dx);
 /* The shell plays it, if the user has that kind of touch switched on: one
@@ -508,6 +514,9 @@ double zmc_pivot_next(cairo_t *cr, const char *title, const char *next, int acti
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	zmc_text(cr, zmc.app->caps, FONT_SEMIBOLD, 11.5, MARGIN, 14, 0);
 	zmc_text(cr, title, FONT_SEMILIGHT, 48, MARGIN - 3, 24, 0);
+	if (drawing_page_in_front) {
+		marquee_title(next ? "" : title);
+	}
 	if (next) {
 		int w = pivot_title_width(cr, title);
 		cairo_set_source_rgb(cr, 0.38, 0.38, 0.38);
@@ -538,6 +547,112 @@ double zmc_pivot(cairo_t *cr, const char *title, const char *next) {
 
 double zmc_header(cairo_t *cr, const char *title) {
 	return zmc_pivot(cr, title, NULL);
+}
+
+/*
+ * A title too long for the screen moves, once: see zmc_marquee_offset. The page
+ * still draws it where it always was, cut by the edge, so every picture of the
+ * page (a turn, a tab) is right and this costs nothing at rest. Only while it moves
+ * it is drawn again, from a small picture of its own, over the header on the GPU.
+ * A pivot's title runs off the edge on purpose, into the next tab's. Without the
+ * GPU, or under DotMatrix's fixed dots, it stays as drawn.
+ */
+static struct {
+	char text[128];		/* the title of the page in front, if it does not fit */
+	bool noted;		/* a new title or a new arrival: start again */
+	cairo_surface_t *picture;
+	unsigned revision;
+	double width, overflow;
+	uint32_t wake_at;	/* moves from then; 0: not waiting */
+	uint32_t started;
+	bool moving;
+} mq;
+
+static double marquee_overflow(double width) {
+	return width + (MARGIN - 3) + MARGIN - zmc.width;
+}
+
+/* (from the drawing of the page in front, which may be on the page turn's thread) */
+static void marquee_title(const char *title) {
+	if (dotmatrix() || strcmp(mq.text, title) == 0) {
+		return;
+	}
+	snprintf(mq.text, sizeof(mq.text), "%s", title);
+	mq.noted = true;
+}
+
+static void marquee_end(void) {
+	mq.moving = false;
+	if (mq.picture) {
+		zmg_forget(mq.picture);
+		cairo_surface_destroy(mq.picture);
+		mq.picture = NULL;
+	}
+}
+
+/* Arriving or coming back to the front: it may go again. */
+static void marquee_again(void) {
+	marquee_end();
+	mq.wake_at = 0;
+	mq.noted = mq.text[0] != 0;
+}
+
+static void marquee_stop(void) {
+	marquee_end();
+	mq.wake_at = 0;
+	mq.noted = false;
+}
+
+/* The page in front is at rest (from the frame that shows it). */
+static void marquee_arm(void) {
+	marquee_end();
+	mq.noted = false;
+	mq.wake_at = 0;
+	if (!mq.text[0]) {
+		return;
+	}
+	mq.width = zmc_text_width(mq.text, FONT_SEMILIGHT, 48);
+	mq.overflow = marquee_overflow(mq.width);
+	if (mq.overflow <= 0) {
+		return;
+	}
+	mq.wake_at = now_ms() + ZMC_MARQUEE_WAIT_MS;
+	if (!mq.wake_at) {
+		mq.wake_at = 1;
+	}
+}
+
+/* Its picture, made as it starts to move and dropped when it stops. */
+static bool marquee_begin(void) {
+	int w = (int)ceil(mq.width + 6) * zmc.scale, h = (HEADER_H - 24) * zmc.scale;
+	if (w > 4096) {
+		return false;	/* more than one texture: it stays as the page drew it */
+	}
+	mq.picture = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	cairo_t *cr = cairo_create(mq.picture);
+	cairo_scale(cr, zmc.scale, zmc.scale);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_text(cr, mq.text, FONT_SEMILIGHT, 48, 0, 0, 0);
+	cairo_destroy(cr);
+	cairo_surface_flush(mq.picture);
+	mq.revision++;
+	mq.moving = true;
+	mq.started = now_ms();
+	return true;
+}
+
+/* A frame of it: over the cached header, which has been drawn by now. */
+static void marquee_draw(double s) {
+	bool done;
+	double off = zmc_marquee_offset((double)(now_ms() - mq.started), mq.overflow, &done);
+	if (done) {
+		marquee_end();	/* the cached header has it at its start */
+		return;
+	}
+	double at = MARGIN - 3 - off, x0 = at > 0 ? at : 0;
+	zmg_rect(0, CAPS_H, zmc.width, HEADER_H - CAPS_H, 0, 0, 0);
+	gpu_surface_rect(mq.picture, (x0 - at) * s, (CAPS_H - 24) * s, (zmc.width - at) * s, (HEADER_H - 24) * s,
+		x0, CAPS_H, zmc.width, HEADER_H, 1);
 }
 
 /* A hub entry: a 25.5 point title, a 12 point grey line under it, 59 points
@@ -594,7 +709,7 @@ void zmc_toggle(cairo_t *cr, double x, double y, bool on) {
 void zmc_slider(cairo_t *cr, double x, double y, double w, int percent, const char *caption,
 		int action) {
 	if (zmc.n_hits < MAX_HITS) {
-		zmc.hits[zmc.n_hits++] = (struct zmc_hit){ x, y, w, 46, action, 0, true };
+		zmc.hits[zmc.n_hits++] = (struct zmc_hit){ x, y, w, 46, action, 0, true, .percent = percent };
 	}
 	if (caption) {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
@@ -705,7 +820,7 @@ static void frame_done(void *data, struct wl_callback *callback, uint32_t time) 
 		zmc.dirty = true;
 	}
 	if (zmc.dirty || frame_hook || zmc.anim_active || zmc.anim_from_surface || coasting || zmc.busy || tilting ||
-			zmc.slide_active || zmc.spring) {
+			zmc.slide_active || zmc.spring || mq.moving) {
 		present();
 	}
 }
@@ -1505,15 +1620,29 @@ static cairo_surface_t *cache_create(int w, int h) {
 
 /* The page as it is now, whole and at full size, to be moved about under the
  * finger without being drawn again. */
+#define CACHE_PAGES 64
+static double cache_page_pts[CACHE_PAGES];	/* how tall each page came out */
+
 static void cache_ensure(int scale) {
 	if (zmc.cache && !zmc.cache_stale &&
 			cairo_image_surface_get_width(zmc.cache) == zmc.width * scale) {
 		return;
 	}
-	int h = zmc.cache ? cairo_image_surface_get_height(zmc.cache) : zmc.height * scale;
+	/* As tall as this page was last time, not as the tallest page so far: every
+	 * drawing paints and uploads all of it, so one tall tab made every other
+	 * tab cost as much for the rest of the app's life. */
+	int h = zmc.height * scale, have = zmc.cache ? cairo_image_surface_get_height(zmc.cache) : 0;
+	if (zmc.page >= 0 && zmc.page < CACHE_PAGES && cache_page_pts[zmc.page] > 0) {
+		h = (int)ceil(cache_page_pts[zmc.page] * scale);
+		h = h < zmc.height * scale ? zmc.height * scale : h;
+	}
+	if (have >= h && have - h < zmc.height * scale) {
+		h = have;	/* near enough: not worth a new surface */
+	}
 	uint32_t began = now_ms();
 	double held_at = zmc.scroll > 0 ? zmc.scroll : 0;
 	zmc_list_lock(true);
+	drawing_page_in_front = true;
 	for (int pass = 0; pass < 2; pass++) {
 		if (!zmc.cache || cairo_image_surface_get_height(zmc.cache) != h ||
 				cairo_image_surface_get_width(zmc.cache) != zmc.width * scale) {
@@ -1563,6 +1692,10 @@ static void cache_ensure(int scale) {
 			break;
 		}
 		h = need;	/* longer than what we had: once more, with room */
+	}
+	drawing_page_in_front = false;
+	if (zmc.page >= 0 && zmc.page < CACHE_PAGES) {
+		cache_page_pts[zmc.page] = vl.active ? 0 : zmc.content_h;
 	}
 	zmc_list_lock(false);
 	zmc.cache_stale = false;
@@ -1813,7 +1946,6 @@ static void draw_press(cairo_t *cr, int scale) {
 #define PIVOT_LIGHT	60.0	/* and over which its title lights up */
 #define PIVOT_FLICK	0.3	/* or this fast, points per ms */
 #define PIVOT_SPRING_W	0.018	/* per ms: in place in about a quarter second */
-#define CAPS_H		32	/* includes Segoe UI caps descenders; stays fixed during pivots */
 
 /* A page drawn whole with nothing behind it (so that two can lie over each
  * other), at `scale`, scrolled by `scroll`; its rows into `rows`. What the
@@ -2002,7 +2134,7 @@ static uint32_t pivot_last, pivot_worst;
 static void pivot_done(void) {
 	zmg_report(zmc.app->app_id);
 	uint32_t ms = now_ms() - zmc.slide_start;
-	fprintf(stderr, "%s: tab slide, %d frames in %u ms (%.1f ms each, worst %u)\n", zmc.app->app_id,
+	if (zmc_perflog()) fprintf(stderr, "%s: tab slide, %d frames in %u ms (%.1f ms each, worst %u)\n", zmc.app->app_id,
 		pivot_frames, ms, pivot_frames > 1 ? (double)ms / pivot_frames : 0.0, pivot_worst);
 	pivot_frames = 0;
 	pivot_worst = 0;
@@ -2243,6 +2375,12 @@ static void present_gpu(uint32_t ms) {
 			gpu_surface_rect(zmc.cache, 0, 0, zmc.width*s, HEADER_H*s,
 				0, 0, zmc.width, HEADER_H, 1);
 		}
+		if (mq.noted) {
+			marquee_arm();
+		}
+		if (mq.moving) {
+			marquee_draw(s);
+		}
 	}
 	if (!zmc.anim_active) {
 		board_draw();
@@ -2321,7 +2459,9 @@ static void *bg_draw(void *unused) {
 		zmc.pivot_set = false;
 		zmc_list_lock(true);
 		vl_begin(-1);
+		drawing_page_in_front = true;
 		bg.content_h = zmc.app->render(cr, bg.page);
+		drawing_page_in_front = false;
 		zmc_list_lock(false);
 		cairo_destroy(cr);
 		int need = (int)ceil((bg.content_h > zmc.height && !vl.active ? bg.content_h : zmc.height) * scale);
@@ -2643,6 +2783,8 @@ static void collect_rows(struct rowset *set, double scroll, double tapped, bool 
 static void begin_animation_(bool have_from, bool have_to, int target, double tapped, uint32_t requested_start);
 static void begin_animation(bool have_from, bool have_to, int target, double tapped, uint32_t requested_start) {
 	board_forget();
+	marquee_stop();
+	mq.text[0] = 0;	/* whichever page comes in says what its title is */
 	uint32_t t0 = now_ms();
 	begin_animation_(have_from, have_to, target, tapped, requested_start);
 	uint32_t took = now_ms() - t0;
@@ -2879,16 +3021,17 @@ static void touch_down(void *data, struct wl_touch *touch, uint32_t serial, uint
 	zmc.down_scroll = zmc.scroll < 0 ? zmc.scroll / 0.4 :
 		zmc.scroll > max ? max + (zmc.scroll - max) / 0.4 : zmc.scroll;
 	zmc.sliding = false;
+	zmc.slider_pending = false;
 	double cy = page_y(zmc.down_y);
+	/* On a slider, nothing happens yet: the way the finger goes says whether
+	 * this is the slider's or the page's (touch_motion), and a slider that
+	 * jumped here would have moved under every scroll that began on it. */
 	for (int i = 0; i < zmc.n_hits && !zmc.moved; i++) {
 		struct zmc_hit *h = &zmc.hits[i];
 		if (h->slider && zmc.down_x >= h->x - MARGIN && zmc.down_x < h->x + h->w + MARGIN &&
 				cy >= h->y - 12 && cy < h->y + h->h + 16) {
-			zmc.sliding = true;
+			zmc.slider_pending = true;
 			zmc.slider = *h;
-			zmc.last_y = zmc.down_x;
-			zmc_haptic("tick");
-			slider_set(zmc.down_x, false);
 			break;
 		}
 	}
@@ -2951,6 +3094,8 @@ static void touch_up(void *data, struct wl_touch *touch, uint32_t serial, uint32
 		slider_set(zmc.last_y, true);
 		return;
 	}
+	bool on_slider = zmc.slider_pending;
+	zmc.slider_pending = false;
 	if (zmc.swiping) {
 		double vx = time - zmc.last_time > 80 ? 0 : zmc.vel_x, x = zmc.swipe_dx, w = zmc.width;
 		double u = -x / w;
@@ -2976,12 +3121,21 @@ static void touch_up(void *data, struct wl_touch *touch, uint32_t serial, uint32
 
 	double cx = zmc.down_x;
 	double cy = page_y(zmc.down_y);
+	struct zmc_hit *s = &zmc.slider;
+	if (on_slider && cx >= s->x && cx < s->x + s->w && cy >= s->y && cy < s->y + s->h) {
+		slider_tapped(cx);
+		return;
+	}
 	for (int i = 0; i < zmc.n_hits; i++) {
 		struct zmc_hit *h = &zmc.hits[i];
-		if (cx >= h->x && cx < h->x + h->w && cy >= h->y && cy < h->y + h->h) {
+		if (!h->slider && cx >= h->x && cx < h->x + h->w && cy >= h->y && cy < h->y + h->h) {
 			zmc_activate(h);
 			return;
 		}
+	}
+	if (on_slider) {
+		slider_tapped(cx);	/* near one, and on nothing else */
+		return;
 	}
 	struct zmc_hit row;
 	if (vl_hit(cx, zmc.down_y, cy, &row) && row.action) {
@@ -2989,21 +3143,39 @@ static void touch_up(void *data, struct wl_touch *touch, uint32_t serial, uint32
 	}
 }
 
-/* Which way a drag goes, from the line between where the finger touched down
- * and where it is. Scrolling is what a thumb mostly does, and its stroke is
- * an arc that may start at a slant, so only a nearly flat stroke (within 20
- * degrees of the horizontal, over 18 points) is across; anything else is
- * along, decided after 12 points. 0: not yet, 1: across, 2: along. */
-static int drag_axis(double dx, double dy) {
-	double len = hypot(dx, dy);
-	if (len < 12) {
-		return 0;
+/* The finger has moved: it is a drag, no longer a press or a hold. */
+static void touch_is_drag(void) {
+	zmc.moved = true;
+	hold_at = 0;
+	if (zmc.button_down) {	/* a scroll that began on a button */
+		zmc.button_down = false;
+		zmc_redraw();
 	}
-	double deg = atan2(fabs(dy), fabs(dx)) * 180 / M_PI;
-	if (deg > 20) {
-		return 2;	/* any curve or slant: the list */
+	if (zmc.press_to > 0) {
+		/* it is a scroll, not a press: let go at once (eased out, it
+		 * would be drawn the plain way while the list already moves) */
+		zmc.press_from = zmc.press_to = 0;
+		zmc.press_start = 0;
 	}
-	return len < 18 ? 0 : 1;	/* flat, and far enough to be sure: across */
+}
+
+/* The finger on a slider has gone sideways: from here to the lift it is the
+ * slider's, wherever it wanders. */
+static void slider_grab(double x) {
+	touch_is_drag();
+	zmc.slider_pending = false;
+	zmc.sliding = true;
+	zmc.slider_grab = zmc_slider_grab(x, zmc.slider.x, zmc.slider.w, zmc.slider.percent);
+	zmc.last_y = x;	/* a slider keeps the x here */
+	zmc_haptic("tick");
+	slider_set(x, false);
+}
+
+/* A tap on a slider: it goes there, as the finger lifts. */
+static void slider_tapped(double x) {
+	zmc.slider_grab = 0;
+	zmc_haptic("tick");
+	slider_set(x, true);
 }
 
 static void touch_motion(void *data, struct wl_touch *touch, uint32_t time, int32_t id,
@@ -3024,19 +3196,8 @@ static void touch_motion(void *data, struct wl_touch *touch, uint32_t time, int3
 	double now_y = wl_fixed_to_double(y);
 	double dx = wl_fixed_to_double(x) - zmc.down_x;
 	double dy = now_y - zmc.down_y;
-	if (fabs(dx) > SLOP || fabs(dy) > SLOP) {
-		zmc.moved = true;
-		hold_at = 0;
-		if (zmc.button_down) {	/* a scroll that began on a button */
-			zmc.button_down = false;
-			zmc_redraw();
-		}
-		if (zmc.press_to > 0) {
-			/* it is a scroll, not a press: let go at once (eased out, it
-			 * would be drawn the plain way while the list already moves) */
-			zmc.press_from = zmc.press_to = 0;
-			zmc.press_start = 0;
-		}
+	if (!zmc.slider_pending && (fabs(dx) > SLOP || fabs(dy) > SLOP)) {
+		touch_is_drag();
 	}
 	double now_x = wl_fixed_to_double(x);
 	if (time != zmc.last_time) {
@@ -3047,16 +3208,34 @@ static void touch_motion(void *data, struct wl_touch *touch, uint32_t time, int3
 		zmc.last_x = now_x;
 		zmc.last_time = time;
 	}
+	if (zmc.slider_pending) {
+		/* decided once, early, and never again in this drag */
+		int axis = zmc_slider_axis(dx, dy);
+		if (axis == ZMC_AXIS_ACROSS) {
+			slider_grab(now_x);
+			return;
+		}
+		if (axis == ZMC_AXIS_NONE) {
+			return;	/* still only a touch */
+		}
+		zmc.slider_pending = false;
+		touch_is_drag();
+		zmc.axis = ZMC_AXIS_ALONG;
+		/* the list starts from here, not from where the finger was */
+		zmc.down_y = now_y;
+		zmc.down_scroll = zmc.scroll;
+		dy = 0;
+	}
 	if (zmc.moved && zmc.axis == 0) {
 		/* across, on a pivot: the tabs; anything else scrolls the list */
-		zmc.axis = zmc.pivot_set ? drag_axis(dx, dy) : 2;
-		if (zmc.axis == 2 && zmc.pivot_set) {
+		zmc.axis = zmc.pivot_set ? zmc_drag_axis(dx, dy) : ZMC_AXIS_ALONG;
+		if (zmc.axis == ZMC_AXIS_ALONG && zmc.pivot_set) {
 			/* the list starts from here, not from where the finger was */
 			zmc.down_y = now_y;
 			zmc.down_scroll = zmc.scroll;
 			dy = 0;
 		}
-		if (zmc.axis == 1) {
+		if (zmc.axis == ZMC_AXIS_ACROSS) {
 			zmc.swiping = true;
 			zmc.swipe_grab = 0;
 			zmc.down_x = now_x;	/* from here: nothing jumps as it starts */
@@ -3067,7 +3246,7 @@ static void touch_motion(void *data, struct wl_touch *touch, uint32_t time, int3
 	if (zmc.swiping) {
 		zmc.swipe_dx = zmc.swipe_grab + dx;
 		present();
-	} else if (zmc.moved && zmc.axis == 2 && !zmc.app->fixed) {
+	} else if (zmc.moved && zmc.axis == ZMC_AXIS_ALONG && !zmc.app->fixed) {
 		set_scroll(zmc.down_scroll - dy);
 	}
 }
@@ -3096,6 +3275,7 @@ static void touch_cancel(void *data, struct wl_touch *touch) {
 		zmc_redraw();
 	}
 	zmc.sliding = false;
+	zmc.slider_pending = false;
 	zmc.fling = true;	/* back inside the ends, if it was past one */
 	zmc.vel = 0;
 	zmc.fling_last = now_ms();
@@ -3285,6 +3465,11 @@ static void xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel
 	wl_array_for_each(state, states) {
 		if (*state == XDG_TOPLEVEL_STATE_ACTIVATED) active = true;
 	}
+	if (!active && toplevel_active) {
+		marquee_stop();	/* no one to see it */
+	} else if (active && !toplevel_active && toplevel_ever_active) {
+		marquee_again();
+	}
 	/* Activation must commit a fresh complete buffer as well: the shell
 	 * waits for this configure's buffer before revealing resumed Settings. */
 	if (zmc.configured && ((active && toplevel_ever_active) || (toplevel_active && !active)))
@@ -3406,9 +3591,8 @@ static void draw_slider_live(double s) {
 }
 
 static void slider_set(double x, bool done) {
-	int value = (int)lround((x - zmc.slider.x) / zmc.slider.w * 100);
-	value = value < 0 ? 0 : value > 100 ? 100 : value;
-	int fine = (int)lround((x - zmc.slider.x) / zmc.slider.w * 1000);
+	int value = zmc_slider_percent(x, zmc.slider.x, zmc.slider.w, zmc.slider_grab);
+	int fine = (int)lround((x - zmc.slider_grab - zmc.slider.x) / zmc.slider.w * 1000);
 	zmc.slider_permille = fine < 0 ? 0 : fine > 1000 ? 1000 : fine;
 	static int notch = -1;
 	if (value / 10 != notch) {
@@ -3488,12 +3672,13 @@ void zmc_back(void) {
 
 double zmc_switch(cairo_t *cr, double y, const char *title, bool on, int action) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, title, FONT_SEMILIGHT, 21, MARGIN, y, zmc.width - 2 * MARGIN - 64);
+	double title_h = zmc_text(cr, title, FONT_SEMILIGHT, 21, MARGIN, y, zmc.width - 2 * MARGIN - 64);
+	double label = zmc_switch_label_y(title_h), more = label - ZMC_SWITCH_LINE;
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, on ? "On" : "Off", FONT_REGULAR, 13, MARGIN, y + 26, 0);
+	zmc_text(cr, on ? "On" : "Off", FONT_REGULAR, 13, MARGIN, y + label, 0);
 	zmc_toggle(cr, zmc.width - MARGIN - 54, y + 4, on);
-	zmc_add_hit(0, y - 4, zmc.width, 52, action, 0);
-	return y + 66;
+	zmc_add_hit(0, y - 4, zmc.width, 52 + more, action, 0);
+	return y + 66 + more;
 }
 
 static bool osk_wanted;		/* (see zmc_keyboard) */
@@ -4635,6 +4820,10 @@ int zmc_run(const struct zmc_app *app, int first_page) {
 	/* system() and pclose() have to be able to wait for their children,
 	 * whatever the process that started us did with this signal */
 	signal(SIGCHLD, SIG_DFL);
+	/* A page's picture is tens of MB, and one is let go at every swipe. On the
+	 * heap they stayed with the app and it doubled in the first swipes
+	 * (54 to 104 MB, tests/swipe-cost.c); these go back as they are freed. */
+	mallopt(M_MMAP_THRESHOLD, 1024 * 1024);
 	zmc.app = app;
 	zmc.page = first_page;
 	zmc.accent = zmc_config_accent();
@@ -4715,6 +4904,11 @@ int zmc_run(const struct zmc_app *app, int first_page) {
 			if (left < 0) left = 0;
 			if (wait < 0 || left < wait) wait = left;
 		}
+		if (mq.wake_at) {
+			int32_t left = (int32_t)(mq.wake_at - now_ms());
+			if (left < 0) left = 0;
+			if (wait < 0 || left < wait) wait = left;
+		}
 		if (zmc.entrance && zmc.anim_active && !zmc.frame) {
 			int32_t left = (int32_t)(zmc.anim_start - now_ms());
 			if (left > 0 && (wait < 0 || left < wait)) {
@@ -4744,6 +4938,16 @@ int zmc_run(const struct zmc_app *app, int first_page) {
 			wl_display_cancel_read(zmc.display);
 			gpu_retry_at = 0;
 			present();
+			continue;
+		}
+		if (ready == 0 && mq.wake_at && (int32_t)(now_ms() - mq.wake_at) >= 0) {
+			wl_display_cancel_read(zmc.display);
+			mq.wake_at = 0;
+			/* not under a finger moving the tabs, and not while a page turns:
+			 * those start it over when they end */
+			if (zmg_ready() && !zmc.anim_active && !zmc.slide_active && !zmc.swiping && marquee_begin()) {
+				present();
+			}
 			continue;
 		}
 		if (ready == 0 && zmc.entrance && zmc.anim_active && !zmc.frame &&

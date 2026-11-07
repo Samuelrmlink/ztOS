@@ -18,7 +18,7 @@ bool zmc_perflog(void);	/* zrnmetrocore.c */
 #include <string.h>
 #include <time.h>
 
-#define TEXTURES 6
+#define TEXTURES 8
 #define TILE_HEIGHT 2048
 #define CACHE_BYTES (64u * 1024u * 1024u)
 struct picture {
@@ -165,9 +165,23 @@ fail:
 	return false;
 }
 
+/* A picture only this cache still holds can never be drawn again: whoever made it
+ * has let it go, and its address is not even reused while it is held here. Its
+ * tiles and its pixels go now. Left to be pushed out, every swipe and page turn
+ * added two or three full-screen ones: the budget stayed full of dead pictures,
+ * each new one pushed out a live one (the tabs being swiped, the page in front),
+ * and those were uploaded again in the middle of the motion. */
+static void forget_dead(void) {
+	for (int i = 0; i < TEXTURES; i++) {
+		struct picture *q = &gpu.pictures[i];
+		if (q->source && cairo_surface_get_reference_count(q->source) == 1) forget(q);
+	}
+}
+
 void zmg_begin(int w, int h, int scale) {
 	gpu.began = clock_ms();
 	gpu.failed = false;
+	forget_dead();
 	if (gpu.w != w || gpu.h != h || gpu.scale != scale) {
 		wl_surface_set_buffer_scale(gpu.wl_surface, scale);
 		wl_egl_window_resize(gpu.window, w * scale, h * scale, 0, 0);
@@ -243,25 +257,33 @@ void zmg_rect(double x, double y, double w, double h, float r, float g, float b)
 }
 
 static struct picture *picture(cairo_surface_t *source, unsigned revision) {
-	struct picture *p = NULL, *oldest = &gpu.pictures[0];
+	struct picture *p = NULL;
 	for (int i = 0; i < TEXTURES; i++) {
-		struct picture *q = &gpu.pictures[i];
-		if (q->source == source) { p = q; break; }
-		if (!q->source || (oldest->source && q->used < oldest->used)) oldest = q;
+		if (gpu.pictures[i].source == source) { p = &gpu.pictures[i]; break; }
 	}
 	/* Revision zero denotes an immutable snapshot. A retained former page
 	 * can reuse the upload it had while it was the live cache. */
 	if (p && (revision == 0 || p->revision == revision)) { p->used = ++gpu.clock; return p; }
+	forget_dead();
+	struct picture *oldest = &gpu.pictures[0];
+	for (int i = 0; i < TEXTURES; i++) {
+		struct picture *q = &gpu.pictures[i];
+		if (!q->source || (oldest->source && q->used < oldest->used)) oldest = q;
+	}
 	int w = cairo_image_surface_get_width(source), h = cairo_image_surface_get_height(source);
 	if (w <= 0 || h <= 0 || w > gpu.max_size || cairo_image_surface_get_stride(source) != w * 4) return NULL;
 	size_t bytes = (size_t)w * h * 4, retained = 0;
-	/* A single long page must still render. Keep it exclusively rather than
-	 * retaining other pages alongside an oversized current picture. */
-	size_t budget = bytes > CACHE_BYTES ? bytes : CACHE_BYTES;
+	/* What is held is what is in use (forget_dead): a long page beside the tabs'
+	 * two pictures. A budget that made them take turns uploaded one of them on
+	 * every swipe, so the longest picture does not count against it. */
+	size_t longest = bytes;
 	for (int i = 0; i < TEXTURES; i++) {
 		struct picture *q = &gpu.pictures[i];
-		if (q != p) retained += (size_t)q->w * q->h * 4;
+		size_t b = (size_t)q->w * q->h * 4;
+		if (q != p) retained += b;
+		if (b > longest) longest = b;
 	}
+	size_t budget = CACHE_BYTES + longest;
 	while (retained + bytes > budget) {
 		struct picture *victim = NULL;
 		for (int i = 0; i < TEXTURES; i++) {

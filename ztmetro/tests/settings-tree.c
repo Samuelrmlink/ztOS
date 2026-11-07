@@ -18,6 +18,14 @@ int main(void) {
 		{ PAGE_CPU, PAGE_POWER }, { PAGE_GPU, PAGE_POWER }, { PAGE_VM, PAGE_POWER },
 		{ PAGE_APP_DETAIL, PAGE_INSTALLED_APPS }, { PAGE_APP_SCALE, PAGE_INSTALLED_APPS },
 		{ PAGE_DATE, PAGE_SYSTEM }, { PAGE_KEYBOARD, PAGE_SYSTEM }, { PAGE_DEV, PAGE_SYSTEM }, { PAGE_ABOUT, PAGE_SYSTEM },
+		/* what used to start an app of its own, and a new entry in the task switcher */
+		{ PAGE_SOUND_EQ, PAGE_AUDIO }, { PAGE_SOUND_FX, PAGE_AUDIO }, { PAGE_SOUND_OUT, PAGE_AUDIO }, { PAGE_SOUND_APPS, PAGE_AUDIO },
+		{ PAGE_PODS_STATUS, PAGE_BLUETOOTH }, { PAGE_PODS_LISTEN, PAGE_BLUETOOTH },
+		{ PAGE_PODS_CONTROLS, PAGE_BLUETOOTH }, { PAGE_PODS_ABOUT, PAGE_BLUETOOTH },
+		{ PAGE_DEVTEST, PAGE_DEV }, { PAGE_DEVTEST_LOGS, PAGE_DEV },
+		{ PAGE_DEVTEST_SYSTEM, PAGE_DEVTEST }, { PAGE_DEVTEST_SENSORS, PAGE_DEVTEST }, { PAGE_DEVTEST_HARDWARE, PAGE_DEVTEST },
+		{ PAGE_DEVTEST_ANIM, PAGE_DEVTEST }, { PAGE_DEVTEST_PREVIEW, PAGE_DEVTEST_ANIM },
+		{ PAGE_DEVTEST_JOURNAL, PAGE_DEVTEST_LOGS }, { PAGE_DEVTEST_KERNEL, PAGE_DEVTEST_LOGS }, { PAGE_DEVTEST_SHELL, PAGE_DEVTEST_LOGS },
 	};
 	for (size_t i = 0; i < sizeof(tree) / sizeof(tree[0]); i++) {
 		assert(page_parent(tree[i].page, WALL_TARGET_TILES) == tree[i].parent);
@@ -29,14 +37,22 @@ int main(void) {
 	assert(page_parent(PAGE_WALLS, WALL_TARGET_TILES) == PAGE_TILES);
 	assert(page_parent(PAGE_WALLS, WALL_TARGET_LOCK) == PAGE_LOCK);
 
-	/* every page gets to the top in at most 3 steps, and only the top has no parent */
+	/* the modules' pages are in their order, for page_is_*() and their first-page sums */
+	assert(PAGE_SOUND_FX == PAGE_SOUND_EQ + 1 && PAGE_SOUND_APPS == PAGE_SOUND_EQ + 3);
+	assert(PAGE_PODS_ABOUT == PAGE_PODS_STATUS + 3);
+	assert(PAGE_DEVTEST_LOGS == PAGE_DEVTEST + 7 && PAGE_DEVTEST_PREVIEW == PAGE_DEVTEST + 9);
+	assert(page_is_sound(PAGE_SOUND_APPS) && !page_is_sound(PAGE_AUDIO) && !page_is_sound(PAGE_LED));
+	assert(page_is_pods(PAGE_PODS_ABOUT) && !page_is_pods(PAGE_BLUETOOTH));
+	assert(page_is_devtest(PAGE_DEVTEST_PREVIEW) && !page_is_devtest(PAGE_DEV));
+
+	/* every page gets to the top in at most 5 steps, and only the top has no parent */
 	for (int target = WALL_TARGET_TILES; target <= WALL_TARGET_LOCK; target++) {
 		for (int p = 0; p < N_PAGES; p++) {
 			int steps = 0, at = p;
 			while (page_parent(at, target) != PAGE_NO_PARENT) {
 				at = page_parent(at, target);
 				assert(at >= 0 && at < N_PAGES);
-				assert(++steps <= 3);
+				assert(++steps <= 5);
 			}
 			assert(at == PAGE_MAIN);
 		}
@@ -59,7 +75,8 @@ int main(void) {
 	/* what the shell's search and people's scripts already use */
 	static const char *const old[] = { "date", "main", "apps", "installed-apps", "theme", "accents",
 		"wallpapers", "display", "wifi", "bluetooth", "mobile", "audio", "battery", "cpu", "vm", "gpu",
-		"keyboard", "about", "perf", "boost", "dev", "haptics", "quick", "apn", "wifijoin", "wifinet", "app-scale" };
+		"keyboard", "about", "perf", "boost", "dev", "haptics", "quick", "apn", "wifijoin", "wifinet", "app-scale",
+		"led", "equalizer", "effects", "audio-output", "app-volume", "airpods", "devtest" };
 	for (size_t i = 0; i < sizeof(old) / sizeof(old[0]); i++) {
 		int found = 0;
 		for (int n = 0; n < N_PAGE_NAMES; n++) found += !strcmp(PAGE_NAMES[n].name, old[i]);

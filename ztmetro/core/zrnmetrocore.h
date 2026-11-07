@@ -53,6 +53,7 @@ struct zmc_hit {
 	int action, arg;
 	bool slider;
 	bool button;	/* a zmc_button: pressing it fills it, it does not tilt */
+	int percent;	/* a slider: where its thumb is drawn */
 };
 
 struct zmc_app {
@@ -171,6 +172,8 @@ struct zmc_state {
 	uint32_t fling_last, last_time;
 	double last_y;
 	bool sliding;
+	bool slider_pending;	/* came down on a slider: which way it goes decides whose it is */
+	double slider_grab;	/* the finger's distance from the thumb, kept while it holds it */
 	struct zmc_hit slider;
 	int slider_permille;	/* where the finger is, in tenths of a percent */
 

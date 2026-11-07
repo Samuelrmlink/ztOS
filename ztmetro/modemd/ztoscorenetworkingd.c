@@ -15,9 +15,10 @@
  *    itself never waits on a program);
  *  - takes, on /run/ztoscorenetworking.ctl (anyone may write):
  *	airplane on|off		the radio off (AT+CFUN=4) or on (AT+CFUN=1)
- *	data on|off		whether mobile data is wanted. Kept, and shown by
- *				the shell, but no connection is made yet: see
- *				"packet data" below
+ *	data on|off		whether mobile data is wanted: kept across restarts,
+ *				on until someone says off. Off takes the phone off
+ *				rmnet0 and leaves the modem registered, so calls and
+ *				texts carry on: see "packet data" below
  *	sms NUMBER TEXT		one message, in PDU mode (text mode is refused
  *				by this modem)
  *
@@ -1059,7 +1060,9 @@ static void at_readable(void)
  * AT+CGDCONT with AT+CGACT=1,1 answers OK, brings nothing up and makes it
  * leave LTE ("denied", then 2G) until the radio is cycled.
  */
-#define DATA_WISH	"/var/lib/ztoscorenetworking/data_on"
+#define DATA_DIR	"/var/lib/ztoscorenetworking"
+#define DATA_WISH	DATA_DIR "/data_on"
+#define DATA_OFF	DATA_DIR "/data_off"	/* someone said off */
 #define DATA_MARK	"/var/lib/ztoscorenetworking/data_trying"	/* see data_keep */
 #define APN_FILE	"/etc/ztoscorenetworking/apn"
 #define AIRPLANE_WISH	"/var/lib/ztoscorenetworking/airplane"	/* kept across restarts */
@@ -1080,14 +1083,43 @@ static void airplane_set(bool on)
 	queue_at("AT+CFUN?");
 }
 
+/* Mobile data at the start: what was last said, and on where nothing was ever said.
+ * Before there was a DATA_OFF, off was only the absence of DATA_WISH, so on a phone
+ * that has already run this daemon (its directory has something in it) that absence
+ * may be someone's choice, and it is kept. */
+static bool data_at_start(bool said_off, bool said_on, bool ran_before)
+{
+	if (said_off)
+		return false;
+	return said_on || !ran_before;
+}
+
+static bool data_dir_used(void)
+{
+	bool used = false;
+	DIR *d = opendir(DATA_DIR);
+	struct dirent *e;
+	while (d && !used && (e = readdir(d)))
+		used = strcmp(e->d_name, ".") && strcmp(e->d_name, "..");
+	if (d)
+		closedir(d);
+	return used;
+}
+
+static void data_touch(const char *path)
+{
+	int fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+	if (fd >= 0)
+		close(fd);
+}
+
 static void data_wish(bool on, bool say)
 {
 	(void)say;
 	now.data_on = on;
 	if (on) {
-		int fd = open(DATA_WISH, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
-		if (fd >= 0)
-			close(fd);
+		unlink(DATA_OFF);
+		data_touch(DATA_WISH);
 		data_tried_at = 0;	/* now, not at the next half minute */
 		if (ctx_up) {
 			/* still there from before it was switched off */
@@ -1095,6 +1127,7 @@ static void data_wish(bool on, bool say)
 			now.data = true;
 		}
 	} else {
+		data_touch(DATA_OFF);
 		unlink(DATA_WISH);
 		unlink(DATA_MARK);
 		now.data = false;	/* the interface comes down; the context stays */
@@ -2366,6 +2399,7 @@ int main(int argc, char **argv)
 	ctl_fd = open(CTL, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 
 	airplane_asked = access(AIRPLANE_WISH, F_OK) == 0;
+	bool data_on_at_start = data_at_start(access(DATA_OFF, F_OK) == 0, access(DATA_WISH, F_OK) == 0, data_dir_used());
 	at_setup();
 	poll_state();
 	next_poll = ms() + PERIOD_S * 1000;
@@ -2384,12 +2418,13 @@ int main(int argc, char **argv)
 		/* the mark, and no report of ours yet in /run: the system went
 		 * down while a context was coming up */
 		unlink(DATA_MARK);
-		unlink(DATA_WISH);
+		data_on_at_start = false;
 		fprintf(stderr, "ztoscorenetworkingd: data: the phone restarted while it was coming up; switched off\n");
 		tell_shell("notify Mobile network|Mobile data|Switched off: the phone restarted while the connection was "
 			"coming up.\n");
 	}
-	data_wish(access(DATA_WISH, F_OK) == 0, false);
+	mkdir(DATA_DIR, 0755);
+	data_wish(data_on_at_start, false);
 	fprintf(stderr, "ztoscorenetworkingd: up\n");
 
 	for (;;) {

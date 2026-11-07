@@ -39,7 +39,6 @@
 #include "audio-sync.h"
 #include "auth/btpair-proto.h"
 #include "audio-state.h"
-#include "airplane-radios.h"
 #include "pods/pods-bar.h"
 #include "osk-numeric.h"
 #include "note-logic.h"
@@ -778,7 +777,6 @@ struct zt_server {
 	uint32_t bt_tile_ms;		/* when the tile changed Bluetooth: the state file is behind it */
 	bool wifi_suspend;
 	bool wifi_suspended_by_sleep;
-	struct airplane_radios airplane_radios;
 	float lock_y;			/* 0 covering the screen, -height pushed off the top */
 	float lock_lift;		/* the Metro lock's clock block: 0 low, 1 raised with the notification row shown */
 	bool keypop;			/* the pressed key shown enlarged above the finger */
@@ -3283,8 +3281,6 @@ static void load_config(struct zt_server *server) {
 			server->lock_enabled = strcmp(value, "off") != 0;
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			server->wifi_suspend = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
-		} else if (strcmp(key, "airplane_radios") == 0) {
-			server->airplane_radios.option = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
 		} else if (strcmp(key, "style") == 0) {
 			/* ztRetrofit's look: metro (Start), dotmatrix (ZrnDotMatrix).
 			 * The session runs in one; this is the one the next starts in */
@@ -8188,6 +8184,22 @@ static void close_inherited(void) {
 
 static void launch(struct zt_server *server, const char *command) {
     struct zt_toplevel *existing;
+    /* Settings is one window: a page of it turns the one that is open, which then
+     * asks for the front ("launch ztsettings"), rather than opening a second one */
+    if (strncmp(command, "ztsettings", 10) == 0 && (!command[10] || command[10] == ' ')) {
+        wl_list_for_each(existing, &server->toplevels, link) {
+            const char *id = existing->xdg_toplevel->app_id;
+            if (existing->mapped && id && strcmp(id, "ztsettings") == 0) {
+                if (command[10]) {
+                    run_detached("ztsettings", command + 11, NULL, NULL);
+                } else {
+                    server->launch_ms = now_ms();
+                    show_toplevel(server, existing);
+                }
+                return;
+            }
+        }
+    }
     wl_list_for_each(existing, &server->toplevels, link) {
         if (existing->mapped && !existing->waydroid_boot && existing->launch_command[0] &&
                 strcmp(existing->launch_command, command) == 0) {
@@ -8565,7 +8577,6 @@ static void shade_activate(struct zt_server *server, int index) {
 	switch (index < 8 ? 100 + server->quick[index] : index) {
 	case 100 + Q_WIFI:
 		hap(server, HAP_TAP, HG_SYSTEM);
-		server->airplane_radios.took_wifi = false;
 		wifi_switch(server, !server->shade_wifi);
 		draw_shade(server);
 		draw_status(server);
@@ -8596,7 +8607,6 @@ static void shade_activate(struct zt_server *server, int index) {
 			break;	/* not attached: the tile is drawn faint */
 		}
 		hap(server, HAP_TAP, HG_SYSTEM);
-		server->airplane_radios.took_bt = false;
 		bt_switch(server, !server->shade_bt);
 		draw_shade(server);
 		damage(server);
@@ -8609,23 +8619,11 @@ static void shade_activate(struct zt_server *server, int index) {
 	case 100 + Q_LOCATION:
 	case 100 + Q_NONE:
 		break;	/* nothing behind them yet: see shade_tile_draw */
-	case 100 + Q_AIRPLANE: /* the modem's radio; the others only with the setting (airplane-radios.h) */
+	case 100 + Q_AIRPLANE: /* the modem's radio: Wi-Fi and Bluetooth stay as they are */
 		hap(server, HAP_CLICK, HG_SYSTEM);
 		server->shade_airplane = !server->shade_airplane;
 		server->cell_airplane = server->shade_airplane;
 		modem_tell(server->shade_airplane ? "airplane on\n" : "airplane off\n");
-		{
-			/* (with no adapter attached the Bluetooth tile does nothing, nor does this) */
-			bool has_bt = access("/sys/class/bluetooth/hci0", F_OK) == 0;
-			int todo = airplane_radios_step(&server->airplane_radios, server->shade_airplane,
-				server->shade_wifi, has_bt && server->shade_bt);
-			if (todo & (AIRPLANE_WIFI_ON | AIRPLANE_WIFI_OFF)) {
-				wifi_switch(server, todo & AIRPLANE_WIFI_ON);
-			}
-			if (has_bt && (todo & (AIRPLANE_BT_ON | AIRPLANE_BT_OFF))) {
-				bt_switch(server, todo & AIRPLANE_BT_ON);
-			}
-		}
 		draw_shade(server);
 		draw_status(server);
 		damage(server);
@@ -8847,6 +8845,8 @@ static const struct { const char *page, *title, *words; } HYPER_SETTINGS[] = {
 	{ "mobile", "cellular + SIM", "mobile data network sim" },
 	{ "apn", "access point", "apn mobile data internet" },
 	{ "audio", "ringtones + sounds", "volume sound ringtone vibrate media" },
+	{ "equalizer", "equalizer + effects", "eq presets bass surround crossfade sound" },
+	{ "app-volume", "app volume + output", "app volume output speaker headphones sound" },
 	{ "battery", "battery", "power charge voltage" },
 	{ "keyboard", "keyboard", "typing key height key sound" },
 	{ "haptics", "haptics", "vibration feedback" },
