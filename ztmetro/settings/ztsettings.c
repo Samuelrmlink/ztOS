@@ -666,6 +666,48 @@ static FILE *wifi_pipe;
 static char wifi_buf[16384];
 static size_t wifi_len;
 
+/* The switches are right from the first frame: asking NetworkManager or
+ * BlueZ takes a moment, so they start from what was last known. */
+static void wifi_on_path(char *path, size_t size) {
+	const char *run = getenv("XDG_RUNTIME_DIR");
+	snprintf(path, size, "%s/ztsettings-wifi-on", run ? run : "/tmp");
+}
+
+static void wifi_on_remember(bool on) {
+	char path[256];
+	wifi_on_path(path, sizeof(path));
+	FILE *f = fopen(path, "w");
+	if (f) {
+		fputc(on ? '1' : '0', f);
+		fclose(f);
+	}
+}
+
+static void wifi_on_seed(void) {
+	char path[256];
+	wifi_on_path(path, sizeof(path));
+	FILE *f = fopen(path, "r");
+	if (f) {
+		app.wifi_on = fgetc(f) == '1';
+		fclose(f);
+		return;
+	}
+	DIR *d = opendir("/sys/class/net");	/* first look: a Wi-Fi interface that is up */
+	if (!d) return;
+	struct dirent *e;
+	while ((e = readdir(d))) {
+		if (strncmp(e->d_name, "wl", 2) != 0) continue;
+		snprintf(path, sizeof(path), "/sys/class/net/%.200s/operstate", e->d_name);
+		f = fopen(path, "r");
+		if (f) {
+			char state[16] = "";
+			if (fgets(state, sizeof(state), f) && strncmp(state, "up", 2) == 0) app.wifi_on = true;
+			fclose(f);
+		}
+	}
+	closedir(d);
+}
+
 static void wifi_parse(char *text) {
 	int section = 0, n_known = 0;
 	static char known[48][64];
@@ -704,6 +746,7 @@ static void wifi_parse(char *text) {
 		}
 	}
 	if (!app.wifi_on) app.n_networks = 0;
+	wifi_on_remember(app.wifi_on);
 }
 
 /* The network being joined with a password just typed, and that password. */
@@ -1876,6 +1919,7 @@ static int wifi_menu_items(const struct network *n, const char *items[3]) {
 
 #define MAX_BT 24
 #include "bt-list.h"
+#define BT_ROW_H 70.0
 static struct {
 	bool on, loading;
 	struct bt_device dev[MAX_BT];
@@ -1892,6 +1936,26 @@ static struct {
 static FILE *bt_pipe;
 static char bt_buf[8192];
 static size_t bt_len;
+
+/* The device a tap is acting on: its row says so until the command has ended,
+ * which may be after the scan it was queued behind. */
+static char bt_busy_mac[18];
+static const char *bt_busy_label;
+static bool bt_busy_running, bt_busy_connecting;
+static void bt_anim_kick(void);
+
+/* ztos-bt-state's file says whether it is on, without asking anything. */
+static void bt_on_seed(void) {
+	const char *run = getenv("XDG_RUNTIME_DIR");
+	char path[256], line[64];
+	snprintf(path, sizeof(path), "%s/ztos-bt", run ? run : "/tmp");
+	FILE *f = fopen(path, "r");
+	if (!f) return;
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "on=", 3) == 0) bt.on = line[3] == '1';
+	}
+	fclose(f);
+}
 
 static void bt_parse(char *text) {
 	static struct bt_device fresh[MAX_BT];
@@ -1919,7 +1983,8 @@ static void bt_parse(char *text) {
 			snprintf(d->icon, sizeof(d->icon), "%s", f[4]);
 		}
 	}
-	bt.n = bt_list_merge(bt.dev, bt.on ? bt.n : 0, fresh, n_fresh);
+	bt.n = bt_list_merge(bt.dev, bt.on ? bt.n : 0, fresh, n_fresh, bt_busy_mac);
+	bt_anim_kick();
 }
 
 /* What the user asked for while a scan was running: it runs when that ends, so
@@ -1941,11 +2006,24 @@ static void bt_ready(int fd, void *data) {
 	bt_parse(bt_buf);
 	bt.loading = false;
 	zmc_busy(false);
+	if (bt_busy_mac[0] && bt_busy_running) {
+		const struct bt_device *d = bt_find(bt.dev, bt.n, bt_busy_mac);
+		if (bt_busy_connecting && (!d || !d->connected)) {
+			snprintf(bt.status, sizeof(bt.status), "could not connect to %.60s", d ? d->name : "the device");
+		} else {
+			bt.status[0] = 0;
+		}
+		bt_busy_mac[0] = 0;
+		bt_busy_running = false;
+		bt_list_sort(bt.dev, bt.n, bt_busy_mac);
+		bt_anim_kick();
+	}
 	zmc_redraw();
 	if (bt_pending[0]) {
 		char next[sizeof(bt_pending)];
 		snprintf(next, sizeof(next), "%s", bt_pending);
 		bt_pending[0] = 0;
+		bt_busy_running = bt_busy_mac[0] != 0;
 		bt_refresh(next);
 	}
 }
@@ -1970,6 +2048,7 @@ static void bt_request(const char *command) {
 	if (bt_pipe) {
 		snprintf(bt_pending, sizeof(bt_pending), "%s", command);
 	} else {
+		bt_busy_running = bt_busy_mac[0] != 0;
 		bt_refresh(command);
 	}
 }
@@ -2032,19 +2111,31 @@ static double draw_bluetooth(cairo_t *cr) {
 	}
 	int battery = bt_battery();
 	double menu_at = -1;
+	double list_top = y;
+	/* rows in motion last, on a plain ground, so that they pass over the others */
+	for (int pass = 0; pass < 2; pass++)
 	for (int i = 0; i < bt.n; i++) {
 		struct bt_device *d = &bt.dev[i];
+		bool moving = d->shown != (float)i;
+		if (moving != (pass == 1)) continue;
+		y = list_top + d->shown * BT_ROW_H;
+		if (moving) {
+			cairo_set_source_rgb(cr, 0, 0, 0);
+			cairo_rectangle(cr, 0, y - 4, zmc.width, BT_ROW_H);
+			cairo_fill(cr);
+		}
 		snprintf(bt_drawn[i], sizeof(bt_drawn[i]), "%s", d->mac);
 		cairo_set_source_rgb(cr, 1, 1, 1);
 		zmc_text_line(cr, d->name, FONT_SEMILIGHT, 26, MARGIN, y, zmc.width - 2 * MARGIN);
 		char line[64];
-		if (d->connected && battery >= 0) {
+		if (d->connected && battery >= 0 && strcmp(d->mac, bt_busy_mac)) {
 			snprintf(line, sizeof(line), "Connected, battery %d%%", battery);
 		} else {
-			snprintf(line, sizeof(line), "%s", d->gone ? "Not in range" : d->connected ? "Connected" :
+			snprintf(line, sizeof(line), "%s", !strcmp(d->mac, bt_busy_mac) ? bt_busy_label :
+				d->gone ? "Not in range" : d->connected ? "Connected" :
 				d->paired ? "Not connected" : "Tap to pair");
 		}
-		if (d->connected) {
+		if (d->connected || !strcmp(d->mac, bt_busy_mac)) {
 			zmc_set_rgb(cr, ACCENTS[app.accent].color);
 		} else {
 			cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
@@ -2052,10 +2143,10 @@ static double draw_bluetooth(cairo_t *cr) {
 		zmc_text(cr, line, FONT_REGULAR, 14, MARGIN, y + 34, 0);
 		zmc_add_hit(0, y - 4, zmc.width, 64, ACT_BT_DEVICE, i);
 		if (i == bt_menu) {
-			menu_at = y + 60;
+			menu_at = list_top + i * BT_ROW_H + 60;
 		}
-		y += 70;
 	}
+	y = list_top + bt.n * BT_ROW_H;
 	if (bt.n == 0) {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 		y += zmc_text(cr, "No devices.", FONT_REGULAR,
@@ -2073,6 +2164,50 @@ static double draw_bluetooth(cairo_t *cr) {
 /* Discoverable only while the page is open. BlueZ's own timeout ends it if
  * Settings goes away without leaving the page, so the tick renews it. */
 static bool bt_discoverable;
+
+#define BT_ANIM_MS 16
+#define BT_SLIDE_TAU_MS 75.0
+
+static uint32_t bt_anim_last;
+static bool bt_animating;
+static void bt_tick(void);
+
+static void bt_anim_tick(void) {
+	uint32_t now = zmc_now_ms();
+	double k = 1.0 - exp(-(double)(now - bt_anim_last) / BT_SLIDE_TAU_MS);
+	bt_anim_last = now;
+	bool moving = false;
+	for (int i = 0; i < bt.n; i++) {
+		struct bt_device *d = &bt.dev[i];
+		d->shown += (float)(((double)i - d->shown) * k);
+		if (fabs((double)i - d->shown) < 0.01) d->shown = (float)i;
+		else moving = true;
+	}
+	if (!moving || zmc.page != PAGE_BLUETOOTH) {
+		for (int i = 0; i < bt.n; i++) bt.dev[i].shown = (float)i;
+		bt_animating = false;
+		zmc_every(zmc.page == PAGE_BLUETOOTH ? 15000 : 0, zmc.page == PAGE_BLUETOOTH ? bt_tick : NULL);
+	}
+	zmc_redraw();
+}
+
+/* A row whose place changed slides there, past the others. */
+static void bt_anim_kick(void) {
+	bool moved = false;
+	for (int i = 0; i < bt.n; i++) {
+		if (bt.dev[i].shown != (float)i) moved = true;
+	}
+	if (!moved) return;
+	if (zmc.page != PAGE_BLUETOOTH) {
+		for (int i = 0; i < bt.n; i++) bt.dev[i].shown = (float)i;
+		return;
+	}
+	if (!bt_animating) {
+		bt_animating = true;
+		bt_anim_last = zmc_now_ms();
+		zmc_every(BT_ANIM_MS, bt_anim_tick);
+	}
+}
 
 static void bt_tick(void) {
 	if (zmc.page != PAGE_BLUETOOTH || bt_menu >= 0 || bt_pending[0]) return;
@@ -3264,7 +3399,18 @@ static void activate(int action, int arg) {
 			zmc_redraw();
 			break;
 		}
+		if (bt_busy_mac[0]) break;	/* one at a time */
 		char cmd[400];
+		snprintf(bt_busy_mac, sizeof(bt_busy_mac), "%s", d->mac);
+		bt_busy_connecting = false;
+		bt_busy_label = action == ACT_BT_FORGET ? "Removing…" : d->connected ? "Disconnecting…" : "Connecting…";
+		if (action != ACT_BT_FORGET && !d->connected) bt_busy_connecting = true;
+		/* up the list as soon as it is tapped; d follows the device */
+		char moved_mac[18];
+		snprintf(moved_mac, sizeof(moved_mac), "%s", d->mac);
+		bt_list_sort(bt.dev, bt.n, bt_busy_mac);
+		bt_anim_kick();
+		d = (struct bt_device *)bt_find(bt.dev, bt.n, moved_mac);
 		if (action == ACT_BT_FORGET) {
 			snprintf(cmd, sizeof(cmd), "bluetoothctl remove %s >/dev/null 2>&1", d->mac);
 			snprintf(bt.status, sizeof(bt.status), "forgot %.60s", d->name);
@@ -3957,6 +4103,8 @@ static int render_to_file(const char *name, const char *path) {
 int main(int argc, char **argv) {
 	signal(SIGCHLD, SIG_DFL);
 	config_load();
+	wifi_on_seed();
+	bt_on_seed();
 	ring_preferences(false);
 	atexit(ringtone_stop);
 	if (argc == 4 && strcmp(argv[1], "--render") == 0) {
