@@ -1727,6 +1727,13 @@ static void cache_ensure(int scale) {
 }
 
 
+void zmc_scroll_top(void) {
+	zmc.scroll = 0;
+	zmc.vel = 0;
+	zmc.fling = false;
+	zmc_redraw();
+}
+
 /* Something on the page changed. */
 void zmc_scroll_end(void) {
 	scroll_to_end = true;
@@ -2486,6 +2493,7 @@ static int present_list(int scale) {
 /* A GPU frame samples cached page textures. Cairo only runs when the app
  * changes a page, never to copy, rotate or scale it on each motion frame. */
 static uint32_t gpu_retry_at;
+static bool in_frame;
 static void present_gpu(uint32_t ms) {
 	static int frames;
 	if (frames < 3) {
@@ -2495,6 +2503,7 @@ static void present_gpu(uint32_t ms) {
 	zmc.dirty = false;
 	struct timespec t0, t1, t2;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
+	in_frame = true;
 	zmg_begin(zmc.width, zmc.height, zmc.scale);
 	if (zmc.anim_active) {
 		zmc.anim_frames++;
@@ -2569,6 +2578,7 @@ static void present_gpu(uint32_t ms) {
 		board_more = false;
 		zmc.dirty = true;
 	}
+	in_frame = false;
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	bool ended = zmg_end();
 	clock_gettime(CLOCK_MONOTONIC, &t2);
@@ -3900,13 +3910,17 @@ void zmc_back(void) {
 }
 
 double zmc_switch(cairo_t *cr, double y, const char *title, bool on, int action) {
+	return zmc_switch_arg(cr, y, title, on, action, 0);
+}
+
+double zmc_switch_arg(cairo_t *cr, double y, const char *title, bool on, int action, int arg) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	double title_h = zmc_text(cr, title, FONT_SEMILIGHT, 21, MARGIN, y, zmc.width - 2 * MARGIN - 64);
 	double label = zmc_switch_label_y(title_h), more = label - ZMC_SWITCH_LINE;
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, on ? "On" : "Off", FONT_REGULAR, 13, MARGIN, y + label, 0);
 	zmc_toggle(cr, zmc.width - MARGIN - 54, y + 4, on);
-	zmc_add_hit(0, y - 4, zmc.width, 52 + more, action, 0);
+	zmc_add_hit(0, y - 4, zmc.width, 52 + more, action, arg);
 	return y + 66 + more;
 }
 
@@ -4199,6 +4213,11 @@ void zmc_gpu_rect(double x, double y, double w, double h, double r, double g, do
 }
 
 void zmc_present(void) {
+	/* from inside a frame (an overlay): it is the next one that is asked for */
+	if (in_frame) {
+		zmc.dirty = true;
+		return;
+	}
 	present();
 }
 

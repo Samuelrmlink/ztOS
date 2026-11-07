@@ -224,6 +224,7 @@ int zmc_run(const struct zmc_app *app, int first_page);
 /* draw one page into a PNG with no display at all; `height` in points */
 int zmc_render_png(const struct zmc_app *app, int page, int height, const char *path);
 void zmc_redraw(void);			/* something on the page changed */
+void zmc_scroll_top(void);		/* the page's content has changed: from its top again */
 void zmc_scroll_end(void);		/* at the next drawing, show the end of the page (a conversation) */
 void zmc_go(int page, int dir);		/* turn to a page: dir > 0 deeper, < 0 back */
 void zmc_turn(int dir);			/* this page's content changes: its rows swivel out and in */
@@ -248,6 +249,7 @@ void zmc_pivot_changed(void);	/* what the other tabs show has changed: draw them
 double zmc_entry(cairo_t *cr, double y, const char *title, const char *detail, int action, int arg);
 /* a title with On/Off under it and a switch on the right; returns the next y */
 double zmc_switch(cairo_t *cr, double y, const char *title, bool on, int action);
+double zmc_switch_arg(cairo_t *cr, double y, const char *title, bool on, int action, int arg);	/* tapped, gives (action, arg) */
 /* a grey caption with a value under it; returns the next y */
 double zmc_field(cairo_t *cr, double y, const char *caption, const char *value);
 /* a title with its current choice under it in the accent colour */

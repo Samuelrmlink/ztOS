@@ -455,8 +455,7 @@ static double draw_listening(cairo_t *cr) {
 		if (mask < 0) y = note(cr, y, "The AirPods don't report this. Choosing here replaces their list. At least two.");
 		for (int i = 0; i < 4; i++) {
 			if (!mode_available(i)) continue;
-			y = zmc_switch(cr, y, MODES[i].label, mask > 0 && (mask & MODES[i].bit), A_CYCLE);
-			zmc.hits[zmc.n_hits - 1].arg = i;	/* (a switch has no arg of its own) */
+			y = zmc_switch_arg(cr, y, MODES[i].label, mask > 0 && (mask & MODES[i].bit), A_CYCLE, i);
 		}
 	}
 	return y;

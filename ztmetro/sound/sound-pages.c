@@ -110,7 +110,7 @@ static double tab_header(cairo_t *cr, int tab) {
 static int open_picker;
 static bool saving;
 static char save_name[48];
-static time_t state_mtime;
+static struct timespec state_mtime;	/* to the nanosecond: two writes in a second are two states */
 static uint32_t last_local;	/* the last change made here: the file is not read over it */
 
 /* ---- talking to the daemon ------------------------------------------------ */
@@ -314,8 +314,8 @@ static void load_state(bool force) {
 	struct stat st;
 	json_object *root = NULL;
 	if (stat(path, &st) == 0) {
-		if (!force && st.st_mtime == state_mtime) return;
-		state_mtime = st.st_mtime;
+		if (!force && st.st_mtim.tv_sec == state_mtime.tv_sec && st.st_mtim.tv_nsec == state_mtime.tv_nsec) return;
+		state_mtime = st.st_mtim;
 		root = json_object_from_file(path);
 	}
 	if (!root) {
@@ -991,9 +991,7 @@ void sound_activate(int action, int arg) {
 			send_fmt("p %s preset %s", curname(), S.custom[arg - 100]);
 			{ char nm[48]; snprintf(nm, sizeof(nm), "%s", S.custom[arg - 100]); snprintf(p->preset, sizeof(p->preset), "%s", nm); }
 		}
-		last_local = 0;
-		usleep(250000);	/* the daemon answers with the curve; then it is read */
-		load_state(true);
+		last_local = 0;	/* the daemon answers with the curve: the next look (tick) reads it */
 		break;
 	case A_SAVE_OPEN:
 		saving = !saving;
@@ -1007,14 +1005,12 @@ void sound_activate(int action, int arg) {
 		send_fmt("p %s savepreset %s", curname(), name);
 		saving = false;
 		zmc_keyboard(false);
-		usleep(250000);
-		load_state(true);
+		last_local = 0;
 		break;
 	}
 	case A_DEL_PRESET:
 		if (arg < S.n_custom) send_fmt("p %s delpreset %s", curname(), S.custom[arg]);
-		usleep(250000);
-		load_state(true);
+		last_local = 0;
 		break;
 	case A_QDOWN: tweak_q(1 / 1.25); break;
 	case A_QUP: tweak_q(1.25); break;
@@ -1154,9 +1150,9 @@ static void tick(void) {
 		return;
 	}
 	if (T.down || zmc_now_ms() - last_local < 900) return;
-	time_t before = state_mtime;
+	struct timespec before = state_mtime;
 	load_state(false);
-	if (before != state_mtime) zmc_redraw();
+	if (before.tv_sec != state_mtime.tv_sec || before.tv_nsec != state_mtime.tv_nsec) zmc_redraw();
 }
 
 void sound_arrived(int page) {

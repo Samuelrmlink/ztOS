@@ -829,9 +829,7 @@ static void activate(int action, int arg) {
 		int pages = (pdata.n_events + EVENTS_PER_PAGE - 1) / EVENTS_PER_PAGE;
 		if (arg < 0 || arg >= pages) return;
 		history_page = arg;
-		zmc.scroll = 0;
-		zmc.vel = 0;
-		zmc_redraw();
+		zmc_scroll_top();
 		return;
 	}
 	if (action == ACT_TAB) {

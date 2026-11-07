@@ -1375,8 +1375,7 @@ static void overlay(int page) {
 	else if (album_open) overlay_list(grid_photos(), album_open->n, list_top[page], at_album, ACT_PHOTO, now);
 	want_commit();
 	if (viewer_is_open()) viewer_overlay();
-	/* (inside a frame there is no zmc_present: this is what asks for the next) */
-	if (more_frames) zmc.dirty = true;
+	if (more_frames) zmc_present();
 }
 
 /* ---- results, on the main thread --------------------------------------------------- */
