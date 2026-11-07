@@ -8,10 +8,14 @@
   scripts/ztctl.py pinch CX CY R0 R1 [MS]  move two fingers apart (or together)
   scripts/ztctl.py play FILE|-             play a timeline of overlapping fingers
   scripts/ztctl.py wake | sleep            screen on or off
+  scripts/ztctl.py size                    points, scale, pixels and whether the screen is on
 
-Control lines include "down ID X Y", "move ID X Y" and "up ID", so up to ten
-fingers can be down at once, each moving and lifting on its own. They go through
-the same code as the touchscreen. A timeline has one "MS LINE" per line, where MS
+For a live view and input without SSH, see ztos mirror (ztmetro/mirror/README.md).
+
+Control lines include "down ID X Y", "move ID X Y", "up ID" and "cancel ID", so
+up to ten fingers can be down at once, each moving and lifting on its own, and
+"key CODE down|up" for power (116), volume up (115), volume down (114), home (172)
+and back (158). They go through the same code as the touchscreen. A timeline has one "MS LINE" per line, where MS
 is the time from the start. For example, a second finger taps while one is held:
 
     0   down 0 180 600
@@ -266,6 +270,8 @@ def main():
         ctl(["screen on"])
     elif cmd == "sleep":
         ctl(["screen off"])
+    elif cmd == "size":
+        subprocess.run(ssh_args() + ['cat "$XDG_RUNTIME_DIR/ztmetro.state"'], check=True, timeout=30)
     else:
         sys.exit(__doc__)
 

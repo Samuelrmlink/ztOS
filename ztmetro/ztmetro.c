@@ -10895,6 +10895,8 @@ static void tone_rgb(int kelvin, float rgb[3]) {
 
 /* Switch the display itself off or on. Off, nothing is drawn and no frames
  * are scheduled; the power key brings it back. */
+static void state_file_write(struct zt_server *server);
+
 static void screen_set(struct zt_server *server, bool on) {
 	if (!on) {
 		server->dm_hidden = 1;	/* the DotMatrix home boots again when it is next seen */
@@ -10947,6 +10949,7 @@ static void screen_set(struct zt_server *server, bool on) {
 	}
 	wlr_output_state_finish(&state);
 	server->screen_on = on;
+	state_file_write(server);
 	if (demoloop_active()) {
 		char path[256];
 		FILE *state = fopen(runtime_file(path, sizeof(path), "ztos-demoloop.screen"), "w");
@@ -12588,17 +12591,43 @@ static void pointer_destroy(struct wl_listener *listener, void *data) {
 
 /* ---- control pipe: drive the shell without a finger ---------------------- */
 
+/* $XDG_RUNTIME_DIR/ztmetro.state, for ztmirror and test tools: the screen's
+ * size in points, the scale, its pixels, and whether it is on. Replaced whole
+ * whenever one of those changes, so a reader never sees half of it. */
+static void state_file_write(struct zt_server *server) {
+	if (!server->output) {
+		return;
+	}
+	char path[256], tmp[280];
+	runtime_file(path, sizeof(path), "ztmetro.state");
+	snprintf(tmp, sizeof(tmp), "%s.new", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f) {
+		return;
+	}
+	struct wlr_output *o = server->output->wlr_output;
+	fprintf(f, "points %d %d\nscale %.2f\npixels %d %d\nscreen %s\n", server->width, server->height,
+		server->scale, o->width, o->height, server->screen_on ? "on" : "off");
+	fclose(f);
+	rename(tmp, path);
+}
+
 /*
  * $XDG_RUNTIME_DIR/ztmetro.ctl takes one command per line, in points:
  *
  *     down ID X Y | move ID X Y | up ID | cancel ID | tap X Y | screen off | screen on | state
+ *     key CODE down|up    a phone key, as its evdev code: see ctl_key()
  *
  * It goes through the same code as the touchscreen, which is what makes the
  * shell testable over ssh.
  */
+static void ctl_key(struct zt_server *server, unsigned code, const char *how);
+
 static void ctl_command(struct zt_server *server, char *line) {
 	int id;
 	double x, y;
+	unsigned code;
+	char how[8];
 	uint32_t t = now_ms();
 	if (sscanf(line, "down %d %lf %lf", &id, &x, &y) == 3) {
 		touch_begin(server, 1000 + id, x, y, t);
@@ -12611,6 +12640,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (sscanf(line, "tap %lf %lf", &x, &y) == 2) {
 		touch_begin(server, 1999, x, y, t);
 		touch_end(server, 1999, t + 30, false);
+	} else if (sscanf(line, "key %u %7s", &code, how) == 2) {
+		ctl_key(server, code, how);
 	} else if (strncmp(line, "modem", 5) == 0) {
 		/* ztoscorenetworkingd: the SIM, the signal or the network changed */
 		modem_read(server);
@@ -12988,6 +13019,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 			server->osk_visible, server->osk_symbols ? "(symbols)" : "",
 			app_height(server), server->scroll, server->page, server->list_scroll,
 			server->n_items, server->editing, server->edit, server->menu_open, server->n_tiles);
+		state_file_write(server);
 	}
 }
 
@@ -13139,10 +13171,8 @@ static int power_key_held(void *data) {
 	return 0;
 }
 
-static void keyboard_handle_key(struct wl_listener *listener, void *data) {
-	struct zt_keyboard *keyboard = wl_container_of(listener, keyboard, key);
-	struct zt_server *server = keyboard->server;
-	struct wlr_keyboard_key_event *event = data;
+/* A key, from a keyboard or (keyboard NULL) from the control pipe. */
+static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, struct wlr_keyboard_key_event *event) {
 	if (event->keycode == KEY_POWER) {
 		/* the power key is the shell's alone: see power/power-key.h */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
@@ -13220,6 +13250,9 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 		}
 		return;
 	}
+	if (!keyboard) {
+		return;	/* the pipe's keys are all the phone's own, handled above */
+	}
     if (server->auth_active) {
         if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
             char text[64] = "";
@@ -13230,6 +13263,27 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
     }
 	wlr_seat_set_keyboard(server->seat, keyboard->wlr_keyboard);
 	wlr_seat_keyboard_notify_key(server->seat, event->time_msec, event->keycode, event->state);
+}
+
+static void keyboard_handle_key(struct wl_listener *listener, void *data) {
+	struct zt_keyboard *keyboard = wl_container_of(listener, keyboard, key);
+	key_event(keyboard->server, keyboard, data);
+}
+
+/* "key CODE down|up" on the control pipe: the phone's own keys only, through
+ * the same logic as the real ones. Typing is not offered here. */
+static void ctl_key(struct zt_server *server, unsigned code, const char *how) {
+	bool down = strcmp(how, "down") == 0;
+	if ((!down && strcmp(how, "up") != 0) || (code != KEY_POWER && code != KEY_VOLUMEUP &&
+			code != KEY_VOLUMEDOWN && code != KEY_HOMEPAGE && code != KEY_BACK)) {
+		return;
+	}
+	struct wlr_keyboard_key_event event = {
+		.time_msec = now_ms(),
+		.keycode = code,
+		.state = down ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED,
+	};
+	key_event(server, NULL, &event);
 }
 
 static void keyboard_handle_destroy(struct wl_listener *listener, void *data) {
@@ -14686,6 +14740,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	server->lock_y = (float)-server->height;
 
 	server->screen_on = true;
+	state_file_write(server);
 	damage(server);
 
 	load_logo(server);

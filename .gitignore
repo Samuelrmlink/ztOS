@@ -28,6 +28,9 @@ __pycache__/
 # ztMETRO binaries (built by its Makefile)
 ztmetro/ztmetro
 ztmetro/xdg-shell-protocol.h
+ztmetro/mirror/ztmirror
+ztmetro/mirror/wlr-screencopy.c
+ztmetro/mirror/wlr-screencopy-client.h
 ztmetro/apps/ztapps
 ztmetro/settings/ztsettings
 ztmetro/devtest/zrndevtest
