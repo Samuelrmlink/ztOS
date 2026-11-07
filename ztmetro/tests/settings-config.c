@@ -28,6 +28,20 @@ static const char *merge(const char *text, struct config_key *keys, int n) {
 int main(void) {
 	struct config_key k[8];
 
+	/* a slot nobody filled in is skipped: a wrong count crashed Settings on save */
+	{
+		struct config_key empty[2];
+		memset(empty, 0, sizeof(empty));
+		empty[0].key = "accent";
+		snprintf(empty[0].value, sizeof(empty[0].value), "red");
+		FILE *in = tmpfile(), *out = tmpfile();
+		fputs("accent = blue\nother = 1\n", in);
+		rewind(in);
+		config_merge(in, out, empty, 2);
+		fclose(in);
+		fclose(out);
+	}
+
 	/* what was edited by hand, or is more than this version knows, survives
 	 * another key's change: 3 tiles (it loads as 8), 120 s (it loads as 180),
 	 * a speed not on the picker */

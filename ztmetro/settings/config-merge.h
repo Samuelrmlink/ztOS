@@ -61,7 +61,7 @@ static inline void config_merge(FILE *in, FILE *out, struct config_key *keys, in
 		bool ours = false;
 		if (line_start && config_line_key(line, name, sizeof(name))) {
 			for (int i = 0; i < n; i++) {
-				if (strcmp(name, keys[i].key) != 0 || !config_key_changed(&keys[i])) continue;
+				if (!keys[i].key || strcmp(name, keys[i].key) != 0 || !config_key_changed(&keys[i])) continue;
 				if (!written[i]) fprintf(out, "%s = %s\n", keys[i].key, keys[i].value);
 				written[i] = ours = true;
 			}
@@ -82,7 +82,7 @@ static inline void config_merge(FILE *in, FILE *out, struct config_key *keys, in
 	}
 	if (!ended) fputc('\n', out);	/* a last line with no end of its own */
 	for (int i = 0; i < n; i++) {
-		if (!written[i] && config_key_changed(&keys[i])) {
+		if (keys[i].key && !written[i] && config_key_changed(&keys[i])) {
 			fprintf(out, "%s = %s\n", keys[i].key, keys[i].value);
 		}
 	}

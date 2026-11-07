@@ -552,10 +552,11 @@ static void auto_load(void) {
 /* Every key Settings can write, as it would write it now. */
 enum { N_CONFIG_KEYS = 26 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };
 static struct config_key config_keys[N_CONFIG_KEYS];
+static int config_n;	/* how many config_format filled in: N_CONFIG_KEYS is only the room */
 
 static struct config_key *config_key_named(const char *name) {
-	for (int i = 0; i < N_CONFIG_KEYS; i++) {
-		if (config_keys[i].key && strcmp(config_keys[i].key, name) == 0) return &config_keys[i];
+	for (int i = 0; i < config_n; i++) {
+		if (strcmp(config_keys[i].key, name) == 0) return &config_keys[i];
 	}
 	return NULL;
 }
@@ -564,9 +565,13 @@ static void config_format(void) {
 	static const char *const sizes[] = { "compact", "standard", "large" };
 	int n = 0;
 #define KEY(name, ...) do { \
-		config_keys[n].key = (name); \
-		snprintf(config_keys[n].value, sizeof(config_keys[n].value), __VA_ARGS__); \
-		n++; \
+		if (n < N_CONFIG_KEYS) { \
+			config_keys[n].key = (name); \
+			snprintf(config_keys[n].value, sizeof(config_keys[n].value), __VA_ARGS__); \
+			n++; \
+		} else { \
+			fprintf(stderr, "ztsettings: no room for config key %s\n", (name)); \
+		} \
 	} while (0)
 	KEY("accent", "%s", ACCENTS[app.accent].name);
 	KEY("columns", "%d", app.columns);
@@ -606,12 +611,13 @@ static void config_format(void) {
 		if (LED_LOOKS[i].colour_key) KEY(LED_LOOKS[i].colour_key, "%06x", app.led.colour[i]);
 	}
 #undef KEY
+	config_n = n;
 }
 
 /* Each key's value as loaded: nothing is written until it differs from this. */
 static void config_remember_loaded(void) {
 	config_format();
-	config_keys_written(config_keys, N_CONFIG_KEYS);
+	config_keys_written(config_keys, config_n);
 }
 
 /* The screen's brightness moved by itself (the light sensor, the pull-down) and
@@ -631,7 +637,7 @@ static void config_brightness_chosen(void) {
 static void config_save(void) {
 	config_format();
 	zmc.accent = ACCENTS[app.accent].color;
-	if (!config_keys_changed(config_keys, N_CONFIG_KEYS)) return;
+	if (!config_keys_changed(config_keys, config_n)) return;
 
 	char path[512], tmp[512];
 	config_path(path, sizeof(path));
@@ -641,11 +647,11 @@ static void config_save(void) {
 		if (in) fclose(in);
 		return;
 	}
-	config_merge(in, out, config_keys, N_CONFIG_KEYS);
+	config_merge(in, out, config_keys, config_n);
 	if (in) fclose(in);
 	fclose(out);
 	if (rename(tmp, path) != 0) return;
-	config_keys_written(config_keys, N_CONFIG_KEYS);
+	config_keys_written(config_keys, config_n);
 
 	if (system("pkill -HUP -x ztmetro 2>/dev/null") != 0) {}
 }
