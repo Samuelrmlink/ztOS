@@ -39,6 +39,7 @@ enum page {
 	PAGE_POWER,	/* battery + performance: power, then hardware */
 	PAGE_SYSTEM,	/* date + region, keyboard, developer, about */
 	PAGE_ANIMATION,	/* animation speeds */
+	PAGE_STYLE,	/* the shell's style: chosen, then applied with a warning */
 	N_PAGES
 };
 
@@ -75,6 +76,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_ACCENTS] = PAGE_THEME,
 	[PAGE_WALLS] = PAGE_THEME,
 	[PAGE_ANIMATION] = PAGE_THEME,
+	[PAGE_STYLE] = PAGE_THEME,
 	[PAGE_NAVIGATION] = PAGE_THEME,
 	[PAGE_BOOST] = PAGE_POWER,
 };
@@ -91,6 +93,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "accents", PAGE_ACCENTS },
 	{ "wallpapers", PAGE_WALLS },
 	{ "animation", PAGE_ANIMATION },
+	{ "style", PAGE_STYLE },
 	{ "navigation", PAGE_NAVIGATION },
 	{ "quick", PAGE_QUICK },
 	{ "display", PAGE_DISPLAY },

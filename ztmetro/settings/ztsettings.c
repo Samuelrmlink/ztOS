@@ -74,7 +74,9 @@ enum action {
 	ACT_BT_MENU,		/* an item of a held device's menu */
 	ACT_BT_MENU_CLOSE,
 	ACT_COLUMNS,
-	ACT_STYLE,		/* arg: the shell's style, 0 Metro, 1 DotMatrix */
+	ACT_STYLE,		/* arg: the shell's style to apply, 0 Metro, 1 DotMatrix */
+	ACT_STYLE_APPLY,
+	ACT_SCALE_APPLY,
 	ACT_HAPTICS,
 	ACT_WIFI_RADIO,
 	ACT_WIFI_SUSPEND,
@@ -186,6 +188,8 @@ static struct {
 	int wall_target;			/* 0 both, 1 Start, 2 lock screen */
 	int columns;
 	int style;				/* ztRetrofit's look: 0 Metro, 1 DotMatrix */
+	int style_pending;			/* the one chosen, until it is applied */
+	int scale_pending;			/* the same for the display's scale */
 	bool haptics;
 	char scale_text[16];
 
@@ -425,6 +429,8 @@ static void config_load(void) {
 	perf_load();
 	auto_load();
 	config_remember_loaded();
+	app.style_pending = app.style;
+	app.scale_pending = app.scale_idx;
 }
 
 /* What zrnperfd is set to: it keeps its state where anyone can read it. */
@@ -1648,6 +1654,45 @@ static void accent_board_open(void) {
 	zmc_board_open(&b);
 }
 
+/* What a change that restarts the whole shell says first, and the row that
+ * does it, which does nothing until there is a change to apply. */
+static double restart_warning(cairo_t *cr, double y, bool differs, int action) {
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	y += zmc_text(cr, "Applying this restarts the whole shell. Every open app closes, and anything "
+		"unsaved in them is lost.", FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 18;
+	if (differs) {
+		return zmc_entry(cr, y, "apply and restart", "close everything and start again", action, 0);
+	}
+	cairo_set_source_rgb(cr, 0.35, 0.35, 0.35);
+	zmc_text(cr, "apply and restart", FONT_SEMILIGHT, 25.5, MARGIN, y, 0);
+	zmc_text(cr, "this one is already in use", FONT_REGULAR, 12, MARGIN, y + 31, 0);
+	return y + 59;
+}
+
+/* ztRetrofit's styles: the same shell, the same apps, another look. The two
+ * never share a screen, so nothing happens until it is applied. */
+static double draw_style(cairo_t *cr) {
+	double y = zmc_header(cr, "shell style");
+	static const char *const styles[] = { "Metro", "DotMatrix" };
+	double gap = 8;
+	for (int k = 0; k < 2; k++) {
+		double btn_w = (zmc.width - 2 * MARGIN - gap) / 2.0;
+		double bx = MARGIN + k * (btn_w + gap);
+		if (app.style_pending == k) {
+			zmc_set_rgb(cr, ACCENTS[app.accent].color);
+		} else {
+			cairo_set_source_rgb(cr, 0.18, 0.18, 0.18);
+		}
+		cairo_rectangle(cr, bx, y, btn_w, 36);
+		cairo_fill(cr);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		zmc_text(cr, styles[k], FONT_REGULAR, 13, bx + 10, y + 9, 0);
+		zmc_add_hit(bx, y, btn_w, 36, ACT_STYLE, k);
+	}
+	y += 56;
+	return restart_warning(cr, y, app.style_pending != app.style, ACT_STYLE_APPLY) + 20;
+}
+
 static double draw_theme(cairo_t *cr) {
 	double y = zmc_header(cr, "customization");
 	char detail[128];
@@ -1698,30 +1743,10 @@ static double draw_theme(cairo_t *cr) {
 	}
 	y += 60;
 
-	/* ztRetrofit's styles: the same shell, the same apps, another look */
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Shell style", FONT_REGULAR, 13.5, MARGIN, y, 0);
-	y += 24;
 	static const char *const styles[] = { "Metro", "DotMatrix" };
-	for (int k = 0; k < 2; k++) {
-		double btn_w = (zmc.width - 2 * MARGIN - gap) / 2.0;
-		double bx = MARGIN + k * (btn_w + gap);
-		if (app.style == k) {
-			zmc_set_rgb(cr, ACCENTS[app.accent].color);
-		} else {
-			cairo_set_source_rgb(cr, 0.18, 0.18, 0.18);
-		}
-		cairo_rectangle(cr, bx, y, btn_w, 36);
-		cairo_fill(cr);
-		cairo_set_source_rgb(cr, 1, 1, 1);
-		zmc_text(cr, styles[k], FONT_REGULAR, 13, bx + 10, y + 9, 0);
-		zmc_add_hit(bx, y, btn_w, 36, ACT_STYLE, k);
-	}
-	/* the two never share a screen: the whole session starts again */
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Changing it restarts the shell and closes open apps", FONT_REGULAR, 12, MARGIN, y + 42, zmc.width - 2 * MARGIN);
-	y += 20;
-	y = draw_wall_row(cr, y + 60);	/* under the style row (36 high, 24 below) */
+	y = zmc_entry(cr, y, "shell style", styles[app.style], ACT_OPEN_PAGE, PAGE_STYLE);
+	y += 4;
+	y = draw_wall_row(cr, y);
 	y = zmc_entry(cr, y, "navigation bar", "choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
 	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
 		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
@@ -1793,7 +1818,10 @@ static double draw_display(cairo_t *cr) {
 	y = picker(cr, y, "Screen times out after", timeouts, 5, app.timeout_idx, ACT_TIMEOUT_CYCLE);
 	/* the shell sizes itself to the panel (360 points across); this is a step either side */
 	static const char *const scales[] = { "Compact", "Standard", "Large" };
-	y = picker(cr, y, "Display scaling", scales, 3, app.scale_idx, ACT_SCALE_CYCLE);
+	y = picker(cr, y, "Display scaling", scales, 3, app.scale_pending, ACT_SCALE_CYCLE);
+	if (app.scale_pending != app.scale_idx) {
+		y = restart_warning(cr, y, true, ACT_SCALE_APPLY) + 10;
+	}
 	static const char *const nav_sizes[] = { "Standard (48 pt)", "Compact (40 pt)", "Expanded (56 pt)" };
 	y = picker(cr, y, "Navigation bar widget size", nav_sizes, 3, app.nav_size_idx, ACT_NAV_SIZE_CYCLE);
 
@@ -3141,6 +3169,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_INSTALLED_APPS: return draw_installed_apps(cr);
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);
 	case PAGE_THEME: return draw_theme(cr);
+	case PAGE_STYLE: return draw_style(cr);
 	case PAGE_ACCENTS: return draw_accents(cr);
 	case PAGE_WALLS: return draw_wallpapers(cr);
 	case PAGE_NAVIGATION: {
@@ -3315,6 +3344,7 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_OPEN_PAGE:
 		if (arg == PAGE_INSTALLED_APPS) installed_load();
+		if (arg == PAGE_STYLE) app.style_pending = app.style;	/* what was left unapplied is forgotten */
 		if (arg == PAGE_WALLS) {
 			wall_cat_open = -1;	/* opens on the categories */
 			wall_leave_at = 0;
@@ -3386,8 +3416,13 @@ static void activate(int action, int arg) {
 		config_save();
 		break;
 	case ACT_STYLE:
-		app.style = arg;
-		config_save();	/* the shell reads it on SIGHUP and starts the session again in it */
+		app.style_pending = arg;
+		break;
+	case ACT_STYLE_APPLY:
+		if (app.style_pending != app.style) {
+			app.style = app.style_pending;
+			config_save();	/* the shell reads it on SIGHUP and starts the session again in it */
+		}
 		break;
 	case ACT_HAPTICS:
 		app.haptics = !app.haptics;
@@ -3687,8 +3722,11 @@ static void activate(int action, int arg) {
 		config_save();
 		break;
 	case ACT_SCALE_CYCLE:
-		if (app.scale_idx != arg) {
-			app.scale_idx = arg;
+		app.scale_pending = arg;
+		break;
+	case ACT_SCALE_APPLY:
+		if (app.scale_idx != app.scale_pending) {
+			app.scale_idx = app.scale_pending;
 			config_save();
 			/* the shell takes a new scale only as it starts: it restarts
 			 * (greetd starts it again), and the apps with it */
@@ -4068,6 +4106,7 @@ static void arrived(int page) {
 		ib_tick();
 		zmc_every(IB_FRAME_MS, ib_tick);	/* the network moves while this page is open */
 	} else if (page == PAGE_DISPLAY) {
+		app.scale_pending = app.scale_idx;
 		display_tick();
 		zmc_every(700, display_tick);
 	}
@@ -4136,6 +4175,11 @@ int main(int argc, char **argv) {
 		}
 		if (getenv("ZT_ABOUT_REPO")) {
 			app.about_show_repo = true;
+		}
+		/* a choice not yet applied, for reviews */
+		if (getenv("ZT_PENDING")) {
+			app.style_pending = !app.style;
+			app.scale_pending = app.scale_idx == 0 ? 1 : 0;
 		}
 		return render_to_file(argv[2], argv[3]);
 	}
