@@ -354,6 +354,12 @@ check-audio-state:
 check-audiod:
 	python3 tests/audiod.py
 
+.PHONY: check-pods
+# the AirPods protocol layer against bytes (no phone, no pods, no libraries)
+check-pods:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-pods-test tests/pods-proto.c
+	/tmp/ztmetro-pods-test
+
 .PHONY: check-power-key
 check-power-key:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-power-key-test tests/power-key.c
