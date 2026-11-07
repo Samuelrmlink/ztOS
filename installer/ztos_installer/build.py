@@ -27,9 +27,10 @@ TARBALL = ROOT / "build" / "alarm.tar.gz"
 TARBALL_URL = "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
 SDK = ROOT / "sdk"
 PKGCACHE = ROOT / "build" / "pkg-cache"
-# Arch's edk2-aarch64 package; the Nix development shell exports ZTOS_EDK2
-# with the same QEMU_EFI.fd from nixpkgs.
-EDK2 = Path(os.environ.get("ZTOS_EDK2", "/usr/share/edk2/aarch64"))
+# Where QEMU_EFI.fd is: Arch's and Fedora's edk2-aarch64, then Debian's and
+# Ubuntu's qemu-efi-aarch64; the Nix development shell exports ZTOS_EDK2.
+EDK2 = next((Path(d) for d in (os.environ.get("ZTOS_EDK2"), "/usr/share/edk2/aarch64", "/usr/share/qemu-efi-aarch64")
+             if d and (Path(d) / "QEMU_EFI.fd").exists()), Path("/usr/share/edk2/aarch64"))
 
 
 class Fail(Exception):

@@ -12,6 +12,7 @@ import urllib.request
 from pathlib import Path
 
 from .build import ROOT, WORK, Fail, say
+from .host import install_hint
 
 REPO = "Zerone-Laboratories/ztOS"
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -66,7 +67,7 @@ def decompress_image(src: Path, dst: Path) -> Path:
             subprocess.run(["zstd", "-d", str(src), "-o", str(dst)], check=True)
             return dst
         # If no zstd command, fallback check if .xz also exists or error
-        raise Fail("zstd not found on this system: sudo pacman -S zstd")
+        raise Fail(f"zstd not found on this system: {install_hint('zstd')}")
 
     if src.suffix == ".xz":
         with lzma.open(src, "rb") as fin, open(dst, "wb") as fout:

@@ -46,6 +46,12 @@ PACKAGES = {
     "qemu-user": ("qemu-user-static qemu-user-static-binfmt", "qemu-user-static-aarch64", "qemu-user-static"),
     "socat": ("socat", "socat", "socat"),
     "adb": ("android-tools", "android-tools", "adb"),
+    "zstd": ("zstd", "zstd", "zstd"),
+    "qemu-system": ("qemu-system-aarch64", "qemu-system-aarch64-core", "qemu-system-arm"),
+    "qemu-firmware": ("edk2-aarch64", "edk2-aarch64", "qemu-efi-aarch64"),
+    "qemu-gl": ("qemu-hw-display-virtio-gpu-pci-gl",
+                "qemu-device-display-virtio-gpu-pci-gl qemu-device-display-virtio-gpu-gl", "qemu-system-gui"),
+    "qemu-window": ("qemu-ui-gtk qemu-ui-opengl", "qemu-ui-gtk qemu-ui-opengl", "qemu-system-gui"),
 }
 BUILD_TOOLS = ("unshare", "newuidmap", "newgidmap", "bsdtar", "mkfs.fat", "mcopy", "mmd", "sfdisk",
                "curl", "tar", "xz")
@@ -272,6 +278,27 @@ def build_checks() -> list:
 def phone_checks() -> list:
     """What putting the image on a phone takes, on top of building it."""
     return [check_tool(t) for t in PHONE_TOOLS]
+
+
+def qemu_lists(kind: str, name: str) -> bool:
+    """Whether QEMU itself offers this device or display. Asking it needs no path to its
+    modules, which differ by distribution (/usr/lib/qemu, /usr/lib64/qemu...)."""
+    try:
+        out = subprocess.run(["qemu-system-aarch64", f"-{kind}", "help"], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return re.search(rf'(^|[\s"]){re.escape(name)}($|[\s",])', out.stdout, re.M) is not None
+
+
+def emulator_checks() -> list:
+    """What `ztos emulator` uses. Optional: a build does not need them."""
+    if shutil.which("qemu-system-aarch64") is None:
+        return [Check("qemu-system-aarch64", False, install_hint("qemu-system"))]
+    gl = qemu_lists("device", "virtio-gpu-gl-pci")
+    window = qemu_lists("display", "gtk")
+    return [Check("qemu-system-aarch64", True),
+            Check("its graphics (virtio GPU with OpenGL)", gl, "" if gl else install_hint("qemu-gl")),
+            Check("its window (GTK)", window, "" if window else install_hint("qemu-window"))]
 
 
 def problems(checks: list) -> list:

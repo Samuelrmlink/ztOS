@@ -121,5 +121,29 @@ class Tools(unittest.TestCase):
         self.assertEqual(check.detail, "sudo apt-get install socat")
 
 
+class Emulator(unittest.TestCase):
+    def fake_qemu(self, tmp, device, display):
+        qemu = Path(tmp) / "qemu-system-aarch64"
+        qemu.write_text(f"""#!/bin/sh
+case $1 in
+-device) echo '{device}' ;;
+-display) printf '{display}' ;;
+esac
+""")
+        qemu.chmod(0o755)
+        return mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ['PATH']}"})
+
+    def test_it_asks_qemu_what_it_has(self):
+        with tempfile.TemporaryDirectory() as tmp, self.fake_qemu(
+                tmp, 'name "virtio-gpu-gl-pci", bus PCI', "Available display backend types:\\nnone\\ngtk\\n"):
+            self.assertTrue(all(c.ok for c in host.emulator_checks()))
+
+    def test_a_similar_name_is_not_the_device(self):
+        with tempfile.TemporaryDirectory() as tmp, self.fake_qemu(tmp, 'name "virtio-gpu-pci", bus PCI', "none\\n"):
+            ok = {c.what: c.ok for c in host.emulator_checks()}
+        self.assertFalse(ok["its graphics (virtio GPU with OpenGL)"])
+        self.assertFalse(ok["its window (GTK)"])
+
+
 if __name__ == "__main__":
     unittest.main()

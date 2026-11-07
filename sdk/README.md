@@ -69,8 +69,9 @@ Then it tells the shell to reread the app list. Nothing needs root, and
 
 ## Setting up
 
-On the laptop you need Python 3.11 or newer and PySide6 (`pacman -S pyside6`).
-Qt Designer is optional (`qt6-tools`). Put `sdk/bin` on your PATH, or link
+On the laptop you need Python 3.11 or newer and PySide6 (`pyside6` on Arch,
+`python3-pyside6` on Fedora, with EPEL on Rocky, Alma and RHEL). Qt Designer is optional (`qt6-tools` on
+Arch, `qt6-designer` on Fedora). Put `sdk/bin` on your PATH, or link
 `sdk/bin/ztos-sdk` into `~/.local/bin`.
 
 The phone needs Qt for Python. Check it, then install what is missing (this

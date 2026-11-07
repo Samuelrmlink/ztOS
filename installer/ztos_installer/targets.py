@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from .build import EDK2, ROOT, WORK, Fail, say
+from .host import install_hint
 
 
 MANUAL_REBOOT = """To reboot the phone:
@@ -58,7 +59,6 @@ def reboot_from_rescue() -> None:
 
 MIRROR_PORT = 27183             # ztmirror (ztmetro/mirror/), for ztos mirror --target qemu
 QEMU_SCREEN = (540, 1110)       # a phone's shape; ztMETRO draws it at 1.5 px a point
-EGL_HEADLESS = Path("/usr/lib/qemu/ui-egl-headless.so").exists()
 
 
 def qemu_command(disk: Path, headless: bool = False, monitor: Path | None = None, gl: bool = False) -> list:
@@ -72,9 +72,9 @@ def qemu_command(disk: Path, headless: bool = False, monitor: Path | None = None
     window; some drivers (NVIDIA on laptops with two GPUs, in particular) make
     QEMU stop with "eglMakeCurrent failed: EGL_BAD_ACCESS"."""
     if not (EDK2 / "QEMU_EFI.fd").exists():
-        raise Fail("no UEFI firmware for aarch64: sudo pacman -S edk2-aarch64")
+        raise Fail(f"no UEFI firmware for aarch64: {install_hint('qemu-firmware')}")
     if shutil.which("qemu-system-aarch64") is None:
-        raise Fail("no QEMU: sudo pacman -S qemu-system-aarch64")
+        raise Fail(f"no QEMU: {install_hint('qemu-system')}")
     w, h = QEMU_SCREEN
     cmd = ["qemu-system-aarch64", "-name", "ztOS", "-M", "virt", "-cpu", "max", "-smp", "4", "-m", "4G",
            "-bios", str(EDK2 / "QEMU_EFI.fd"),

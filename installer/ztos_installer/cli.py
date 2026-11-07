@@ -199,11 +199,9 @@ def cmd_guide(args):
 
 
 def cmd_doctor(args):
-    import shutil
-
     def show(checks):
         for c in checks:
-            state = "yes" if c.ok else ("warning" if c.warning else "NO")
+            state = "yes" if c.ok else ("warning" if c.warning else "no")
             print(f"  {c.what}: {state}" + (f" ({c.detail})" if c.detail else ""))
 
     build = host.build_checks()
@@ -211,15 +209,11 @@ def cmd_doctor(args):
     show(build)
     print("installing on a phone (the emulator does not need these)")
     show(host.phone_checks())
-    print("the emulator")
-    print(f"  qemu-system-aarch64: {'yes' if shutil.which('qemu-system-aarch64') else 'no'}")
-    gpu = Path("/usr/lib/qemu/hw-display-virtio-gpu-pci-gl.so").exists()
-    window = Path("/usr/lib/qemu/ui-gtk.so").exists() and Path("/usr/lib/qemu/ui-opengl.so").exists()
-    print(f"  its graphics (virtio GPU with OpenGL): {'yes' if gpu else 'no: sudo pacman -S qemu-hw-display-virtio-gpu-pci-gl'}")
-    print(f"  its window (GTK + OpenGL): {'yes' if window else 'no: sudo pacman -S qemu-ui-gtk qemu-ui-opengl'}")
+    print("the emulator (optional)")
+    show(host.emulator_checks())
     failed = host.problems(build)
     if failed:
-        raise b.Fail(f"this computer cannot build ztOS yet: {len(failed)} thing(s) marked NO above")
+        raise b.Fail(f"this computer cannot build ztOS yet: {len(failed)} thing(s) under 'building ztOS' said no")
     print("this computer can build ztOS")
 
 

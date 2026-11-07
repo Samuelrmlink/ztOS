@@ -9,6 +9,11 @@ The build never needs root. These steps do, because they install packages.
 
 ## What was tested
 
+The build tests below used a symlink at `/usr/lib/qt6/uic`. The build now finds
+`/usr/lib64/qt6/libexec/uic` by itself, so the commands here no longer make one. That
+`uic` was run by hand on `apps/music/form.ui`; no full build was repeated without the
+symlink.
+
 | Distribution | What ran | Result |
 | --- | --- | --- |
 | Rocky Linux 10.2 | Full cold build for `starlte`, no EPEL, compilers removed first | Exit 0, `root.img` passes `e2fsck -fn`, listing looks right |
@@ -47,10 +52,6 @@ sudo dnf -y --setopt=install_weak_deps=False \
     --repo=f45u --setopt=f45u.gpgcheck=1 \
     --setopt=f45u.gpgkey=https://src.fedoraproject.org/rpms/fedora-repos/raw/f45/f/RPM-GPG-KEY-fedora-45-primary \
     install qemu-user-static-aarch64
-
-# the build only looks for pyside6-uic or /usr/lib/qt6/uic; Qt puts uic elsewhere here
-sudo mkdir -p /usr/lib/qt6
-sudo ln -s /usr/lib64/qt6/libexec/uic /usr/lib/qt6/uic
 ```
 
 Check the key's fingerprint when dnf shows it:
@@ -65,8 +66,8 @@ The Fedora package is a static binary and needs only `/bin/sh` to install. The
 stays enabled and `dnf update` will not update this package. Repeat the command
 to update it. When Fedora 45 reaches end of life, change the release in both URLs.
 
-**Using EPEL instead of the symlink.** `pyside6-tools` provides a real
-`pyside6-uic`, so no symlink is needed:
+**Using EPEL for `uic`.** `qt6-qtbase-devel` is enough. `pyside6-tools` is the
+other way, with a real `pyside6-uic`:
 
 ```sh
 sudo dnf -y install epel-release
@@ -101,8 +102,6 @@ it again with CodeReady Builder enabled.
 sudo dnf -y --setopt=install_weak_deps=False install \
     git-core bsdtar dosfstools mtools e2fsprogs python3 util-linux shadow-utils \
     curl tar xz qemu-user-static-aarch64 qt6-qtbase-devel
-sudo mkdir -p /usr/lib/qt6
-sudo ln -s /usr/lib64/qt6/libexec/uic /usr/lib/qt6/uic
 ```
 
 The Fedora 45 cloud image already had `qemu-user-static` with binfmt active, and
@@ -157,7 +156,7 @@ third-party EL10 rebuilds installed with `--nogpgcheck`.
 | qemu binfmt with F | `qemu-user-static-aarch64` | Without F the build fails at "setting up package signing keys" |
 | `mke2fs` 1.47 or later | `e2fsprogs` | `-O ^orphan_file` at `build.py:374` needs it (read from code). 1.47.1 and 1.47.4 work; older was not tried |
 | Python 3.11 or later | `python3` | The SDK imports `tomllib` (read from code). 3.12 and 3.15 work; older was not tried |
-| `uic` | `qt6-qtbase-devel` + symlink, or `pyside6-tools` | Build failed without one on Rocky and Fedora |
+| `uic` | `qt6-qtbase-devel`, or `pyside6-tools` | Build failed without one on Rocky and Fedora |
 | `curl` | `curl` | Downloads the Arch Linux ARM tarball (`build.py:110`) |
 | `tar`, `xz` | `tar`, `xz` | Unpack `ztos-media` (`build.py:238`) |
 
@@ -271,8 +270,7 @@ sudo dnf -y --setopt=install_weak_deps=False install qemu-system-aarch64-core ed
 ```
 
 These install, and QEMU reaches its UEFI firmware. ztOS was not booted in it.
-`doctor` will still say "no" for graphics and window, because it looks in
-`/usr/lib/qemu` and Fedora uses `/usr/lib64/qemu`.
+`doctor` asks QEMU itself which graphics and windows it has.
 
 **EL10:** `qemu-system-aarch64` is not in AppStream, CRB or EPEL. `qemu-kvm` is there
 but is x86-only, so there is no packaged way to run the emulator. Only `edk2-aarch64`
@@ -299,8 +297,6 @@ for this on a Rocky host; that was not repeated here.
   the binary gone, restarting `systemd-binfmt` fails and the entry disappears (tested on
   Rocky), and a reboot should do the same (not tested). `doctor` warns about this: "the
   qemu interpreter is installed: warning".
-- **Only one `uic` location is checked.** `sdk/ztos_sdk/cli.py:254` looks for
-  `pyside6-uic`, then `/usr/lib/qt6/uic`, which is why the symlink is needed.
 - **The tarball is not verified.** It comes over plain HTTP with no checksum
   (`build.py:27`, `build.py:110`).
 - **Images differ slightly by host.** Fedora's `mke2fs` adds `metadata_csum_seed`, which

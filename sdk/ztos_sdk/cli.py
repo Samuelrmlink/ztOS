@@ -171,7 +171,7 @@ def cmd_designer(args):
     project = find_project(args.project)
     designer = shutil.which("designer6") or shutil.which("pyside6-designer") or shutil.which("designer")
     if not designer:
-        raise Fail("Qt Designer is not installed (pacman -S qt6-tools)")
+        raise Fail("Qt Designer is not installed (qt6-tools on Arch, qt6-designer on Fedora and its relatives; elsewhere, your distribution's Qt 6 tools)")
     forms = [str(project.root / args.form)] if args.form else [str(project.root / f) for f in project.files()
                                                              if f.suffix == ".ui"]
     say("drawing with", designer, *forms)
