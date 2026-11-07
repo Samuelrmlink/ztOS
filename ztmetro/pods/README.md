@@ -7,6 +7,7 @@
 | `pods-proto.h`, `pods-aes.h` | Bytes: AAP packets, the advert. No I/O. |
 | `pods-model.h` | State, commands, scan policy, the files. No I/O, no clock. |
 | `ztos-podsd.c` | sd-bus, the L2CAP socket, timers, files |
+| `pods-adv-capture.c` | A standalone capture of every advert in Apple's manufacturer data, for working out what the air carries |
 | `ztpods.c` | The app. JSON and a socket; no Bluetooth. |
 | `pods-bar-state.h`, `pods-bar.h` | The short file's reader; the status bar's drawing |
 
@@ -16,7 +17,7 @@ Tests: `make check-pods` (any machine, no libraries), `make check-podsd` (on the
 
 ## Where the facts come from
 
-**Nothing in this directory has been run against real AirPods on this phone.** All protocol facts are read from other projects, whose licences are GPL-3.0-or-later (LibrePods, LinuxPods) and GPLv3 (apple-wireshark). No code was copied; this is a C reimplementation from the facts they document, and these files say `GPL-3.0-or-later`, as ztOS's README does for `ztmetro/`. Thanks to all three.
+Seen on this phone, off a Pro 2 USB-C (A3047): a pod's advert resolving with the stored IRK and opening under the ENC_KEY while linked, in the layout below (one 30 s capture, 2026-11-07; left pod worn, right in the closed case). In that capture, with no charger event, no case advert in the format below was heard. Other protocol facts are read from other projects, whose licences are GPL-3.0-or-later (LibrePods, LinuxPods) and GPLv3 (apple-wireshark). No code was copied; this is a C reimplementation from the facts they document, and these files say `GPL-3.0-or-later`, as ztOS's README does for `ztmetro/`. Thanks to all three.
 
 | Fact | Where it was seen, by them |
 |---|---|
@@ -33,6 +34,6 @@ Settings left out on purpose: spatial and head tracking (out of scope), 0x06 own
 ## Things the design relies on
 
 - **Battery from broadcasts needs one connection here first**, for the keys. Before that, adverts are only "nearby": 10% steps, no proof of whose.
-- **A closed case is silent** a few seconds after the lid shuts, so what shows is the last reading, with its age.
-- **Bursts, not advert monitors**: monitors need `Experimental = true`. Discovery holds up LE devices reconnecting by directed advertising, hence short bursts: 4 s of 10 s with the app open, 3 s of 60 s with the screen on and no A2DP running, and none with the screen off or every pair linked.
+- **A closed case: an open question.** LinuxPods measured the *pods* stopping about 4 s after the lid shuts (Pro 3). The owner has seen an iPhone follow a charger going into a closed case with one pod inside (Pro 2 USB-C, A3047), so something is still sent, and LibrePods' `android/rewrite` branch reads a separate case advert: type 07, first byte 06, a block under ENC_KEY, from an address of the case's own. We read it too (`ble_decrypt_case`, source `case`), but **it hasn't been seen on our hardware**: `pods-adv-capture` is there to settle it. Which readings show is the newest honest one: the link's for what it reports, a broadcast's for what it doesn't.
+- **Bursts, not advert monitors**: monitors need `Experimental = true`, and with no controller offload here they would scan continuously on the host. Discovery holds up LE devices reconnecting by directed advertising, hence short bursts: with the screen on, 4 s of 10 s with the app open and 3 s of 60 s otherwise, linked or not, for a pair we have keys for. With A2DP active: none if a pair is linked, 2 s of 20 s if nothing is and the app is open. With the screen off: none. A linked pair's music is never scanned beside until that has been measured on this chip.
 - `mpris-proxy`'s AVRCP handling isn't touched: AAP's stem packets aren't read, and nothing here sends media keys.

@@ -19,6 +19,7 @@
 #define PODS_MODE_HOLD_MS 2500		/* a report of the old mode can follow a change */
 #define PODS_OFF_DEBOUNCE_MS 300	/* one pod in an ear: "Off" for 50 ms, and back */
 #define PODS_DUMP_WAIT_MS 25000		/* the startup dump has taken 20 s: then rows open anyway */
+#define PODS_AAP_CASE_FRESH_S 30	/* the link's last word on the case: newer than this stands */
 #define PODS_MAX_SETTING_ID 0x42
 
 /* ---- models ---- */
@@ -120,6 +121,7 @@ struct pods_device {
 	enum pods_link link;
 	uint32_t link_up_ms;
 	struct pods_battery part[POD_PARTS];
+	bool aap_live[POD_PARTS];	/* the link's last battery packet had a level for it */
 	int lid;			/* 0 open, 1 closed, -1 unknown */
 	long lid_seen;
 	int connection;			/* the advert's: -1 unknown */
@@ -230,6 +232,7 @@ static inline void pods_link_open(struct pods_device *d, uint32_t now, struct po
  * still has the pair. */
 static inline void pods_link_gone(struct pods_device *d, bool connected) {
 	d->link = connected ? PODS_LINK_CONNECTED : PODS_LINK_NONE;
+	memset(d->aap_live, 0, sizeof(d->aap_live));
 	d->settings_known = false;
 	d->mode = d->mode_pending = 0;
 	d->primary = d->place[0] = d->place[1] = -1;
@@ -298,6 +301,7 @@ static inline int pods_link_packet(struct pods_device *d, uint32_t now, long wal
 		int ev = 0;
 		for (int i = 0; i < POD_PARTS; i++) {
 			/* a part with nothing to report keeps its last reading, and its age */
+			if (parts[i].present) d->aap_live[i] = parts[i].level >= 0;
 			if (!parts[i].present || parts[i].level < 0) continue;
 			d->part[i] = (struct pods_battery){ parts[i].level, parts[i].charging, wall, 'a' };
 			ev = PODS_EV_CHANGED | PODS_EV_SAVE;
@@ -479,11 +483,56 @@ static inline void pods_nearby_note(struct pods_world *w, const struct ble_clear
 
 enum { PODS_ADV_IGNORED, PODS_ADV_NEARBY, PODS_ADV_READING, PODS_ADV_MISMATCH };
 
+/* A broadcast's reading of one part. The link is the truth for what it is reporting: a pod it
+ * has a level for is never overwritten, and the case only once the link has said nothing of
+ * it for a while (it reports on events, and a broadcast can be newer). What the link calls
+ * Disconnected (a closed case) it isn't reporting, so a broadcast may fill that in. */
+static inline bool pods_ble_may_set(const struct pods_device *d, int part, long wall) {
+	if (d->link != PODS_LINK_READY || !d->aap_live[part]) return true;
+	return part == POD_CASE && wall - d->part[part].seen >= PODS_AAP_CASE_FRESH_S;
+}
+
+static inline void pods_ble_exact(struct pods_device *d, const struct ble_exact *e, long wall, char source) {
+	for (int part = 0; part < 3; part++) {
+		if (e->level[part] < 0 || !pods_ble_may_set(d, part, wall)) continue;	/* above 100: not available */
+		d->part[part] = (struct pods_battery){ e->level[part], e->charging[part], wall, source };
+	}
+}
+
+/* Only the 10% steps: a reading of 57 with a step of 50 is not news, so the 57 stays (and
+ * counts as heard now). One that disagrees, or nothing at all, takes the step, marked coarse. */
+static inline void pods_ble_coarse(struct pods_device *d, const struct ble_clear *c, const struct ble_exact *e, long wall) {
+	for (int part = 0; part < 3; part++) {
+		if (e->level[part] >= 0 || c->level[part] < 0 || !pods_ble_may_set(d, part, wall)) continue;
+		struct pods_battery *b = &d->part[part];
+		if (b->level >= c->level[part] && b->level < c->level[part] + 10) {
+			b->charging = c->charging[part];
+			b->seen = wall;
+		} else {
+			*b = (struct pods_battery){ c->level[part], c->charging[part], wall, 'c' };
+		}
+	}
+}
+
 /* An advert: `addr` it came from, `mfr` Apple's manufacturer data. Only a pair whose IRK
  * resolves the address and whose ENC_KEY opens it counts as that pair: cleartext can be
- * forged, and says nothing of which pair it is. *which is set for PODS_ADV_READING. */
+ * forged, and says nothing of which pair it is. A case's own advert has an address of its
+ * own: for that the block opening under a pair's ENC_KEY is all there is. *which is set for
+ * PODS_ADV_READING. */
 static inline int pods_advert(struct pods_world *w, const uint8_t addr[6], const uint8_t *mfr, size_t n, long wall,
 		int *which) {
+	const uint8_t *kase = ble_find_case(mfr, n);
+	if (kase) {
+		for (int i = 0; i < w->n; i++) {
+			struct pods_device *d = &w->dev[i];
+			struct ble_exact e;
+			if (!d->has_keys || !ble_decrypt_case(d->enc, kase, &e)) continue;
+			if (which) *which = i;
+			pods_ble_exact(d, &e, wall, 'k');
+			return PODS_ADV_READING;
+		}
+		return PODS_ADV_IGNORED;
+	}
 	const uint8_t *payload = ble_find_proximity(mfr, n);
 	struct ble_clear c;
 	if (!payload || !ble_parse_clear(payload, &c)) return PODS_ADV_IGNORED;
@@ -500,12 +549,8 @@ static inline int pods_advert(struct pods_world *w, const uint8_t addr[6], const
 			d->lid = c.lid;
 			d->lid_seen = wall;
 		}
-		/* with an open link AAP is the truth, and it is live; this lags it */
-		if (d->link == PODS_LINK_READY) return PODS_ADV_READING;
-		for (int part = 0; part < 3; part++) {
-			if (e.level[part] < 0) continue;	/* above 100: not available, keep the last */
-			d->part[part] = (struct pods_battery){ e.level[part], e.charging[part], wall, 'b' };
-		}
+		pods_ble_exact(d, &e, wall, 'b');
+		pods_ble_coarse(d, &c, &e, wall);
 		return PODS_ADV_READING;
 	}
 	pods_nearby_note(w, &c, wall);
@@ -516,19 +561,22 @@ static inline int pods_advert(struct pods_world *w, const uint8_t addr[6], const
 
 struct pods_scan_in {
 	bool powered, screen_on, ui_open, audio_active;
-	int keyed_unlinked;	/* pairs with keys and no open link: a broadcast would tell us something */
+	int keyed_unlinked;	/* pairs with keys and no open link */
+	int keyed_linked;	/* with keys and a link: the case's own broadcasts say what the link can't */
 	int known, linked;
 };
 struct pods_scan_plan { int on_s, every_s; };	/* 0: no scanning */
 
-/* Discovery holds up reconnecting LE devices and costs radio time beside A2DP, so bursts,
- * and only when a broadcast has something to say to someone. */
+/* Discovery costs radio time beside A2DP and holds up LE devices reconnecting, so bursts, and
+ * only when a broadcast has something to say to someone.
+ * Never with the screen off. Never beside music to a pair we hold a link to: nobody has measured
+ * what a burst does to it on this chip, and audio already hiccups here. */
 static inline struct pods_scan_plan pods_scan_policy(const struct pods_scan_in *s) {
-	struct pods_scan_plan none = { 0, 0 }, ui = { 4, 10 }, background = { 3, 60 };
+	struct pods_scan_plan none = { 0, 0 }, ui = { 4, 10 }, ui_audio = { 2, 20 }, background = { 3, 60 };
 	if (!s->powered || !s->screen_on) return none;
-	if (s->known > 0 && s->linked == s->known) return none;	/* AAP says it all */
+	if (s->audio_active) return s->ui_open && !s->linked ? ui_audio : none;
 	if (s->ui_open) return ui;
-	if (s->keyed_unlinked > 0 && !s->audio_active) return background;
+	if (s->keyed_unlinked > 0 || s->keyed_linked > 0) return background;
 	return none;
 }
 
@@ -550,7 +598,7 @@ static inline void pods_json_part(FILE *f, const char *name, const struct pods_b
 	*comma = true;
 	if (b->level >= 0) {
 		fprintf(f, "\"level\":%d,\"charging\":%s,\"seen\":%ld,\"source\":\"%s\"}", b->level,
-			b->charging ? "true" : "false", b->seen, b->source == 'a' ? "aap" : "ble");
+			b->charging ? "true" : "false", b->seen, b->source == 'a' ? "aap" : b->source == 'k' ? "case" : b->source == 'c' ? "ble-coarse" : "ble");
 	} else {
 		fputs("\"level\":null}", f);
 	}

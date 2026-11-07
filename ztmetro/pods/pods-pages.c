@@ -253,7 +253,9 @@ static double battery_row(cairo_t *cr, double y, const char *label, json_object 
 	if (known && !live) {
 		char age[32], line[64];
 		age_text(age, sizeof(age), jl(b, "seen", 0));
-		snprintf(line, sizeof(line), "Last heard %s", age);
+		const char *from = js(b, "source", "");
+		snprintf(line, sizeof(line), "Last heard %s%s", age, !strcmp(from, "case") ? ", from the case" :
+			!strcmp(from, "ble-coarse") ? ", to the nearest 10%" : "");
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 		zmc_text(cr, line, FONT_REGULAR, 13, MARGIN, y, 0);
 		y += 20;

@@ -395,11 +395,17 @@ def run(t):
     assert t.tell("rename %s " % MAC) in ("err bad-name", "err usage")
     assert t.tell("forget %s" % MAC) == "err connected"
 
-    # with a link up, nothing scans: AAP says it all
+    # with a link up it still listens, for the case; not beside music
     n = len(t.calls("StartDiscovery"))
     assert t.tell("scan-hint on") == "ok"
-    time.sleep(1.5)
-    assert len(t.calls("StartDiscovery")) == n
+    wait("a burst beside the link", lambda: len(t.calls("StartDiscovery")) > n, 12)
+    wait("the burst's reply", lambda: t.state()["scanning"], 12)
+    # the left pod reports, so a broadcast leaves it; the case didn't, so one may set it
+    t.advert(RPA_PATH, ADVERT)
+    wait("the case, from a broadcast", lambda: t.device()["battery"]["case"]["level"] == 55)
+    assert t.device()["battery"]["case"]["source"] == "ble"
+    assert t.device()["battery"]["left"]["level"] == 80 and t.device()["battery"]["left"]["source"] == "aap"
+    n = len(t.calls("StartDiscovery"))
 
     # the channel drops with BlueZ still connected: back, after a wait
     ch.close()

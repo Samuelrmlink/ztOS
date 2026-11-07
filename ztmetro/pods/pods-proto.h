@@ -206,19 +206,32 @@ static inline size_t aap_build_rename(uint8_t *out, size_t cap, const char *name
 #define BLE_PROXIMITY_TYPE 0x07
 #define BLE_PROXIMITY_LEN 25
 
-/* Apple's manufacturer data is a list of type, length, value. NULL unless it holds a
- * paired-form proximity pairing message. */
-static inline const uint8_t *ble_find_proximity(const uint8_t *m, size_t n) {
+/* Apple's manufacturer data is a list of type, length, value. The length's top three bits
+ * are flags on some messages, so they are not length. */
+static inline const uint8_t *ble_find_message(const uint8_t *m, size_t n, uint8_t first_byte, size_t want_len, bool at_least) {
 	for (size_t at = 0; at + 2 <= n;) {
-		size_t len = m[at + 1];
+		size_t len = m[at + 1] & 0x1f;
 		if (at + 2 + len > n) return NULL;
-		if (m[at] == BLE_PROXIMITY_TYPE) {
-			/* first byte 00 is pairing mode, another layout */
-			return len == BLE_PROXIMITY_LEN && m[at + 2] == 0x01 ? m + at + 2 : NULL;
+		if (m[at] == BLE_PROXIMITY_TYPE && len >= 1 && m[at + 2] == first_byte && (at_least ? len >= want_len : len == want_len)) {
+			return m + at + 2;
 		}
 		at += 2 + len;
 	}
 	return NULL;
+}
+
+/* NULL unless it holds a paired-form proximity pairing message (first byte 01; 00 is
+ * pairing mode, another layout). */
+static inline const uint8_t *ble_find_proximity(const uint8_t *m, size_t n) {
+	return ble_find_message(m, n, 0x01, BLE_PROXIMITY_LEN, false);
+}
+
+/* The charging case's own advert, as LibrePods' android/rewrite branch reads it: same type,
+ * first byte 06, then one AES block under ENC_KEY. From an address of the case's, which the
+ * pods' IRK does not resolve. NOT YET SEEN ON OUR HARDWARE: see README.md. */
+#define BLE_CASE_LEN 17
+static inline const uint8_t *ble_find_case(const uint8_t *m, size_t n) {
+	return ble_find_message(m, n, 0x06, BLE_CASE_LEN, true);
 }
 
 /* What anyone nearby can read. Levels in 10% steps, -1 unknown. Which pair: not said. */
@@ -290,6 +303,23 @@ static inline bool ble_decrypt(const uint8_t enc[16], const uint8_t *payload, co
 		int level = b & 0x7f;
 		out->level[part[i]] = level > 100 ? -1 : level;
 		out->charging[part[i]] = level <= 100 && (b & 0x80);
+	}
+	return true;
+}
+
+/* A block that opens as a case advert: byte 1 is 0x20, byte 15 is 0, then case, left, right at
+ * 3, 4, 5 as bit 7 charging, the rest the level, FF none. There is no MAC in it to check, so a
+ * wrong key passes about one time in 130,000; only keys of pairs we hold are tried. */
+static inline bool ble_decrypt_case(const uint8_t enc[16], const uint8_t *payload, struct ble_exact *out) {
+	uint8_t pt[16];
+	pods_aes_decrypt(enc, payload + 1, pt);
+	if (pt[1] != 0x20 || pt[15] != 0) return false;
+	static const int part[3] = { POD_CASE, POD_LEFT, POD_RIGHT };
+	for (int i = 0; i < 3; i++) {
+		uint8_t b = pt[3 + i];
+		if (b != 0xff && (b & 0x7f) > 100) return false;
+		out->level[part[i]] = b == 0xff ? -1 : b & 0x7f;
+		out->charging[part[i]] = b != 0xff && (b & 0x80);
 	}
 	return true;
 }
