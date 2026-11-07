@@ -42,6 +42,7 @@
 #include "zrnboard.h"
 #include "../background-apps.h"
 #include "config-merge.h"
+#include "page-tree.h"
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -53,37 +54,6 @@ static const char *runtime_file(char *out, size_t size, const char *name) {
 }
 
 #define MAX_NETWORKS	24
-enum page {
-	PAGE_MAIN,
-	PAGE_THEME,
-	PAGE_DISPLAY,
-	PAGE_WIFI,
-	PAGE_MOBILE,
-	PAGE_AUDIO,
-	PAGE_BATTERY,
-	PAGE_CPU,
-	PAGE_VM,
-	PAGE_GPU,
-	PAGE_KEYBOARD,
-	PAGE_ABOUT,
-	PAGE_PERF,
-	PAGE_DEV,
-	PAGE_APPS,	/* the second tab of the hub */
-	PAGE_INSTALLED_APPS,
-	PAGE_APP_DETAIL,
-	PAGE_HAPTICS,
-	PAGE_QUICK,
-	PAGE_APN,
-	PAGE_WIFI_JOIN,	/* a network's password, the first time */
-	PAGE_WIFI_NET,	/* one network: its state, its address, forgetting it */
-	PAGE_DATE,
-	PAGE_BLUETOOTH,
-	PAGE_ACCENTS,	/* the accent picker, full screen */
-	PAGE_WALLS,	/* the background photo picker: categories, then one */
-	PAGE_NAVIGATION,
-	PAGE_BOOST,	/* Dynamic Boost System: RapidBoost and IntelligentBoost */
-};
-
 enum action {
 	ACT_RINGTONE = 700,
 	ACT_APP_SELECT = 600, ACT_APP_BACKGROUND, ACT_APP_BATCH,
@@ -3977,51 +3947,39 @@ static bool back(void) {
 		zmc_redraw();
 		return true;
 	}
-	if (zmc.page == PAGE_MAIN || zmc.page == PAGE_APPS) {
+	int up = page_parent(zmc.page, hub_tab);
+	if (up == PAGE_NO_PARENT) {
 		return false;	/* either tab of the hub: back leaves the app */
 	}
-	if (zmc.page == PAGE_APP_DETAIL) { zmc_go(PAGE_INSTALLED_APPS, -1); return true; }
-	if (zmc.page == PAGE_INSTALLED_APPS) { zmc_go(PAGE_APPS, -1); return true; }
-	zmc_every(0, NULL);	/* the performance page's refresh, if it was running */
+	/* What leaving a page takes, before going up; some backs only put something away. */
+	if (zmc.page == PAGE_WALLS && wall_cat_open >= 0) {
+		/* a category: its photos swivel out, then back to the categories. This
+		 * runs on the page's timer, so it comes before that is stopped */
+		if (!wall_leave_at) {
+			wall_leave_at = zmc_now_ms();
+			wall_kick();
+		}
+		return true;
+	}
+	zmc_every(0, NULL);	/* whichever page's refresh was running */
+	wall_ticking = false;	/* (the timer they ran on: started again when they are next wanted) */
+	bt_animating = false;
 	if (zmc.page == PAGE_WIFI && wifi_menu >= 0) {
 		wifi_menu = -1;	/* back puts the menu away first */
 		zmc_redraw();
-		return true;
-	}
-	if (zmc.page == PAGE_WIFI_NET) {
-		zmc_go(PAGE_WIFI, -1);
 		return true;
 	}
 	if (zmc.page == PAGE_WIFI_JOIN) {
 		wifi_typing = false;
 		wifi_password[0] = 0;
 		zmc_keyboard(false);
-		zmc_go(PAGE_WIFI, -1);
-		return true;
-	}
-	if (zmc.page == PAGE_ACCENTS) {
-		zmc_go(PAGE_THEME, -1);	/* the picker is under the theme page */
-		return true;
-	}
-	if (zmc.page == PAGE_WALLS) {
-		if (wall_cat_open >= 0) {	/* a category: its photos swivel out, then back to the categories */
-			if (!wall_leave_at) {
-				wall_leave_at = zmc_now_ms();
-				wall_kick();
-			}
-			return true;
-		}
-		zmc_go(PAGE_THEME, -1);
-		return true;
 	}
 	if (zmc.page == PAGE_DATE) { date_focus = -1; zmc_keyboard(false); }
 	if (zmc.page == PAGE_APN) {
 		apn_focus = -1;
 		zmc_keyboard(false);
-		zmc_go(PAGE_MOBILE, -1);	/* it is under the cellular page */
-		return true;
 	}
-	zmc_go(hub_tab, -1);
+	zmc_go(up, -1);
 	return true;
 }
 
