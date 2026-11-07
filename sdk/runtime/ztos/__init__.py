@@ -2053,8 +2053,8 @@ class Page(QWidget):
         return bar
 
     def textbox(self, caption: str = "", text: str = "", on_change=None, on_submit=None,
-                password: bool = False, placeholder: str = "") -> TextBox:
-        box = self.add(TextBox(caption, text, on_change, on_submit, password, placeholder))
+                password: bool = False, placeholder: str = "", numbers: str = "") -> TextBox:
+        box = self.add(TextBox(caption, text, on_change, on_submit, password, placeholder, numbers=numbers))
         self.space(16)
         return box
 
