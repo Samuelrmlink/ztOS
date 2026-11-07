@@ -170,7 +170,7 @@ still passed. Programs are compiled inside the ARM chroot.
 | Run | Wall clock | CPU (user) | Disk |
 | --- | --- | --- | --- |
 | Rocky 10 cold, no EPEL | 59 min 49 s | 94 min | `root.img` 5.3 GB; total not measured |
-| Rocky 10 with EPEL | 73 min 9 s | not recorded | total not measured |
+| Rocky 10 with EPEL | 73 min 9 s | 114 min | total not measured |
 | Fedora 45 cold | 58 min 15 s | 94 min | Clone and build 13 GB (`du`) |
 
 - **Disk:** `root.img` is 10 GiB but sparse, 5.3 GB allocated. Peak use on the
