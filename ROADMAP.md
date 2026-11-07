@@ -127,6 +127,9 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 | 7.12 | **Lock Screen submenu under Customization**, with its own wallpaper picker. As on the tiles screen, chosen wallpapers join a user list before use, and the two lists are separate. No limit on how many wallpapers either list holds. | M | Lock wallpaper is a single `lock_wallpaper` value today. Should share the list storage and picker with 7.8. |
 | 7.13 | **Automatic wallpaper rotation.** A submenu inside both Tiles Shell and Lock Screen to rotate through that list at a chosen interval. | M | Depends on 7.8 and 7.12. Must not wake a sleeping phone just to change wallpaper: apply at the next wake. |
 | 7.11 | **Preview for the background and shell style overhaul.** Show a preview demo of how the shell will look, then require a second confirmation to apply. Replaces the plain warning and direct shortcut in 7.10 later. | M | Depends on 7.10. `ztsettings --render` may help with previews. |
+| 7.14 | **AirPods support, in its own app for now.** Battery levels (left, right, case), listening modes and other radio options, toggle switches and name editing, similar to LibrePods and LinuxPods. **Battery must show even when not connected, from BLE broadcasts.** Support features across AirPods generations, including how each reports sensor and battery data. Testing is on AirPods Pro 2. Spatial audio is out of scope. A button on the device's row in the Bluetooth page opens these settings once AirPods have connected. | L | Research running. Depends on 3.0a. The chip-default Bluetooth address (3.0a3) may matter for pairing. |
+| 7.15 | **AirPods "High quality two-way audio".** Use the microphone without dropping to the low-quality headset profile, as LibrePods lists it. | L, research | Feasibility unknown until research reports. |
+| 7.16 | **Move the AirPods UI into a modal** reached from the same area as the audio sources modal (7.2). | M | Depends on 7.2 and 7.14. |
 
 ### Building these in parallel
 
@@ -138,6 +141,7 @@ Items that edit the same code can't run in parallel without conflicts. Two files
 | B: audio backend | 3.0a6, then 7.6 | `ztos-soundd`, WirePlumber config | Mostly outside the shell. Settles the API that 7.2 uses. |
 | C: pull-down menu | 7.1, then 7.5, then 7.2 UI | `ztmetro.c` | One after another: all three change the same drawing and touch code. 7.2 UI waits for B. |
 | D: Settings | 7.7, 7.10 | `ztsettings.c` | Plan first. Hold other Settings changes while pages move. 7.5 removes `PAGE_QUICK`, so agree the order with C. |
+| G: AirPods | 7.14, 7.15, then 7.16 | New app and daemon | Mostly independent. The Bluetooth page button touches `ztsettings.c`, and battery may feed 7.1. |
 | F: wallpapers and gallery | 7.8, 7.9, 7.12, 7.13 | `ztmetro.c`, new app | The gallery app is independent. The 7.8 gesture touches the home screen's touch code, so schedule it around C. |
 | E: audio hardware | 3.5mm and USB output detection for 7.2 | Audio driver, kernel config | Independent. Rebuilt with `scripts/build-bt-modules.sh`. The kernel side may need a new boot image, which is now allowed; see below. |
 
