@@ -39,6 +39,7 @@
 #include "audio-sync.h"
 #include "auth/btpair-proto.h"
 #include "audio-state.h"
+#include "airplane-radios.h"
 #include "osk-numeric.h"
 #include <dirent.h>
 #include <errno.h>
@@ -755,6 +756,7 @@ struct zt_server {
 	uint32_t bt_tile_ms;		/* when the tile changed Bluetooth: the state file is behind it */
 	bool wifi_suspend;
 	bool wifi_suspended_by_sleep;
+	struct airplane_radios airplane_radios;
 	float lock_y;			/* 0 covering the screen, -height pushed off the top */
 	float lock_lift;		/* the Metro lock's clock block: 0 low, 1 raised with the notification row shown */
 	bool keypop;			/* the pressed key shown enlarged above the finger */
@@ -3256,6 +3258,8 @@ static void load_config(struct zt_server *server) {
 			server->lock_enabled = strcmp(value, "off") != 0;
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			server->wifi_suspend = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
+		} else if (strcmp(key, "airplane_radios") == 0) {
+			server->airplane_radios.option = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
 		} else if (strcmp(key, "style") == 0) {
 			/* ztRetrofit's look: metro (Start), dotmatrix (ZrnDotMatrix).
 			 * The session runs in one; this is the one the next starts in */
@@ -8420,6 +8424,24 @@ static void modem_tell(const char *line) {
 	}
 }
 
+static void wifi_switch(struct zt_server *server, bool on) {
+	server->shade_wifi = on;
+	run_detached("nmcli", "radio", "wifi", on ? "on" : "off");
+	server->wifi_off_ms = on ? 0 : now_ms();
+	if (!on) {
+		/* gone now, whatever was last measured */
+		server->wifi_bars = -1;
+		server->wifi_read_ms = now_ms();
+	}
+}
+
+/* bluetoothd's adapter (zrn-bluetooth.service attaches it) */
+static void bt_switch(struct zt_server *server, bool on) {
+	server->shade_bt = on;
+	server->bt_tile_ms = now_ms();
+	run_detached("bluetoothctl", "power", on ? "on" : "off", NULL);
+}
+
 static void shade_activate(struct zt_server *server, int index) {
 	if (index >= 8) {
 		hap(server, HAP_TICK, HG_SYSTEM);
@@ -8427,14 +8449,8 @@ static void shade_activate(struct zt_server *server, int index) {
 	switch (index < 8 ? 100 + server->quick[index] : index) {
 	case 100 + Q_WIFI:
 		hap(server, HAP_TAP, HG_SYSTEM);
-		server->shade_wifi = !server->shade_wifi;
-		run_detached("nmcli", "radio", "wifi", server->shade_wifi ? "on" : "off");
-		server->wifi_off_ms = server->shade_wifi ? 0 : now_ms();
-		if (!server->shade_wifi) {
-			/* gone now, whatever was last measured */
-			server->wifi_bars = -1;
-			server->wifi_read_ms = now_ms();
-		}
+		server->airplane_radios.took_wifi = false;
+		wifi_switch(server, !server->shade_wifi);
 		draw_shade(server);
 		draw_status(server);
 		damage(server);
@@ -8464,9 +8480,8 @@ static void shade_activate(struct zt_server *server, int index) {
 			break;	/* not attached: the tile is drawn faint */
 		}
 		hap(server, HAP_TAP, HG_SYSTEM);
-		server->shade_bt = !server->shade_bt;
-		server->bt_tile_ms = now_ms();
-		run_detached("bluetoothctl", "power", server->shade_bt ? "on" : "off", NULL);
+		server->airplane_radios.took_bt = false;
+		bt_switch(server, !server->shade_bt);
 		draw_shade(server);
 		damage(server);
 		break;
@@ -8478,11 +8493,23 @@ static void shade_activate(struct zt_server *server, int index) {
 	case 100 + Q_LOCATION:
 	case 100 + Q_NONE:
 		break;	/* nothing behind them yet: see shade_tile_draw */
-	case 100 + Q_AIRPLANE: /* the modem's radio only: Wi-Fi and Bluetooth keep their own tiles */
+	case 100 + Q_AIRPLANE: /* the modem's radio; the others only with the setting (airplane-radios.h) */
 		hap(server, HAP_CLICK, HG_SYSTEM);
 		server->shade_airplane = !server->shade_airplane;
 		server->cell_airplane = server->shade_airplane;
 		modem_tell(server->shade_airplane ? "airplane on\n" : "airplane off\n");
+		{
+			/* (with no adapter attached the Bluetooth tile does nothing, nor does this) */
+			bool has_bt = access("/sys/class/bluetooth/hci0", F_OK) == 0;
+			int todo = airplane_radios_step(&server->airplane_radios, server->shade_airplane,
+				server->shade_wifi, has_bt && server->shade_bt);
+			if (todo & (AIRPLANE_WIFI_ON | AIRPLANE_WIFI_OFF)) {
+				wifi_switch(server, todo & AIRPLANE_WIFI_ON);
+			}
+			if (has_bt && (todo & (AIRPLANE_BT_ON | AIRPLANE_BT_OFF))) {
+				bt_switch(server, todo & AIRPLANE_BT_ON);
+			}
+		}
 		draw_shade(server);
 		draw_status(server);
 		damage(server);

@@ -79,6 +79,7 @@ enum action {
 	ACT_HAPTICS,
 	ACT_WIFI_RADIO,
 	ACT_WIFI_SUSPEND,
+	ACT_AIRPLANE_RADIOS,
 	ACT_WIFI_CONNECT,
 	ACT_WIFI_RESCAN,
 	ACT_WIFI_PASSWORD,	/* the box */
@@ -202,6 +203,7 @@ static struct {
 
 	bool wifi_on, wifi_loading;
 	bool wifi_suspend;
+	bool airplane_radios;
 	struct network networks[MAX_NETWORKS];
 	int n_networks;
 	char wifi_status[96];
@@ -408,6 +410,8 @@ static void config_load(void) {
 			else app.timeout_idx = 4;
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			app.wifi_suspend = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
+		} else if (strcmp(key, "airplane_radios") == 0) {
+			app.airplane_radios = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
 		}
 	}
 	if (f) fclose(f);
@@ -537,7 +541,7 @@ static void auto_load(void) {
 }
 
 /* Every key Settings can write, as it would write it now. */
-enum { N_CONFIG_KEYS = 25 + N_HAPTIC_GROUPS };
+enum { N_CONFIG_KEYS = 26 + N_HAPTIC_GROUPS };
 static struct config_key config_keys[N_CONFIG_KEYS];
 
 static struct config_key *config_key_named(const char *name) {
@@ -573,6 +577,7 @@ static void config_format(void) {
 	}
 	KEY("quick", "%s", quick);
 	KEY("wifi_suspend", "%s", app.wifi_suspend ? "on" : "off");
+	KEY("airplane_radios", "%s", app.airplane_radios ? "on" : "off");
 	KEY("key_height", "%d", app.key_height);
 	KEY("key_sound", "%s", app.key_sound ? "on" : "off");
 	KEY("ring_volume", "%d", app.ring_vol);
@@ -2418,6 +2423,10 @@ static double draw_mobile(cairo_t *cr) {
 
 	snprintf(value, sizeof(value), "%s%s", apn_field[0], apn_field[1][0] ? ", with a user name" : "");
 	y = zmc_entry(cr, y, "access point", value, ACT_OPEN_PAGE, PAGE_APN);
+	y = zmc_switch(cr, y, "Airplane mode: all radios", app.airplane_radios, ACT_AIRPLANE_RADIOS);
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	y += zmc_text(cr, "Airplane mode also turns off Wi-Fi and Bluetooth, and puts them back when it ends.",
+		FONT_REGULAR, 13.5, MARGIN, y, zmc.width - 2 * MARGIN) + 20;
 	return y + 20;
 }
 
@@ -3586,6 +3595,10 @@ static void activate(int action, int arg) {
 		}
 		app.wifi_on = !app.wifi_on;
 		wifi_refresh(app.wifi_on ? "sleep 3" : NULL);
+		break;
+	case ACT_AIRPLANE_RADIOS:
+		app.airplane_radios = !app.airplane_radios;
+		config_save();	/* the shell reads it on SIGHUP */
 		break;
 	case ACT_WIFI_SUSPEND:
 		app.wifi_suspend = !app.wifi_suspend;
