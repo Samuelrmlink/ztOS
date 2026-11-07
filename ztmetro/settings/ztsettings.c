@@ -124,9 +124,11 @@ enum action {
 	ACT_TIMEOUT_CYCLE,
 	ACT_SCALE_CYCLE,
 	ACT_NAV_SIZE_CYCLE,
+	ACT_FS_BARS_CYCLE,
 	ACT_NAV_ICON,
 	ACT_KEY_HEIGHT,
 	ACT_KEY_SOUND,
+	ACT_VOLUME_MEDIA,
 	ACT_MOBILE_DATA,
 	ACT_ROAMING,
 	ACT_NETWORK_MODE,
@@ -224,6 +226,7 @@ static struct {
 	bool opentone;
 	int timeout_idx;
 	int nav_size_idx;
+	int fs_bars_idx;	/* how long a full-screen app's bars stay after a swipe */
 	int nav_icon_idx;
 	int scale_idx;
 
@@ -239,6 +242,7 @@ static struct {
 
 	int key_height;
 	bool key_sound;
+	bool volume_media;	/* the audio modal brings the player's controls when the volume moves */
 	int media_vol;
 	int ring_vol;
 	bool vibrate_ring;
@@ -276,6 +280,7 @@ static struct {
 	.autobrightness = true,
 	.timeout_idx = 1,
 	.nav_size_idx = 0,
+	.fs_bars_idx = 1,
 	.scale_idx = 1,
 	.mobile_data = true,
 	.roaming = false,
@@ -350,6 +355,9 @@ static void config_load(void) {
 			snprintf(app.start_wall, sizeof(app.start_wall), "%s", val);
 		} else if (strcmp(key, "lock_wallpaper") == 0) {
 			snprintf(app.lock_wall, sizeof(app.lock_wall), "%s", val);
+		} else if (strcmp(key, "fullscreen_bars_secs") == 0) {
+			int n = atoi(val);
+			app.fs_bars_idx = n <= 2 ? 0 : n <= 3 ? 1 : n <= 5 ? 2 : 3;
 		} else if (strcmp(key, "nav_center_icon") == 0) {
 			int n = atoi(val); app.nav_icon_idx = n < 0 ? 0 : n > 4 ? 4 : n;
 		} else if (strcmp(key, "dotmatrix_palette") == 0) {
@@ -365,6 +373,8 @@ static void config_load(void) {
 		} else if (strcmp(key, "key_height") == 0) {
             int n = atoi(val);
             app.key_height = n < 42 ? 42 : n > 72 ? 72 : n;
+        } else if (strcmp(key, "volume_media_controls") == 0) {
+            app.volume_media = strcmp(val, "on") == 0;
         } else if (strcmp(key, "key_sound") == 0) {
             app.key_sound = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
         } else if (strcmp(key, "ring_volume") == 0) {
@@ -552,7 +562,7 @@ static void auto_load(void) {
 
 static void config_save(void) {
 	static const int timeouts[] = { 30, 60, 180, 300, 0 };
-	enum { N_KEYS = 23 + N_HAPTIC_GROUPS };
+	enum { N_KEYS = 25 + N_HAPTIC_GROUPS };
 	struct { const char *key; char value[300]; bool written; } keys[N_KEYS] = {
 		{ .key = "accent" }, { .key = "columns" }, { .key = "haptics" },
 		{ .key = "brightness" }, { .key = "timeout" }, { .key = "demo_tiles" },
@@ -587,6 +597,11 @@ static void config_save(void) {
 	snprintf(keys[20 + N_HAPTIC_GROUPS].value, 32, "%s", sizes[app.scale_idx]);
 	keys[21 + N_HAPTIC_GROUPS].key = "style";
 	snprintf(keys[21 + N_HAPTIC_GROUPS].value, 32, "%s", app.style ? "dotmatrix" : "metro");
+	static const int fs_bars_secs[] = { 2, 3, 5, 10 };
+	keys[24 + N_HAPTIC_GROUPS].key = "volume_media_controls";
+	snprintf(keys[24 + N_HAPTIC_GROUPS].value, 32, "%s", app.volume_media ? "on" : "off");
+	keys[23 + N_HAPTIC_GROUPS].key = "fullscreen_bars_secs";
+	snprintf(keys[23 + N_HAPTIC_GROUPS].value, 32, "%d", fs_bars_secs[app.fs_bars_idx]);
 	keys[22 + N_HAPTIC_GROUPS].key = "dotmatrix_palette";
 	snprintf(keys[22 + N_HAPTIC_GROUPS].value, 32, "%s", dm_palette_names[app.palette]);
 	snprintf(keys[0].value, 32, "%s", ACCENTS[app.accent].name);
@@ -1888,6 +1903,8 @@ static double draw_display(cairo_t *cr) {
 	y = picker(cr, y, "Display scaling", scales, 3, app.scale_idx, ACT_SCALE_CYCLE);
 	static const char *const nav_sizes[] = { "Standard (48 pt)", "Compact (40 pt)", "Expanded (56 pt)" };
 	y = picker(cr, y, "Navigation bar widget size", nav_sizes, 3, app.nav_size_idx, ACT_NAV_SIZE_CYCLE);
+	static const char *const fs_bars[] = { "2 seconds", "3 seconds", "5 seconds", "10 seconds" };
+	y = picker(cr, y, "Bars stay after a swipe in full screen", fs_bars, 4, app.fs_bars_idx, ACT_FS_BARS_CYCLE);
 
 	return y + 20;
 }
@@ -2749,6 +2766,8 @@ static double draw_audio(cairo_t *cr) {
 	}
 	y += 26;
 
+	y = zmc_switch(cr, y, "Media controls with the volume", app.volume_media, ACT_VOLUME_MEDIA);
+	y += 10;
 	y = audio_section(cr, y, "system");
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Sound engine", FONT_REGULAR, 13, MARGIN, y, 0);
@@ -3153,7 +3172,7 @@ static double render_page_content(cairo_t *cr, int p) {
 
 static bool is_picker(int action) {
 	switch (action) {
-	case ACT_TIMEOUT_CYCLE: case ACT_SCALE_CYCLE: case ACT_NAV_SIZE_CYCLE:
+	case ACT_TIMEOUT_CYCLE: case ACT_SCALE_CYCLE: case ACT_NAV_SIZE_CYCLE: case ACT_FS_BARS_CYCLE:
 	case ACT_NETWORK_MODE: case ACT_COMP_ALGO_CYCLE: case ACT_PERF_PROFILE: case ACT_IB_MODE: case ACT_IB_ENGINE:
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
@@ -3665,8 +3684,16 @@ static void activate(int action, int arg) {
 		app.key_sound = !app.key_sound;
 		config_save();
 		break;
+	case ACT_VOLUME_MEDIA:
+		app.volume_media = !app.volume_media;
+		config_save();
+		break;
 	case ACT_NAV_SIZE_CYCLE:
 		app.nav_size_idx = arg;
+		break;
+	case ACT_FS_BARS_CYCLE:
+		app.fs_bars_idx = arg;
+		config_save();
 		break;
 	case ACT_MOBILE_DATA:
 		/* ztoscorenetworkingd's: the same thing the action centre's tile asks */
