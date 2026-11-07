@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ztos-podsd for a Rocky Linux 10 / RHEL 10 PC without systemd-devel (README.md).
+# `make podsd-container` in ztmetro/ does both of these:
+#   podman build -t ztos-pods-build -f ztmetro/pods/qt/Containerfile ztmetro/pods/qt
+#   podman run --rm --security-opt label=disable -v "$PWD/ztmetro:/src" -w /src ztos-pods-build make pods/ztos-podsd
+# The image's glibc and libsystemd are the host's, so the binary runs on the host.
+FROM quay.io/rockylinux/rockylinux:10
+RUN dnf -y install gcc make pkgconf systemd-devel && dnf clean all

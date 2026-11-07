@@ -148,6 +148,18 @@ pods/pods-adv-capture: pods/pods-adv-capture.c $(PODS_DEPS)
 pods/ztpods: pods/ztpods.c pods/pods-pages.c pods/pods-pages.h pods/pods-ui.h $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ pods/ztpods.c pods/pods-pages.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
+# On a PC, not the phone (pods/qt/README.md): the Qt front end, and the daemon built in a
+# Rocky Linux 10 container for a host without systemd-devel. Neither is part of `all`.
+PODMAN ?= podman
+PODS_QT_BUILD ?= pods/qt/build
+.PHONY: pods-qt podsd-container
+pods-qt:
+	cmake -S pods/qt -B $(PODS_QT_BUILD) $(PODS_QT_CMAKE)
+	cmake --build $(PODS_QT_BUILD) -j
+podsd-container:
+	$(PODMAN) build -t ztos-pods-build -f pods/qt/Containerfile pods/qt
+	$(PODMAN) run --rm --security-opt label=disable -v "$(CURDIR):/src" -w /src ztos-pods-build make pods/ztos-podsd
+
 # ntfy: pushes from outside (ntfy/README.md)
 ntfy/ztos-ntfyd: ntfy/ztos-ntfyd.c ntfy/ntfy-model.h
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd libcurl) -o $@ ntfy/ztos-ntfyd.c \
