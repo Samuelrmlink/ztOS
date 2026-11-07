@@ -7611,7 +7611,8 @@ static void osk_show(struct zt_server *server, bool visible) {
 		server->osk_app_mode = OSK_MODE_FULL;
 	}
 	if (visible != server->osk_visible) {
-		wlr_log(WLR_INFO, "keyboard %s%s", visible ? "shown" : "hidden",
+		wlr_log(WLR_INFO, "keyboard %s%s%s", visible ? "shown " : "hidden",
+			visible ? osk_mode_name(osk_mode_wanted(server)) : "",
 			visible && server->osk_terminal ? " (terminal row)" : "");
 	}
     if (server->osk_cursor_touch) {

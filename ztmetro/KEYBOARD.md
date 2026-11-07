@@ -49,8 +49,20 @@ Where it comes from, first match wins (`osk_mode_choose` in `osk-numeric.h`):
    `inputMethodHints` in the SDK; the browser, from WebKit's input purpose for the
    page's field). `osk show` without a position, or `osk hide`, goes back to the letters.
 
-Android apps under Waydroid get the letters: its input method window says nothing
-about the field. See `android/waydroid/KEYS.md`.
+What each client was seen to send, from the shell's `text-input enable: purpose N`
+log line (GTK 3.24.52, GTK 4.24.1, Qt/PySide 6.12, WPE WebKit 2.54.2):
+
+| Client | Pad |
+| --- | --- |
+| GtkEntry, GTK 3 and 4 | `gtk_entry_set_input_purpose`: digits, number, phone, pin (with the sensitive and hidden hints) |
+| GtkSpinButton | GTK 4: number. GTK 3 sends no purpose: the letters |
+| Qt | `ImhDigitsOnly`, `ImhFormattedNumbersOnly`, `ImhDialableCharactersOnly`; QSpinBox digits, QDoubleSpinBox number |
+| Browser, no text-input | `type=number` and `inputmode=decimal` number, `inputmode=numeric` digits, `type=tel` phone. `type=password` has the letters, even with `inputmode=numeric` |
+
+A digits pad has no minus, so a QSpinBox that allows negatives can't get one from
+it. Android apps under Waydroid get the letters: its input method window says
+nothing about the field. See `android/waydroid/KEYS.md`. Clients without
+text-input-v3 get the letters too.
 
 Touch targets cover the gaps between keys. An English common-word prefix
 model modestly expands likely next letters at key edges; the center of every
