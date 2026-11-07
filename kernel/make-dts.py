@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Derive the Galaxy S9 (starlte, SM-G960N) device tree from the S9+ port's.
+"""Derive the Galaxy S9 (starlte, SM-G960) device tree from the S9+ port's.
 
   make-dts.py <exynos9810-star2lte.dts> <out.dts> [--ufs] [--power] [--touch]
               [--gpu] [--decon] [--wlan] [--fallback boot|recovery]
@@ -61,7 +61,7 @@ def disable(anchor, count=1):
     sub(anchor, anchor + '\n\t\t\tstatus = "disabled";', count)
 
 
-sub('model = "Samsung Galaxy S9+ (SM-G965F)";', 'model = "Samsung Galaxy S9 (SM-G960N)";')
+sub('model = "Samsung Galaxy S9+ (SM-G965F)";', 'model = "Samsung Galaxy S9 (SM-G960)";')  # one tree for F and N: ztos-variant knows which
 sub('compatible = "samsung,star2lte", "samsung,exynos9810";',
     'compatible = "samsung,starlte", "samsung,exynos9810";')
 

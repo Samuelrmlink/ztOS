@@ -68,6 +68,6 @@ for moddir in "$R"/usr/lib/modules/*; do
 done
 chmod 755 "$R"/usr/local/sbin/* 2>/dev/null || true
 
-DEVICE_UNITS="zboot-boot-ok zboot-usb-gadget zboot-firstboot zboot-charge-hold zrn-charge zrn-cpuidle ztoscirrusaudio
+DEVICE_UNITS="ztos-variant zboot-boot-ok zboot-usb-gadget zboot-firstboot zboot-charge-hold zrn-charge zrn-cpuidle ztoscirrusaudio
 	ztoscsf-sensorhub ztoscsf-sensord ztoscorenetworking-modem ztoscorenetworking zrnperfd zrn-sleepd
 	ztos-panel-selfmask ztos-panel-selfmask-again.timer ztos-panel-bl zrn-bluetooth bluetooth ztos-gnss-gate ztos-gnss-lto.timer ztos-waydroid-location"

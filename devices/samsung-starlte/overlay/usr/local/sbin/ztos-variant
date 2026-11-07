@@ -1,0 +1,55 @@
+#!/bin/sh
+# Print which Galaxy S9 this is: SM-G960F, SM-G960N, ... or "unknown" (exit 1).
+#
+#   ztos-variant [--wait SECONDS]
+#
+# Read-only: this opens three files for reading and writes nothing, EFS above
+# all. See docs/g960f-differences.md (2.1).
+#
+# Order, most trustworthy first:
+#   1. EFS imei/prodcode.dat: written at the factory, kept across reflashes.
+#      Only its first eight characters are used; the rest is not printed.
+#   2. VENDOR's ro.product.vendor.model: the firmware flashed, normally the
+#      phone's own. Root only (mode 600).
+#   3. SYSTEM's ro.product.system.model: the same, for a phone without VENDOR.
+#
+# EFS is mounted by the modem's service, some time after boot. --wait gives it
+# that long before settling for VENDOR or SYSTEM.
+R=${ZTOS_VARIANT_ROOT:-}
+EFS=$R/run/android/mnt/vendor/efs/imei/prodcode.dat
+VENDOR=$R/run/android/vendor/build.prop
+SYSTEM=$R/mnt/system/system/build.prop
+
+wait=0
+[ "${1:-}" = --wait ] && wait=${2:?seconds}
+
+# Only a well-formed S9 model counts: anything else falls through to the next
+# source, so an unexpected file cannot produce a wrong name.
+model_ok() {
+	case "$1" in
+	SM-G960[A-Z0-9]) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+from_efs() {
+	m=$(head -c 8 "$EFS" 2>/dev/null | tr -d '\0\r\n')
+	model_ok "$m" && echo "$m"
+}
+
+from_prop() {	# file, key
+	m=$(sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n 1 | tr -d '\r')
+	model_ok "$m" && echo "$m"
+}
+
+i=0
+while :; do
+	m=$(from_efs) && { echo "$m"; exit 0; }
+	[ "$i" -ge "$wait" ] && break
+	i=$((i + 1))
+	sleep 1
+done
+m=$(from_prop "$VENDOR" ro.product.vendor.model) && { echo "$m"; exit 0; }
+m=$(from_prop "$SYSTEM" ro.product.system.model) && { echo "$m"; exit 0; }
+echo unknown
+exit 1
