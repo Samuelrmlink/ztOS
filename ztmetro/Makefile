@@ -389,7 +389,10 @@ check-slider-gesture:
 SWIPE_BUILD = $(CC) -std=gnu11 -O1 -g -w -Itests/swipe-cost -Icore -Iretro $(shell pkg-config --cflags $(APP_PKGS) json-c)
 SWIPE_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs cairo pangocairo gdk-pixbuf-2.0 xkbcommon json-c) -lm -lpthread
 SWIPE_CORE = core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
-.PHONY: check-slider-touch check-swipe-cost
+.PHONY: check-slider-touch check-swipe-cost check-pivot-wheel
+check-pivot-wheel: $(CORE_DEPS)
+	$(SWIPE_BUILD) -o /tmp/ztmetro-pivot-wheel-test tests/pivot-wheel.c $(SWIPE_CORE) $(SWIPE_LIBS)
+	/tmp/ztmetro-pivot-wheel-test
 check-slider-touch: $(CORE_DEPS)
 	$(SWIPE_BUILD) -o /tmp/ztmetro-slider-touch-test tests/slider-touch.c $(SWIPE_CORE) $(SWIPE_LIBS)
 	/tmp/ztmetro-slider-touch-test

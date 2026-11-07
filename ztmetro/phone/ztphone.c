@@ -337,9 +337,14 @@ static void describe(const struct call_item *c, char *out, size_t size) {
 	}
 }
 
+static double tab_header(cairo_t *cr, int tab) {
+	static const struct zmc_tab tabs[] = { { "history", P_HISTORY }, { "speed dial", P_SPEED },
+		{ "keypad", P_KEYPAD }, { "contacts", P_CONTACTS } };
+	return zmc_pivot_wheel(cr, tabs, 4, tab);
+}
+
 static double draw_history(cairo_t *cr) {
-	zmc.pivot_after = "keypad";
-	double y = zmc_pivot_next(cr, "history", "speed dial", ZMC_ACT_PIVOT, P_SPEED);
+	double y = tab_header(cr, P_HISTORY);
 	if (!sample) {
 		n_calls = calls_load(calls, MAX_CALLS);
 	}
@@ -390,8 +395,7 @@ static double draw_history(cairo_t *cr) {
 /* The speed dial: two across, a tile to each entry, in the accent colour, and
  * a plus at the end. Tap a tile to call it; hold for the menu. */
 static double draw_speed(cairo_t *cr) {
-	zmc.pivot_after = "contacts";
-	double y = zmc_pivot_next(cr, "speed dial", "keypad", ZMC_ACT_PIVOT, P_KEYPAD);
+	double y = tab_header(cr, P_SPEED);
 	if (n_speed == 0) {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 		y += zmc_text(cr, "Looking for quicker calling? Tap the plus sign to add someone to speed dial.",
@@ -543,8 +547,7 @@ static bool contacts_row_head(int row) {
 }
 
 static double draw_contacts(cairo_t *cr) {
-	zmc.pivot_after = "speed dial";
-	double y = zmc_pivot_next(cr, "contacts", "history", ZMC_ACT_PIVOT, P_HISTORY);
+	double y = tab_header(cr, P_CONTACTS);
 	if (!sample) contacts_load();
 	if (n_contacts == 0) {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
@@ -576,8 +579,7 @@ static double draw_keypad(cairo_t *cr) {
 		{ '1', "" }, { '2', "ABC" }, { '3', "DEF" }, { '4', "GHI" }, { '5', "JKL" }, { '6', "MNO" },
 		{ '7', "PQRS" }, { '8', "TUV" }, { '9', "WXYZ" }, { '*', "" }, { '0', "+" }, { '#', "" },
 	};
-	zmc.pivot_after = "history";
-	double y = zmc_pivot_next(cr, "keypad", "contacts", ZMC_ACT_PIVOT, P_CONTACTS) - 14;
+	double y = tab_header(cr, P_KEYPAD) - 14;
 	/* the number so far, and under it whose it is */
 	double size = strlen(digits) > 13 ? 26 : 34;
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -1211,14 +1213,9 @@ static void tick(void) {
 	settle();
 }
 
-/* four tabs going round: the one just left is not the next */
-static void tab_arrived(int page) {
-	zmc_pivot_changed();
-}
-
 static const struct zmc_app phone = {
 	.app_id = "ztphone", .title = "Phone", .caps = "PHONE",
-	.render = render, .activate = activate, .back = back, .text = typed, .hold = hold, .arrived = tab_arrived,
+	.render = render, .activate = activate, .back = back, .text = typed, .hold = hold
 };
 
 int main(int argc, char **argv) {

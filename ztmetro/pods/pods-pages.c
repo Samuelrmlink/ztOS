@@ -80,6 +80,12 @@ static void (*open_bluetooth)(void);
 
 static int page_of(int tab) { return first_page + tab; }
 
+static double tab_header(cairo_t *cr, int tab) {
+	const struct zmc_tab tabs[] = { { "status", page_of(P_STATUS) }, { "listening", page_of(P_LISTEN) },
+		{ "controls", page_of(P_CONTROLS) }, { "about", page_of(P_ABOUT) } };
+	return zmc_pivot_wheel(cr, tabs, 4, page_of(tab));
+}
+
 static json_object *root;	/* the whole state */
 static json_object *dev;	/* the pair on show, inside root */
 static char wanted[18];		/* which one that is */
@@ -298,8 +304,7 @@ static double draw_nearby(cairo_t *cr, double y) {
 }
 
 static double draw_status(cairo_t *cr) {
-	zmc.pivot_after = "controls";
-	double y = zmc_pivot_next(cr, "status", "listening", ZMC_ACT_PIVOT, page_of(P_LISTEN));
+	double y = tab_header(cr, P_STATUS);
 	if (!root) {
 		return note(cr, y, "The AirPods service isn't running, so nothing is known about them.");
 	}
@@ -425,8 +430,7 @@ static bool mode_available(int i) {
 }
 
 static double draw_listening(cairo_t *cr) {
-	zmc.pivot_after = "about";
-	double y = zmc_pivot_next(cr, "listening", "controls", ZMC_ACT_PIVOT, page_of(P_CONTROLS));
+	double y = tab_header(cr, P_LISTEN);
 	const char *why = blocked();
 	if (why) return note(cr, y, why);
 	if (in_list(dev, "caps", "modes")) {
@@ -451,24 +455,21 @@ static double draw_listening(cairo_t *cr) {
 		if (mask < 0) y = note(cr, y, "The AirPods don't report this. Choosing here replaces their list. At least two.");
 		for (int i = 0; i < 4; i++) {
 			if (!mode_available(i)) continue;
-			y = zmc_switch(cr, y, MODES[i].label, mask > 0 && (mask & MODES[i].bit), A_CYCLE);
-			zmc.hits[zmc.n_hits - 1].arg = i;	/* (a switch has no arg of its own) */
+			y = zmc_switch_arg(cr, y, MODES[i].label, mask > 0 && (mask & MODES[i].bit), A_CYCLE, i);
 		}
 	}
 	return y;
 }
 
 static double draw_controls(cairo_t *cr) {
-	zmc.pivot_after = "status";
-	double y = zmc_pivot_next(cr, "controls", "about", ZMC_ACT_PIVOT, page_of(P_ABOUT));
+	double y = tab_header(cr, P_CONTROLS);
 	const char *why = blocked();
 	if (why) return note(cr, y, why);
 	return rows(cr, y, P_CONTROLS);
 }
 
 static double draw_about(cairo_t *cr) {
-	zmc.pivot_after = "listening";
-	double y = zmc_pivot_next(cr, "about", "status", ZMC_ACT_PIVOT, page_of(P_STATUS));
+	double y = tab_header(cr, P_ABOUT);
 	if (!dev) return note(cr, y, "No AirPods yet.");
 	if (ready()) {
 		y = zmc_textbox(cr, y + 24, "Name", name_edited ? name_edit : js(dev, "name", ""), editing, A_NAME, 0) + 6;
@@ -641,7 +642,6 @@ static void tick(void) {
 }
 
 void pods_arrived(int page) {
-	zmc_pivot_changed();
 	open_picker = 0;
 	zmc_every(1000, tick);
 }

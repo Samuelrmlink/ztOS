@@ -683,8 +683,13 @@ static double group(cairo_t *cr, double y, const char *name, int count) {
 	return y + 36;
 }
 
+static double tab_header(cairo_t *cr, int tab) {
+	static const struct zmc_tab tabs[] = { { "services", PAGE_SERVICES }, { "devices", PAGE_DEVICES } };
+	return zmc_pivot_wheel(cr, tabs, 2, tab);
+}
+
 static double draw_services(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "services", "devices", ACT_OPEN, PAGE_DEVICES);
+	double y = tab_header(cr, PAGE_SERVICES);
 	if (!loaded) {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 		zmc_text(cr, "asking systemd", FONT_REGULAR, 13.5, ZMC_MARGIN, y, 0);
@@ -732,7 +737,7 @@ static bool bluetooth_on(void) {
 }
 
 static double draw_devices(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "devices", "services", ACT_OPEN, PAGE_SERVICES);
+	double y = tab_header(cr, PAGE_DEVICES);
 	for (size_t i = 0; i < sizeof(devices) / sizeof(devices[0]); i++) {
 		const struct device *d = &devices[i];
 		bool in = device_present(d);

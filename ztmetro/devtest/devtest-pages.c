@@ -30,6 +30,11 @@ enum action { ACT_OPEN = DEVTEST_ACTIONS + 1, ACT_PLAY };
 static int first_page;
 static int page_of(int tab) { return first_page + tab; }
 
+static double tab_header(cairo_t *cr, int tab) {
+	const struct zmc_tab tabs[] = { { "devtest", page_of(PAGE_HUB) }, { "logs", page_of(PAGE_LOGS) } };
+	return zmc_pivot_wheel(cr, tabs, 2, page_of(tab));
+}
+
 #define MAX_LINES	70	/* of a log, newest first */
 #define LINE_LEN	240
 
@@ -129,7 +134,7 @@ static double draw_stream(cairo_t *cr, const char *title) {
 static int hub_tab = PAGE_HUB;	/* the hub tab last shown */
 
 static double draw_hub(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "devtest", "logs", ACT_OPEN, page_of(PAGE_LOGS));
+	double y = tab_header(cr, PAGE_HUB);
 	y = zmc_entry(cr, y, "system", "kernel, memory, storage, load", ACT_OPEN, PAGE_SYSTEM);
 	y = zmc_entry(cr, y, "sensors", "battery, charger, heat, clocks: live", ACT_OPEN, PAGE_SENSORS);
 	y = zmc_entry(cr, y, "hardware", "what this kernel drives, and what it does not", ACT_OPEN, PAGE_HARDWARE);
@@ -139,7 +144,7 @@ static double draw_hub(cairo_t *cr) {
 
 /* The hub's second tab: the logs, as they are written. */
 static double draw_logs(cairo_t *cr) {
-	double y = zmc_pivot_next(cr, "logs", "devtest", ACT_OPEN, page_of(PAGE_HUB));
+	double y = tab_header(cr, PAGE_LOGS);
 	y = zmc_entry(cr, y, "journal", "systemd's log as it is written", ACT_OPEN, PAGE_JOURNAL);
 	y = zmc_entry(cr, y, "kernel log", "the kernel's messages as they come", ACT_OPEN, PAGE_KERNEL);
 	y = zmc_entry(cr, y, "shell log", "ztMETRO's own log", ACT_OPEN, PAGE_SHELL);

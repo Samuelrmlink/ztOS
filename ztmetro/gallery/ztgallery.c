@@ -1190,6 +1190,8 @@ static double draw_note(cairo_t *cr, double y, const char *big, const char *smal
 static const char *const empty_where =
 	"Photos you take with Camera, and any you put in Pictures or Screenshots, show up here.";
 
+static const struct zmc_tab TABS[] = { { "albums", PAGE_ALBUMS }, { "photos", PAGE_PHOTOS } };
+
 static double render(cairo_t *cr, int page) {
 	in_render = true;
 	double y;
@@ -1203,7 +1205,7 @@ static double render(cairo_t *cr, int page) {
 			y = zmc_list(cr, y, &list);
 		}
 	} else if (page == PAGE_ALBUMS) {
-		y = zmc_pivot_next(cr, "albums", "photos", ZMC_ACT_PIVOT, PAGE_PHOTOS);
+		y = zmc_pivot_wheel(cr, TABS, 2, PAGE_ALBUMS);
 		list_top[page] = y;
 		if (n_albums) {
 			const struct gl_grid *g = grid_albums();
@@ -1214,7 +1216,7 @@ static double render(cairo_t *cr, int page) {
 			y = draw_note(cr, y, "no albums yet", "Each folder of photos is an album.");
 		}
 	} else {
-		y = zmc_pivot_next(cr, "photos", "albums", ZMC_ACT_PIVOT, PAGE_ALBUMS);
+		y = zmc_pivot_wheel(cr, TABS, 2, PAGE_PHOTOS);
 		list_top[page] = y;
 		if (n_all) {
 			const struct gl_grid *g = grid_photos();
@@ -1373,8 +1375,7 @@ static void overlay(int page) {
 	else if (album_open) overlay_list(grid_photos(), album_open->n, list_top[page], at_album, ACT_PHOTO, now);
 	want_commit();
 	if (viewer_is_open()) viewer_overlay();
-	/* (inside a frame there is no zmc_present: this is what asks for the next) */
-	if (more_frames) zmc.dirty = true;
+	if (more_frames) zmc_present();
 }
 
 /* ---- results, on the main thread --------------------------------------------------- */
