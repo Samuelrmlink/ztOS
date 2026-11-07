@@ -70,6 +70,7 @@ enum page {
 	PAGE_APPS,	/* the second tab of the hub */
 	PAGE_INSTALLED_APPS,
 	PAGE_APP_DETAIL,
+	PAGE_APP_SCALE,
 	PAGE_HAPTICS,
 	PAGE_QUICK,
 	PAGE_APN,
@@ -169,6 +170,8 @@ enum action {
 	ACT_IB_ENGINE,		/* arg: 0 the processor, 1 SCORE */
 	ACT_QUICK_SLOT,		/* then one for each of the eight places */
 	ACT_QUICK_LAST = ACT_QUICK_SLOT + 7,
+	ACT_APP_SCALE_SLOT,	/* then one for each app listed */
+	ACT_APP_SCALE_LAST = ACT_APP_SCALE_SLOT + 23,
 };
 
 /* The kinds of touch that can be felt, each with a switch of its own; the
@@ -1133,11 +1136,90 @@ static double draw_app_detail(cairo_t *cr) {
 	return y;
 }
 
+/* App scaling: a size for each app, by its Wayland app id. The shell reads
+ * ~/.config/ztmetro/app-scale; the apps offered are the ones saved there and
+ * those open now ($XDG_RUNTIME_DIR/ztmetro-apps, from the shell). */
+#define APP_SCALE_MAX 24
+static const char *const app_scale_names[] = { "75%", "90%", "100%", "110%", "125%", "150%" };
+static const float app_scale_values[] = { 0.75f, 0.9f, 1.0f, 1.1f, 1.25f, 1.5f };
+#define APP_SCALE_N 6
+static struct { char id[96]; int choice; } app_scale[APP_SCALE_MAX];
+static int app_scale_count;
+
+static void app_scale_path(char *path, size_t size) {
+	const char *home = getenv("HOME");
+	snprintf(path, size, "%s/.config/ztmetro/app-scale", home ? home : "");
+}
+
+static int app_scale_find(const char *id) {
+	for (int i = 0; i < app_scale_count; i++) {
+		if (!strcmp(app_scale[i].id, id)) return i;
+	}
+	return -1;
+}
+
+static void app_scale_load(void) {
+	char path[512], line[160], id[96];
+	float zoom;
+	app_scale_count = 0;
+	app_scale_path(path, sizeof(path));
+	FILE *f = fopen(path, "r");
+	while (f && fgets(line, sizeof(line), f) && app_scale_count < APP_SCALE_MAX) {
+		if (sscanf(line, "%95s = %f", id, &zoom) != 2) continue;
+		int best = 2;
+		for (int k = 0; k < APP_SCALE_N; k++) {
+			if (fabsf(app_scale_values[k] - zoom) < fabsf(app_scale_values[best] - zoom)) best = k;
+		}
+		snprintf(app_scale[app_scale_count].id, sizeof(app_scale[0].id), "%s", id);
+		app_scale[app_scale_count++].choice = best;
+	}
+	if (f) fclose(f);
+	f = fopen(runtime_file(path, sizeof(path), "ztmetro-apps"), "r");
+	while (f && fgets(line, sizeof(line), f) && app_scale_count < APP_SCALE_MAX) {
+		if (sscanf(line, "%95s", id) != 1 || app_scale_find(id) >= 0) continue;
+		snprintf(app_scale[app_scale_count].id, sizeof(app_scale[0].id), "%s", id);
+		app_scale[app_scale_count++].choice = 2;
+	}
+	if (f) fclose(f);
+}
+
+static void app_scale_save(void) {
+	char path[512], tmp[520];
+	app_scale_path(path, sizeof(path));
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f) return;
+	for (int i = 0; i < app_scale_count; i++) {
+		if (app_scale[i].choice != 2) {
+			fprintf(f, "%s = %.2f\n", app_scale[i].id, app_scale_values[app_scale[i].choice]);
+		}
+	}
+	fclose(f);
+	rename(tmp, path);
+	if (system("pkill -HUP -x ztmetro 2>/dev/null") != 0) {}
+}
+
+static double draw_app_scale(cairo_t *cr) {
+	double y = zmc_header(cr, "app scaling");
+	cairo_set_source_rgb(cr, .6, .6, .6);
+	y += zmc_text(cr, "Make one app's text and controls larger or smaller. Open an app and it appears here.",
+		FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 20;
+	if (!app_scale_count) {
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		y += zmc_text(cr, "No apps open", FONT_SEMILIGHT, 21, MARGIN, y, 0) + 20;
+	}
+	for (int i = 0; i < app_scale_count; i++) {
+		y = picker(cr, y, app_scale[i].id, app_scale_names, APP_SCALE_N, app_scale[i].choice, ACT_APP_SCALE_SLOT + i);
+	}
+	return y + 20;
+}
+
 /* The hub's second tab: what belongs to the system's own programs. */
 static double draw_apps(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "applications", "system", ACT_OPEN_PAGE, PAGE_MAIN);
 	char detail[128];
 	y = zmc_entry(cr, y, "apps", "choose apps that run in the background", ACT_OPEN_PAGE, PAGE_INSTALLED_APPS);
+	y = zmc_entry(cr, y, "app scaling", "make one app larger or smaller", ACT_OPEN_PAGE, PAGE_APP_SCALE);
 	y = zmc_entry(cr, y, "keyboard", app.haptics ? "vibrate on touch: on" : "vibrate on touch: off",
 		ACT_OPEN_PAGE, PAGE_KEYBOARD);
 
@@ -3124,6 +3206,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_APPS: return draw_apps(cr);
 	case PAGE_INSTALLED_APPS: return draw_installed_apps(cr);
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);
+	case PAGE_APP_SCALE: return draw_app_scale(cr);
 	case PAGE_THEME: return draw_theme(cr);
 	case PAGE_ACCENTS: return draw_accents(cr);
 	case PAGE_WALLS: return draw_wallpapers(cr);
@@ -3179,7 +3262,8 @@ static bool is_picker(int action) {
 	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
 		return true;
 	}
-	return action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST;
+	return (action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST) ||
+		(action >= ACT_APP_SCALE_SLOT && action <= ACT_APP_SCALE_LAST);
 }
 
 static int board_choice;
@@ -3208,6 +3292,14 @@ static void activate(int action, int arg) {
 		return;
 	}
 	open_picker = 0;
+	if (action >= ACT_APP_SCALE_SLOT && action <= ACT_APP_SCALE_LAST) {
+		int i = action - ACT_APP_SCALE_SLOT;
+		if (i < app_scale_count && arg >= 0 && arg < APP_SCALE_N) {
+			app_scale[i].choice = arg;
+			app_scale_save();
+		}
+		return;
+	}
 	if (action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST) {
 		if (arg >= 0 && arg < N_QUICK) {
 			app.quick[action - ACT_QUICK_SLOT] = arg;
@@ -3299,6 +3391,7 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_OPEN_PAGE:
 		if (arg == PAGE_INSTALLED_APPS) installed_load();
+		if (arg == PAGE_APP_SCALE) app_scale_load();
 		if (arg == PAGE_MAIN || arg == PAGE_APPS) {
 			hub_tab = arg;	/* where back returns to from a page under it */
 		}
@@ -3980,7 +4073,7 @@ static bool back(void) {
 		return false;	/* either tab of the hub: back leaves the app */
 	}
 	if (zmc.page == PAGE_APP_DETAIL) { zmc_go(PAGE_INSTALLED_APPS, -1); return true; }
-	if (zmc.page == PAGE_INSTALLED_APPS) { zmc_go(PAGE_APPS, -1); return true; }
+	if (zmc.page == PAGE_INSTALLED_APPS || zmc.page == PAGE_APP_SCALE) { zmc_go(PAGE_APPS, -1); return true; }
 	zmc_every(0, NULL);	/* the performance page's refresh, if it was running */
 	if (zmc.page == PAGE_WIFI && wifi_menu >= 0) {
 		wifi_menu = -1;	/* back puts the menu away first */
@@ -4096,7 +4189,7 @@ static const struct zmc_app settings = {
  * That is how the look is checked without opening the app on the phone. */
 /* Pages by name: --render PAGE, and `ztsettings PAGE` (Hyperscan opens one). */
 static const struct { const char *name; enum page page; } pages[] = {
-	{ "date", PAGE_DATE }, { "main", PAGE_MAIN }, { "apps", PAGE_APPS }, { "installed-apps", PAGE_INSTALLED_APPS }, { "theme", PAGE_THEME }, { "accents", PAGE_ACCENTS }, { "wallpapers", PAGE_WALLS }, { "display", PAGE_DISPLAY },
+	{ "app-scale", PAGE_APP_SCALE }, { "date", PAGE_DATE }, { "main", PAGE_MAIN }, { "apps", PAGE_APPS }, { "installed-apps", PAGE_INSTALLED_APPS }, { "theme", PAGE_THEME }, { "accents", PAGE_ACCENTS }, { "wallpapers", PAGE_WALLS }, { "display", PAGE_DISPLAY },
 	{ "wifi", PAGE_WIFI }, { "bluetooth", PAGE_BLUETOOTH }, { "mobile", PAGE_MOBILE }, { "audio", PAGE_AUDIO },
 	{ "battery", PAGE_BATTERY }, { "cpu", PAGE_CPU }, { "vm", PAGE_VM },
 	{ "gpu", PAGE_GPU }, { "keyboard", PAGE_KEYBOARD }, { "about", PAGE_ABOUT },
@@ -4148,6 +4241,7 @@ int main(int argc, char **argv) {
 		int page = page_named(argv[1]);
 		if (page == PAGE_WIFI) wifi_load();
 		if (page == PAGE_INSTALLED_APPS) installed_load();
+		if (page == PAGE_APP_SCALE) app_scale_load();
 		return zmc_run(&settings, page);
 	}
 	if (argc > 1) {

@@ -90,6 +90,7 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
+#include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_idle_notify_v1.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
@@ -366,6 +367,8 @@ struct zt_toplevel {
 	bool awaiting;
 	uint32_t awaiting_since;
 	int sent_h;		/* the height it was last asked to take */
+	int sent_w;		/* and the width */
+	float zoom;		/* its own scale from Settings; 0 until looked up */
 	bool fullscreen;	/* it asked for the whole screen, and has it */
 	struct wl_listener request_fullscreen;
 	struct wl_listener map, unmap, commit, destroy;
@@ -732,6 +735,11 @@ struct zt_server {
 	GLuint tone_tex;
 	bool tone_dirty;
 	struct wlr_idle_notifier_v1 *idle_notifier;	/* for hypridle and the like */
+	struct wlr_idle_inhibit_manager_v1 *idle_inhibit;	/* a video asking the screen to stay on */
+	bool idle_inhibit_logged;
+	/* Settings > app scaling: ~/.config/ztmetro/app-scale, "APP_ID = 1.25" */
+	struct { char id[96]; float zoom; } app_scales[32];
+	int n_app_scales;
 	uint32_t wifi_read_ms;
 	uint32_t wifi_off_ms;		/* when the tile switched Wi-Fi off: reports just after are stale */
 	uint32_t bt_tile_ms;		/* when the tile changed Bluetooth: the state file is behind it */
@@ -7385,7 +7393,57 @@ static void osk_lift(struct zt_server *server) {
  * points or so). Such a window is shown smaller, so that all of it is there. */
 static double app_fit(struct zt_server *server, struct zt_toplevel *toplevel) {
 	int w = toplevel->xdg_toplevel->base->geometry.width;
+	if (toplevel->zoom > 0 && toplevel->zoom != 1.0f) {
+		/* a scale of its own: whatever width it is, it fills the screen's */
+		return w > 0 ? (double)server->width / w : toplevel->zoom;
+	}
 	return w > server->width ? (double)server->width / w : 1.0;
+}
+
+/* The scale Settings gives this app: it is told it has less room (or more) and
+ * is drawn larger (or smaller) to fill the screen. The Android runtimes size
+ * themselves their own way, and keep 1. */
+static float app_zoom_for(struct zt_server *server, struct zt_toplevel *toplevel) {
+	const char *id = toplevel->xdg_toplevel->app_id;
+	if (!id || toplevel->android_runtime || !strncmp(id, "waydroid.", 9)) {
+		return 1.0f;
+	}
+	for (int i = 0; i < server->n_app_scales; i++) {
+		if (!strcmp(server->app_scales[i].id, id)) {
+			return server->app_scales[i].zoom;
+		}
+	}
+	return 1.0f;
+}
+
+static void app_scales_load(struct zt_server *server) {
+	char path[512], line[160];
+	const char *home = getenv("HOME");
+	snprintf(path, sizeof(path), "%s/.config/ztmetro/app-scale", home ? home : "");
+	server->n_app_scales = 0;
+	FILE *f = fopen(path, "r");
+	while (f && fgets(line, sizeof(line), f) && server->n_app_scales < 32) {
+		char id[96];
+		float zoom;
+		if (sscanf(line, "%95s = %f", id, &zoom) == 2 && zoom >= 0.5f && zoom <= 2.0f) {
+			snprintf(server->app_scales[server->n_app_scales].id, sizeof(server->app_scales[0].id), "%s", id);
+			server->app_scales[server->n_app_scales++].zoom = zoom;
+		}
+	}
+	if (f) fclose(f);
+}
+
+/* Render at the screen's own pixels, so that a scaled app is not blurred. */
+static void app_surface_scale(struct wlr_surface *surface, int sx, int sy, void *data) {
+	(void)sx; (void)sy;
+	float scale = *(float *)data;
+	wlr_surface_set_preferred_buffer_scale(surface, (int32_t)ceilf(scale));
+	wlr_fractional_scale_v1_notify_scale(surface, scale);
+}
+
+static void app_tell_scale(struct zt_server *server, struct zt_toplevel *toplevel) {
+	float scale = server->scale * (toplevel->zoom > 0 ? toplevel->zoom : 1.0f);
+	wlr_xdg_surface_for_each_surface(toplevel->xdg_toplevel->base, app_surface_scale, &scale);
 }
 
 /* Ask an app for the room it has. Shown smaller, it has to be taller by as
@@ -7393,10 +7451,16 @@ static double app_fit(struct zt_server *server, struct zt_toplevel *toplevel) {
 static void app_configure(struct zt_server *server, struct zt_toplevel *toplevel) {
 	double room = toplevel == server->shown ? app_height(server) :
 		toplevel->fullscreen ? server->height : server->height - STATUS_H - NAV_H;
-	int h = (int)(room / app_fit(server, toplevel));
-	if (h != toplevel->sent_h && toplevel->xdg_toplevel->base->initialized) {
+	float zoom = toplevel->zoom > 0 ? toplevel->zoom : 1.0f;
+	int w = (int)lround(server->width / zoom);
+	/* one that will not go that narrow is shown smaller still */
+	int at = toplevel->xdg_toplevel->base->geometry.width;
+	double fit = at > w ? (double)server->width / at : zoom;
+	int h = (int)(room / fit);
+	if ((h != toplevel->sent_h || w != toplevel->sent_w) && toplevel->xdg_toplevel->base->initialized) {
 		toplevel->sent_h = h;
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, server->width, h);
+		toplevel->sent_w = w;
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, w, h);
 	}
 }
 
@@ -8985,6 +9049,25 @@ static int key_repeat_fired(void *data) {
 
 /* ---- xdg-shell ----------------------------------------------------------- */
 
+/* The apps that are open, for Settings > app scaling to offer. */
+static void apps_running_write(struct zt_server *server) {
+	char path[256], tmp[264];
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	snprintf(path, sizeof(path), "%s/ztmetro-apps", runtime ? runtime : "/tmp");
+	snprintf(tmp, sizeof(tmp), "%s.new", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f) return;
+	struct zt_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		const char *id = t->xdg_toplevel->app_id;
+		if (t->mapped && id && !t->android_runtime && strncmp(id, "waydroid.", 9) != 0) {
+			fprintf(f, "%s\n", id);
+		}
+	}
+	fclose(f);
+	rename(tmp, path);
+}
+
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, map);
 	char proc[64], executable[512];
@@ -9024,6 +9107,16 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 		return;
 	}
 	toplevel->mapped = true;
+	{
+		/* (android_runtime is known by now) */
+		float zoom = app_zoom_for(server, toplevel);
+		if (zoom != toplevel->zoom) {
+			toplevel->zoom = zoom;
+			app_tell_scale(server, toplevel);
+			app_configure(server, toplevel);
+		}
+	}
+	apps_running_write(server);
     bool matches = true;
     if (app_id && !strncmp(app_id, "waydroid.", 9)) {
         android_window_command(server, app_id + 9, "waydroid",
@@ -9094,6 +9187,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		draw_status(server);
 	}
 	toplevel->mapped = false;
+	apps_running_write(server);
 	if (toplevel->waydroid_ime) {
 		if (server->shown && server->shown->xdg_toplevel->app_id &&
 				!strncmp(server->shown->xdg_toplevel->app_id, "waydroid.", 9)) {
@@ -9144,8 +9238,11 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 		/* Every app gets the whole app area, and is told it is maximised so
 		 * it draws no shadows or resize borders. */
 		toplevel->fullscreen = toplevel->xdg_toplevel->requested.fullscreen;
-		toplevel->sent_h = toplevel->fullscreen ? server->height : server->height - STATUS_H - NAV_H;
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, server->width, toplevel->sent_h);
+		toplevel->zoom = app_zoom_for(server, toplevel);
+		toplevel->sent_w = (int)lround(server->width / toplevel->zoom);
+		toplevel->sent_h = (int)((toplevel->fullscreen ? server->height : server->height - STATUS_H - NAV_H) / toplevel->zoom);
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, toplevel->sent_w, toplevel->sent_h);
+		app_tell_scale(server, toplevel);
 		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, toplevel->fullscreen);
 		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
 		wlr_xdg_toplevel_set_tiled(toplevel->xdg_toplevel,
@@ -9153,6 +9250,9 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 		apply_decoration(server, toplevel->xdg_toplevel);
 	} else {
 		/* it may have come out wider than it was asked to be */
+		if (toplevel->zoom > 0 && toplevel->zoom != 1.0f) {
+			app_tell_scale(server, toplevel);	/* new subsurfaces: a video's, say */
+		}
 		app_configure(server, toplevel);
 	}
 }
@@ -9172,6 +9272,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->destroy.link);
 	wl_list_remove(&toplevel->request_fullscreen.link);
 	wl_list_remove(&toplevel->link);
+	apps_running_write(server);
 	free(toplevel);
 }
 
@@ -11448,10 +11549,32 @@ static bool waydroid_keeps_screen_on(struct zt_server *server) {
 	return age >= 0 && age < 40;
 }
 
+/* An app asks the screen to stay on (idle-inhibit, as a playing video does). It
+ * only counts for the app in front: one left running behind the others, or
+ * behind the lock screen, keeps nothing awake. */
+static bool app_keeps_screen_on(struct zt_server *server) {
+	if (!server->idle_inhibit || !server->shown || !server->shown->mapped || server->locked) {
+		return false;
+	}
+	struct wlr_surface *root = server->shown->xdg_toplevel->base->surface;
+	struct wlr_idle_inhibitor_v1 *inhibitor;
+	wl_list_for_each(inhibitor, &server->idle_inhibit->inhibitors, link) {
+		if (wlr_surface_get_root_surface(inhibitor->surface) == root) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static int idle_fired(void *data) {
 	struct zt_server *server = data;
 	if (server->screen_timeout > 0) {
-		if (server->screen_on && waydroid_keeps_screen_on(server)) {
+		bool app = server->screen_on && app_keeps_screen_on(server);
+		if (app != server->idle_inhibit_logged) {
+			server->idle_inhibit_logged = app;
+			wlr_log(WLR_INFO, "screen: %s", app ? "kept on by the app in front" : "the app let go");
+		}
+		if (app || (server->screen_on && waydroid_keeps_screen_on(server))) {
 			/* look again soon: the screen sleeps once the app lets go */
 			wl_event_source_timer_update(server->idle_timer, 15000);
 			return 0;
@@ -15406,6 +15529,19 @@ static int reload(int signal_number, void *data) {
 	int strength = server->haptic_strength;
 	int ring_before = server->ring_volume;
 	load_config(server);
+	app_scales_load(server);
+	{
+		struct zt_toplevel *t;
+		wl_list_for_each(t, &server->toplevels, link) {
+			float zoom = app_zoom_for(server, t);
+			if (t->xdg_toplevel->base->initialized && zoom != t->zoom) {
+				wlr_log(WLR_INFO, "app scale: %s %.2f", t->xdg_toplevel->app_id ? t->xdg_toplevel->app_id : "?", zoom);
+				t->zoom = zoom;
+				app_tell_scale(server, t);
+				app_configure(server, t);
+			}
+		}
+	}
 	if (server->style_config != server->style) {
 		/* the settings app chose the other style: the session starts again */
 		style_switch(server, server->style_config);
@@ -15832,6 +15968,8 @@ int main(int argc, char *argv[]) {
 	server.home_flip_tile = -1;
 	modem_read(&server);
 	server.idle_notifier = wlr_idle_notifier_v1_create(server.wl_display);
+	server.idle_inhibit = wlr_idle_inhibit_v1_create(server.wl_display);
+	app_scales_load(&server);
 
 	server.new_output.notify = server_new_output;
 	wl_signal_add(&server.backend->events.new_output, &server.new_output);
