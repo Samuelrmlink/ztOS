@@ -451,21 +451,22 @@ class Daemon:
         """Bring running streams in line; a held volume or mute is spent once it is set,
         because WirePlumber saves it from there."""
         changed = False
-        for s in g["streams"]:
-            i = self.intents.get(s["key"])
-            if not i:
-                continue
-            if "percent" in i:
-                if self.tool("wpctl", "set-volume", str(s["id"]), "%d%%" % i["percent"]):
-                    s["percent"] = i["percent"]
-            if "mute" in i:
-                if self.tool("wpctl", "set-mute", str(s["id"]), "1" if i["mute"] else "0"):
-                    s["mute"] = i["mute"]
         for key in {s["key"] for s in g["streams"]}:
             i = self.intents.get(key)
-            if i and ("percent" in i or "mute" in i):
-                i.pop("percent", None)
-                i.pop("mute", None)
+            if not i:
+                continue
+            streams = [s for s in g["streams"] if s["key"] == key]
+            if "percent" in i and any([self.tool("wpctl", "set-volume", str(s["id"]), "%d%%" % i["percent"])
+                                       for s in streams]):
+                for s in streams:
+                    s["percent"] = i["percent"]
+                del i["percent"]
+                changed = True
+            if "mute" in i and any([self.tool("wpctl", "set-mute", str(s["id"]), "1" if i["mute"] else "0")
+                                    for s in streams]):
+                for s in streams:
+                    s["mute"] = i["mute"]
+                del i["mute"]
                 changed = True
         for act in target_actions(g["streams"], g["targets"], self.stored, self.intents, g["sinks"]):
             if act[0] == "set":
