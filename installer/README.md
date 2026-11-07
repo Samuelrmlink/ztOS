@@ -35,6 +35,8 @@ sudo pacman -S --needed util-linux libarchive dosfstools mtools e2fsprogs \
     qemu-hw-display-virtio-gpu-pci qemu-hw-display-virtio-gpu-pci-gl qemu-ui-gtk qemu-ui-opengl
 ```
 
+On Fedora, Rocky, Alma or RHEL, see [Host setup for the Red Hat family](../docs/host-setup-rhel.md).
+
 The build never needs `sudo`. It runs in a user namespace, so your account
 needs a subordinate ID range in `/etc/subuid` and `/etc/subgid` (most
 distributions add one per user). ARM programs run through qemu-user, so a
