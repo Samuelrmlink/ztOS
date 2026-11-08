@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+"""km: the KM003C USB-C meter on the bench, over the km003c_rp2 board's WebSocket
+(ws://192.168.1.209/ws, line protocol: ~/Work/km003c_rp2_webapp/docs/api.md).
+
+The link is lossy Wi-Fi: every command reconnects on its own, and a sample gap shows
+up as SEQ jumps (counted), never as a hang. km only listens by default: it never
+STOPs or re-rates a stream someone else started (the browser page shares it). If
+nothing is streaming it STARTs one at --rate and leaves it running for them.
+
+  km status                     the meter, its stream, one reading
+  km watch [-n S] [-e S] [--pd] a row every -e seconds (mean V/I/W, D+/D-, CC), PD decoded
+  km log FILE [-n S]            every line, host-timestamped, to FILE (reconnects); for background use
+  km sum FILE [--from T] [--to T]  min/mean/max over a log, and its PD exchange
+  km pd FILE                    the PD messages in a log, decoded
+  km send 'CMD' ...             raw commands (anything that changes VBUS/stream needs --force)
+
+Current: positive is into the phone (the meter reads it negative as wired); KM_FLIP=0 for the raw sign.
+"""
+import argparse, asyncio, os, statistics, sys, time
+
+HOST = os.environ.get("KM_HOST", "km003c.local")  # the km003c_rp2 board; KM_HOST=<ip> to override
+FLIP = 1 if os.environ.get("KM_FLIP") == "0" else -1  # the bench wiring: + is into the phone
+UNSAFE = ("QCTEST", "PDTEST", "USB", "STOP", "START", "ENERGY", "PD OFF", "RECORD")
+
+try:
+    import websockets
+except ImportError:
+    sys.exit("km: needs python3-websockets")
+
+
+def kv(line):
+    """'ADC SERIAL=1 T=2 ...' -> ('ADC', {'SERIAL':'1', 'T':'2', ...})"""
+    parts = line.split()
+    d = {}
+    for p in parts[1:]:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            d[k] = v
+    return (parts[0] if parts else ""), d
+
+
+# ---------- USB PD decoding ----------
+CTRL = {1: "GoodCRC", 2: "GotoMin", 3: "Accept", 4: "Reject", 5: "Ping", 6: "PS_RDY",
+        7: "Get_Source_Cap", 8: "Get_Sink_Cap", 9: "DR_Swap", 10: "PR_Swap", 11: "VCONN_Swap",
+        12: "Wait", 13: "Soft_Reset", 14: "Data_Reset", 15: "Data_Reset_Complete",
+        16: "Not_Supported", 17: "Get_Source_Cap_Ext", 18: "Get_Status", 19: "FR_Swap",
+        20: "Get_PPS_Status", 21: "Get_Country_Codes", 22: "Get_Sink_Cap_Ext",
+        23: "Get_Source_Info", 24: "Get_Revision"}
+DATA = {1: "Source_Capabilities", 2: "Request", 3: "BIST", 4: "Sink_Capabilities",
+        5: "Battery_Status", 6: "Alert", 7: "Get_Country_Info", 8: "Enter_USB",
+        9: "EPR_Request", 10: "EPR_Mode", 11: "Source_Info", 12: "Revision", 15: "Vendor_Defined"}
+EXT = {1: "Source_Cap_Ext", 2: "Status", 3: "Get_Battery_Cap", 4: "Get_Battery_Status",
+       5: "Battery_Cap", 6: "Get_Mfr_Info", 7: "Mfr_Info", 8: "Security_Req", 9: "Security_Resp",
+       12: "PPS_Status", 15: "Sink_Cap_Ext", 17: "EPR_Source_Cap", 18: "EPR_Sink_Cap"}
+
+
+def pdo_text(o, sink=False):
+    t = o >> 30
+    if t == 0:
+        v, i = ((o >> 10) & 0x3FF) * 50, (o & 0x3FF) * 10
+        extra = ""
+        if not sink and o & (1 << 29):
+            extra += " DRP"
+        return f"fixed {v/1000:g}V {i/1000:g}A{extra}"
+    if t == 1:
+        return f"battery {((o>>10)&0x3FF)*50/1000:g}-{((o>>20)&0x3FF)*50/1000:g}V {(o&0x3FF)*250/1000:g}W"
+    if t == 2:
+        return f"variable {((o>>10)&0x3FF)*50/1000:g}-{((o>>20)&0x3FF)*50/1000:g}V {(o&0x3FF)*10/1000:g}A"
+    sub = (o >> 28) & 3
+    if sub == 0:
+        return f"PPS {((o>>8)&0xFF)*0.1:g}-{((o>>17)&0xFF)*0.1:g}V {(o&0x7F)*50/1000:g}A"
+    if sub == 1:
+        return f"EPR AVS {((o>>8)&0xFF)*0.1:g}-{((o>>17)&0x1FF)*0.1:g}V {o&0xFF}W"
+    return f"APDO {o:08x}"
+
+
+class PD:
+    """Decodes a capture in order; remembers the last Source_Capabilities for Requests."""
+
+    def __init__(self):
+        self.caps = []
+
+    def decode(self, hexdata):
+        b = bytes.fromhex(hexdata)
+        if len(b) < 2:
+            return f"? {hexdata}"
+        h = b[0] | b[1] << 8
+        typ, n, ext = h & 0x1F, (h >> 12) & 7, h >> 15
+        role = ("SRC" if h & 0x100 else "SNK") + "/" + ("DFP" if h & 0x20 else "UFP")
+        rev = {0: "1.0", 1: "2.0", 2: "3.x"}.get((h >> 6) & 3, "?")
+        mid = (h >> 9) & 7
+        objs = [int.from_bytes(b[2 + 4*k:6 + 4*k], "little") for k in range(n) if len(b) >= 6 + 4*k]
+        if ext:
+            name = EXT.get(typ, f"ext{typ}")
+        elif n == 0:
+            name = CTRL.get(typ, f"ctrl{typ}")
+        else:
+            name = DATA.get(typ, f"data{typ}")
+        out = f"{name} [{role} r{rev} id{mid}]"
+        if ext:
+            return out + f" {b[2:].hex()}"
+        if n and typ == 1:
+            self.caps = objs
+            out += "".join(f"\n      #{k+1} {pdo_text(o)}" for k, o in enumerate(objs))
+        elif n and typ == 4:
+            out += "".join(f"\n      #{k+1} {pdo_text(o, True)}" for k, o in enumerate(objs))
+        elif n and typ in (2, 9):
+            r = objs[0]
+            pos = (r >> 28) & 0xF
+            src = self.caps[pos-1] if 0 < pos <= len(self.caps) else None
+            if src is not None and src >> 30 == 3:
+                out += f" #{pos} PPS {((r>>9)&0xFFF)*20/1000:g}V {(r&0x7F)*50/1000:g}A"
+            else:
+                out += f" #{pos} op {((r>>10)&0x3FF)*10/1000:g}A max {(r&0x3FF)*10/1000:g}A"
+                if src is not None:
+                    out += f" ({pdo_text(src)})"
+            if r & (1 << 26):
+                out += " mismatch"
+        elif n and typ == 15:
+            v = objs[0]
+            if v & 0x8000:
+                ctype = ("REQ", "ACK", "NAK", "BUSY")[(v >> 6) & 3]
+                cmd = {1: "Discover_Identity", 2: "Discover_SVIDs", 3: "Discover_Modes", 4: "Enter_Mode",
+                       5: "Exit_Mode", 6: "Attention"}.get(v & 0x1F, f"cmd{v & 0x1F}")
+                out += f" svid={v>>16:04x} {cmd} {ctype}"
+                if (v & 0x1F) == 1 and ctype == "ACK" and len(objs) >= 4:
+                    out += discover_identity(objs[1:])
+                elif len(objs) > 1:
+                    out += " " + " ".join(f"{o:08x}" for o in objs[1:])
+            else:
+                out += f" svid={v>>16:04x} unstructured " + " ".join(f"{o:08x}" for o in objs[1:])
+        elif n:
+            out += " " + " ".join(f"{o:08x}" for o in objs)
+        return out
+
+
+def discover_identity(vdos):
+    """ID Header, Cert Stat, Product, then product-type VDOs (USB PD 3.x 6.4.4.3.1)"""
+    idh, cert, prod = vdos[0], vdos[1], vdos[2]
+    ufp = {0: "-", 1: "PDUSB hub", 2: "PDUSB peripheral", 3: "PSD", 5: "alt mode adapter",
+           6: "VPD"}.get((idh >> 27) & 7, "?")
+    plug = {0: "-", 3: "passive cable", 4: "active cable"}.get((idh >> 27) & 7, "?")
+    out = (f"\n      VID {idh & 0xFFFF:04x} PID {prod >> 16:04x} bcd {prod & 0xFFFF:04x} XID {cert:08x}"
+           f" product type {(idh >> 27) & 7} = {ufp} on SOP, {plug} on SOP'")
+    if len(vdos) >= 4 and (idh >> 27) & 7 in (3, 4) and not idh >> 30:
+        c = vdos[3]
+        speed = {0: "USB 2.0", 1: "USB 3.2 Gen1", 2: "USB 3.2/USB4 Gen2", 3: "USB4 Gen3", 4: "USB4 Gen4"}.get(c & 7, "?")
+        cur = {1: "3 A", 2: "5 A"}.get((c >> 5) & 3, "?")
+        vmax = {0: "20 V", 1: "30 V", 2: "40 V", 3: "50 V"}.get((c >> 9) & 3, "?")
+        out += (f"\n      cable: {cur}, max {vmax}, {speed}, EPR {'yes' if c >> 17 & 1 else 'no'},"
+                f" latency code {(c >> 13) & 0xF}, VDO {c:08x}")
+    return out
+
+
+def pd_line(d, pd):
+    kind = d.get("KIND", "?")
+    tx = " (meter)" if d.get("TX") == "1" else ""
+    if kind == "PD_MSG":
+        sop = {"0": "", "1": "SOP' ", "2": "SOP'' "}.get(d.get("SOP", "0"), f"SOP{d.get('SOP')} ")
+        return f"PD {sop}{pd.decode(d.get('DATA', ''))}{tx}"
+    return f"PD {kind} ev={d.get('EV', '')}{tx}"
+
+
+# ---------- reading the analogue lines ----------
+def cc_adv(mv):
+    """what a sink's Rd (5.1k) sees on the active CC: the source's Rp"""
+    if mv < 200:
+        return "open"
+    if mv < 660:
+        return "Rp-default"
+    if mv < 1230:
+        return "Rp-1.5A"
+    if mv < 2180:
+        return "Rp-3A"
+    return "high"
+
+
+def dpdm_hint(dp, dm):
+    if dp < 250 and dm < 250:
+        return ""
+    if abs(dp - dm) < 60 and 400 < dp < 2900:
+        return "shorted(DCP?)"
+    if 500 < dp < 700 and dm < 300:
+        return "QC/AFC req?"
+    if 2500 < dp and 2500 < dm:
+        return "Apple 2.7?"
+    return ""
+
+
+class Alarms:
+    """What the line itself says went wrong, from the meter's side:
+    - VBUS lost: the source cut its output (likely its over-current protection) or a
+      real unplug; with the current just before, and how long until it came back;
+    - Hard Reset (either side), and Source_Capabilities that differ from the ones
+      before it: a charger that removes PDOs after a reset is likely reacting to us."""
+
+    def __init__(self):
+        self.caps = None          # PDO list (ints) currently advertised
+        self.caps_before_reset = None
+        self.reset_at = None
+        self.vbus_on = None
+        self.lost_at = None
+        self.recent_i = []        # (t, mA) for the last ~2 s
+        self.peak_v = 0
+
+    def adc(self, t, d):
+        v = int(d["VBUS_UV"]) / 1e6
+        i = FLIP * int(d["I_UA"]) / 1e3
+        out = []
+        on = v > 3.5
+        if on:
+            self.recent_i.append((t, i))
+            self.recent_i = [x for x in self.recent_i if t - x[0] < 2.0]
+        if self.vbus_on and not on:
+            self.lost_at = t
+            pk = max((x[1] for x in self.recent_i), default=0)
+            last = self.recent_i[-1][1] if self.recent_i else 0
+            out.append(f"!! VBUS LOST (was {self.peak_v:.2f} V; current just before {last:.0f} mA, peak {pk:.0f} mA in the last 2 s)")
+        if self.vbus_on is False and on and self.lost_at is not None:
+            gap = t - self.lost_at
+            kind = "likely the charger's protection or a reset" if gap < 6 else "likely a re-plug"
+            if gap >= 6:
+                self.caps = None   # a different charger may follow: don't compare across it
+            out.append(f"!! VBUS BACK after {gap:.1f} s ({kind})")
+        if on:
+            self.peak_v = v
+        self.vbus_on = on
+        return out
+
+    def pd(self, t, d, pd):
+        out = []
+        kind = d.get("KIND")
+        if kind == "HARD_RESET":
+            who = "sent by the meter" if d.get("TX") == "1" else "on the line"
+            self.hard_resets = getattr(self, "hard_resets", 0) + 1
+            out.append(f"!! HARD RESET {who} (#{self.hard_resets}; a strong sign of over-current or a protocol error)")
+            if self.reset_at is None:
+                self.caps_before_reset = self.caps
+            self.reset_at = t
+        elif kind == "CABLE_RESET":
+            out.append("!  cable reset on the line")
+        elif kind == "PD_ERROR":
+            out.append(f"!  PD error ev={d.get('EV', '')}")
+        elif kind == "PD_MSG" and d.get("SOP", "0") == "0":
+            b = bytes.fromhex(d.get("DATA", ""))
+            if len(b) >= 2:
+                h = b[0] | b[1] << 8
+                n = (h >> 12) & 7
+                if not h >> 15 and n and (h & 0x1F) == 1:
+                    objs = [int.from_bytes(b[2+4*k:6+4*k], "little") for k in range(n)]
+                    ref = self.caps_before_reset if self.reset_at is not None else self.caps
+                    if ref is not None and objs != ref:
+                        gone = [pdo_text(o) for o in ref if o not in objs]
+                        new = [pdo_text(o) for o in objs if o not in ref]
+                        if self.reset_at is not None:
+                            out.append(f"!! SOURCE CAPS CHANGED AFTER A HARD RESET: removed {gone or '-'}; added {new or '-'}"
+                                       " -- likely a reaction to our draw or PD logic: investigate")
+                        else:
+                            out.append(f"-- source caps renegotiated (no reset; thermal or shared-port rebalancing?):"
+                                       f" removed {gone or '-'}; added {new or '-'}")
+                    self.caps = objs
+                    self.reset_at = None
+                    self.caps_before_reset = None
+        return out
+
+
+class Agg:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.v, self.i, self.dp, self.dm, self.c1, self.c2 = [], [], [], [], [], []
+
+    def add(self, d):
+        self.v.append(int(d["VBUS_UV"]) / 1e6)
+        self.i.append(FLIP * int(d["I_UA"]) / 1e3)
+        self.dp.append(int(d.get("DP_UV", 0)) / 1e3)
+        self.dm.append(int(d.get("DM_UV", 0)) / 1e3)
+        self.c1.append(int(d.get("CC1_UV", 0)) / 1e3)
+        self.c2.append(int(d.get("CC2_UV", 0)) / 1e3)
+
+    def row(self):
+        if not self.v:
+            return None
+        m = statistics.fmean
+        v, i = m(self.v), m(self.i)
+        dp, dm, c1, c2 = m(self.dp), m(self.dm), m(self.c1), m(self.c2)
+        cc = max(c1, c2)
+        hint = dpdm_hint(dp, dm)
+        return (f"{v:6.3f}V {i:7.1f}mA {v*i/1000:6.2f}W  (I {min(self.i):.0f}..{max(self.i):.0f})"
+                f"  D+ {dp:4.0f} D- {dm:4.0f}mV {hint:<13} CC1 {c1:4.0f} CC2 {c2:4.0f}mV {cc_adv(cc)} n={len(self.v)}")
+
+
+# ---------- the connection ----------
+class Meter:
+    def __init__(self, host, rate, want_pd):
+        self.url = f"ws://{host}/ws"
+        self.rate, self.want_pd = rate, want_pd
+        self.reconnects = 0
+
+    async def lines(self, setup=True):
+        """Yields (host_time, line) forever, reconnecting on loss."""
+        while True:
+            try:
+                async with websockets.connect(self.url, open_timeout=6, ping_interval=5,
+                                              ping_timeout=8, close_timeout=1, max_size=None) as ws:
+                    await ws.send("STATUS")
+                    await ws.send("FOLLOW ON")
+                    started = False
+                    async for msg in ws:
+                        if isinstance(msg, bytes):
+                            msg = msg.decode(errors="replace")
+                        for line in msg.splitlines():
+                            verb, d = kv(line)
+                            if setup and verb == "STATE" and not started:
+                                started = True
+                                if d.get("OPEN") == "1" and d.get("STREAMING") != "1":
+                                    await ws.send(f"START {self.rate}")
+                                if self.want_pd and d.get("OPEN") == "1" and d.get("PD") != "1":
+                                    await ws.send("PD ON")
+                            yield time.time(), line
+            except (OSError, asyncio.TimeoutError, websockets.WebSocketException) as e:
+                self.reconnects += 1
+                print(f"# km: link lost ({type(e).__name__}); reconnecting", file=sys.stderr)
+                await asyncio.sleep(1)
+
+
+async def until(gen, seconds):
+    end = time.time() + seconds if seconds > 0 else None
+    it = gen.__aiter__()
+    while True:
+        left = None if end is None else end - time.time()
+        if left is not None and left <= 0:
+            return
+        try:
+            yield await asyncio.wait_for(it.__anext__(), timeout=left)
+        except asyncio.TimeoutError:
+            return
+
+
+async def cmd_status(a):
+    m = Meter(a.host, a.rate, False)
+    agg = Agg()
+    async for t, line in until(m.lines(setup=False), a.n):
+        verb, d = kv(line)
+        if verb in ("METER", "STATE", "INFO", "WARN"):
+            print(line)
+        elif verb == "ADC":
+            agg.add(d)
+    print("reading:", agg.row() or "no samples (not streaming?)")
+
+
+async def cmd_watch(a):
+    m = Meter(a.host, a.rate, a.pd)
+    agg, pd, al = Agg(), PD(), Alarms()
+    tick = time.time() + a.e
+    async for t, line in until(m.lines(), a.n):
+        verb, d = kv(line)
+        stamp = time.strftime("%H:%M:%S ", time.localtime(t))
+        for w in (al.adc(t, d) if verb == "ADC" else al.pd(t, d, pd) if verb == "PD" else []):
+            print(stamp + w, flush=True)
+        if verb == "ADC":
+            agg.add(d)
+        elif verb == "PD":
+            text = pd_line(d, pd)
+            if "GoodCRC" not in text or a.crc:
+                print(time.strftime("%H:%M:%S ", time.localtime(t)) + text, flush=True)
+        elif verb in ("ERR", "WARN") or (verb == "OK" and "FOLLOW" not in line):
+            print("#", line, flush=True)
+        if t >= tick:
+            r = agg.row()
+            print(time.strftime("%H:%M:%S ", time.localtime(t)) + (r or "no samples"), flush=True)
+            agg.reset()
+            tick = t + a.e
+
+
+async def cmd_log(a):
+    m = Meter(a.host, a.rate, a.pd)
+    n = 0
+    with open(a.file, "a", buffering=1) as f:
+        f.write(f"# km log start {time.strftime('%Y-%m-%d %H:%M:%S')} host={a.host}\n")
+        async for t, line in until(m.lines(), a.n):
+            f.write(f"{t:.3f} {line}\n")
+            n += 1
+        f.write(f"# km log end {time.strftime('%Y-%m-%d %H:%M:%S')} lines={n} reconnects={m.reconnects}\n")
+
+
+def read_log(path, t0=None, t1=None):
+    for raw in open(path, errors="replace"):
+        if raw.startswith("#"):
+            continue
+        ts, _, line = raw.rstrip("\n").partition(" ")
+        try:
+            t = float(ts)
+        except ValueError:
+            continue
+        if (t0 and t < t0) or (t1 and t > t1):
+            continue
+        yield t, line
+
+
+def parse_when(s):
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        today = time.strftime("%Y-%m-%d ")
+        return time.mktime(time.strptime(today + s, "%Y-%m-%d %H:%M:%S"))
+
+
+def cmd_sum(a):
+    agg, pd, al = Agg(), PD(), Alarms()
+    alarms = []
+    first = last = None
+    gapped = 0
+    lastT = None
+    for t, line in read_log(a.file, parse_when(a.since), parse_when(a.to)):
+        verb, d = kv(line)
+        for w in (al.adc(t, d) if verb == "ADC" else al.pd(t, d, pd) if verb == "PD" else []):
+            alarms.append(time.strftime("%H:%M:%S ", time.localtime(t)) + w)
+        if verb == "ADC":
+            agg.add(d)
+            first = first or t
+            last = t
+            if lastT and t - lastT > 2:
+                gapped += 1
+            lastT = t
+        elif verb == "PD" and not a.nopd:
+            text = pd_line(d, pd)
+            if "GoodCRC" not in text:
+                print(time.strftime("%H:%M:%S ", time.localtime(t)) + text)
+    if not agg.v:
+        print("no samples")
+        return
+    p = [v * i / 1000 for v, i in zip(agg.v, agg.i)]
+    q = lambda xs: f"min {min(xs):8.2f}  mean {statistics.fmean(xs):8.2f}  max {max(xs):8.2f}"
+    print(f"{time.strftime('%H:%M:%S', time.localtime(first))}..{time.strftime('%H:%M:%S', time.localtime(last))}"
+          f"  {last-first:.0f}s  {len(agg.v)} samples  {gapped} gaps >2s")
+    print("V   ", q(agg.v))
+    print("mA  ", q(agg.i))
+    print("W   ", q(p))
+    print("D+mV", q(agg.dp))
+    print("D-mV", q(agg.dm))
+    print("CC1 ", q(agg.c1), cc_adv(statistics.fmean(agg.c1)))
+    print("CC2 ", q(agg.c2), cc_adv(statistics.fmean(agg.c2)))
+    print(f"energy ~{statistics.fmean(p)*(last-first)/3600:.3f} Wh")
+    print(f"alarms: {len(alarms)}")
+    for w in alarms:
+        print("  " + w)
+
+
+def cmd_pd(a):
+    pd, al = PD(), Alarms()
+    for t, line in read_log(a.file):
+        verb, d = kv(line)
+        for w in (al.adc(t, d) if verb == "ADC" else al.pd(t, d, pd) if verb == "PD" else []):
+            print(time.strftime("%H:%M:%S ", time.localtime(t)) + w)
+        if verb == "PD":
+            text = pd_line(d, pd)
+            if "GoodCRC" not in text or a.crc:
+                print(time.strftime("%H:%M:%S ", time.localtime(t)) + f"{t%1:.3f}"[1:] + " " + text)
+
+
+async def cmd_send(a):
+    for c in a.cmds:
+        if any(c.upper().startswith(u) for u in UNSAFE) and not a.force:
+            sys.exit(f"km: '{c}' changes the meter's stream or VBUS; add --force if you mean it")
+    async with websockets.connect(f"ws://{a.host}/ws", open_timeout=6) as ws:
+        for c in a.cmds:
+            await ws.send(c)
+            print(">>", c)
+        try:
+            while True:
+                msg = await asyncio.wait_for(ws.recv(), timeout=a.n)
+                for line in str(msg).splitlines():
+                    if not line.startswith(("ADC", "PD ")):
+                        print("<<", line)
+        except (asyncio.TimeoutError, websockets.ConnectionClosed):
+            pass
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--host", default=HOST)
+    ap.add_argument("--rate", type=int, default=10, help="START rate if nothing streams (2,10,50,1000)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("status"); s.add_argument("-n", type=float, default=2)
+    s = sub.add_parser("watch"); s.add_argument("-n", type=float, default=0); s.add_argument("-e", type=float, default=1)
+    s.add_argument("--pd", action="store_true", help="turn PD capture on if it is off"); s.add_argument("--crc", action="store_true")
+    s = sub.add_parser("log"); s.add_argument("file"); s.add_argument("-n", type=float, default=0); s.add_argument("--pd", action="store_true")
+    s = sub.add_parser("sum"); s.add_argument("file"); s.add_argument("--from", dest="since"); s.add_argument("--to"); s.add_argument("--nopd", action="store_true")
+    s = sub.add_parser("pd"); s.add_argument("file"); s.add_argument("--crc", action="store_true")
+    s = sub.add_parser("send"); s.add_argument("cmds", nargs="+"); s.add_argument("-n", type=float, default=3); s.add_argument("--force", action="store_true")
+    a = ap.parse_args()
+    try:
+        if a.cmd in ("sum", "pd"):
+            {"sum": cmd_sum, "pd": cmd_pd}[a.cmd](a)
+        else:
+            asyncio.run({"status": cmd_status, "watch": cmd_watch, "log": cmd_log, "send": cmd_send}[a.cmd](a))
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass
+
+
+if __name__ == "__main__":
+    main()
