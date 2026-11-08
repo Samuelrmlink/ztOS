@@ -172,7 +172,7 @@ for sym in ARCH_ACTIONS ARCH_AIROHA ARCH_SUNXI ARCH_ALPINE ARCH_APPLE ARCH_BCM \
 	COMPAT DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT FTRACE STACK_TRACER \
 	SECURITY_SELINUX SECURITY_APPARMOR SECURITY_SMACK SECURITY_TOMOYO \
 	NET_SCHED NET_CLS_ACT IP_VS BRIDGE VLAN_8021Q \
-	TYPEC WATCHDOG_NOWAYOUT \
+	WATCHDOG_NOWAYOUT \
 	USB_G_SERIAL RANDOMIZE_BASE ARM64_VA_BITS_52 ARM64_PA_BITS_52 \
 	PSTORE_PMSG PSTORE_COMPRESS STRICT_DEVMEM SCSI_UFS_CRYPTO; do
 	cfg --disable "$sym"
@@ -244,8 +244,11 @@ fi
 # MAX77705 USB-C controller: needs the MFD's interrupt domain, so --power only
 if [ -n "$POWER" ]; then
 	cfg --enable CHARGER_MAX77705_USBC
+	# its Type-C port, partner and PD objects (/sys/class/typec, usb_power_delivery)
+	cfg --enable TYPEC
 else
 	cfg --disable CHARGER_MAX77705_USBC
+	cfg --disable TYPEC
 fi
 if [ -n "$GPU" ]; then
 	cfg --enable DRM_PANFROST

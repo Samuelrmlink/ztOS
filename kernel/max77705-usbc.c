@@ -57,6 +57,8 @@
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
 #include <linux/unaligned.h>
+#include <linux/usb/pd.h>
+#include <linux/usb/typec.h>
 #include <linux/workqueue.h>
 
 #define REG_HW_REV		0x00
@@ -364,6 +366,14 @@ struct max77705_usbc {
 	unsigned int hv_waits;		/* for the charger's limit to come down */
 
 	struct usbc_pd pd;
+	unsigned int pd_gen;		/* bumped whenever pd.cur changes */
+
+	/* Type-C class (CONFIG_TYPEC) */
+	struct typec_port *port;
+	struct typec_partner *partner;
+	struct usb_power_delivery *partner_pd;
+	struct usb_power_delivery_capabilities *partner_src_caps;
+	unsigned int partner_pd_gen;
 
 	struct power_supply *psy;
 	struct mutex pub_lock;		/* pub, and pd's caps/strings for readers */
@@ -1386,6 +1396,7 @@ static void usbc_pd_forget(struct max77705_usbc *u)
 	u->pd.have_first = false;
 	memset(&u->pd.first, 0, sizeof(u->pd.first));
 	memset(&u->pd.cur, 0, sizeof(u->pd.cur));
+	u->pd_gen++;
 	u->pd.pos = 0;
 	u->pd.req_pos = 0;
 	u->pd.req_tries = 0;
@@ -1433,6 +1444,8 @@ static void usbc_pd_read_caps(struct max77705_usbc *u)
 	} else if (changed && !hr) {
 		u->pd.caps_renegotiated++;
 	}
+	if (!pd_caps_equal(&u->pd.cur, &c))
+		u->pd_gen++;
 	u->pd.cur = c;
 	u->pd.pos = pos;
 	if (pos && pos == u->pd.req_pos) {
@@ -1786,6 +1799,169 @@ static void usbc_hv_work(struct work_struct *work)
 		queue_delayed_work(u->wq, &u->hv_work, msecs_to_jiffies(again));
 }
 
+/* ---- Type-C class ----------------------------------------------------------- */
+
+#if IS_ENABLED(CONFIG_TYPEC)
+/*
+ * What the firmware shows, mapped onto the typec class: a port (DRP/DRD,
+ * no role-swap ops: the firmware decides), a partner per CC attach with
+ * orientation, roles, Rp/PD power operation mode, and, once a contract is
+ * in, a usb_power_delivery object with the partner's source capabilities
+ * (/sys/class/usb_power_delivery/pdN/source-capabilities). The partner's
+ * PD revision is not reported by the firmware: 3.0 is the port's (Samsung
+ * hard-codes 0x300 too). No cable: the firmware gives nothing about SOP'.
+ */
+#define PD_REV_PORT	0x0300
+
+static void usbc_typec_drop_pd(struct max77705_usbc *u)
+{
+	if (!u->partner_pd)
+		return;
+	typec_partner_set_usb_power_delivery(u->partner, NULL);
+	if (!IS_ERR_OR_NULL(u->partner_src_caps))
+		usb_power_delivery_unregister_capabilities(u->partner_src_caps);
+	u->partner_src_caps = NULL;
+	usb_power_delivery_unregister(u->partner_pd);
+	u->partner_pd = NULL;
+}
+
+static void usbc_typec_detach(struct max77705_usbc *u)
+{
+	if (!u->partner)
+		return;
+	usbc_typec_drop_pd(u);
+	typec_unregister_partner(u->partner);
+	u->partner = NULL;
+	typec_set_orientation(u->port, TYPEC_ORIENTATION_NONE);
+	typec_set_pwr_opmode(u->port, TYPEC_PWR_MODE_USB);
+	typec_set_pwr_role(u->port, TYPEC_SINK);
+	typec_set_data_role(u->port, TYPEC_DEVICE);
+	typec_set_vconn_role(u->port, TYPEC_SINK);
+}
+
+/* the source caps in force as the partner's usb_power_delivery */
+static void usbc_typec_pd(struct max77705_usbc *u)
+{
+	struct usb_power_delivery_desc desc = { .revision = PD_REV_PORT };
+	struct usb_power_delivery_capabilities_desc caps = { .role = TYPEC_SOURCE };
+
+	if (u->partner_pd && u->partner_pd_gen == u->pd_gen)
+		return;
+	usbc_typec_drop_pd(u);
+	u->partner_pd_gen = u->pd_gen;
+	if (!u->pd.cur.n)
+		return;
+
+	typec_partner_set_pd_revision(u->partner, PD_REV_PORT);	/* usb_pd = 1 */
+	u->partner_pd = typec_partner_usb_power_delivery_register(u->partner, &desc);
+	if (IS_ERR(u->partner_pd)) {
+		dev_warn(u->dev, "partner usb_power_delivery: %ld\n",
+			 PTR_ERR(u->partner_pd));
+		u->partner_pd = NULL;
+		return;
+	}
+	memcpy(caps.pdo, u->pd.cur.pdo, u->pd.cur.n * sizeof(u32));
+	u->partner_src_caps = usb_power_delivery_register_capabilities(u->partner_pd, &caps);
+	if (IS_ERR(u->partner_src_caps))
+		dev_warn(u->dev, "partner source caps: %ld\n", PTR_ERR(u->partner_src_caps));
+	typec_partner_set_usb_power_delivery(u->partner, u->partner_pd);
+}
+
+static void usbc_typec_update(struct max77705_usbc *u)
+{
+	u8 cc0 = u->st[ST(REG_CC_STATUS0)], pd1 = u->st[ST(REG_PD_STATUS1)];
+	u8 ccstat = FIELD_GET(CC0_CCSTAT, cc0);
+	enum typec_pwr_opmode mode;
+
+	if (!u->port)
+		return;
+	if (ccstat == CCSTAT_NONE || ccstat > 4) {	/* none, error, disabled */
+		usbc_typec_detach(u);
+		return;
+	}
+	if (!u->partner) {
+		struct typec_partner_desc desc = {
+			.accessory = ccstat == 3 ? TYPEC_ACCESSORY_AUDIO :
+				     ccstat == 4 ? TYPEC_ACCESSORY_DEBUG :
+				     TYPEC_ACCESSORY_NONE,
+		};
+
+		u->partner = typec_register_partner(u->port, &desc);
+		if (IS_ERR(u->partner)) {
+			dev_warn(u->dev, "typec partner: %ld\n", PTR_ERR(u->partner));
+			u->partner = NULL;
+			return;
+		}
+		u->partner_pd_gen = u->pd_gen - 1;	/* look at the caps */
+	}
+
+	typec_set_pwr_role(u->port, ccstat == CCSTAT_SOURCE ? TYPEC_SOURCE : TYPEC_SINK);
+	typec_set_data_role(u->port, (pd1 & PD1_DATAROLE) ? TYPEC_HOST : TYPEC_DEVICE);
+	typec_set_vconn_role(u->port, (cc0 & CC0_CCVCNSTAT) ? TYPEC_SOURCE : TYPEC_SINK);
+	switch (FIELD_GET(CC0_CCPINSTAT, cc0)) {
+	case 1:
+		typec_set_orientation(u->port, TYPEC_ORIENTATION_NORMAL);
+		break;
+	case 2:
+		typec_set_orientation(u->port, TYPEC_ORIENTATION_REVERSE);
+		break;
+	default:
+		typec_set_orientation(u->port, TYPEC_ORIENTATION_NONE);
+		break;
+	}
+
+	if (u->pd.pos && ccstat == CCSTAT_SINK)
+		mode = TYPEC_PWR_MODE_PD;
+	else if (ccstat == CCSTAT_SINK && FIELD_GET(CC0_CCISTAT, cc0) == CCI_3_0A)
+		mode = TYPEC_PWR_MODE_3_0A;
+	else if (ccstat == CCSTAT_SINK && FIELD_GET(CC0_CCISTAT, cc0) == CCI_1_5A)
+		mode = TYPEC_PWR_MODE_1_5A;
+	else
+		mode = TYPEC_PWR_MODE_USB;
+	typec_set_pwr_opmode(u->port, mode);
+
+	if (ccstat == CCSTAT_SINK)
+		usbc_typec_pd(u);
+}
+
+static void usbc_typec_remove(void *data)
+{
+	struct max77705_usbc *u = data;
+
+	usbc_typec_detach(u);
+	typec_unregister_port(u->port);
+	u->port = NULL;
+}
+
+static void usbc_typec_init(struct max77705_usbc *u)
+{
+	struct typec_capability cap = {
+		.type = TYPEC_PORT_DRP,
+		.data = TYPEC_PORT_DRD,
+		.revision = USB_TYPEC_REV_1_2,
+		.pd_revision = PD_REV_PORT,
+		.prefer_role = TYPEC_NO_PREFERRED_ROLE,
+		.accessory = { TYPEC_ACCESSORY_AUDIO, TYPEC_ACCESSORY_DEBUG },
+		.orientation_aware = 1,
+	};
+
+	cap.fwnode = dev_fwnode(u->dev);
+	u->port = typec_register_port(u->dev, &cap);
+	if (IS_ERR(u->port)) {
+		dev_warn(u->dev, "typec port: %ld (power_supply only)\n", PTR_ERR(u->port));
+		u->port = NULL;
+		return;
+	}
+	typec_set_pwr_role(u->port, TYPEC_SINK);
+	typec_set_data_role(u->port, TYPEC_DEVICE);
+	if (devm_add_action_or_reset(u->dev, usbc_typec_remove, u))
+		u->port = NULL;
+}
+#else
+static void usbc_typec_update(struct max77705_usbc *u) { }
+static void usbc_typec_init(struct max77705_usbc *u) { }
+#endif
+
 /* ---- events --------------------------------------------------------------- */
 
 /* SYSMsg: log it; after an MCU (re)boot re-apply the masks and forget what
@@ -1874,6 +2050,7 @@ static void usbc_event_work(struct work_struct *work)
 	if (ccstat == CCSTAT_SINK && (u->st[ST(REG_PD_STATUS1)] & PD1_PSRDY) &&
 	    (psrdy || !u->pd.have_first))
 		usbc_pd_read_caps(u);
+	usbc_typec_update(u);
 
 	usbc_publish(u);
 
@@ -2106,6 +2283,7 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	if (IS_ERR(u->psy))
 		return dev_err_probe(dev, PTR_ERR(u->psy), "power_supply\n");
 
+	usbc_typec_init(u);	/* optional: charging does not need it */
 	usbc_debugfs_init(u);
 	ret = devm_add_action_or_reset(dev, usbc_stop_work, u);
 	if (ret)
