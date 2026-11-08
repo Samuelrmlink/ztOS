@@ -177,6 +177,14 @@ enum aod_mode { AOD_OFF, AOD_ON, AOD_CHARGING };
 #define FORCE_PRESS_DEVICE	"s6sy761-force"
 #define FORCE_PRESS_MS		24
 #define FORCE_PRESS_MS_MAX	60
+/* its strength, % of the heavy pulse: its own, not the overall haptic
+ * strength (80 %: as it felt when it followed that, at its default) */
+#define FORCE_PRESS_STRENGTH	80
+/* how hard the press must be: the sponge's pressure level, 0 the firmware's
+ * own, 1-5 Samsung's steps (light to firm); the driver's sysfs force_level,
+ * group video by udev (90-zrn-force.rules), kept in the driver across
+ * screen-off and resume, set again by the shell at start */
+#define FORCE_LEVEL_GLOB	"/sys/bus/i2c/drivers/s6sy761/*/force_level"
 /* A tile or row leans in only once the finger has stayed put this long: shown
  * at once, the start of every scroll pressed the tile under it first */
 #define PRESS_DELAY_MS	80
@@ -1078,6 +1086,8 @@ struct zt_server {
 	 * button). Its pulse is a length of its own, kept in an effect of its own. */
 	bool force_press;		/* config force_press */
 	int force_press_ms;		/* config force_press_vibration: 0 none */
+	int force_press_strength;	/* config force_press_strength: % of HAP_HEAVY */
+	int force_press_level;		/* config force_press_pressure: 0 firmware, 1-5 */
 	int force_effect, force_effect_ms, force_effect_mag;
 	uint32_t haptic_scan_ms;
 
@@ -2606,8 +2616,10 @@ static void hap(struct zt_server *server, enum hap_kind kind, enum hap_group gro
 	}
 }
 
-/* The force press's pulse: force_press_ms long, as strong as a long press at the
- * overall strength. Its own setting, so felt even when touches aren't. */
+static void force_level_apply(struct zt_server *server);
+
+/* The force press's pulse: force_press_ms long, force_press_strength % of a long
+ * press. Its own settings, so felt even when touches aren't. */
 static void hap_force(struct zt_server *server) {
 	if (g_dump_dir || server->force_press_ms <= 0) {
 		return;
@@ -2618,8 +2630,11 @@ static void hap_force(struct zt_server *server) {
 			return;
 		}
 	}
-	double level = HAPS[HAP_HEAVY].level * server->haptic_strength / 100.0;
+	double level = HAPS[HAP_HEAVY].level * server->force_press_strength / 100.0;
 	int magnitude = (int)(0xffff * (level > 1 ? 1 : level));
+	if (magnitude <= 0) {
+		return;
+	}
 	if (server->force_effect < 0 || server->force_effect_ms != server->force_press_ms ||
 			server->force_effect_mag != magnitude) {
 		struct ff_effect effect = {
@@ -3269,6 +3284,8 @@ static void load_config(struct zt_server *server) {
 	server->haptic_strength = 80;
 	server->force_press = true;
 	server->force_press_ms = FORCE_PRESS_MS;
+	server->force_press_strength = FORCE_PRESS_STRENGTH;
+	server->force_press_level = 0;
 	for (int i = 0; i < 8; i++) {
 		server->haptic_level[i] = 100;
 	}
@@ -3351,6 +3368,12 @@ static void load_config(struct zt_server *server) {
 			server->haptics_enabled = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "force_press") == 0) {
 			server->force_press = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+		} else if (strcmp(key, "force_press_strength") == 0) {
+			int v = atoi(value);
+			server->force_press_strength = v < 0 ? 0 : v > 100 ? 100 : v;
+		} else if (strcmp(key, "force_press_pressure") == 0) {
+			int v = atoi(value);
+			server->force_press_level = v < 0 ? 0 : v > 5 ? 5 : v;
 		} else if (strcmp(key, "force_press_vibration") == 0) {
 			int ms = strcmp(value, "off") == 0 ? 0 : atoi(value);
 			server->force_press_ms = ms < 0 ? 0 : ms > FORCE_PRESS_MS_MAX ? FORCE_PRESS_MS_MAX : ms;
@@ -15401,6 +15424,9 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 		keyboard->server = server;
 		keyboard->wlr_keyboard = wlr_keyboard;
 		keyboard->force = device->name && strcmp(device->name, FORCE_PRESS_DEVICE) == 0;
+		if (keyboard->force) {
+			force_level_apply(server);	/* the driver starts at 0 at each probe */
+		}
 		set_default_keymap(wlr_keyboard);
 		wlr_keyboard_set_repeat_info(wlr_keyboard, 25, 600);
 		keyboard->modifiers.notify = keyboard_handle_modifiers;
@@ -16975,6 +17001,28 @@ static void server_new_surface(struct wl_listener *listener, void *data) {
 	wlr_fractional_scale_v1_notify_scale(surface, server->scale);
 }
 
+/* The force press's pressure level into the touchscreen driver (it keeps it
+ * and sets it again at every wake of the controller). Quiet when there is no
+ * force press (no file) or no permission yet. */
+static void force_level_apply(struct zt_server *server) {
+	glob_t g;
+	if (glob(FORCE_LEVEL_GLOB, 0, NULL, &g) != 0) {
+		return;
+	}
+	for (size_t i = 0; i < g.gl_pathc; i++) {
+		FILE *f = fopen(g.gl_pathv[i], "w");
+		if (!f) {
+			wlr_log(WLR_INFO, "force press: %s: %s", g.gl_pathv[i], strerror(errno));
+			continue;
+		}
+		fprintf(f, "%d\n", server->force_press_level);
+		if (fclose(f) == 0) {
+			wlr_log(WLR_INFO, "force press: pressure level %d", server->force_press_level);
+		}
+	}
+	globfree(&g);
+}
+
 /* Read the files again. Scale stays as it is: apps are already drawing at it.
  * load_config starts from "automatic" (0), and telling a surface that aborts
  * wlroots, so it goes back before anything can use it. */
@@ -16992,8 +17040,13 @@ static int reload(int signal_number, void *data) {
 	uint32_t accent = server->accent;
 	int strength = server->haptic_strength;
 	int force_ms = server->force_press_ms;
+	int force_strength = server->force_press_strength;
+	int force_level = server->force_press_level;
 	int ring_before = server->ring_volume;
 	reload_config(server);
+	if (force_level != server->force_press_level) {
+		force_level_apply(server);
+	}
 	{
 		struct zt_toplevel *t;
 		wl_list_for_each(t, &server->toplevels, link) {
@@ -17021,7 +17074,7 @@ static int reload(int signal_number, void *data) {
 	}
 	if (strength != server->haptic_strength) {
 		hap(server, HAP_CLICK, HG_SYSTEM);	/* this is how it feels now */
-	} else if (force_ms != server->force_press_ms) {
+	} else if (force_ms != server->force_press_ms || force_strength != server->force_press_strength) {
 		hap_force(server);	/* the force press's pulse, as it is now */
 	}
 	/* nothing may keep animating a tile that is about to be replaced */

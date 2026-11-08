@@ -87,6 +87,8 @@ enum action {
 	ACT_HAPTICS,
 	ACT_FORCE_PRESS,
 	ACT_FORCE_MS,		/* the force press's vibration: a slider */
+	ACT_FORCE_STRENGTH,	/* its strength, % of the heavy pulse: a slider */
+	ACT_FORCE_LEVEL,	/* how hard to press, 0 firmware / 1-5: a slider */
 	ACT_WIFI_RADIO,
 	ACT_WIFI_SUSPEND,
 	ACT_WIFI_POWERSAVE,	/* the chip's 802.11 power save, through zrnperfd */
@@ -160,6 +162,8 @@ enum action {
 #define FORCE_MS_DEFAULT	24
 #define FORCE_MS_MAX		60
 #define FORCE_MS_MIN		12
+#define FORCE_STRENGTH_DEFAULT	80	/* ztmetro.c FORCE_PRESS_STRENGTH */
+#define FORCE_LEVEL_MAX		5
 
 /* The kinds of touch that can be felt, each with a switch of its own; the
  * shell reads the same keys. */
@@ -256,6 +260,8 @@ static struct {
 	int haptic_strength;	/* percent */
 	bool force_press;	/* a hard press at the bottom centre is Start */
 	int force_ms;		/* how long it vibrates; 0 not at all */
+	int force_strength;	/* how strongly, % of the heavy pulse */
+	int force_level;	/* pressure needed: 0 the firmware's, 1-5 light to firm */
 	int haptic_group[N_HAPTIC_GROUPS];	/* percent of the strength; 0 off */
 	int quick[8];		/* indexes into QUICK_IDS */
 } app = {
@@ -267,6 +273,7 @@ static struct {
 	.haptic_strength = 80,
 	.force_press = true,
 	.force_ms = FORCE_MS_DEFAULT,
+	.force_strength = FORCE_STRENGTH_DEFAULT,
 	.haptic_group = { 100, 100, 100, 100, 100, 100 },
 	.quick = { 0, 1, 2, 3, 10, 5, 7, 8 },
 	.accent = 5,
@@ -401,6 +408,12 @@ static void config_load(void) {
 			app.haptics = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "force_press") == 0) {
 			app.force_press = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "force_press_strength") == 0) {
+			int v = atoi(val);
+			app.force_strength = v < 0 ? 0 : v > 100 ? 100 : v;
+		} else if (strcmp(key, "force_press_pressure") == 0) {
+			int v = atoi(val);
+			app.force_level = v < 0 ? 0 : v > FORCE_LEVEL_MAX ? FORCE_LEVEL_MAX : v;
 		} else if (strcmp(key, "force_press_vibration") == 0) {
 			int ms = strcmp(val, "off") == 0 ? 0 : atoi(val);
 			app.force_ms = ms < 0 ? 0 : ms > FORCE_MS_MAX ? FORCE_MS_MAX : ms;
@@ -627,6 +640,8 @@ static void config_format(void) {
 	KEY("haptic_strength", "%d", app.haptic_strength);
 	KEY("force_press", "%s", app.force_press ? "on" : "off");
 	KEY("force_press_vibration", "%d", app.force_ms);
+	KEY("force_press_strength", "%d", app.force_strength);
+	KEY("force_press_pressure", "%d", app.force_level);
 	char quick[CONFIG_VALUE_MAX - 8] = "";
 	for (int i = 0; i < 8; i++) {
 		size_t at = strlen(quick);
@@ -3118,9 +3133,21 @@ static double draw_force_press(cairo_t *cr, double y) {
 	else snprintf(caption, sizeof(caption), "Vibration: off");
 	zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.force_ms * 100 / FORCE_MS_MAX, caption, ACT_FORCE_MS);
 	y += 58;
+	if (app.force_ms > 0) {
+		snprintf(caption, sizeof(caption), "Vibration strength: %d%%", app.force_strength);
+		zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.force_strength, caption, ACT_FORCE_STRENGTH);
+		y += 58;
+	}
+	static const char *const levels[] = { "the phone's default", "lightest", "light", "medium",
+		"firm", "firmest" };
+	snprintf(caption, sizeof(caption), "Pressure needed: %s", levels[app.force_level]);
+	zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.force_level * 100 / FORCE_LEVEL_MAX, caption,
+		ACT_FORCE_LEVEL);
+	y += 58;
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	y += zmc_text(cr, "How long the phone buzzes when a hard press is felt, from off to 60 ms. Felt as you let go "
-		"of the slider. Works while the screen is on.", FONT_REGULAR, 12.5, MARGIN, y - 6, zmc.width - 2 * MARGIN) + 10;
+	y += zmc_text(cr, "How long and how strongly the phone buzzes when a hard press is felt (its own strength, "
+		"not the one above), and how hard you have to press. The buzz is felt as you let go of a slider. "
+		"Works while the screen is on.", FONT_REGULAR, 12.5, MARGIN, y - 6, zmc.width - 2 * MARGIN) + 10;
 	return y + 20;
 }
 
@@ -4287,6 +4314,18 @@ static void slide(int action, int value, bool done) {
 		if (app.force_ms > 0 && app.force_ms < FORCE_MS_MIN) app.force_ms = FORCE_MS_MIN;
 		if (done) {
 			config_save();	/* the shell buzzes once at the new length */
+		}
+		break;
+	case ACT_FORCE_STRENGTH:
+		app.force_strength = value < 10 ? 10 : value;
+		if (done) {
+			config_save();	/* the shell buzzes once at the new strength */
+		}
+		break;
+	case ACT_FORCE_LEVEL:
+		app.force_level = (value * FORCE_LEVEL_MAX + 50) / 100;
+		if (done) {
+			config_save();	/* the shell sets the touchscreen's level */
 		}
 		break;
 	case ACT_HAPTIC_STRENGTH:
