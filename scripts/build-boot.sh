@@ -40,12 +40,12 @@ FALLBACK=boot
 DTS_FLAGS=()
 EXTRA=
 WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
-UFS=1 ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP=
+UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP=
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--fallback) FALLBACK=$2; shift ;;
 	--no-ufs) UFS= ;;
-	--power) DTS_FLAGS+=(--power) ;;
+	--power) DTS_FLAGS+=(--power); POWER=1 ;;
 	--touch) DTS_FLAGS+=(--touch); ACPM=1 ;;
 	--gpu) DTS_FLAGS+=(--gpu); GPU=1; ACPM=1 ;;
 	--decon) DTS_FLAGS+=(--decon); DECON=1 ;;
@@ -79,6 +79,10 @@ grep -q starlte-zt "$SRC/arch/arm64/boot/dts/exynos/Makefile" ||
 grep -q starlte-zt "$SRC/arch/arm64/boot/dts/exynos/Makefile"
 
 echo "=== port drivers ==="
+# kernel/patch-max77705-charger.py edits the installed charger driver; put the
+# port's copy back first, or apply_drivers.sh takes it for upstream drift
+CHG=$SRC/drivers/power/supply/max77705_charger.c
+grep -q 'zboot: max77705' "$CHG" && install -m644 "$PORT/src/soc/max77705_charger.c" "$CHG"
 BUILD=$B bash "$PORT/scripts/build/apply_drivers.sh" "$SRC" | tail -n 3
 # our own changes to the port's drivers, applied to the copies in the tree
 # the panel brightness (AOR) as /sys/class/backlight/s9p-panel, and the panel
@@ -110,6 +114,9 @@ python3 "$ROOT/kernel/patch-touch-force.py" "$SRC"
 python3 "$ROOT/kernel/patch-pinctrl-resume.py" "$SRC"
 # the firmware's roams are reported to the host the way Samsung's driver does
 python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
+# MAX77705 charger: stock-like AICL (masked IRQ, delayed work, 100 mA steps to
+# a 300 mA floor) instead of mainline's 25 mA ratchet that wraps to 3.2 A
+[ -n "$POWER" ] && python3 "$ROOT/kernel/patch-max77705-charger.py" "$SRC"
 
 echo "=== initramfs ==="
 LIST=$B/initramfs.list
