@@ -42,8 +42,10 @@
 #include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/mfd/max77705-private.h>
 #include <linux/of.h>
 #include <linux/power_supply.h>
+#include <linux/regmap.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
@@ -132,6 +134,8 @@
 /* mailbox opcodes (include/linux/ccic/max77705.h, muic/max77705-muic.h) */
 #define OP_CONTROL1_R		0x05
 #define OP_CONTROL1_W		0x06
+#define OP_FW_AUTOIBUS		0x57	/* OPCODE_SAMSUNG_FW_AUTOIBUS */
+#define  AUTOIBUS_AT_OFF	0x01	/* MCU firmware on, automatic IBUS off */
 
 #define MBOX_DATA_MAX		32
 #define MBOX_TIMEOUT_MS		3000	/* OPCODE_WAIT_TIMEOUT */
@@ -145,6 +149,21 @@
 #define COM_OPEN		0x3f
 
 #define POLL_MS			1000	/* only without an interrupt */
+
+/*
+ * AutoIBUS: the MCU firmware can set the charger's CHGIN_ILIM itself.
+ * Stock turns that off (0x57 = 0x01) at PD init and again whenever the
+ * charger's DETAILS_00 bit 7 reads 0 ("ILIM set by USBC"), so that the AP
+ * alone owns the input limit. A write to the MCU, so it is a switch.
+ */
+static bool autoibus_off = true;
+module_param(autoibus_off, bool, 0644);
+MODULE_PARM_DESC(autoibus_off,
+		 "send AutoIBUS off (opcode 0x57 = 0x01) at start and when DETAILS_00 bit 7 is 0, as stock (default 1)");
+
+#define CHG_DETAILS_00_ILIM_BY_CHG	BIT(7)
+#define AUTOIBUS_CHECK_MS	2000	/* at most one DETAILS_00 check per */
+#define AUTOIBUS_MAX_PER_ATTACH	5	/* resends, then give up until detach */
 
 /* BC_STATUS ChgTyp / PrChgTyp, CC_STATUS0 CCStat / CCIStat */
 #define CHGTYP_NONE		0
@@ -267,6 +286,10 @@ struct max77705_usbc {
 
 	u8 path;			/* last CONTROL1 written, 0 = none */
 	u8 path_tried;			/* value written for this attach */
+
+	bool autoibus_sent;		/* since probe / the last MCU reboot */
+	unsigned int autoibus_resends;	/* this attach */
+	unsigned long autoibus_checked;	/* jiffies */
 
 	struct power_supply *psy;
 	struct mutex pub_lock;
@@ -542,6 +565,9 @@ static bool usbc_op_allowed(struct max77705_usbc *u, u8 op, const u8 *w, int wle
 		return wlen == 0;
 	case OP_CONTROL1_W:
 		return wlen == 1 && (w[0] == COM_USB || w[0] == COM_OPEN);
+	case OP_FW_AUTOIBUS:
+		/* only "USBC fw on, auto IBUS off": stock's AUTOIBUS_AT_OFF */
+		return wlen == 1 && w[0] == AUTOIBUS_AT_OFF;
 	default:
 		return false;
 	}
@@ -910,6 +936,71 @@ static void usbc_route(struct max77705_usbc *u)
 	usbc_set_path(u, want);
 }
 
+/* ---- AutoIBUS --------------------------------------------------------------- */
+
+static int usbc_autoibus_send(struct max77705_usbc *u, const char *why)
+{
+	u8 v = AUTOIBUS_AT_OFF;
+	int ret = usbc_cmd(u, OP_FW_AUTOIBUS, &v, 1, NULL, 0);
+
+	if (!ret)
+		dev_info(u->dev, "AutoIBUS off (%s)\n", why);
+	else if (ret != -EPERM && ret != -ENODEV)
+		dev_warn(u->dev, "AutoIBUS off (%s) failed: %d\n", why, ret);
+	return ret;
+}
+
+/*
+ * DETAILS_00 bit 7 through the charger's own regmap (no cache, plain read;
+ * the charger is found by its power_supply name, so no DT link is needed).
+ * Returns 1 if the USBC firmware set the limit, 0 if the charger did, or a
+ * negative error.
+ */
+static int usbc_ilim_by_usbc(void)
+{
+	struct power_supply *chg = power_supply_get_by_name("max77705-charger");
+	struct regmap *map;
+	unsigned int v;
+	int ret = -ENODEV;
+
+	if (!chg)
+		return ret;
+	map = chg->dev.parent ? dev_get_regmap(chg->dev.parent, NULL) : NULL;
+	if (map) {
+		ret = regmap_read(map, MAX77705_CHG_REG_DETAILS_00, &v);
+		if (!ret)
+			ret = !(v & CHG_DETAILS_00_ILIM_BY_CHG);
+	}
+	power_supply_put(chg);
+	return ret;
+}
+
+static void usbc_autoibus(struct max77705_usbc *u, bool vbus)
+{
+	if (!autoibus_off || !u->mbox_allowed || u->mbox_dead)
+		return;
+	if (!u->autoibus_sent) {
+		/* stock: max77705_pd_init(), once */
+		u->autoibus_sent = true;
+		usbc_autoibus_send(u, "start");
+		return;
+	}
+	if (!vbus) {
+		u->autoibus_resends = 0;
+		return;
+	}
+	if (u->autoibus_resends >= AUTOIBUS_MAX_PER_ATTACH ||
+	    time_before(jiffies, u->autoibus_checked +
+			msecs_to_jiffies(AUTOIBUS_CHECK_MS)))
+		return;
+	u->autoibus_checked = jiffies;
+	if (usbc_ilim_by_usbc() != 1)
+		return;
+	if (++u->autoibus_resends == AUTOIBUS_MAX_PER_ATTACH)
+		dev_warn(u->dev, "AutoIBUS keeps coming back: last resend for this attach\n");
+	usbc_autoibus_send(u, "DETAILS_00 says the USBC set ILIM");
+}
+
 /* ---- events --------------------------------------------------------------- */
 
 /* SYSMsg: log it; after an MCU (re)boot re-apply the masks and forget what
@@ -925,6 +1016,7 @@ static void usbc_handle_sysmsg(struct max77705_usbc *u, u8 msg)
 		usbc_set_masks(u);
 		u->path = 0;
 		u->path_tried = 0;
+		u->autoibus_sent = false;
 		break;
 	case SYSMSG_CC_5V_SHORT:
 	case SYSMSG_SBU_GND_SHORT:
@@ -968,6 +1060,7 @@ static void usbc_event_work(struct work_struct *work)
 	usbc_route(u);
 	if (!vbus)
 		u->path_tried = 0;	/* the next attach writes it again */
+	usbc_autoibus(u, vbus);
 
 	usbc_publish(u);
 }
