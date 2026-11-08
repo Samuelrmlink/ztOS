@@ -36,6 +36,20 @@ Input current, both inputs (CHGIN = USB, WCIN = wireless receiver):
   input_current_limit_effective (uA, the register now), input_current_limit_found
   (uA, 0 = no back-off this plug-in), input_current_ramp (idle, ramping,
   holding, backed-off).
+* A charger that protects itself by cutting VBUS looks like an unplug. CHGIN
+  coming back within 5 s, after being lost above 500 mA within 3 s of a step
+  up (or on the second such quick return within a minute: the input current
+  itself is in the fuel gauge, not readable here), counts as a trip: the
+  plug-in chain is capped at the trip limit - 200 mA (at least 500 mA) and
+  holds there with no retry, also across ceiling raises; a second trip at or
+  below the cap halves the headroom above 500 mA. A gap over 5 s is a real
+  unplug and forgets the cap (userspace keeps memory per charger). One
+  dev_warn per trip. Read-only on max77705-charger: input_current_trips,
+  input_current_trip_limit (uA), input_current_trip_voltage (uV of the USB-C
+  supply's voltage_now at the trip, 0 = unknown; >= 8 V is "at 9 V").
+  input_current_limit_found shows the lower of the AICL result and the cap.
+* input_current_limit can be set from the kernel too (the P9320 driver sets
+  the WCIN ceiling with power_supply_set_property); same ceiling rules.
 * Limits are written as code = mA / 25 - 1, the inverse of the (code + 1) * 25
   read-back (stock's formula); mainline wrote mA / 25, so 1500 read as 1525.
 
@@ -103,6 +117,8 @@ struct max77705_input_state {
 	int			found_ua;	/* AICL back-off result; 0 = none */
 	int			ramp;		/* enum max77705_ramp */
 	int			backoff_from_ua; /* limit before a back-off in progress */
+	int			cap_ua;		/* after a VBUS cut-off; 0 = none */
+	unsigned long		raised_at;	/* jiffies of the last step up */
 };
 ''', 'struct max77705_charger_data {\n', before=True)
 hblock('\t/* zboot: max77705-charger state { */\n', '\t/* } zboot */\n', '''\tstruct mutex		lock;		/* limits, ramps, AICL */
@@ -112,6 +128,15 @@ hblock('\t/* zboot: max77705-charger state { */\n', '\t/* } zboot */\n', '''\tst
 \tstruct max77705_input_state in[MAX77705_N_INPUTS];
 \tstruct power_supply	*psy_wc;
 \tint			vbus_uv;	/* USB-C supply voltage_now; 0 = unknown */
+\t/* CHGIN cut-off ("trip") detection */
+\tunsigned long		lost_at;	/* jiffies CHGIN went away; 0 = n/a */
+\tunsigned long		quick_at;	/* last quick return not taken as a trip */
+\tint			lost_limit_ua;
+\tunsigned int		lost_since_raise_ms;
+\tint			lost_vbus_uv;
+\tint			trips;
+\tint			trip_limit_ua;
+\tint			trip_vbus_uv;
 ''', '\tstruct power_supply\t*psy_chg;\n', before=False)
 HFILE.write_text(h)
 
@@ -160,6 +185,12 @@ region('static irqreturn_t max77705_aicl_irq(int irq, void *irq_drv_data)\n',
 #define MAX77705_RAMP_STEP_UA		100000	/* stock WC_CURRENT_STEP */
 #define MAX77705_SAFE_START_UA		500000
 #define MAX77705_VBUS_CHANGE_UV		1000000
+/* a charger cutting VBUS (over-current) looks like an unplug that comes back */
+#define MAX77705_TRIP_RETURN_MS		5000	/* back within: not a real unplug */
+#define MAX77705_TRIP_RAISE_MS		3000	/* lost within this of a step up */
+#define MAX77705_TRIP_REPEAT_MS		60000	/* or a second quick return within */
+#define MAX77705_TRIP_MARGIN_UA		200000
+#define MAX77705_HV_UV			8000000	/* "at 9 V" */
 
 enum max77705_ramp {
 	MAX77705_RAMP_IDLE,
@@ -247,14 +278,26 @@ static void max77705_aicl_unmask(struct max77705_charger_data *chg)
 	}
 }
 
+/* what this plug-in learnt: the AICL back-off and the cut-off cap; 0 = nothing */
+static int max77705_hold_ua(struct max77705_input_state *st)
+{
+	if (st->found_ua && st->cap_ua)
+		return min(st->found_ua, st->cap_ua);
+	return st->found_ua ?: st->cap_ua;
+}
+
 static int max77705_ramp_target(struct max77705_input_state *st)
 {
-	return st->found_ua ? min(st->found_ua, st->ceil_ua) : st->ceil_ua;
+	int hold = max77705_hold_ua(st);
+
+	return hold ? min(hold, st->ceil_ua) : st->ceil_ua;
 }
 
 static void max77705_ramp_settle(struct max77705_input_state *st)
 {
-	st->ramp = st->found_ua && st->found_ua < st->ceil_ua ?
+	int hold = max77705_hold_ua(st);
+
+	st->ramp = hold && hold < st->ceil_ua ?
 		   MAX77705_RAMP_BACKED_OFF : MAX77705_RAMP_HOLDING;
 }
 
@@ -411,6 +454,8 @@ static void max77705_ramp_work(struct work_struct *work)
 	new = min(cur + MAX77705_RAMP_STEP_UA, target);
 	if (new != cur && max77705_ilim_write(chg, in, new))
 		goto out;
+	if (new > cur)
+		st->raised_at = jiffies;
 	if (new >= target) {
 		max77705_ramp_settle(st);
 		settled = true;
@@ -485,7 +530,7 @@ static ssize_t input_current_limit_found_show(struct device *dev,
 	struct max77705_charger_data *chg;
 	enum max77705_input in = max77705_attr_input(dev, &chg);
 
-	return sysfs_emit(buf, "%d\n", READ_ONCE(chg->in[in].found_ua));
+	return sysfs_emit(buf, "%d\n", max77705_hold_ua(&chg->in[in]));
 }
 static DEVICE_ATTR_RO(input_current_limit_found);
 
@@ -500,13 +545,131 @@ static ssize_t input_current_ramp_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(input_current_ramp);
 
-static struct attribute *max77705_charger_attrs[] = {
+/* CHGIN only: the charger cutting VBUS under us */
+static ssize_t input_current_trips_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct max77705_charger_data *chg = power_supply_get_drvdata(dev_to_psy(dev));
+
+	return sysfs_emit(buf, "%d\n", READ_ONCE(chg->trips));
+}
+static DEVICE_ATTR_RO(input_current_trips);
+
+static ssize_t input_current_trip_limit_show(struct device *dev,
+					     struct device_attribute *attr,
+					     char *buf)
+{
+	struct max77705_charger_data *chg = power_supply_get_drvdata(dev_to_psy(dev));
+
+	return sysfs_emit(buf, "%d\n", READ_ONCE(chg->trip_limit_ua));
+}
+static DEVICE_ATTR_RO(input_current_trip_limit);
+
+static ssize_t input_current_trip_voltage_show(struct device *dev,
+					       struct device_attribute *attr,
+					       char *buf)
+{
+	struct max77705_charger_data *chg = power_supply_get_drvdata(dev_to_psy(dev));
+
+	return sysfs_emit(buf, "%d\n", READ_ONCE(chg->trip_vbus_uv));
+}
+static DEVICE_ATTR_RO(input_current_trip_voltage);
+
+static struct attribute *max77705_wc_attrs[] = {
 	&dev_attr_input_current_limit_effective.attr,
 	&dev_attr_input_current_limit_found.attr,
 	&dev_attr_input_current_ramp.attr,
 	NULL
 };
+ATTRIBUTE_GROUPS(max77705_wc);
+
+static struct attribute *max77705_charger_attrs[] = {
+	&dev_attr_input_current_limit_effective.attr,
+	&dev_attr_input_current_limit_found.attr,
+	&dev_attr_input_current_ramp.attr,
+	&dev_attr_input_current_trips.attr,
+	&dev_attr_input_current_trip_limit.attr,
+	&dev_attr_input_current_trip_voltage.attr,
+	NULL
+};
 ATTRIBUTE_GROUPS(max77705_charger);
+
+/*
+ * CHGIN went away (chg->lock held, limit not yet parked): remember enough to
+ * tell a charger's over-current cut-off from an unplug when it comes back.
+ */
+static void max77705_chgin_lost(struct max77705_charger_data *chg)
+{
+	struct max77705_input_state *st = &chg->in[MAX77705_IN_CHGIN];
+	int cur;
+
+	if (max77705_ilim_read(chg, MAX77705_IN_CHGIN, &cur))
+		cur = 0;
+	chg->lost_at = jiffies ?: 1;
+	chg->lost_limit_ua = cur;
+	chg->lost_since_raise_ms = st->raised_at ?
+		jiffies_to_msecs(jiffies - st->raised_at) : UINT_MAX;
+	chg->lost_vbus_uv = chg->vbus_uv;
+}
+
+/*
+ * CHGIN is back (chg->lock held, before the ramp starts). Back within 5 s,
+ * above the safe start, and either within 3 s of a step up or the second
+ * quick return within a minute: the charger cut VBUS to protect itself (on an
+ * A-to-C cable that looks exactly like an unplug). The plug-in chain is then
+ * capped below the limit it tripped at and never probes above it; a second
+ * trip at or below the cap halves the headroom above 500 mA. A longer gap is
+ * a real unplug and forgets the cap; userspace keeps memory per charger.
+ * The input current itself cannot be read here (IIN is in the fuel gauge), so
+ * "drawing near the limit" is approximated by the timing.
+ */
+static bool max77705_chgin_back(struct max77705_charger_data *chg)
+{
+	struct max77705_input_state *st = &chg->in[MAX77705_IN_CHGIN];
+	unsigned long now = jiffies;
+	bool quick, trip;
+	int lost = chg->lost_limit_ua, cap;
+
+	quick = chg->lost_at &&
+		time_before_eq(now, chg->lost_at + msecs_to_jiffies(MAX77705_TRIP_RETURN_MS));
+	chg->lost_at = 0;
+	if (!quick) {
+		st->cap_ua = 0;
+		chg->quick_at = 0;
+		return false;
+	}
+	trip = lost > MAX77705_SAFE_START_UA &&
+	       (chg->lost_since_raise_ms <= MAX77705_TRIP_RAISE_MS ||
+		(chg->quick_at &&
+		 time_before_eq(now, chg->quick_at + msecs_to_jiffies(MAX77705_TRIP_REPEAT_MS))));
+	if (!trip) {
+		chg->quick_at = now ?: 1;
+		return false;
+	}
+	chg->quick_at = 0;
+
+	if (st->cap_ua && lost <= st->cap_ua)
+		cap = MAX77705_SAFE_START_UA + (st->cap_ua - MAX77705_SAFE_START_UA) / 2;
+	else
+		cap = lost - MAX77705_TRIP_MARGIN_UA;
+	if (st->cap_ua)
+		cap = min(cap, st->cap_ua);
+	cap = max77705_ilim_round(MAX77705_IN_CHGIN, max(cap, MAX77705_SAFE_START_UA));
+	st->cap_ua = cap;
+
+	chg->trips++;
+	chg->trip_limit_ua = lost;
+	chg->trip_vbus_uv = chg->lost_vbus_uv;
+	if (chg->lost_since_raise_ms == UINT_MAX)
+		dev_warn(chg->dev, "charger cut VBUS at %d mA%s: holding at %d mA\\n",
+			 lost / 1000,
+			 chg->lost_vbus_uv >= MAX77705_HV_UV ? " at 9 V" : "", cap / 1000);
+	else
+		dev_warn(chg->dev, "charger cut VBUS at %d mA (%u ms after raising)%s: holding at %d mA\\n",
+			 lost / 1000, chg->lost_since_raise_ms,
+			 chg->lost_vbus_uv >= MAX77705_HV_UV ? " at 9 V" : "", cap / 1000);
+	return true;
+}
 
 ''')
 
@@ -628,7 +791,7 @@ region('static void max77705_chgin_isr_work(struct work_struct *work)\n',
 {
 	struct max77705_charger_data *chg =
 		container_of(work, struct max77705_charger_data, chgin_work);
-	int on[MAX77705_N_INPUTS], vbus_uv = 0, in;
+	int on[MAX77705_N_INPUTS], vbus_uv = 0, in, was;
 	union power_supply_propval vbus;
 	bool wc_changed = false, input_changed = false;
 	struct max77705_input_state *st;
@@ -650,6 +813,7 @@ region('static void max77705_chgin_isr_work(struct work_struct *work)\n',
 		st = &chg->in[in];
 		if (on[in] == st->online)
 			continue;
+		was = st->online;
 		st->online = on[in];
 		input_changed = true;
 		if (in == MAX77705_IN_WCIN)
@@ -658,10 +822,14 @@ region('static void max77705_chgin_isr_work(struct work_struct *work)\n',
 		st->found_ua = 0;
 		st->backoff_from_ua = 0;
 		if (on[in]) {
+			if (in == MAX77705_IN_CHGIN && was == 0)
+				max77705_chgin_back(chg);
 			dev_info(chg->dev, "%s valid: input limit ramps up to %d mA\\n",
-				 max77705_ilim[in].name, st->ceil_ua / 1000);
+				 max77705_ilim[in].name, max77705_ramp_target(st) / 1000);
 			max77705_ramp_restart(chg, in);
 		} else {
+			if (in == MAX77705_IN_CHGIN && was == 1)
+				max77705_chgin_lost(chg);
 			st->ceil_ua = max77705_ilim[in].default_ceil_ua;
 			st->ramp = MAX77705_RAMP_IDLE;
 			max77705_ilim_write(chg, in, max77705_ilim[in].idle_ua);
@@ -802,7 +970,7 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	}
 	wccfg.fwnode = wc_node;
 	wccfg.drv_data = chg;
-	wccfg.attr_grp = max77705_charger_groups;
+	wccfg.attr_grp = max77705_wc_groups;
 
 	chg->psy_wc = devm_power_supply_register(dev, &max77705_wc_psy_desc, &wccfg);
 	if (IS_ERR(chg->psy_wc))
