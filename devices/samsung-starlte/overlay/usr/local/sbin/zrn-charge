@@ -1,79 +1,423 @@
-#!/bin/sh
-# Set the MAX77705 charger's limits from what is plugged in.
+#!/bin/bash
+# zrn-charge: the charging policy for the MAX77705 (Galaxy S9).
 #
-# The mainline charger driver leaves the input limit at 500 mA whatever the
-# source, and the MUIC driver, which does learn the charger type, tells no
-# one. So the type is read here from the MUIC's BC_STATUS register (bit 7:
-# VBUS present; bits 1:0: 1 a computer's port, 2 a charging port, 3 a wall
-# charger) and the limits written to the charger's sysfs:
+# The kernel charges at whatever limits it is given; this decides them, from
+# what is plugged in and from the battery's temperature, as Samsung's own
+# system did (its DT `cable-info` and battery nodes; charging/wired-stock.md
+# §0.7 and §5, charging/wireless.md §2.3). Limits in mA, input / into the battery:
 #
-#	wall charger or charging port	1500 mA in, 1500 mA into the battery
-#	a computer, or nothing		 500 mA in,  450 mA (the driver's own)
+#	sdp (a computer's port)				 500 / 550
+#	cdp (a charging port)				1500 / 1500
+#	dcp, samsung-2a, apple-2a, apple-12w, dcp-3a	1800 / 2100	(stock: "TA")
+#	apple-1a					1000 / 1000
+#	apple-0.5a, dcd-timeout, unknown, nothing	 500 / 500
+#	rp-1.5a (Type-C Rp 1.5 A)			1500 / 1500
+#	rp-3a   (Type-C Rp 3 A)				3000 / 2150
+#	afc-9v, qc2-9v at 9 V				1650 / 2150	(at 5 V: as dcp)
+#	pd						the source's current, <= 3000 and <= 15 W / 2150
+#	wireless (Qi 5 V)				 900 / 1200	(10 V: 650 / 1200)
+#
+# On top of that, from max170xx_battery/temp (tenths of a degree), with stock's
+# hysteresis:
+#	>= 50 C stop, resume at 45;  <= 0 C stop, resume at 5
+#	>= 41 C 1090 mA (700 on a pad) and a 4.15 V float, back at 39;  <= 5 C 700 mA
+#	and 4.15 V, back at 10;  <= 15 C 700 mA, back at 20. Where the charger's float
+#	can't be set, "4.15 V" is kept by stopping at 4.15 V and resuming below 4.0 V.
+#	9 V only below 41 C; at 9 V with the screen on, 500 mA in / 1000 (stock SIOP).
+#
+# The charger type comes from the max77705-usbc power supply where the kernel
+# has one (charger_type, else usb_type and current_max); on a kernel without it,
+# from the MUIC's BC_STATUS and the Type-C CC_STATUS0 over I2C (plain status
+# registers; nothing is written). AICL is the kernel's: once the input limit has
+# been cut below what was asked (or the kernel reports a cut in
+# $AICL_NAME), it is not raised again while the same charger stays in.
+# Where the kernel ramps the input itself, the limit written is its ceiling,
+# written once per decision and never "corrected" from what it reads back.
+# 9 V is asked for through the usbc device's hv_enable, and only when allowed;
+# either way the input limit drops to 500 mA first, and the new limit is
+# written once usbc's voltage_now has moved.
 #
 # It also tells zrn-ledd, which owns the front LED, what the battery is doing:
-# charging, full, low (discharging with the battery at 15 % or less) or none.
-# By default that is drawn as Samsung's own system does: red while charging,
-# green once full, off otherwise, and a slow red breathing when low.
+# charging, full, low (discharging at 15 % or less) or none.
 #
-# Run by udev on every power-supply change and once at boot. Detection takes
-# up to ten seconds after the plug goes in, hence the wait.
-C=/sys/class/power_supply/max77705-charger
-[ -w "$C/input_current_limit" ] || exit 0
+#	zrn-charge --daemon	the service: waits for power-supply uevents (and a
+#				slow timer, for the temperature), one pass per burst
+#	zrn-charge		one pass (zboot-charge-hold, early in the boot); if
+#				the daemon runs, it just asks it for one
+#
+# ZRN_CHARGE_ROOT puts every path under another directory (tests);
+# ZRN_CHARGE_I2CGET and ZRN_CHARGE_MONITOR replace i2cget and udevadm monitor.
+R=${ZRN_CHARGE_ROOT:-}
+PS=$R/sys/class/power_supply
+C=$PS/max77705-charger		# CHGIN limit, charge current, behaviour
+W=$PS/max77705-wireless		# WCIN: online, input limit
+U=$PS/max77705-usbc		# what the source is
+B=$PS/max170xx_battery
+RX=$PS/p9320-wireless		# the receiver: its output voltage, if it says
+DRM=$R/sys/class/drm
+LED=$R/run/zrn-led/charge
+RUN=$R/run/zrn-charge
+UPTIME=$R/proc/uptime
+I2CGET=${ZRN_CHARGE_I2CGET:-i2cget}
+MONITOR=${ZRN_CHARGE_MONITOR:-udevadm monitor --kernel --subsystem-match=power_supply}
+AICL_NAME=input_current_limit_aicl	# on the charger: uA, 0 = AICL has not cut it
+# The kernel's input ramp, where it has one: input_current_limit is then a
+# ceiling, written once per decision; the kernel starts low, steps up while VBUS
+# holds, backs off on AICL or a dip, and holds what it found for the plug. These
+# read-only attributes on the charger say so (and are logged); without them the
+# limit is set and watched here, as before.
+RAMP_EFFECTIVE=input_current_limit_effective	# uA, what applies now
+RAMP_FOUND=input_current_limit_found		# uA, what the ramp settled on
+RAMP_STATE=input_current_ramp			# the ramp's state, a word
+LOW=15		# per cent: at this or below, off the charger, the battery is low
+REPLUG_S=5	# out for less than this is the same plug (VBUS drop-outs keep the AICL cut)
+PREPARE_S=10	# 500 mA while a source is asked for 9 V, at most this long
+DEBOUNCE=0.5	# seconds of quiet that end a burst of uevents
+
+get() {	# file: its first line in REPLY; false if there is none
+	REPLY=
+	[ -r "$1" ] || return 1
+	read -r REPLY < "$1" 2>/dev/null || [ -n "$REPLY" ]
+}
+num() { get "$1" && [[ $REPLY =~ ^-?[0-9]+$ ]]; }
+sel() {	# a sysfs choice list, "a [b] c": the chosen one
+	get "$1" || return 1
+	case $REPLY in *\[*\]*) REPLY=${REPLY#*\[}; REPLY=${REPLY%%\]*} ;; esac
+}
+put() {
+	[ -n "${ZRN_CHARGE_TRACE:-}" ] && echo "${1#$PS/} $2" >> "$ZRN_CHARGE_TRACE"	# tests: the order
+	[ -e "$1" ] && { echo "$2" > "$1"; } 2>/dev/null
+}
+now() { get "$UPTIME"; NOW=${REPLY%%.*}; NOW=${NOW:-0}; }
+min() { [ "$2" -lt "${!1}" ] && printf -v "$1" %d "$2"; }
+
+table() {	# type: lin, lchg (mA), stock's cable-info
+	case $1 in
+	sdp)		lin=500  lchg=550 ;;
+	cdp|rp-1.5a)	lin=1500 lchg=1500 ;;
+	dcp|samsung-2a|apple-2a|apple-12w|dcp-3a) lin=1800 lchg=2100 ;;
+	apple-1a)	lin=1000 lchg=1000 ;;
+	rp-3a|pd)	lin=3000 lchg=2150 ;;
+	afc-9v|qc2-9v)	lin=1650 lchg=2150 ;;
+	wireless)	lin=900  lchg=1200 ;;
+	wireless-hv)	lin=650  lchg=1200 ;;
+	*)		lin=500  lchg=500 ;;
+	esac
+}
+
+i2c() {	# register of the USB-C MCU (0x25): a plain status read, or 0
+	REPLY=$($I2CGET -f -y 1 0x25 "$1" 2>/dev/null)
+	[[ $REPLY =~ ^0x[0-9a-fA-F]+$ ]] || REPLY=0
+}
+
+detect() {	# src (none, wired, wireless), type, cmax (mA, 0 = not said), volt (mV)
+	local wired=0 wl=0 bc cc chg pr r a
+	type=none cmax=0 volt=5000
+	get "$C/online" && [ "$REPLY" = 1 ] && wired=1
+	get "$W/online" && [ "$REPLY" = 1 ] && wl=1
+	if [ -d "$U" ]; then
+		get "$U/online" && [ "$REPLY" = 1 ] && wired=1
+		if [ $wired = 1 ]; then
+			num "$U/current_max" && cmax=$((REPLY / 1000))
+			num "$U/voltage_now" && [ "$REPLY" -gt 0 ] && volt=$((REPLY / 1000))
+			get "$U/charger_type"; type=$REPLY
+			if [ -z "$type" ]; then
+				sel "$U/usb_type"
+				case $REPLY in
+				SDP) type=sdp ;; CDP) type=cdp ;; DCP) type=dcp ;; PD*) type=pd ;;
+				C) if [ $cmax -ge 3000 ]; then type=rp-3a
+				   elif [ $cmax -ge 1500 ]; then type=rp-1.5a; else type=unknown; fi ;;
+				*) type=unknown ;;
+				esac
+			fi
+		fi
+	elif [ $wired = 1 ]; then
+		# today's kernel: BC_STATUS (VBUSDet 7, PrChgTyp 5:3, DCDTmo 2, ChgTyp 1:0)
+		# and CC_STATUS0 (CCIStat 5:4: Rp 1 = 0.5 A, 2 = 1.5 A, 3 = 3 A)
+		i2c 0x08; bc=$REPLY
+		i2c 0x0a; cc=$REPLY
+		chg=$((bc & 3)) pr=$((bc >> 3 & 7))
+		case $pr in
+		1) type=samsung-2a ;; 2) type=apple-0.5a ;; 3) type=apple-1a ;;
+		4) type=apple-2a ;; 5) type=apple-12w ;; 6) type=dcp-3a ;;
+		esac
+		# stock: a proprietary signature on SDP/CDP is an "unofficial TA"; DCP is TA
+		case $chg in
+		0) type=unknown ;;
+		3) [ $pr = 6 ] || type=dcp ;;
+		2) [ $type = none ] && type=cdp ;;
+		1) [ $type = none ] && { [ $((bc >> 2 & 1)) = 1 ] && type=dcd-timeout || type=sdp; } ;;
+		esac
+		# a Type-C source's Rp current, where it gives more (stock: not for CDP)
+		case $((cc >> 4 & 3)) in 3) r=rp-3a ;; 2) r=rp-1.5a ;; *) r= ;; esac
+		if [ -n "$r" ] && [ $type != cdp ]; then
+			table $r; a=$lin; table $type
+			[ $a -gt $lin ] && type=$r
+		fi
+	fi
+	if [ $wired = 1 ]; then src=wired
+	elif [ $wl = 1 ]; then
+		src=wireless type=wireless
+		num "$RX/voltage_now" && [ "$REPLY" -ge 7500000 ] && { type=wireless-hv; volt=$((REPLY / 1000)); }
+	else src=none
+	fi
+}
+
+screen_on() {	# as zrn-sleepd sees it: off only when every connector says disabled
+	local f seen=0
+	for f in "$DRM"/card*-*/enabled; do
+		get "$f" || continue
+		seen=1
+		[ "$REPLY" = disabled ] || return 0
+	done
+	[ $seen = 0 ]
+}
 
 led() {	# what the front LED should show: zrn-ledd draws it. Only when it changes.
-	S=/run/zrn-led/charge
-	[ "$(cat $S 2>/dev/null)" = "$1" ] || { echo "$1" > $S; } 2>/dev/null
+	get "$LED"
+	[ "$REPLY" = "$1" ] || { echo "$1" > "$LED"; } 2>/dev/null
 }
-LOW=15	# per cent: at this or below, off the charger, the battery is low
-# Green means "on a charger and full (or held full)", never just "a cable is in".
-led_now() {
-	level=$(cat /sys/class/power_supply/max170xx_battery/capacity 2>/dev/null || echo 100)
-	case "$(cat /sys/class/power_supply/max170xx_battery/status 2>/dev/null)" in
+led_now() {	# online: 1 if a charger is in
+	local level=100
+	num "$B/capacity" && level=$REPLY
+	get "$B/status"
+	case $REPLY in
 	Charging) led charging ;;
 	Full) led full ;;
 	Discharging)
 		# Plugged in counts as charging: on a computer's port the phone can use more
-		# than the port gives, and the gauge flips between the two with the load. The
-		# light says a cable is doing its job, and doesn't flicker with the screen.
+		# than the port gives, and the gauge flips between the two with the load.
 		# Low stays low: on such a port it's still running down.
 		if [ "$level" -le $LOW ]; then led low
-		elif [ "$(cat $C/online)" = 1 ]; then led charging
+		elif [ "$1" = 1 ]; then led charging
 		else led none; fi ;;
-	*)	if [ "$(cat $C/online)" = 1 ] && [ "$level" -ge 95 ]; then led full
-		elif [ "$level" -le $LOW ] && [ "$(cat $C/online)" != 1 ]; then led low
+	*)	if [ "$1" = 1 ] && [ "$level" -ge 95 ]; then led full
+		elif [ "$level" -le $LOW ] && [ "$1" != 1 ]; then led low
 		else led none; fi ;;
 	esac
 }
-led_now
-# The event comes before the battery's status has caught up with the plug, and any
-# event while this runs is swallowed, so a look now can be a look too soon: the LED
-# stayed dark on a charging phone. So look again when this ends, whichever way it does.
-trap led_now EXIT
-type=0 vbus=0
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
-	bc=$(i2cget -f -y 1 0x25 0x08 2>/dev/null) || exit 0
-	vbus=$(( (bc >> 7) & 1 )) type=$(( bc & 3 ))
-	[ "$vbus" = 0 ] && break
-	[ "$type" != 0 ] && break
-	sleep 1
-done
-if [ "$vbus" = 1 ] && [ "$type" -ge 2 ]; then in=1500000 cc=1500000; else in=500000 cc=450000; fi
-# only when it differs: our own write raises another change event
-now=$(cat "$C/input_current_limit")
-diff=$(( now - in )); [ "$diff" -lt 0 ] && diff=$(( -diff ))
-if [ "$diff" -gt 60000 ]; then
-	if [ "$in" -gt "$now" ]; then
-		echo "$cc" > "$C/constant_charge_current"; echo "$in" > "$C/input_current_limit"
-	else
-		echo "$in" > "$C/input_current_limit"; echo "$cc" > "$C/constant_charge_current"
+
+setlim() {	# input file, the variable holding what was last written there,
+		# input mA, charge mA. An input limit is written once per decision (our
+		# own write raises another uevent); without the kernel's ramp, the
+		# CHGIN limit is also compared with what it reads back. Raising, the
+		# battery side goes first.
+	local f=$1 v=$2 cur=${!2} tol=0 d
+	if [ $ramp = 0 ] && [ "$f" = "$C/input_current_limit" ] && num "$f"; then
+		cur=$((REPLY / 1000)) tol=60	# the read-back is in 25 mA codes
 	fi
-	echo "zrn-charge: vbus=$vbus type=$type -> input ${in} uA, charge ${cc} uA"
-fi
-# the charger's own view catches up with the plug, or give it a few seconds to
-for _ in 1 2 3 4 5 6 7 8; do
-	led_now
-	case "$vbus:$(cat "$C/online")" in
-	1:1|0:0) break ;;
+	d=$((cur - $3)); d=${d#-}
+	if [ $3 -gt $cur ]; then
+		setone "$C/constant_charge_current" $4
+		[ $d -gt $tol ] && put "$f" $(($3 * 1000))
+	else
+		[ $d -gt $tol ] && put "$f" $(($3 * 1000))
+		setone "$C/constant_charge_current" $4
+	fi
+	printf -v $v %d $3
+}
+setone() {
+	local cur=0 d
+	num "$1" && cur=$((REPLY / 1000))
+	d=$((cur - $2)); d=${d#-}
+	[ $d -gt 49 ] && put "$1" $(($2 * 1000))	# the read-back is in 50 mA codes
+}
+
+# what one pass remembers for the next (the daemon keeps it; a lone pass reads it)
+STATE="src_was key_was cap win ceil wceil off_since plug_at settle hot_stop cold_stop warm cold cool vhold hv_at logged"
+src_was=none key_was= cap=0 win=0 ceil=0 wceil=0 off_since=0 plug_at=0 settle=0
+hot_stop=0 cold_stop=0 warm=0 cold=0 cool=0 vhold=0 hv_at=0 logged=
+load() { [ -r "$RUN/state" ] && . "$RUN/state"; }
+save() {
+	local v
+	{ for v in $STATE; do printf '%s=%q\n' $v "${!v}"; done; } > "$RUN/state" 2>/dev/null
+}
+
+pass() {	# look, decide, write; nap: when to look again without an event (s)
+	local T=250 mv in chg why= stop=0 hvbus=0 hvok=1 hvf= hv=0 want=0 rb a f t s key nominal fl
+	local ramp=0 rs=
+	# (all builtins: no process is started, but for i2cget on the old kernel)
+	now; detect
+
+	# a plug session: from a charger in until out for REPLUG_S or more
+	if [ $src = none ]; then
+		[ "$off_since" = 0 ] && off_since=$NOW
+	else
+		if [ "$src_was" = none ] && [ $((NOW - off_since)) -ge $REPLUG_S ]; then
+			cap=0 win=0 ceil=0 wceil=0 hv_at=0 plug_at=$NOW settle=$((NOW + 15))
+		fi
+		off_since=0
+	fi
+	[ "$src" != "$src_was" ] && settle=$((NOW + 10))	# the gauge's status lags the plug
+	src_was=$src
+	[ $volt -ge 7000 ] && hvbus=1
+	[ -e "$C/$RAMP_STATE" ] || [ -e "$C/$RAMP_FOUND" ] || [ -e "$C/$RAMP_EFFECTIVE" ] && ramp=1
+	key="$src $type $hvbus"
+	if [ $src != none ]; then	# another source or voltage: the AICL cut is gone
+		[ "$key" != "$key_was" ] && cap=0
+		key_was=$key
+	fi
+
+	# the battery's temperature, with stock's hysteresis
+	num "$B/temp" && T=$REPLY
+	[ $T -ge 500 ] && hot_stop=1;	[ $T -le 450 ] && hot_stop=0
+	[ $T -le 0 ] && cold_stop=1;	[ $T -ge 50 ] && cold_stop=0
+	[ $T -ge 410 ] && warm=1;	[ $T -le 390 ] && warm=0
+	[ $T -le 50 ] && cold=1;	[ $T -ge 100 ] && cold=0
+	[ $T -le 150 ] && cool=1;	[ $T -ge 200 ] && cool=0
+
+	table $type; in=$lin chg=$lchg
+	case $type in
+	afc-9v|qc2-9v) [ $hvbus = 1 ] || { table dcp; in=$lin chg=$lchg; } ;;
+	pd)	[ $cmax -gt 0 ] && min in $cmax
+		[ $hvbus = 1 ] && min in $((15000000 / volt)) ;;
 	esac
-	sleep 1
-done
+	[ $src = none ] && in=500 chg=500
+
+	if [ $warm = 1 ]; then
+		if [ $src = wireless ]; then min chg 700; else min chg 1090; fi
+		why+=" warm"
+	elif [ $cold = 1 ]; then min chg 700; why+=" cold"
+	elif [ $cool = 1 ]; then min chg 700; why+=" cool"
+	fi
+	# the float: 4.15 V while swelling is a risk, else the battery's own
+	nominal=4350; num "$B/constant_charge_voltage_max" && nominal=$((REPLY / 1000))
+	f=$nominal; [ $((warm | cold)) = 1 ] && f=4150
+	fl=$nominal; num "$C/constant_charge_voltage" && fl=$((REPLY / 1000))
+	[ $fl != $f ] && put "$C/constant_charge_voltage" $((f * 1000)) &&
+		num "$C/constant_charge_voltage" && fl=$((REPLY / 1000))
+	if [ $f -lt $nominal ] && [ $fl -gt $f ]; then
+		# can't be set: stop at 4.15 V, go on below 4.0 V, as stock recharges
+		mv=0; num "$B/voltage_now" && mv=$((REPLY / 1000))
+		[ $mv -ge 4150 ] && vhold=1
+		[ $mv -lt 4000 ] && vhold=0
+	else
+		vhold=0
+	fi
+	[ $hot_stop = 1 ] && stop=1 why+=" too hot"
+	[ $cold_stop = 1 ] && stop=1 why+=" too cold"
+	[ $vhold = 1 ] && stop=1 why+=" at 4.15 V"
+	[ $((warm | hot_stop | cold_stop)) = 1 ] && hvok=0
+
+	if [ $src = wired ]; then
+		if [ $hvbus = 1 ] && screen_on; then min in 500; min chg 1000; why+=" screen on"; fi
+		# AICL, without the kernel's ramp: its own word for the cut, or the limit
+		# found below what was asked. Not raised again for this plug.
+		if [ $ramp = 0 ]; then
+			num "$C/$AICL_NAME" && [ "$REPLY" -gt 0 ] &&
+				{ a=$((REPLY / 1000)); [ $cap = 0 ] || [ $a -lt $cap ] && cap=$a; }
+			rb=0; num "$C/input_current_limit" && rb=$((REPLY / 1000))
+			if [ $win -gt 0 ] && [ $rb -gt 0 ] && [ $rb -lt $((win - 60)) ]; then
+				a=$rb; [ $a -lt 300 ] && a=300	# stock's floor
+				[ $cap = 0 ] || [ $a -lt $cap ] && cap=$a
+			fi
+			[ $cap -gt 0 ] && [ $in -gt $cap ] && { in=$cap; why+=" aicl"; }
+		else
+			get "$C/$RAMP_STATE" && rs=$REPLY
+		fi
+	fi
+
+	# 9 V: asked for through hv_enable; going back, the input limit drops first
+	for f in "$U/hv_enable" "$U/device/hv_enable"; do [ -e "$f" ] && { hvf=$f; break; }; done
+	if [ -n "$hvf" ]; then
+		get "$hvf"; [ "$REPLY" = 1 ] && hv=1
+		[ $src = wired ] && [ $hvok = 1 ] && case $type in
+			sdp|cdp|dcd-timeout|unknown|apple-*|rp-*) ;;
+			*) want=1 ;;
+		esac
+		if [ $hv != $want ]; then
+			# a voltage change: a safe 5 V limit first (stock's PREPARE_TA), then
+			# the switch; the new limit only once the bus has moved
+			[ $src = wired ] && { put "$C/input_current_limit" 500000; ceil=500; }
+			put "$hvf" $want; hv=$want hv_at=$NOW settle=$((NOW + PREPARE_S))
+		fi
+		[ $src = none ] && hv_at=0
+		if [ $hv_at -gt 0 ] && [ $hvbus != $hv ] && [ $((NOW - hv_at)) -lt $PREPARE_S ]; then
+			if [ $hv = 1 ]; then min in 500; min chg 500; why+=" asking for 9 V"
+			else min in 500; why+=" leaving 9 V"; fi
+		fi
+	fi
+
+	# write
+	if [ ! -e "$C/charge_behaviour" ]; then
+		[ $stop = 1 ] && chg=100
+	elif [ $stop = 1 ]; then
+		sel "$C/charge_behaviour"; [ "$REPLY" = inhibit-charge ] || put "$C/charge_behaviour" inhibit-charge
+	else
+		sel "$C/charge_behaviour"; [ "$REPLY" = auto ] || put "$C/charge_behaviour" auto
+	fi
+	case $src in
+	wired)	setlim "$C/input_current_limit" ceil $in $chg; win=$in ;;
+	wireless) setlim "$W/input_current_limit" wceil $in $chg; win=0 ;;
+	none)	setlim "$C/input_current_limit" ceil 500 500; win=0 wceil=0 ;;
+	esac
+	if [ $src = none ]; then led_now 0; else led_now 1; fi
+
+	# one line per decision, not per uevent
+	t="$src $type"; [ $hvbus = 1 ] && t+=" $((volt / 1000)) V"
+	t+=": in $in mA, charge $chg mA"
+	[ $stop = 1 ] && t+=", stopped"
+	[ -n "$why" ] && t+=" (${why# })"
+	[ -n "$rs" ] && t+=", ramp $rs"
+	if [ "$t" != "$logged" ]; then
+		logged=$t
+		a=$T s=; [ $a -lt 0 ] && a=$((-a)) s=-
+		t+=", battery $s$((a / 10)).$((a % 10)) C"
+		if [ $ramp = 1 ] && [ $src = wired ]; then
+			num "$C/$RAMP_EFFECTIVE" && t+=", effective $((REPLY / 1000)) mA"
+			num "$C/$RAMP_FOUND" && t+=", found $((REPLY / 1000)) mA"
+		fi
+		echo "zrn-charge: $t"
+	fi
+
+	if [ $settle -gt $NOW ]; then nap=1
+	elif [ $src = none ]; then nap=300
+	elif [ $hv = 1 ]; then nap=10	# the screen, for the 9 V limit
+	else nap=30
+	fi
+}
+
+daemon_pid() {	# the running daemon's pid, if there is one
+	local pid args
+	get "$RUN/pid" || return 1
+	pid=$REPLY
+	[ -r "/proc/$pid/cmdline" ] || return 1
+	mapfile -d '' -t args < "/proc/$pid/cmdline" 2>/dev/null
+	[[ "${args[*]}" == *zrn-charge*--daemon* ]] && REPLY=$pid
+}
+
+daemon() {
+	local mon end
+	echo $$ > "$RUN/pid"
+	exec 3< <(exec $MONITOR)
+	mon=$!
+	trap 'rm -f "$RUN/pid"; kill $mon 2>/dev/null; exit 0' TERM INT
+	trap : USR1	# a lone `zrn-charge` asks for a pass
+	load
+	while :; do
+		pass; save
+		read -r -t $nap -u 3 _
+		case $? in
+		0)	now; end=$((NOW + 2))	# the burst: wait for quiet, at most 2 s
+			while read -r -t $DEBOUNCE -u 3 _; do now; [ $NOW -ge $end ] && break; done ;;
+		1)	echo "zrn-charge: the uevent monitor stopped"; exit 1 ;;
+		esac
+	done
+}
+
+mkdir -p "$RUN" 2>/dev/null
+case ${1:-} in
+--daemon) daemon ;;
+*)
+	if daemon_pid; then kill -USR1 "$REPLY" 2>/dev/null; exit 0; fi
+	load
+	pass
+	# without the usbc driver the MUIC takes a few seconds to tell the type
+	n=${ZRN_CHARGE_DETECT_S:-14}
+	while [ $src = wired ] && [ $type = unknown ] && [ $n -gt 0 ]; do
+		sleep 1; n=$((n - 1)); pass
+	done
+	save
+	;;
+esac
+exit 0

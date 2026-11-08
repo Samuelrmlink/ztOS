@@ -5,8 +5,8 @@
 bluez
 bluez-utils
 
-# Charger type from the MUIC over I2C (zrn-charge): without i2cget it exits and the
-# input stays at the driver default, so a wall charger charged at USB speed.
+# Charger type from the MUIC over I2C (zrn-charge, on a kernel without the
+# max77705-usbc supply): without i2cget every charger counts as unknown, 500 mA.
 i2c-tools
 
 # The speaker and microphone limiters in /etc/pipewire/pipewire.conf.d: without

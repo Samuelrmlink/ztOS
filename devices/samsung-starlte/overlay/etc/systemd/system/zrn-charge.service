@@ -1,9 +1,14 @@
 [Unit]
-Description=Set charger current limits from the charger type
+Description=Charging policy: charger limits from the charger type and the battery temperature
+# A daemon, woken by the power-supply uevents it watches itself: no udev rule
+# starts it, so there is no start limit to hit.
+StartLimitIntervalSec=0
 
 [Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/zrn-charge
+Type=simple
+ExecStart=/usr/local/sbin/zrn-charge --daemon
+Restart=on-failure
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
