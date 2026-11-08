@@ -113,14 +113,19 @@ No kernel or boot image change. In `ztmetro/ztmetro.c` (search `aod_`):
 - The block starts 18 % down the screen: lit rows 565-1440 of 2960 over all
   nine places, clear of the status bar and the panel's top self-mask band
   (rows 0-149, 1.1b).
-- The force press is reported at (753, 2899), inside the bottom self-mask
-  band (rows 2810-2959). The mark sits just above the band, over the press's
-  column (lowest lit row ~2780), at stock's size (19 x 18 points, measured
-  from a side-by-side photo), its brightest channel the grey text's (a grim
-  of the live AOD at the darkest level: mark 82,58,63, text 82), a
-  0.75-point line, tinted with the accent; it moves by up to 6 pixels on its
-  own 7-place cycle (not in step with the nine). Not drawn with the force
-  press or "Show where to press for Start" switched off.
+- The force press's mark sits where stock's does (side-by-side photos,
+  scaled by the screen's width and corrected by our own mark's known row):
+  its middle at (720, 2855), on the screen's middle line, low, inside the
+  bottom self-mask band (rows 2810-2959). That band is the panel's
+  rounded-corner image: it hides whole rows only if its side memory is lost
+  with the mask on (1.1b, which the boot-time mask-off prevents), otherwise
+  only the corners. 17 x 17 points (68 x 68 pixels), round corners, a
+  1.25-point line, white at the grey text's level (a grim at the darkest
+  level: the mark's peak equals the text's). It moves among five places, 3
+  pixels about the middle each way, on the 10-minute clock (five, so never
+  in step with the nine). The force event's 753,2899 is where the finger
+  pressed, not the mark's place. Not drawn with the force press or "Show
+  where to press for Start" switched off.
 - A hung shell leaves a static picture lit until the battery ends. Stage 3
   (the panel's own self-move) is the only real fix.
 
