@@ -157,6 +157,15 @@
 #define OP_GET_SRCCAP		0x31
 #define OP_SRCCAP_REQUEST	0x32	/* object position, 1-based */
 #define  SRCCAP_ANSWER_LEN	31
+#define OP_SET_VDM_REQ		0x48	/* [n | 1<<3, VDM header, VDOs]: send to SOP */
+#define  VDM_ANSWER_LEN		29	/* [hdr byte, reply VDM header, VDOs] */
+#define OP_GET_VDM_RESP		0x4b	/* [sub-id] -> [sub, PD hdr, VDM hdr, VDOs] */
+#define  VDM_SUB_IDENTITY	0x01
+#define  VDM_SUB_SVIDS		0x02
+#define  VDM_SUB_MODES		0x03
+#define  VDM_RESP_LEN		31
+#define OP_SET_ALTMODE		0x55	/* 3: the firmware runs discovery itself */
+#define  ALTMODE_SRC_VDM	0x03
 #define OP_CONTROL1_R		0x05
 #define OP_CONTROL1_W		0x06
 #define OP_FW_AUTOIBUS		0x57	/* OPCODE_SAMSUNG_FW_AUTOIBUS */
@@ -185,6 +194,23 @@ static bool autoibus_off = true;
 module_param(autoibus_off, bool, 0644);
 MODULE_PARM_DESC(autoibus_off,
 		 "send AutoIBUS off (opcode 0x57 = 0x01) at start and when DETAILS_00 bit 7 is 0, as stock (default 1)");
+
+/*
+ * Both off by default; see charging/pd-vdm.md. vdm_discovery: send stock's
+ * 0x55 = 3 so the firmware runs Discover Identity/SVIDs/Modes itself, and
+ * read the results (partner identity in /sys/class/typec). vdm_debugfs:
+ * debugfs max77705-usbc/vdm sends a VDM (0x48) written by root; 1 allows
+ * only structured Discover Identity/SVIDs/Modes requests, 2 any VDM.
+ */
+static bool vdm_discovery;
+module_param(vdm_discovery, bool, 0444);
+MODULE_PARM_DESC(vdm_discovery,
+		 "let the firmware run Discover Identity/SVIDs/Modes (opcode 0x55 = 3) and read the results (default 0)");
+
+static int vdm_debugfs;
+module_param(vdm_debugfs, int, 0444);
+MODULE_PARM_DESC(vdm_debugfs,
+		 "debugfs vdm file: 0 off, 1 Discover Identity/SVIDs/Modes only, 2 any VDM (default 0)");
 
 #define CHG_DETAILS_00_ILIM_BY_CHG	BIT(7)
 #define AUTOIBUS_CHECK_MS	2000	/* at most one DETAILS_00 check per */
@@ -374,6 +400,18 @@ struct max77705_usbc {
 	struct usb_power_delivery *partner_pd;
 	struct usb_power_delivery_capabilities *partner_src_caps;
 	unsigned int partner_pd_gen;
+
+	/* VDMs (vdm_discovery / vdm_debugfs) */
+	bool altmode_sent;		/* 0x55 since probe / MCU reboot */
+	struct usb_pd_identity partner_ident;
+	u8 vdm_resp[3][VDM_RESP_LEN];	/* 0x4b sub 1..3, raw, this attach */
+	bool vdm_resp_ok[3];
+	struct mutex vdm_lock;		/* the debugfs request/reply below */
+	u8 vdm_req[29];
+	int vdm_req_len;
+	u8 vdm_reply[VDM_ANSWER_LEN];
+	int vdm_ret;
+	unsigned long vdm_sent;		/* jiffies */
 
 	struct power_supply *psy;
 	struct mutex pub_lock;		/* pub, and pd's caps/strings for readers */
@@ -638,7 +676,12 @@ static irqreturn_t usbc_irq(int irq, void *data)
 static int usbc_set_masks(struct max77705_usbc *u)
 {
 	u8 m[4] = { UIC_INT_M_INIT, CC_INT_M_INIT, PD_INT_M_INIT, VDM_INT_M_INIT };
-	int ret = usbc_write(u, REG_UIC_INT_M, m, 4);
+	int ret;
+
+	/* Samsung's alt-mode value: Discover ID/SVIDs/Modes/Enter Mode open */
+	if (vdm_discovery)
+		m[3] = 0xf0;
+	ret = usbc_write(u, REG_UIC_INT_M, m, 4);
 
 	if (!ret)
 		u->vdm_unmasked = m[3] != 0xff;
@@ -706,6 +749,32 @@ static int pd_caps_fmt(char *buf, size_t len, const struct pd_caps *c)
 	return n;
 }
 
+/* ---- VDM switches ------------------------------------------------------------ */
+
+#define VDM_HDR_STRUCTURED	BIT(15)
+#define VDM_HDR_CMD(h)		((h) & 0x1f)
+#define VDM_HDR_CMDTYPE(h)	(((h) >> 6) & 0x3)	/* 0 REQ 1 ACK 2 NAK 3 BUSY */
+#define VDM_HDR_SVID(h)		((h) >> 16)
+
+/* 0x48: [n | 1<<3, header LE32, n-1 VDOs]; what debugfs may send */
+static bool usbc_vdm_allowed(const u8 *w, int wlen)
+{
+	unsigned int n;
+	u32 h;
+
+	if (vdm_debugfs <= 0 || wlen < 5 || wlen > 29 || (wlen - 1) % 4)
+		return false;
+	n = (wlen - 1) / 4;
+	if (w[0] != (n | 1 << 3))
+		return false;
+	h = get_unaligned_le32(&w[1]);
+	if (vdm_debugfs >= 2)
+		return true;
+	return (h & VDM_HDR_STRUCTURED) && VDM_HDR_CMDTYPE(h) == 0 &&
+	       VDM_HDR_SVID(h) == 0xff00 && n == 1 &&
+	       VDM_HDR_CMD(h) >= 1 && VDM_HDR_CMD(h) <= 3;
+}
+
 /* ---- mailbox ------------------------------------------------------------ */
 
 /*
@@ -741,6 +810,16 @@ static bool usbc_op_allowed(struct max77705_usbc *u, u8 op, const u8 *w, int wle
 	case OP_SRCCAP_REQUEST:
 		/* a fixed PDO of at most 9 V in the caps now in force */
 		return wlen == 1 && usbc_pdo_allowed(u, w[0]);
+	case OP_SET_ALTMODE:
+		/* stock's ALTERNATE_MODE_START, and only when asked for */
+		return vdm_discovery && wlen == 1 && w[0] == ALTMODE_SRC_VDM;
+	case OP_GET_VDM_RESP:
+		/* reads of what the firmware received; Samsung's sub-ids */
+		return wlen == 1 && (w[0] == 1 || w[0] == 2 || w[0] == 3 ||
+				     w[0] == 4 || w[0] == 6 || w[0] == 0x10 ||
+				     w[0] == 0x11);
+	case OP_SET_VDM_REQ:
+		return usbc_vdm_allowed(w, wlen);
 	default:
 		return false;
 	}
@@ -1881,6 +1960,7 @@ static void usbc_typec_update(struct max77705_usbc *u)
 	}
 	if (!u->partner) {
 		struct typec_partner_desc desc = {
+			.identity = &u->partner_ident,
 			.accessory = ccstat == 3 ? TYPEC_ACCESSORY_AUDIO :
 				     ccstat == 4 ? TYPEC_ACCESSORY_DEBUG :
 				     TYPEC_ACCESSORY_NONE,
@@ -1957,10 +2037,82 @@ static void usbc_typec_init(struct max77705_usbc *u)
 	if (devm_add_action_or_reset(u->dev, usbc_typec_remove, u))
 		u->port = NULL;
 }
+static void usbc_typec_identity(struct max77705_usbc *u)
+{
+	if (u->partner)
+		typec_partner_set_identity(u->partner);
+}
 #else
 static void usbc_typec_update(struct max77705_usbc *u) { }
 static void usbc_typec_init(struct max77705_usbc *u) { }
+static void usbc_typec_identity(struct max77705_usbc *u) { }
 #endif
+
+/* ---- VDM results (vdm_discovery) ------------------------------------------ */
+
+static void usbc_vdm_forget(struct max77705_usbc *u)
+{
+	memset(&u->partner_ident, 0, sizeof(u->partner_ident));
+	memset(u->vdm_resp_ok, 0, sizeof(u->vdm_resp_ok));
+}
+
+/*
+ * 0x4b [sub] -> r: [sub, PD header LE16, VDM header LE32, VDOs LE32...].
+ * Kept raw for debugfs; Discover Identity (an ACK) becomes the partner's
+ * identity: ID header, cert stat, product, then up to three product-type
+ * VDOs, as many as the PD header's object count says.
+ */
+static void usbc_vdm_read(struct max77705_usbc *u, u8 sub)
+{
+	u8 *r = u->vdm_resp[sub - 1];
+	unsigned int nobj, i;
+	u32 hdr;
+
+	u->vdm_resp_ok[sub - 1] = false;
+	if (usbc_cmd(u, OP_GET_VDM_RESP, &sub, 1, r, VDM_RESP_LEN))
+		return;
+	u->vdm_resp_ok[sub - 1] = true;
+	hdr = get_unaligned_le32(&r[3]);
+	nobj = (get_unaligned_le16(&r[1]) >> 12) & 0x7;	/* incl. the VDM header */
+	dev_info(u->dev, "VDM %s: header %08x (%s), %u VDOs\n",
+		 sub == VDM_SUB_IDENTITY ? "Discover Identity" :
+		 sub == VDM_SUB_SVIDS ? "Discover SVIDs" : "Discover Modes",
+		 hdr, VDM_HDR_CMDTYPE(hdr) == 1 ? "ACK" :
+		 VDM_HDR_CMDTYPE(hdr) == 2 ? "NAK" : "BUSY/REQ",
+		 nobj ? nobj - 1 : 0);
+	if (sub != VDM_SUB_IDENTITY || VDM_HDR_CMDTYPE(hdr) != 1 || nobj < 4)
+		return;
+
+	memset(&u->partner_ident, 0, sizeof(u->partner_ident));
+	u->partner_ident.id_header = get_unaligned_le32(&r[7]);
+	u->partner_ident.cert_stat = get_unaligned_le32(&r[11]);
+	u->partner_ident.product = get_unaligned_le32(&r[15]);
+	for (i = 0; i < 3 && 4 + i < nobj && 19 + 4 * i + 4 <= VDM_RESP_LEN; i++)
+		u->partner_ident.vdo[i] = get_unaligned_le32(&r[19 + 4 * i]);
+	dev_info(u->dev, "partner identity: VID %04x PID %04x bcdDevice %04x (id header %08x)\n",
+		 u->partner_ident.id_header & 0xffff, u->partner_ident.product >> 16,
+		 u->partner_ident.product & 0xffff, u->partner_ident.id_header);
+	usbc_typec_identity(u);
+}
+
+static void usbc_vdm_events(struct max77705_usbc *u, u8 vdm_int)
+{
+	if (!vdm_discovery)
+		return;
+	if (!u->altmode_sent && u->mbox_allowed && !u->mbox_dead) {
+		u8 v = ALTMODE_SRC_VDM;
+
+		u->altmode_sent = true;
+		if (!usbc_cmd(u, OP_SET_ALTMODE, &v, 1, NULL, 0))
+			dev_info(u->dev, "firmware discovery on (0x55 = 3)\n");
+	}
+	if (vdm_int & BIT(0))
+		usbc_vdm_read(u, VDM_SUB_IDENTITY);
+	if (vdm_int & BIT(1))
+		usbc_vdm_read(u, VDM_SUB_SVIDS);
+	if (vdm_int & BIT(2))
+		usbc_vdm_read(u, VDM_SUB_MODES);
+}
 
 /* ---- events --------------------------------------------------------------- */
 
@@ -1978,6 +2130,7 @@ static void usbc_handle_sysmsg(struct max77705_usbc *u, u8 msg)
 		u->path = 0;
 		u->path_tried = 0;
 		u->autoibus_sent = false;
+		u->altmode_sent = false;
 		break;
 	case SYSMSG_CC_5V_SHORT:
 	case SYSMSG_SBU_GND_SHORT:
@@ -2023,6 +2176,8 @@ static void usbc_event_work(struct work_struct *work)
 	/* detach: PD per CC attach, AFC/QC2 per VBUS */
 	if (ccstat != CCSTAT_SINK && (u->pd.have_first || u->pd.pos))
 		usbc_pd_forget(u);
+	if (ccstat == CCSTAT_NONE)
+		usbc_vdm_forget(u);
 	if (!vbus) {
 		u->hv_mode = HV_NONE;
 		u->hv_dcp_done = false;
@@ -2045,6 +2200,7 @@ static void usbc_event_work(struct work_struct *work)
 	if (!vbus)
 		u->path_tried = 0;	/* the next attach writes it again */
 	usbc_autoibus(u, vbus);
+	usbc_vdm_events(u, pend[3]);
 
 	/* a contract as a sink (or one already there at probe): its caps */
 	if (ccstat == CCSTAT_SINK && (u->st[ST(REG_PD_STATUS1)] & PD1_PSRDY) &&
@@ -2183,12 +2339,117 @@ static int usbc_pd_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(usbc_pd);
 
+/*
+ * vdm (vdm_debugfs >= 1): write "<VDM header> [VDO ...]" as hex words; the
+ * driver frames 0x48 and the partner's reply comes back in the same
+ * transaction. Read: the last request and reply, and the raw 0x4b results.
+ * Only with a partner, a PD contract and no request of ours pending; one per
+ * second; the allowlist (usbc_vdm_allowed) has the last word.
+ */
+static ssize_t usbc_vdm_write(struct max77705_usbc *u, const char __user *ubuf,
+			      size_t len)
+{
+	char kbuf[128], *p, *tok;
+	u8 w[29];
+	int n = 0, ret;
+	u32 v;
+
+	if (len >= sizeof(kbuf))
+		return -EINVAL;
+	if (copy_from_user(kbuf, ubuf, len))
+		return -EFAULT;
+	kbuf[len] = 0;
+	p = strim(kbuf);
+	while ((tok = strsep(&p, " \t\n")) && n < 7) {
+		if (!*tok)
+			continue;
+		if (kstrtou32(tok, 16, &v))
+			return -EINVAL;
+		put_unaligned_le32(v, &w[1 + 4 * n]);
+		n++;
+	}
+	if (!n || (p && *p))
+		return -EINVAL;
+	w[0] = n | 1 << 3;
+	if (FIELD_GET(CC0_CCSTAT, READ_ONCE(u->st[ST(REG_CC_STATUS0)])) == CCSTAT_NONE ||
+	    !READ_ONCE(u->pd.pos) || READ_ONCE(u->pd.req_pos))
+		return -EAGAIN;
+
+	mutex_lock(&u->vdm_lock);
+	if (u->vdm_sent && time_before(jiffies, u->vdm_sent + HZ)) {
+		mutex_unlock(&u->vdm_lock);
+		return -EBUSY;
+	}
+	u->vdm_sent = jiffies;
+	memcpy(u->vdm_req, w, 1 + 4 * n);
+	u->vdm_req_len = 1 + 4 * n;
+	memset(u->vdm_reply, 0, sizeof(u->vdm_reply));
+	ret = usbc_cmd(u, OP_SET_VDM_REQ, w, 1 + 4 * n, u->vdm_reply, VDM_ANSWER_LEN);
+	u->vdm_ret = ret;
+	mutex_unlock(&u->vdm_lock);
+	return ret ? ret : len;
+}
+
+static int usbc_vdm_show(struct seq_file *s, void *unused)
+{
+	struct max77705_usbc *u = s->private;
+	static const char * const what[3] = { "identity", "svids", "modes" };
+	int i;
+
+	mutex_lock(&u->vdm_lock);
+	seq_printf(s, "vdm_debugfs %d, vdm_discovery %d\n", vdm_debugfs, vdm_discovery);
+	if (u->vdm_req_len) {
+		seq_printf(s, "request: %*phN, ret %d\n", u->vdm_req_len, u->vdm_req,
+			   u->vdm_ret);
+		if (!u->vdm_ret && u->vdm_reply[0] == 0xff)
+			seq_puts(s, "reply: none\n");
+		else if (!u->vdm_ret)
+			seq_printf(s, "reply: header %08x (%s), raw %*phN\n",
+				   get_unaligned_le32(&u->vdm_reply[1]),
+				   VDM_HDR_CMDTYPE(get_unaligned_le32(&u->vdm_reply[1])) == 1 ? "ACK" :
+				   VDM_HDR_CMDTYPE(get_unaligned_le32(&u->vdm_reply[1])) == 2 ? "NAK" : "BUSY/REQ",
+				   VDM_ANSWER_LEN, u->vdm_reply);
+	}
+	mutex_unlock(&u->vdm_lock);
+	for (i = 0; i < 3; i++)
+		if (u->vdm_resp_ok[i])
+			seq_printf(s, "0x4b %s: %*phN\n", what[i], VDM_RESP_LEN, u->vdm_resp[i]);
+	return 0;
+}
+
+static int usbc_vdm_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, usbc_vdm_show, inode->i_private);
+}
+
+static ssize_t usbc_vdm_write_file(struct file *file, const char __user *ubuf,
+				   size_t len, loff_t *ppos)
+{
+	struct seq_file *s = file->private_data;
+
+	if (vdm_debugfs <= 0)
+		return -EPERM;
+	return usbc_vdm_write(s->private, ubuf, len);
+}
+
+static const struct file_operations usbc_vdm_fops = {
+	.owner = THIS_MODULE,
+	.open = usbc_vdm_open,
+	.read = seq_read,
+	.write = usbc_vdm_write_file,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 static void usbc_debugfs_init(struct max77705_usbc *u)
 {
 	u->debugfs = debugfs_create_dir("max77705-usbc", NULL);
 	debugfs_create_file("events", 0400, u->debugfs, u, &usbc_events_fops);
 	debugfs_create_file("registers", 0400, u->debugfs, u, &usbc_regs_fops);
 	debugfs_create_file("pd", 0400, u->debugfs, u, &usbc_pd_fops);
+	if (vdm_debugfs > 0 || vdm_discovery)
+		debugfs_create_file("vdm", vdm_debugfs > 0 ? 0600 : 0400,
+				    u->debugfs, u, &usbc_vdm_fops);
 }
 
 /* ---- probe ---------------------------------------------------------------- */
@@ -2230,6 +2491,7 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	spin_lock_init(&u->log_lock);
 	mutex_init(&u->mbox_lock);
 	mutex_init(&u->pub_lock);
+	mutex_init(&u->vdm_lock);
 	init_completion(&u->cmd_done);
 	INIT_WORK(&u->event_work, usbc_event_work);
 	INIT_DELAYED_WORK(&u->poll_work, usbc_poll_work);
