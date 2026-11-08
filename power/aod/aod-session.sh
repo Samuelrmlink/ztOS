@@ -1,0 +1,55 @@
+#!/bin/bash
+# aod-session.sh: the whole on-phone check, for a window with nobody touching the phone,
+# run as samuel under ztlock:  ztlock run NAME 'bash ~/ztdev-aod/power/aod/aod-session.sh'
+#   1. aod-test.sh, aod-test2.sh (the rules, through the ctl)
+#   2. the current: the dark, the AOD at its floor and at its ceiling (lux simulated), ROUNDS (2)
+#      rounds of 15 s settling and SAMPLES (60) one-second readings, cable out
+#   3. aod-soak.sh SOAK (21) minutes
+# Logs: /var/tmp/aod-test.log, aod-test2.log, aod-power2.log, aod-soak.log.
+D=$(dirname "$(readlink -f "$0")")
+R=/run/user/1000
+CTL=$R/ztmetro.ctl
+BAT=/sys/class/power_supply/max170xx_battery
+BL=/sys/class/backlight/s9p-panel
+LOG=/var/tmp/aod-power2.log
+ctl() { printf '%s\n' "$1" > $CTL; }
+was=$(grep '^screen ' $R/ztmetro.state)
+
+bash $D/aod-test.sh
+bash $D/aod-test2.sh
+
+ISYS=
+for h in /sys/class/hwmon/hwmon*; do
+	[ "$(cat $h/name)" = max77705 ] && [ "$(cat $h/curr2_label 2>/dev/null)" = ISYS_REG ] && ISYS=$h/curr2_input
+done
+SAMPLES=${SAMPLES:-60}
+reading() {
+	local label=$1 sum=0 isys=0 i
+	sleep 15
+	for i in $(seq "$SAMPLES"); do
+		sum=$((sum + $(cat $BAT/current_now)))
+		[ -n "$ISYS" ] && isys=$((isys + $(cat $ISYS)))
+		sleep 1
+	done
+	echo "$(printf '%-26s %6d mA  ISYS %4d mA  (%s mV, %s %%, backlight %3s, %s)' "$label" \
+		$((sum / SAMPLES / 1000)) $((isys / SAMPLES)) $(($(cat $BAT/voltage_now) / 1000)) \
+		"$(cat $BAT/capacity)" "$(cat $BL/brightness)" \
+		"$(grep -E '^(screen|aod) ' $R/ztmetro.state | tr '\n' ' ')")" >> $LOG
+}
+echo "aod power $(date)  battery $(cat $BAT/capacity) %, charger $(cat /sys/class/power_supply/max77705-charger/online), Wi-Fi associated (power save)" > $LOG
+ctl "screen on"; sleep 2
+ctl "aod off"; sleep 1; ctl "screen off"; sleep 2
+for r in $(seq ${ROUNDS:-2}); do
+	ctl "aod off"
+	reading "round $r: dark"
+	ctl "aod test lux 0"; ctl "aod on"
+	reading "round $r: AOD, floor (L* 18)"
+	ctl "aod test lux 20000"
+	reading "round $r: AOD, ceiling (L* 45)"
+	ctl "aod test lux real"
+done
+pkill -HUP -x ztmetro; sleep 2	# the config's aod again
+echo "done $(date +%T)" >> $LOG
+
+bash $D/aod-soak.sh ${SOAK:-21}
+if [ "$was" = "screen on" ]; then ctl "screen on"; fi
