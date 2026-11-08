@@ -996,12 +996,29 @@ static void read_front(void) {
 		on = atoi(bl) == 0;
 	}
 	char *f = strstr(buf, "\nfront=");
+	char app_id[96] = "";
 	if (f) {
 		known = true;
 		front = atoi(f + 7);
+		char *sp = strchr(f + 7, ' ');
+		if (sp) {
+			snprintf(app_id, sizeof(app_id), "%s", sp + 1);
+			app_id[strcspn(app_id, "\n")] = 0;
+		}
 	}
 	int fg = g_shell;
-	if (front > 0) {
+	if (!strncmp(app_id, "waydroid.", 9) && app_id[9]) {
+		/* an Android app's window belongs to Waydroid's compositor: the app is its package */
+		const char *pkg = app_id + 9;
+		fg = -1;
+		for (int i = 0; i < n_groups; i++) {
+			if (groups[i].kind == K_ANDROID && !strcmp(groups[i].id, pkg)) fg = i;
+		}
+		if (fg < 0) {
+			const char *label = desktop_package(pkg);
+			fg = group_get(label ? label : pkg, pkg, K_ANDROID);
+		}
+	} else if (front > 0) {
 		struct proc *p = proc_find(front);
 		if (p) {
 			fg = p->g;

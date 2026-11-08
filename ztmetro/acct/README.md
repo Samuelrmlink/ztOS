@@ -116,7 +116,9 @@ a model above the measurement is scaled down to it; below, the rest is
 the model stands. Every checked window is appended to
 `/var/lib/ztacct/calib.csv` with the model's inputs, to fit the coefficients
 (`/etc/ztacct/power_profile`, `KEY VALUE` lines: `base_awake_mw`,
-`screen_mw`, `cluster1.khz`/`cluster1.mw`, `cpu_scale`, …).
+`screen_mw`, `cluster1.khz`/`cluster1.mw`, `cpu_scale`, …): `fit-calib.py
+calib.csv` fits them by least squares. `bench-cpu.sh` (overnight, `ztbench`)
+measures the CPU tables with busy loops, screen off.
 
 ## Windows and the state file
 
@@ -149,3 +151,16 @@ pipes, anonymous inodes, devices.
 ## Its own cost
 
 `ztacct status` reports the daemon's CPU time and wakes.
+
+## The app
+
+`ztusage` ("battery + data" in the app list, `/usr/local/share/applications/ztusage.desktop`):
+four tabs (battery, data, cpu, background) sort the apps; "Showing" cycles
+the window (since the charge, today, last 24 h, yesterday, the day before).
+Tapping an app opens its processes under it, each with its share; "details"
+(or holding the app) opens its page: totals, where the energy went, 24
+hourly bars, processes now and exited, open files. Tapping a process opens
+its page: memory, CPU, data, I/O, what it is, threads, open files.
+
+`ztusage --render battery|data|cpu|background|open:APP|app:APP|proc:PID FILE.png`
+draws a page with no display (`ZTUSAGE_RENDER_H` points tall).

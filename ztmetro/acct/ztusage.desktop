@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=battery + data
+Comment=Battery and data use per app, and each app's processes and open files
+Exec=ztusage
+Terminal=false
+Type=Application
+Icon=ztusage
+Categories=System;Settings;
