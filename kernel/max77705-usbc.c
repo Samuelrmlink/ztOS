@@ -1113,8 +1113,35 @@ PD_COUNTER_ATTR(pd_hard_resets_received, hr_received);
 PD_COUNTER_ATTR(pd_hard_resets_sent, hr_sent);
 /* new caps with no hard reset: a normal renegotiation (thermal, multi-port) */
 PD_COUNTER_ATTR(pd_caps_renegotiated, caps_renegotiated);
-/* caps after a hard reset differ from before it: the anomaly */
-PD_COUNTER_ATTR(pd_caps_changed_after_hard_reset, caps_changed_after_hr);
+/* caps after a hard reset differ from before it: the anomaly (in practice
+ * fewer or smaller PDOs; any difference counts) */
+PD_COUNTER_ATTR(pd_caps_reduced_after_hard_reset, caps_changed_after_hr);
+
+/* the source caps in force, "mV:mA" per PDO in order (other PDO types as
+ * typeN:raw); empty without a PD contract on this attach */
+static ssize_t pd_source_caps_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct max77705_usbc *u = power_supply_get_drvdata(to_power_supply(dev));
+	ssize_t n = 0;
+	unsigned int i;
+
+	mutex_lock(&u->pub_lock);
+	for (i = 0; i < u->pd.cur.n; i++) {
+		u32 p = u->pd.cur.pdo[i];
+
+		if (pdo_fixed(p))
+			n += sysfs_emit_at(buf, n, "%s%u:%u", i ? " " : "",
+					   pdo_mv(p), pdo_ma(p));
+		else
+			n += sysfs_emit_at(buf, n, "%stype%u:%08x", i ? " " : "",
+					   p >> 30, p);
+	}
+	mutex_unlock(&u->pub_lock);
+	n += sysfs_emit_at(buf, n, "\n");
+	return n;
+}
+static DEVICE_ATTR_RO(pd_source_caps);
 
 static ssize_t pd_string_show(struct max77705_usbc *u, const char *s, char *buf)
 {
@@ -1151,9 +1178,10 @@ static struct attribute *usbc_psy_attrs[] = {
 	&dev_attr_pd_hard_resets_received.attr,
 	&dev_attr_pd_hard_resets_sent.attr,
 	&dev_attr_pd_caps_renegotiated.attr,
-	&dev_attr_pd_caps_changed_after_hard_reset.attr,
+	&dev_attr_pd_caps_reduced_after_hard_reset.attr,
 	&dev_attr_pd_last_event.attr,
 	&dev_attr_pd_last_hard_reset.attr,
+	&dev_attr_pd_source_caps.attr,
 	NULL
 };
 ATTRIBUTE_GROUPS(usbc_psy);
