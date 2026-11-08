@@ -25,6 +25,10 @@ struct install {
 	char log[INST_LOG_LINES][160];	/* the newest lines of what pacman or makepkg said */
 	int log_n, log_head;
 	bool cancellable;
+	/* built from the AUR, but the password was not given (the sheet was
+	 * dismissed, or the phone locked while it waited): it can go in again
+	 * without building it again */
+	bool can_retry;
 };
 
 extern struct install inst;
@@ -34,6 +38,8 @@ extern struct install inst;
 void inst_init(void (*changed)(void), void (*finished)(bool ok));
 bool inst_start(const char *name, bool aur, bool remove);
 void inst_cancel(void);
+/* the built package again, when inst.can_retry */
+bool inst_retry(void);
 void inst_clear(void);	/* forget a finished one */
 /* call every half a second while something runs */
 void inst_tick(void);

@@ -155,7 +155,11 @@ static void helper_poll(enum step next_ok) {
 		if (r == st.starter) {
 			st.starter = 0;
 			if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-				finish(false, "the system said no (was the password given?)");
+				/* a built package keeps: the password can be given again */
+				inst.can_retry = st.step == S_PUT && st.built[0];
+				finish(false, inst.can_retry ? "the password was not given (the phone may have locked "
+					"while it waited). It is built: install it now." :
+					"the system said no (was the password given?)");
 				return;
 			}
 			st.started = true;
@@ -322,6 +326,8 @@ static void child_done(void) {
 				return;
 			}
 			st.step = S_DEPS;
+			inst.cancellable = false;	/* pacman, as root: let it finish */
+			tell();
 			return;
 		}
 		start_build();	/* nothing to install first */
@@ -425,6 +431,26 @@ void inst_cancel(void) {
 	}
 	child_stop();
 	finish(false, "cancelled");
+}
+
+bool inst_retry(void) {
+	if (inst.state != INST_FAILED || !inst.can_retry || !st.built[0]) {
+		return false;
+	}
+	inst.can_retry = false;
+	inst.state = INST_RUNNING;
+	inst.error[0] = 0;
+	zmc_busy(true);
+	char line[1100];
+	snprintf(line, sizeof(line), "file %s", st.built);
+	snprintf(inst.stage, sizeof(inst.stage), "installing (asks your password)");
+	if (!request("admin", line)) {
+		finish(false, "could not ask the system to install");
+		return false;
+	}
+	st.step = S_PUT;
+	tell();
+	return true;
 }
 
 void inst_clear(void) {

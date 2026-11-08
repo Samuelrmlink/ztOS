@@ -38,7 +38,7 @@
 #define LIST_MAX	100	/* rows on one page (each is a hit; the core keeps 160) */
 #define GREY		0.6
 
-enum page { P_TOP, P_CATS, P_INSTALLED, P_SEARCH, P_LIST, P_DETAIL, P_PROGRESS };
+enum page { P_TOP, P_CATS, P_INSTALLED, P_SEARCH, P_LIST, P_DETAIL, P_PROGRESS, P_COUNT };
 enum action {
 	ACT_PKG = 1, ACT_SEARCHBOX, ACT_FILTER, ACT_SEE_ALL, ACT_CAT, ACT_GROUP, ACT_INSTALL, ACT_REMOVE,
 	ACT_OPEN, ACT_UPDATE, ACT_PROGRESS, ACT_CANCEL, ACT_DONE, ACT_CHECK_UPDATES, ACT_UPDATE_ALL,
@@ -73,23 +73,28 @@ static struct vec update_lines;		/* "name old -> new" from ztos-update */
 static struct vec aur_updates;
 static bool aur_updates_loading, aur_updates_checked;
 
-/* every package drawn as a row this time, so a tap's arg can name it */
-static struct pkg *rows[ZMC_MAX_HITS];
-static int n_rows;
+/* every package drawn as a row, per page, so a tap's arg can name it. Per
+ * page because the core draws pages other than the one in front (the pivot's
+ * neighbours, the page a back swipe reveals, cached page pictures): with one
+ * table, drawing the top page behind the search results made a tap on the
+ * first result open the top page's first app instead. */
+static struct pkg *rows[P_COUNT][ZMC_MAX_HITS];
+static int n_rows[P_COUNT];
+static _Thread_local int drawing = P_TOP;	/* the page render() is drawing (also on the core's page thread) */
 
 static int nav[16], n_nav;		/* the pages to go back to */
 
 static int add_row(struct pkg *p) {
-	if (n_rows >= ZMC_MAX_HITS) {
+	if (n_rows[drawing] >= ZMC_MAX_HITS) {
 		return -1;
 	}
-	rows[n_rows] = p;
-	return n_rows++;
+	rows[drawing][n_rows[drawing]] = p;
+	return n_rows[drawing]++;
 }
 
 /* The data under the rows is about to change: no tap may name an old row. */
 static void rows_forget(void) {
-	n_rows = 0;
+	memset(n_rows, 0, sizeof(n_rows));
 }
 
 static void go(int page) {
@@ -1006,6 +1011,9 @@ static double draw_progress(cairo_t *cr) {
 			snprintf(label, sizeof(label), "find %s", first);
 			y = button(cr, MARGIN, y, bw, label, ACT_FIND, 0) + 12;
 		}
+		if (inst.can_retry) {
+			y = button(cr, MARGIN, y, bw, "install it now", ACT_RETRY, 0) + 12;
+		}
 	} else {
 		white(cr);
 		y += zmc_text(cr, inst.stage, FONT_REGULAR, 17, MARGIN, y, bw) + 18;
@@ -1037,7 +1045,11 @@ static double draw_progress(cairo_t *cr) {
 }
 
 static double render(cairo_t *cr, int page) {
-	n_rows = 0;
+	if (page < 0 || page >= P_COUNT) {
+		return 0;
+	}
+	drawing = page;
+	n_rows[page] = 0;
 	switch (page) {
 	case P_TOP: return draw_top(cr);
 	case P_CATS: return draw_cats(cr);
@@ -1129,8 +1141,9 @@ static void activate(int action, int arg) {
 	}
 	switch (action) {
 	case ACT_PKG:
-		if (arg >= 0 && arg < n_rows && rows[arg]) {
-			open_details(rows[arg]);
+		if (zmc.page >= 0 && zmc.page < P_COUNT && arg >= 0 && arg < n_rows[zmc.page] &&
+				rows[zmc.page][arg]) {
+			open_details(rows[zmc.page][arg]);
 		}
 		break;
 	case ACT_SEARCHBOX:
@@ -1194,6 +1207,11 @@ static void activate(int action, int arg) {
 		inst_clear();
 		n_nav = n_nav > 0 ? n_nav - 1 : 0;
 		zmc_go(P_DETAIL, -1);
+		break;
+	case ACT_RETRY:
+		if (inst_retry()) {
+			zmc_every(500, tick);
+		}
 		break;
 	case ACT_FIND: {
 		char first[128] = "";
