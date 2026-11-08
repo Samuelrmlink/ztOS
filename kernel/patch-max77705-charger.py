@@ -23,6 +23,13 @@ goes away, so userspace cannot push the limit back into the collapse.
 The input limits are written as code = mA / 25 - 1, the inverse of the
 (code + 1) * 25 mA read-back (stock's formula); mainline wrote mA / 25, so
 1500 mA read back as 1525 mA.
+
+Charge current. Mainline never applied the monitored battery's
+constant-charge-current-max, so CNFG_02 stayed at its 450 mA default; it is
+programmed at probe now (1500 mA in ztOS's DT, under stock's
+battery,max_charging_current of 2150 mA). Writes are clamped to 3150 mA, the
+largest code of the 6-bit field: mainline's 3200 mA clamp gave code 64, which
+the field truncated to 0, 100 mA.
 """
 from pathlib import Path
 import sys
@@ -325,5 +332,37 @@ rep('''	ret = devm_request_threaded_irq(dev, regmap_irq_get_virq(irq_data, MAX77
 	ret = devm_request_threaded_irq(dev, chg->aicl_irq,
 					NULL, max77705_aicl_irq,''')
 
+# --- charge current: the battery's maximum at probe, and a clamp that fits the field
+rep('static const struct regmap_config max77705_chg_regmap_config = {', '''/* zboot: CNFG_02 CHG_CC is 6 bits of 50 mA: 63 = 3150 mA */
+#define MAX77705_CURRENT_CC_MAX		3150000
+
+static const struct regmap_config max77705_chg_regmap_config = {''')
+rep('''	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+		err = max77705_set_integer(chg, MAX77705_CHG_CC_LIM,
+					   MAX77705_CURRENT_CHGIN_MIN,
+					   MAX77705_CURRENT_CHGIN_MAX,
+''', '''	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+		err = max77705_set_integer(chg, MAX77705_CHG_CC_LIM,
+					   MAX77705_CURRENT_CHGIN_MIN,
+					   MAX77705_CURRENT_CC_MAX,
+''')
+rep('''		max77705_set_float_voltage(chg, info->voltage_max_design_uv);
+	}
+''', '''		max77705_set_float_voltage(chg, info->voltage_max_design_uv);
+	}
+
+	/* zboot: the battery's constant-charge-current-max, not the 450 mA default */
+	if (info->constant_charge_current_max_ua > 0) {
+		err = max77705_set_integer(chg, MAX77705_CHG_CC_LIM,
+					   MAX77705_CURRENT_CHGIN_MIN,
+					   MAX77705_CURRENT_CC_MAX,
+					   MAX77705_CURRENT_CHG_STEP,
+					   info->constant_charge_current_max_ua);
+		if (err)
+			goto err;
+	}
+''')
+
 CFILE.write_text(s)
-print('patch-max77705-charger: AICL work, 100 mA steps to a 300 mA floor')
+print('patch-max77705-charger: AICL work, 100 mA steps to a 300 mA floor; '
+      'charge current from the battery node')
