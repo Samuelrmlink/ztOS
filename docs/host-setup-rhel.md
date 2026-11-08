@@ -2,7 +2,7 @@
 
 `installer/README.md` lists the packages for Arch Linux. This page gives the
 same setup for the Red Hat family, tested from cloud images in KVM guests
-(6 vCPU, 16 GB RAM, SELinux enforcing, unprivileged user) on 2026-11-06, at
+(6 vCPU, 16 GB RAM, SELinux enforcing, unprivileged user) on 2026-11-06 and 07, at
 commit `aeb4749`.
 
 The build never needs root. These steps do, because they install packages.
@@ -11,7 +11,8 @@ The build never needs root. These steps do, because they install packages.
 
 | Distribution | What ran | Result |
 | --- | --- | --- |
-| Rocky Linux 10.2 | Full cold build for `starlte`, no EPEL, compilers removed first | Exit 0, `root.img` passes `e2fsck -fn`, listing looks right |
+| Rocky Linux 10.2 | Full cold build for `starlte`, qemu from `scripts/install-qemu-user-from-fedora.sh`, no Fedora repository | Exit 0, `root.img` passes `e2fsck -fn`, listing looks right |
+| Rocky Linux 10.2 | Full cold build for `starlte`, qemu from the Fedora repository command, no EPEL, compilers removed first | Exit 0, `root.img` passes `e2fsck -fn`, listing looks right |
 | Rocky Linux 10.2 | Full build for `starlte` with CRB + EPEL `pyside6-tools` | Exit 0, same checks |
 | Fedora 45 | Full cold build for `starlte` | Exit 0, same checks |
 | AlmaLinux 10.2 | Package install, `ztos doctor`, reboot. **No build** | Doctor passes; binfmt survives the reboot |
@@ -39,31 +40,101 @@ No EPEL or CRB is needed to build.
 ```sh
 sudo dnf -y --setopt=install_weak_deps=False install \
     git-core bsdtar dosfstools mtools e2fsprogs python3 util-linux shadow-utils \
-    curl tar xz qt6-qtbase-devel
+    curl tar xz qt6-qtbase-devel \
+    cpio gnupg2 file    # used by the qemu script below; already in the cloud images
 
-# qemu-user is not in EL10 (see below): take this one package from Fedora, signature checked
-sudo dnf -y --setopt=install_weak_deps=False \
-    --repofrompath=f45u,https://dl.fedoraproject.org/pub/fedora/linux/updates/45/Everything/x86_64/ \
-    --repo=f45u --setopt=f45u.gpgcheck=1 \
-    --setopt=f45u.gpgkey=https://src.fedoraproject.org/rpms/fedora-repos/raw/f45/f/RPM-GPG-KEY-fedora-45-primary \
-    install qemu-user-static-aarch64
+# qemu-user is not in EL10 (see below): run this from a clone of this repository
+sudo scripts/install-qemu-user-from-fedora.sh
 
 # the build only looks for pyside6-uic or /usr/lib/qt6/uic; Qt puts uic elsewhere here
 sudo mkdir -p /usr/lib/qt6
 sudo ln -s /usr/lib64/qt6/libexec/uic /usr/lib/qt6/uic
 ```
 
-Check the key's fingerprint when dnf shows it:
-`4F50 A611 4CD5 C697 6A7F 1179 655A 4B02 F577 861E`.
-
 This exact list was installed on Alma. The Rocky cold build added only
 `git-core bsdtar mtools qt6-qtbase-devel`, because the cloud image already had
 the rest. Name them all, since a smaller install may not have them.
 
-The Fedora package is a static binary and needs only `/bin/sh` to install. The
-`--repofrompath` option applies to that one command, so no Fedora repository
-stays enabled and `dnf update` will not update this package. Repeat the command
-to update it. When Fedora 45 reaches end of life, change the release in both URLs.
+### Recommended: qemu-user from the Fedora RPM, unpacked
+
+`scripts/install-qemu-user-from-fedora.sh` needs root. It takes the newest
+`qemu-user-static-aarch64` from Fedora 45 updates and installs two files:
+
+- `/usr/local/bin/qemu-aarch64-static`
+- `/etc/binfmt.d/qemu-aarch64-static.conf`, which is the RPM's own rule with the
+  interpreter path changed and the F flag kept
+
+No repository is added, and neither the RPM nor its key goes in the system's RPM
+database. Before changing anything it checks:
+
+- the key's fingerprint, `4F50 A611 4CD5 C697 6A7F 1179 655A 4B02 F577 861E`
+- the RPM's signature, against a temporary database that holds only that key
+- the package name, architecture and release
+- that the binary is static and runs
+
+If any check fails it stops, and nothing has changed. It is safe to run again, and
+it replaces an existing `qemu-aarch64` entry, even one whose interpreter was deleted.
+
+**Things to know before you use it:**
+
+- **Updates are manual.** `dnf update` does not know about these files, so security
+  fixes do not arrive by themselves. Run the script again to update. Fedora's mirrors
+  drop old versions, so the script looks up the current one each time.
+- **This is Fedora's binary, built for Fedora.** It is static, so it uses no EL10
+  libraries, but neither Fedora nor your distribution supports it on EL10.
+- **Restarting `systemd-binfmt` flushes every binfmt entry** and loads only those with a
+  config file. The script lists any it is about to lose. Do not run it during a build.
+- **Fedora 45's end of life.** Change `FEDORA_RELEASE` and `KEY_FINGERPRINT` at the top
+  of the script.
+
+To remove it, run `sudo scripts/install-qemu-user-from-fedora.sh --uninstall`. By hand:
+
+```sh
+sudo rm /usr/local/bin/qemu-aarch64-static /etc/binfmt.d/qemu-aarch64-static.conf
+sudo systemctl restart systemd-binfmt
+# only if it is still there, which happens when the service was already inactive or failed
+echo -1 | sudo tee /proc/sys/fs/binfmt_misc/qemu-aarch64
+```
+
+Tested on Rocky 10.2 with `qemu-user-static-aarch64-11.1.3-1.fc45`, SELinux enforcing:
+
+| Test | Result |
+| --- | --- |
+| Fresh guest, then the script, an aarch64 program, a reboot, the program again | Entry came back with no help; program ran both times |
+| `rpm -qa` before and after; `rpm -q qemu-user-static-aarch64`; `dnf repolist` | Identical; not installed; Rocky repositories only |
+| Full cold build (see the top of this page), as an unprivileged user | Exit 0 in 61 min, `root.img` passes `e2fsck -fn` |
+| AVC denials | None in the audit log or the journal, through the install, a reboot and the build |
+| Stale state: 31 F-flag entries with deleted interpreters and no config files, service inactive | `qemu-aarch64` replaced; the other 30 flushed |
+| Tampered payload, tampered header, tampered signature, unsigned RPM, RPM signed by Rocky, wrong Fedora package, wrong key, two keys in one file, not a key, mirror or key host unreachable | Each exits non-zero and changes nothing, with the stale entries still in place |
+| A second run | Nothing changed |
+| `--uninstall`, and the manual removal above | Entry gone; an aarch64 program no longer runs; `ztos doctor` reports qemu missing; `rpm -qa` unchanged |
+
+AlmaLinux and RHEL were not tested with the script. Nor was SELinux in permissive or
+disabled mode, or a real update from one Fedora build to the next.
+
+### Alternative: the Fedora repository command
+
+This installs the same package as a normal RPM, so it is registered in the RPM database
+and Fedora's key is imported into it. The build passed this way on Rocky, and the install
+passed on Alma.
+
+```sh
+sudo dnf -y --setopt=install_weak_deps=False \
+    --repofrompath=f45u,https://dl.fedoraproject.org/pub/fedora/linux/updates/45/Everything/x86_64/ \
+    --repo=f45u --setopt=f45u.gpgcheck=1 \
+    --setopt=f45u.gpgkey=https://src.fedoraproject.org/rpms/fedora-repos/raw/f45/f/RPM-GPG-KEY-fedora-45-primary \
+    install qemu-user-static-aarch64
+```
+
+Check the key's fingerprint when dnf shows it:
+`4F50 A611 4CD5 C697 6A7F 1179 655A 4B02 F577 861E`.
+
+The package needs only `/bin/sh` to install. The `--repofrompath` option applies to
+that one command, so no Fedora repository stays enabled and `dnf update` will not
+update this package. Repeat the command to update it. When Fedora 45 reaches end of
+life, change the release in both URLs.
+
+### Other EL10 options
 
 **Using EPEL instead of the symlink.** `pyside6-tools` provides a real
 `pyside6-uic`, so no symlink is needed:
@@ -133,14 +204,22 @@ entry with the **F** flag. Check it:
 cat /proc/sys/fs/binfmt_misc/qemu-aarch64    # want: enabled, flags: F
 ```
 
-`qemu-user-static-aarch64` ships `/usr/lib/binfmt.d/qemu-aarch64-static.conf` with
-that flag. It registers on install and comes back on boot; a reboot was tested
-on Rocky and Alma. No `/etc/binfmt.d` file is needed.
+The script's entry should show `interpreter /usr/local/bin/qemu-aarch64-static`, and
+it comes back on boot from `/etc/binfmt.d`.
+
+Installed as an RPM, `qemu-user-static-aarch64` ships
+`/usr/lib/binfmt.d/qemu-aarch64-static.conf` with that flag instead. It registers on
+install and comes back on boot; a reboot was tested on Rocky and Alma. If both are
+present, the `/etc/binfmt.d` file of the same name wins.
+
+**Check the interpreter exists too.** With the F flag, an entry can show `enabled` and
+keep working after its file is deleted, then vanish at the next reboot. The script
+replaces such an entry.
 
 **Where to get it on EL10.** AppStream, BaseOS, Extras, CRB and EPEL have no
 `qemu-user-static` and nothing that provides `/usr/bin/qemu-aarch64-static`
-(checked on Alma 10). The Fedora package above is the tested source. Avoid
-third-party EL10 rebuilds installed with `--nogpgcheck`.
+(checked on Alma 10). The Fedora package, through the script above, is the tested
+source. Avoid third-party EL10 rebuilds installed with `--nogpgcheck`.
 
 ## What the build needs, and how we know
 
@@ -154,7 +233,7 @@ third-party EL10 rebuilds installed with `--nogpgcheck`.
 | `unshare --map-auto` | `util-linux` | Used by the build; works with 2.40 (EL10) and 2.42 (Fedora) |
 | `newuidmap`, `newgidmap` | `shadow-utils` | Used through `--map-auto` |
 | subuid and subgid | account | Removing either made `unshare` fail |
-| qemu binfmt with F | `qemu-user-static-aarch64` | Without F the build fails at "setting up package signing keys" |
+| qemu binfmt with F | `qemu-user-static-aarch64`, or the script on EL10 | Without F the build fails at "setting up package signing keys" |
 | `mke2fs` 1.47 or later | `e2fsprogs` | `-O ^orphan_file` at `build.py:374` needs it (read from code). 1.47.1 and 1.47.4 work; older was not tried |
 | Python 3.11 or later | `python3` | The SDK imports `tomllib` (read from code). 3.12 and 3.15 work; older was not tried |
 | `uic` | `qt6-qtbase-devel` + symlink, or `pyside6-tools` | Build failed without one on Rocky and Fedora |
@@ -169,6 +248,7 @@ still passed. Programs are compiled inside the ARM chroot.
 
 | Run | Wall clock | CPU (user) | Disk |
 | --- | --- | --- | --- |
+| Rocky 10 cold, qemu from the script | 61 min 1 s | 95 min | `root.img` 5.3 GB; clone and build 13 GB (`du`) |
 | Rocky 10 cold, no EPEL | 59 min 49 s | 94 min | `root.img` 5.3 GB; total not measured |
 | Rocky 10 with EPEL | 73 min 9 s | 114 min | total not measured |
 | Fedora 45 cold | 58 min 15 s | 94 min | Clone and build 13 GB (`du`) |
