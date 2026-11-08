@@ -1107,16 +1107,27 @@ static unsigned int usbc_rp_ma(struct max77705_usbc *u)
 	}
 }
 
-/* VBADC (USBC_STATUS1[7:4]) is a 1 V-wide window: report its middle, uV */
+/*
+ * The bus voltage, uV. On a PD contract: the contract's voltage. Otherwise
+ * VBADC (USBC_STATUS1[7:4]), a 1 V-wide window, whose edges sit near the
+ * 5 V a charger really gives (5.08 V read as code 3, "6 V", on the bench):
+ * codes 2-3 are 5 V, so a charger at 5.1 V doesn't look like a voltage
+ * change (the charger re-ramps on 1 V steps). From 7.5 V up, its middle.
+ */
 static int usbc_vbus_uv(struct max77705_usbc *u)
 {
 	unsigned int code = FIELD_GET(STATUS1_VBADC, READ_ONCE(u->st[0]));
+	u8 pos = READ_ONCE(u->pd.pos);
 
 	if (!(READ_ONCE(u->st[ST(REG_BC_STATUS)]) & BC_VBUSDET) || code == 0)
 		return 0;
+	if (pos && pos <= u->pd.cur.n && !(u->pd.cur.pdo[pos - 1] >> 30))
+		return pdo_mv(u->pd.cur.pdo[pos - 1]) * 1000;
 	if (code == 1)
 		return 4150000;			/* 3.8..4.5 V */
-	return (code + 3) * 1000000;		/* 2: 4.5..5.5 V, ... */
+	if (code <= 3)
+		return 5000000;			/* 4.5..6.5 V */
+	return (code + 3) * 1000000;		/* 4: 6.5..7.5 V, 5: 7.5..8.5 V, ... */
 }
 
 static void usbc_compute(struct max77705_usbc *u, struct usbc_pub *n)
@@ -2948,11 +2959,54 @@ static int max77705_usbc_probe(struct i2c_client *client)
 		queue_delayed_work(u->wq, &u->poll_work, msecs_to_jiffies(POLL_MS));
 	}
 
+	/*
+	 * A charger left at 9 V by the last boot (AFC/QC2 hold their voltage
+	 * across our reset; a PD contract is re-read on its own): take it as
+	 * ours, so the high-voltage step returns it to 5 V until hv_enable
+	 * asks again. AFC_DONE says which; otherwise QC2 is assumed, whose
+	 * 5 V command falls back to the reset if it was AFC after all.
+	 */
+	if ((u->st[ST(REG_BC_STATUS)] & BC_VBUSDET) &&
+	    FIELD_GET(BC_CHGTYP, u->st[ST(REG_BC_STATUS)]) == CHGTYP_DCP &&
+	    !(u->st[ST(REG_PD_STATUS1)] & PD1_PSRDY) &&
+	    vbadc_is_9v(FIELD_GET(STATUS1_VBADC, u->st[0]))) {
+		u->hv_mode = u->st[1] == 0x20 ? HV_AFC_9V : HV_QC2_9V;
+		u->hv_dcp_done = true;
+		dev_info(dev, "a DCP already at 9 V (left by the last boot): taken as %s, back to 5 V until hv_enable\n",
+			 u->hv_mode == HV_AFC_9V ? "AFC" : "QC2");
+		queue_delayed_work(u->wq, &u->hv_work, msecs_to_jiffies(500));
+	}
+
 	/* the flags may have been set long before we came: read them once */
 	usbc_read_ints(u);
 	/* and decide the switch from what is there now */
 	queue_work(u->wq, &u->event_work);
 	return 0;
+}
+
+/*
+ * Reboot and power-off: the bus back to 5 V first, as stock does, so the
+ * next boot (or the bootloader's charging screen) never starts at 9 V.
+ */
+static void max77705_usbc_shutdown(struct i2c_client *client)
+{
+	struct max77705_usbc *u = i2c_get_clientdata(client);
+	u8 pos = 1;
+
+	if (!u || !u->wq)
+		return;
+	cancel_delayed_work_sync(&u->hv_work);
+	cancel_work_sync(&u->event_work);
+	if (u->mbox_allowed && !u->mbox_dead) {
+		if (u->hv_mode != HV_NONE) {
+			usbc_dcp_5v(u);
+		} else if (u->pd.pos > 1) {
+			dev_info(u->dev, "shutdown: PD back to pdo 1 (5 V)\n");
+			if (!usbc_cmd(u, OP_SRCCAP_REQUEST, &pos, 1, NULL, 0))
+				msleep(300);	/* the source's PS_RDY: tSrcTransition + margin */
+		}
+	}
+	WRITE_ONCE(u->stopping, true);
 }
 
 static const struct of_device_id max77705_usbc_of_match[] = {
@@ -2967,6 +3021,7 @@ static struct i2c_driver max77705_usbc_driver = {
 		.of_match_table	= max77705_usbc_of_match,
 	},
 	.probe	= max77705_usbc_probe,
+	.shutdown = max77705_usbc_shutdown,
 };
 module_i2c_driver(max77705_usbc_driver);
 
