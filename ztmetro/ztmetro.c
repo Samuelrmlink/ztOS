@@ -14642,10 +14642,13 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 		if (!server->force_press) {
 			return;
 		}
-		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && server->screen_on) {
-			wlr_log(WLR_INFO, "force press");
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+			/* felt whether it goes to Start or wakes the screen (below) */
+			wlr_log(WLR_INFO, "force press%s", server->screen_on ? "" : ", waking");
 			hap_force(server);
-			touches_cancel_all(server);
+			if (server->screen_on) {
+				touches_cancel_all(server);
+			}
 		}
 	}
 	int nav = hwkey_nav(event->keycode);
