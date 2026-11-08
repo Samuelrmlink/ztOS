@@ -30,6 +30,10 @@ struct install {
 	 * dismissed, or the phone locked while it waited): it can go in again
 	 * without building it again */
 	bool can_retry;
+	/* Flathub: flatpak does it, as root, through ztstore-install@ */
+	bool flatpak;
+	int percent;		/* how far the download is, or -1 */
+	bool cancelling;	/* asked to stop: flatpak stops between objects */
 };
 
 extern struct install inst;
@@ -39,6 +43,11 @@ extern struct install inst;
 void inst_init(void (*changed)(void), void (*finished)(bool ok));
 bool inst_start(const char *name, bool aur, bool remove);
 void inst_cancel(void);
+/* Flathub, system-wide: op "install", "update", "remove" an app (by its ID),
+ * "update-all" (every Flathub app; id NULL), or "add-remote" (Flathub itself,
+ * from the official .flatpakrepo the system keeps). No password: flatpak
+ * checks Flathub's signatures, as pacman checks the repos'. */
+bool inst_start_flatpak(const char *op, const char *id, const char *title);
 /* the built package again, when inst.can_retry */
 bool inst_retry(void);
 /* An AUR package built here before, of this version, that has not gone in

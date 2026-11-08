@@ -148,6 +148,38 @@ static bool request(const char *unit_kind, const char *line) {
 	return st.starter > 0;
 }
 
+/* ESC [ ... letter (and ESC ] ... BEL) taken out, in place */
+static void strip_escapes(char *s) {
+	char *o = s;
+	for (char *c = s; *c; c++) {
+		if (*c == 0x1b) {
+			if (c[1] == '[') {
+				c += 2;
+				while (*c && !((*c >= '@' && *c <= '~'))) {
+					c++;
+				}
+			} else if (c[1] == ']') {
+				/* (flatpak's "ESC ] 9;4;1;45 ESC \": the terminal's own progress) */
+				c += 2;
+				while (*c && *c != 0x07 && !(*c == 0x1b && c[1] == '\\')) {
+					c++;
+				}
+				if (*c == 0x1b) {
+					c++;
+				}
+			} else if (c[1]) {
+				c++;
+			}
+			if (!*c) {
+				break;
+			}
+			continue;
+		}
+		*o++ = *c;
+	}
+	*o = 0;
+}
+
 /* the service's status line: "ID working|done|failed WHAT" */
 static void helper_poll(enum step next_ok) {
 	if (st.starter > 0) {
@@ -173,9 +205,60 @@ static void helper_poll(enum step next_ok) {
 		/* the last lines of it */
 		inst.log_n = inst.log_head = 0;
 		char *save = NULL;
-		for (char *l = strtok_r(log, "\n", &save); l; l = strtok_r(NULL, "\n", &save)) {
+		for (char *l = strtok_r(log, "\n\r", &save); l; l = strtok_r(NULL, "\n\r", &save)) {
+			if (inst.flatpak) {
+				/* flatpak on a terminal: its colours and cursor moves out */
+				strip_escapes(l);
+				l = trim(l);
+			}
 			if (*l) {
 				log_line(l);
+			}
+			if (inst.flatpak) {
+				/* "Installing 1/2… ████▌  45%  1.2 MB/s  00:03" */
+				char *pc = strrchr(l, '%');
+				if (pc && pc > l && pc[-1] >= '0' && pc[-1] <= '9') {
+					char *d = pc - 1;
+					while (d > l && d[-1] >= '0' && d[-1] <= '9') {
+						d--;
+					}
+					inst.percent = atoi(d);
+				}
+				if (inst.cancelling) {
+					continue;
+				}
+				const char *verbs[] = { "Installing", "Updating", "Uninstalling", "Downloading", "Looking for",
+					"Adding", NULL };
+				for (int v = 0; verbs[v]; v++) {
+					const char *at = strstr(l, verbs[v]);
+					if (at && (at == l || at[-1] == ' ' || at[-1] == '\t')) {
+						char stage[200];
+						snprintf(stage, sizeof(stage), "%s", at);
+						/* the words, not the bar and the numbers after them */
+						for (char *c = stage; *c; c++) {
+							if ((unsigned char)*c >= 0xe2 && c > stage + 4) {
+								*c = 0;
+								break;
+							}
+						}
+						/* "Installing app/org.x.Y/aarch64/stable" -> "installing org.x.Y" */
+						char *ref = strstr(stage, "app/");
+						ref = ref ? ref : strstr(stage, "runtime/");
+						if (ref) {
+							char *id = strchr(ref, '/') + 1, *slash = strchr(id, '/');
+							if (slash) {
+								*slash = 0;
+							}
+							memmove(ref, id, strlen(id) + 1);
+						}
+						snprintf(inst.stage, sizeof(inst.stage), "%s", trim(stage));
+						for (char *c = inst.stage; *c; c++) {
+							*c = (c == inst.stage && *c >= 'A' && *c <= 'Z') ? *c + 32 : *c;
+						}
+						break;
+					}
+				}
+				continue;
 			}
 			if (strstr(l, "downloading") || strstr(l, "retrieving")) {
 				snprintf(inst.stage, sizeof(inst.stage), "downloading");
@@ -470,9 +553,57 @@ bool inst_start_built(const char *name, const char *path) {
 	return inst_retry();
 }
 
+bool inst_start_flatpak(const char *op, const char *id, const char *title) {
+	if (inst.state == INST_RUNNING) {
+		return false;
+	}
+	memset(&inst, 0, sizeof(inst));
+	st.needs[0] = st.built[0] = 0;
+	snprintf(inst.name, sizeof(inst.name), "%s", id ? id : (title ? title : "Flathub"));
+	inst.flatpak = true;
+	inst.percent = -1;
+	inst.removing = !strcmp(op, "remove");
+	inst.state = INST_RUNNING;
+	inst.cancellable = !inst.removing;
+	zmc_busy(true);
+	snprintf(inst.stage, sizeof(inst.stage), "starting");
+	char line[400];
+	snprintf(line, sizeof(line), "flatpak %s%s%s", op, id ? " " : "", id ? id : "");
+	if (!request("install", line)) {
+		finish(false, "could not ask the system to do it");
+		return false;
+	}
+	tell();
+	return true;
+}
+
+/* a word to the service working for us: stop. It reads this file between
+ * the steps of flatpak's download, and stops it. */
+static void ask_cancel(void) {
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	if (!runtime) {
+		return;
+	}
+	char path[4096], text[64];
+	snprintf(path, sizeof(path), "%s/ztstore/cancel", runtime);
+	int n = snprintf(text, sizeof(text), "%ld\n", st.request_id);
+	unlink(path);
+	write_atomic(path, text, n);
+}
+
 void inst_cancel(void) {
 	if (!inst.cancellable) {
 		return;
+	}
+	if (inst.flatpak) {
+		if (st.step == S_HELPER && !inst.cancelling) {
+			ask_cancel();
+			inst.cancelling = true;
+			inst.cancellable = false;
+			snprintf(inst.stage, sizeof(inst.stage), "stopping…");
+			tell();
+		}
+		return;	/* the service says when it has stopped */
 	}
 	child_stop();
 	finish(false, "cancelled");
