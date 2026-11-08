@@ -68,35 +68,92 @@ static inline void pods_heard_text(char *out, size_t size, const char *name, con
 /* ---- colours, 0xRRGGBB ---- */
 #define PODS_C_FULL	0x34c759	/* a ring's level */
 #define PODS_C_LOW	0xe5383b	/* 15% or less, not charging */
-#define PODS_C_BODY_TOP	0xfafafc	/* the plastic, lit from above */
-#define PODS_C_BODY_BOT	0xd6d6dc
-#define PODS_C_EDGE	0x9a9aa2	/* its outline: the drawing is white on any background */
-#define PODS_C_TIP	0xc4c4cb	/* ear tips */
-#define PODS_C_DARK	0x2b2b30	/* the stem's sensor */
-#define PODS_C_METAL	0xa6a6ae
-#define PODS_C_SEAM	0xb4b4bc	/* the lid's line */
-#define PODS_C_LED_OFF	0xb8b8be
-#define PODS_C_LED_ON	0x3ddc68	/* the lid is open: the case's light is on */
+#define PODS_C_EDGE	0x9a9aa2	/* outlines: the drawing is white on any background */
 #define PODS_C_BADGE	0x8e8e93	/* the L and R discs */
 
-/* ---- the shapes ---- */
-enum pods_shape_kind { PODS_S_ELLIPSE, PODS_S_RRECT, PODS_S_LINE };
-enum pods_paint { PODS_P_BODY, PODS_P_TIP, PODS_P_DARK, PODS_P_METAL, PODS_P_SEAM, PODS_P_LED };
+/* ---- paints: a colour, or a linear gradient across the drawing's own box ---- */
+struct pods_fill {
+	int n;			/* stops; 1 is a plain colour */
+	float x0, y0, x1, y1;	/* the gradient's line, in the box's units */
+	float at[4];
+	unsigned rgb[4];
+};
+enum {
+	PODS_F_HEAD, PODS_F_STEM, PODS_F_TIP, PODS_F_SENSOR, PODS_F_METAL, PODS_F_GAP, PODS_F_SHINE,
+	PODS_F_CASE, PODS_F_SEAM, PODS_F_LED_OFF, PODS_F_LED_ON,
+};
+static const struct pods_fill PODS_FILLS[] = {	/* in the order of the names above */
+	/* the bud's head: gloss, lit from above on the outer side */
+	{ 3, 10, 2, 52, 56, { 0, 0.5f, 1 }, { 0xffffff, 0xeeeef2, 0xc6c6ce } },
+	/* the stem, a cylinder: dark at both edges, light just off its middle */
+	{ 4, 29, 0, 47, 0, { 0, 0.32f, 0.62f, 1 }, { 0xc2c2ca, 0xfcfcfd, 0xe8e8ec, 0xa9a9b2 } },
+	/* silicone: softer, greyer */
+	{ 3, 0, 18, 0, 50, { 0, 0.45f, 1 }, { 0xe6e6ea, 0xcfcfd5, 0xa4a4ad } },
+	{ 2, 0, 12, 0, 38, { 0, 1 }, { 0x4a4a52, 0x101013 } },
+	/* the stem's end: brushed metal, a cylinder too */
+	{ 4, 29, 0, 47, 0, { 0, 0.35f, 0.7f, 1 }, { 0x7c7c85, 0xe4e4e8, 0xa2a2aa, 0x66666e } },
+	{ 1, 0, 0, 0, 0, { 0 }, { 0x55555c } },
+	{ 2, 0, 6, 0, 30, { 0, 1 }, { 0xffffff, 0xf4f4f7 } },
+	{ 3, 0, 0, 0, 108, { 0, 0.55f, 1 }, { 0xfbfbfd, 0xebebef, 0xcfcfd6 } },
+	{ 1, 0, 0, 0, 0, { 0 }, { 0xb4b4bc } },
+	{ 1, 0, 0, 0, 0, { 0 }, { 0xb8b8be } },
+	{ 1, 0, 0, 0, 0, { 0 }, { 0x3ddc68 } },	/* the lid is open: the light is on */
+};
 
-/* Ellipse and rounded rectangle: the box x, y, w, h, and r the corners' radius.
- * Line: from x, y by w, h, r wide. Body and tip shapes are outlined: every one of them
- * stroked first in PODS_C_EDGE, then all filled, so where they meet there is no line. */
-struct pods_shape { unsigned char kind, paint, pro_only; float x, y, w, h, r; };
+/* ---- shapes ---- */
+enum pods_shape_kind { PODS_S_ELLIPSE, PODS_S_RRECT, PODS_S_LINE, PODS_S_PATH };
+enum pods_op { PODS_END, PODS_M, PODS_L, PODS_C, PODS_Z };
+struct pods_seg { unsigned char op; float p[6]; };	/* M x y, L x y, C x1 y1 x2 y2 x y */
 
-/* the left bud, from the front, in a 64 x 100 box; the right is its mirror */
-#define PODS_BUD_W 64.0f
-#define PODS_BUD_H 100.0f
+/* Ellipse and rounded rectangle: the box x, y, w, h, and r the corners' radius. Line: from
+ * x, y by w, h, r wide. Path: path, in the drawing's units. edged: outlined in PODS_C_EDGE,
+ * every edged shape first, then all are filled, so where two meet there is no line. */
+struct pods_shape {
+	unsigned char kind, fill, edged, pro_only;
+	float x, y, w, h, r;
+	const struct pods_seg *path;
+};
+
+/* The left bud, from the front, in a 72 x 108 box; the right is its mirror. A rounded
+ * head, the ear tip behind it out to the side, a stem shaded as the round thing it is, the
+ * sensor's dark window, and a metal end. */
+#define PODS_BUD_W 72.0f
+#define PODS_BUD_H 108.0f
+static const struct pods_seg PODS_BUD_HEAD[] = {
+	{ PODS_M, { 38, 3 } },
+	{ PODS_C, { 52, 3, 61, 13, 60.5f, 27 } },
+	{ PODS_C, { 60, 39, 53, 47, 47, 52 } },
+	{ PODS_L, { 30, 52 } },
+	{ PODS_C, { 22, 48, 15, 39, 15.5f, 27 } },
+	{ PODS_C, { 16, 12, 25, 3, 38, 3 } },
+	{ PODS_Z, { 0 } }, { PODS_END, { 0 } },
+};
+static const struct pods_seg PODS_BUD_STEM[] = {
+	{ PODS_M, { 29.5f, 40 } }, { PODS_L, { 47.5f, 40 } }, { PODS_L, { 46.5f, 98 } },
+	{ PODS_C, { 46.5f, 103.5f, 43.5f, 106, 38.5f, 106 } }, { PODS_C, { 33.5f, 106, 30.5f, 103.5f, 30.5f, 98 } },
+	{ PODS_Z, { 0 } }, { PODS_END, { 0 } },
+};
+static const struct pods_seg PODS_BUD_END[] = {	/* the stem's last 9 units */
+	{ PODS_M, { 30.7f, 96 } }, { PODS_L, { 46.3f, 96 } }, { PODS_L, { 46.5f, 98 } },
+	{ PODS_C, { 46.5f, 103.5f, 43.5f, 106, 38.5f, 106 } }, { PODS_C, { 33.5f, 106, 30.5f, 103.5f, 30.5f, 98 } },
+	{ PODS_Z, { 0 } }, { PODS_END, { 0 } },
+};
+static const struct pods_seg PODS_BUD_TIP[] = {	/* tilted a little, as it sits */
+	{ PODS_M, { 2, 33 } },
+	{ PODS_C, { 1, 24, 9, 18, 18, 19 } },
+	{ PODS_C, { 27, 20, 31, 29, 29, 38 } },
+	{ PODS_C, { 27, 46, 18, 50, 11, 48 } },
+	{ PODS_C, { 5, 46, 2, 40, 2, 33 } },
+	{ PODS_Z, { 0 } }, { PODS_END, { 0 } },
+};
 static const struct pods_shape PODS_BUD[] = {
-	{ PODS_S_ELLIPSE, PODS_P_TIP, 1, 2, 18, 30, 26, 0 },	/* ear tip, out to the side */
-	{ PODS_S_ELLIPSE, PODS_P_BODY, 0, 12, 2, 46, 42, 0 },	/* the head */
-	{ PODS_S_RRECT, PODS_P_BODY, 0, 26, 18, 18, 80, 9 },	/* the stem */
-	{ PODS_S_ELLIPSE, PODS_P_DARK, 0, 30.5f, 12, 9, 22, 0 },	/* sensor */
-	{ PODS_S_RRECT, PODS_P_METAL, 0, 27.5f, 88, 15, 8, 4 },	/* the stem's end */
+	{ PODS_S_PATH, PODS_F_TIP, 1, 1, 0, 0, 0, 0, 0, PODS_BUD_TIP },
+	{ PODS_S_PATH, PODS_F_STEM, 1, 0, 0, 0, 0, 0, 0, PODS_BUD_STEM },
+	{ PODS_S_PATH, PODS_F_HEAD, 1, 0, 0, 0, 0, 0, 0, PODS_BUD_HEAD },
+	{ PODS_S_ELLIPSE, PODS_F_SHINE, 0, 0, 27, 7, 16, 9, 0, NULL },	/* a soft highlight */
+	{ PODS_S_RRECT, PODS_F_SENSOR, 0, 0, 34.5f, 13, 8, 23, 4, NULL },
+	{ PODS_S_PATH, PODS_F_METAL, 0, 0, 0, 0, 0, 0, 0, PODS_BUD_END },
+	{ PODS_S_LINE, PODS_F_GAP, 0, 0, 30.8f, 96, 15.4f, 0, 0.8f, NULL },
 };
 #define PODS_N_BUD ((int)(sizeof(PODS_BUD) / sizeof(PODS_BUD[0])))
 
@@ -104,19 +161,17 @@ static const struct pods_shape PODS_BUD[] = {
 #define PODS_CASE_W 150.0f
 #define PODS_CASE_H 108.0f
 static const struct pods_shape PODS_CASE[] = {
-	{ PODS_S_RRECT, PODS_P_BODY, 0, 2, 2, 146, 104, 34 },
-	{ PODS_S_LINE, PODS_P_SEAM, 0, 4, 32, 142, 0, 1.2f },	/* lid */
-	{ PODS_S_ELLIPSE, PODS_P_LED, 0, 72.5f, 52, 5, 5, 0 },
+	{ PODS_S_RRECT, PODS_F_CASE, 1, 0, 2, 2, 146, 104, 34, NULL },
+	{ PODS_S_LINE, PODS_F_SEAM, 0, 0, 4, 32, 142, 0, 1.2f, NULL },	/* lid */
+	{ PODS_S_ELLIPSE, PODS_F_LED_OFF, 0, 0, 72.5f, 52, 5, 5, 0, NULL },
 };
 #define PODS_N_CASE ((int)(sizeof(PODS_CASE) / sizeof(PODS_CASE[0])))
 
-/* a shape as drawn: in a box at x, y, s to a unit, mirrored for the right bud */
-static inline struct pods_shape pods_place(const struct pods_shape *in, float box_w, float x, float y, float s, bool mirror) {
-	struct pods_shape o = *in;
-	if (mirror) o.x = in->kind == PODS_S_LINE ? box_w - in->x : box_w - in->x - in->w, o.w = in->kind == PODS_S_LINE ? -in->w : in->w;
-	o.x = x + o.x * s, o.y = y + o.y * s, o.w *= s, o.h *= s, o.r *= s;
-	return o;
-}
+/* From a drawing's units to the page: its box's top left at x, y, s to a unit, mirrored
+ * (about the box's middle) for the right bud. */
+struct pods_xf { float x, y, s, box_w; bool mirror; };
+static inline float pods_xf_x(const struct pods_xf *t, float x) { return t->x + (t->mirror ? t->box_w - x : x) * t->s; }
+static inline float pods_xf_y(const struct pods_xf *t, float y) { return t->y + y * t->s; }
 
 /* The charging bolt, in a ring of radius 1 at the origin: x, y pairs, closed. */
 static const float PODS_BOLT[][2] = {
@@ -146,7 +201,7 @@ struct pods_hero {
  * drawer's to leave out.) */
 static inline void pods_hero_layout(struct pods_hero *h, const struct pods_ring *rings, int n, float avail, float unit) {
 	const float ART_H = PODS_CASE_H, GAP = 22, CASE_GAP = 40, RING = 50, RING_GAP = 18, LABEL = 24, LABEL_GAP = 10;
-	const float BUD_COL = 96, PAIR_W = PODS_BUD_W * 2 - 10;	/* a pair of buds overlaps a little */
+	const float BUD_COL = 100, PAIR_GAP = 4, PAIR_W = PODS_BUD_W * 2 - PAIR_GAP;	/* a pair: their heads ~20 apart */
 	bool art = !(n == 1 && rings[0].parts == PODS_PART_HEADSET);
 	float col[3], total = 0;
 	for (int i = 0; i < n; i++) {
@@ -171,7 +226,7 @@ static inline void pods_hero_layout(struct pods_hero *h, const struct pods_ring 
 			float by = (ART_H - PODS_BUD_H) / 2 * s;
 			if (p & PODS_PART_LEFT) {
 				h->art[h->n_art].art = PODS_ART_BUD_L, h->art[h->n_art].x = bx, h->art[h->n_art].y = by, h->art[h->n_art++].s = s;
-				bx += (PODS_BUD_W - 10) * s;
+				bx += (PODS_BUD_W - PAIR_GAP) * s;
 			}
 			if (p & PODS_PART_RIGHT) {
 				h->art[h->n_art].art = PODS_ART_BUD_R, h->art[h->n_art].x = bx, h->art[h->n_art].y = by, h->art[h->n_art++].s = s;

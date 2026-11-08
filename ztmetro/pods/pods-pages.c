@@ -196,67 +196,83 @@ static struct pods_battery reading(json_object *b) {
 	return r;
 }
 
-static void shape_path(cairo_t *cr, const struct pods_shape *s) {
-	double x = s->w < 0 ? s->x + s->w : s->x, w = s->w < 0 ? -s->w : s->w;
-	if (s->kind == PODS_S_ELLIPSE) {
+static void shape_path(cairo_t *cr, const struct pods_shape *sh, const struct pods_xf *t) {
+	cairo_new_path(cr);
+	if (sh->kind == PODS_S_PATH) {
+		for (const struct pods_seg *g = sh->path; g->op != PODS_END; g++) {
+			const float *q = g->p;
+			switch (g->op) {
+			case PODS_M: cairo_move_to(cr, pods_xf_x(t, q[0]), pods_xf_y(t, q[1])); break;
+			case PODS_L: cairo_line_to(cr, pods_xf_x(t, q[0]), pods_xf_y(t, q[1])); break;
+			case PODS_C:
+				cairo_curve_to(cr, pods_xf_x(t, q[0]), pods_xf_y(t, q[1]), pods_xf_x(t, q[2]), pods_xf_y(t, q[3]),
+					pods_xf_x(t, q[4]), pods_xf_y(t, q[5]));
+				break;
+			case PODS_Z: cairo_close_path(cr); break;
+			}
+		}
+		return;
+	}
+	double x0 = pods_xf_x(t, sh->x), x1 = pods_xf_x(t, sh->x + sh->w), y = pods_xf_y(t, sh->y), h = sh->h * t->s;
+	double x = x0 < x1 ? x0 : x1, w = fabs(x1 - x0);
+	if (sh->kind == PODS_S_ELLIPSE) {
 		cairo_save(cr);
-		cairo_translate(cr, x + w / 2, s->y + s->h / 2);
-		cairo_scale(cr, w / 2, s->h / 2);
-		cairo_new_path(cr);
+		cairo_translate(cr, x + w / 2, y + h / 2);
+		cairo_scale(cr, w / 2, h / 2);
 		cairo_arc(cr, 0, 0, 1, 0, 2 * M_PI);
 		cairo_restore(cr);
 	} else {
-		double r = s->r;
-		cairo_new_sub_path(cr);
-		cairo_arc(cr, x + w - r, s->y + r, r, -M_PI / 2, 0);
-		cairo_arc(cr, x + w - r, s->y + s->h - r, r, 0, M_PI / 2);
-		cairo_arc(cr, x + r, s->y + s->h - r, r, M_PI / 2, M_PI);
-		cairo_arc(cr, x + r, s->y + r, r, M_PI, 3 * M_PI / 2);
+		double r = sh->r * t->s;
+		cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
+		cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
+		cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
+		cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
 		cairo_close_path(cr);
 	}
 }
 
-static void draw_art(cairo_t *cr, const struct pods_shape *shapes, int count, float box_w, float box_h, float x, float y,
-		float s, bool mirror, bool pro, bool lit) {
-	cairo_pattern_t *body = cairo_pattern_create_linear(0, y, 0, y + box_h * s);
-	cairo_pattern_add_color_stop_rgb(body, 0, ((PODS_C_BODY_TOP >> 16) & 255) / 255.0, ((PODS_C_BODY_TOP >> 8) & 255) / 255.0,
-		(PODS_C_BODY_TOP & 255) / 255.0);
-	cairo_pattern_add_color_stop_rgb(body, 1, ((PODS_C_BODY_BOT >> 16) & 255) / 255.0, ((PODS_C_BODY_BOT >> 8) & 255) / 255.0,
-		(PODS_C_BODY_BOT & 255) / 255.0);
+static void rgb_stop(cairo_pattern_t *p, double at, unsigned v) {
+	cairo_pattern_add_color_stop_rgb(p, at, ((v >> 16) & 255) / 255.0, ((v >> 8) & 255) / 255.0, (v & 255) / 255.0);
+}
+
+/* sets the source to one of PODS_FILLS; returns the pattern to free, if it made one */
+static cairo_pattern_t *set_fill(cairo_t *cr, int which, const struct pods_xf *t) {
+	const struct pods_fill *f = &PODS_FILLS[which];
+	if (f->n == 1) {
+		zmc_set_rgb(cr, f->rgb[0]);
+		return NULL;
+	}
+	cairo_pattern_t *p = cairo_pattern_create_linear(pods_xf_x(t, f->x0), pods_xf_y(t, f->y0), pods_xf_x(t, f->x1), pods_xf_y(t, f->y1));
+	for (int i = 0; i < f->n; i++) rgb_stop(p, f->at[i], f->rgb[i]);
+	cairo_set_source(cr, p);
+	return p;
+}
+
+static void draw_art(cairo_t *cr, const struct pods_shape *shapes, int count, const struct pods_xf *t, bool pro, bool lit) {
 	/* outlines first, all of them, so where two shapes meet is no line */
-	for (int pass = 0; pass < 2; pass++) {
-		for (int i = 0; i < count; i++) {
-			struct pods_shape sh = pods_place(&shapes[i], box_w, x, y, s, mirror);
-			if (sh.pro_only && !pro) continue;
-			if (pass == 0) {
-				if (sh.paint != PODS_P_BODY && sh.paint != PODS_P_TIP) continue;
-				shape_path(cr, &sh);
-				zmc_set_rgb(cr, PODS_C_EDGE);
-				cairo_set_line_width(cr, 2.0 * (s > 0.6f ? s : 0.6f));
-				cairo_stroke(cr);
-				continue;
-			}
-			if (sh.kind == PODS_S_LINE) {
-				zmc_set_rgb(cr, PODS_C_SEAM);
-				cairo_set_line_width(cr, sh.r);
-				cairo_move_to(cr, sh.x, sh.y);
-				cairo_line_to(cr, sh.x + sh.w, sh.y + sh.h);
-				cairo_stroke(cr);
-				continue;
-			}
-			shape_path(cr, &sh);
-			switch (sh.paint) {
-			case PODS_P_BODY: cairo_set_source(cr, body); break;
-			case PODS_P_TIP: zmc_set_rgb(cr, PODS_C_TIP); break;
-			case PODS_P_DARK: zmc_set_rgb(cr, PODS_C_DARK); break;
-			case PODS_P_METAL: zmc_set_rgb(cr, PODS_C_METAL); break;
-			case PODS_P_LED: zmc_set_rgb(cr, lit ? PODS_C_LED_ON : PODS_C_LED_OFF); break;
-			default: zmc_set_rgb(cr, PODS_C_SEAM); break;
-			}
+	for (int i = 0; i < count; i++) {
+		if (!shapes[i].edged || (shapes[i].pro_only && !pro)) continue;
+		shape_path(cr, &shapes[i], t);
+		zmc_set_rgb(cr, PODS_C_EDGE);
+		cairo_set_line_width(cr, 1.6 * (t->s > 0.7f ? t->s : 0.7f));
+		cairo_stroke(cr);
+	}
+	for (int i = 0; i < count; i++) {
+		const struct pods_shape *sh = &shapes[i];
+		if (sh->pro_only && !pro) continue;
+		cairo_pattern_t *p = set_fill(cr, sh->fill == PODS_F_LED_OFF && lit ? PODS_F_LED_ON : sh->fill, t);
+		if (sh->kind == PODS_S_LINE) {
+			cairo_set_line_width(cr, sh->r * t->s);
+			cairo_new_path(cr);
+			cairo_move_to(cr, pods_xf_x(t, sh->x), pods_xf_y(t, sh->y));
+			cairo_line_to(cr, pods_xf_x(t, sh->x + sh->w), pods_xf_y(t, sh->y + sh->h));
+			cairo_stroke(cr);
+		} else {
+			shape_path(cr, sh, t);
 			cairo_fill(cr);
 		}
+		if (p) cairo_pattern_destroy(p);
 	}
-	cairo_pattern_destroy(body);
 }
 
 /* The picture: the buds and the case, a ring for each battery (pods-art.h). */
@@ -266,12 +282,10 @@ static double draw_hero(cairo_t *cr, double y, const struct pods_ring *rings, in
 	cairo_save(cr);
 	cairo_translate(cr, MARGIN, y + 6);
 	for (int i = 0; i < h.n_art; i++) {
-		if (h.art[i].art == PODS_ART_CASE) {
-			draw_art(cr, PODS_CASE, PODS_N_CASE, PODS_CASE_W, PODS_CASE_H, h.art[i].x, h.art[i].y, h.art[i].s, false, pro, lit);
-		} else {
-			draw_art(cr, PODS_BUD, PODS_N_BUD, PODS_BUD_W, PODS_BUD_H, h.art[i].x, h.art[i].y, h.art[i].s,
-				h.art[i].art == PODS_ART_BUD_R, pro, lit);
-		}
+		struct pods_xf t = { h.art[i].x, h.art[i].y, h.art[i].s, h.art[i].art == PODS_ART_CASE ? PODS_CASE_W : PODS_BUD_W,
+			h.art[i].art == PODS_ART_BUD_R };
+		if (h.art[i].art == PODS_ART_CASE) draw_art(cr, PODS_CASE, PODS_N_CASE, &t, pro, lit);
+		else draw_art(cr, PODS_BUD, PODS_N_BUD, &t, pro, lit);
 	}
 	double size = h.label_h * 0.8;
 	for (int i = 0; i < h.n_rings; i++) {
@@ -306,8 +320,9 @@ static double draw_hero(cairo_t *cr, double y, const struct pods_ring *rings, in
 		double bw = h.label_h * 0.78, gap = h.label_h * 0.25, tw = zmc_text_width(text, FONT_SEMILIGHT, size);
 		double x = cx - (tw + (badge ? bw + gap : 0)) / 2, mid = h.rings[i].label_y + h.label_h / 2;
 		if (parts == PODS_PART_CASE) {
-			struct pods_shape c = { PODS_S_RRECT, 0, 0, (float)x, (float)(mid - bw * 0.36), (float)bw, (float)(bw * 0.72), (float)(bw * 0.22) };
-			shape_path(cr, &c);
+			struct pods_shape c = { PODS_S_RRECT, 0, 0, 0, (float)x, (float)(mid - bw * 0.36), (float)bw, (float)(bw * 0.72), (float)(bw * 0.22), NULL };
+			struct pods_xf one = { 0, 0, 1, 0, false };
+			shape_path(cr, &c, &one);
 			zmc_set_rgb(cr, PODS_C_BADGE);
 			cairo_fill(cr);
 			cairo_set_source_rgb(cr, 0, 0, 0);

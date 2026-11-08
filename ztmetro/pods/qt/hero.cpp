@@ -34,45 +34,54 @@ QSize PodsHero::sizeHint() const {
 	return QSize(int(h.w) + 1, int(h.h) + 5);
 }
 
-static QPainterPath outline(const struct pods_shape &s) {
+static QPainterPath outline(const struct pods_shape &sh, const struct pods_xf &t) {
 	QPainterPath p;
-	QRectF box(s.x, s.y, s.w, s.h);
-	if (s.kind == PODS_S_ELLIPSE) p.addEllipse(box.normalized());
-	else p.addRoundedRect(box.normalized(), s.r, s.r);
+	if (sh.kind == PODS_S_PATH) {
+		for (const struct pods_seg *g = sh.path; g->op != PODS_END; g++) {
+			const float *q = g->p;
+			switch (g->op) {
+			case PODS_M: p.moveTo(pods_xf_x(&t, q[0]), pods_xf_y(&t, q[1])); break;
+			case PODS_L: p.lineTo(pods_xf_x(&t, q[0]), pods_xf_y(&t, q[1])); break;
+			case PODS_C:
+				p.cubicTo(pods_xf_x(&t, q[0]), pods_xf_y(&t, q[1]), pods_xf_x(&t, q[2]), pods_xf_y(&t, q[3]),
+					pods_xf_x(&t, q[4]), pods_xf_y(&t, q[5]));
+				break;
+			case PODS_Z: p.closeSubpath(); break;
+			}
+		}
+		return p;
+	}
+	QRectF box(QPointF(pods_xf_x(&t, sh.x), pods_xf_y(&t, sh.y)), QPointF(pods_xf_x(&t, sh.x + sh.w), pods_xf_y(&t, sh.y + sh.h)));
+	if (sh.kind == PODS_S_ELLIPSE) p.addEllipse(box.normalized());
+	else p.addRoundedRect(box.normalized(), sh.r * t.s, sh.r * t.s);
 	return p;
 }
 
-static void draw_art(QPainter &p, const struct pods_shape *shapes, int count, float box_w, float box_h, float x, float y,
-		float s, bool mirror, bool pro, bool lit) {
-	QLinearGradient body(0, y, 0, y + box_h * s);
-	body.setColorAt(0, rgb(PODS_C_BODY_TOP));
-	body.setColorAt(1, rgb(PODS_C_BODY_BOT));
+static QBrush paint(int which, const struct pods_xf &t) {
+	const struct pods_fill &f = PODS_FILLS[which];
+	if (f.n == 1) return rgb(f.rgb[0]);
+	QLinearGradient g(pods_xf_x(&t, f.x0), pods_xf_y(&t, f.y0), pods_xf_x(&t, f.x1), pods_xf_y(&t, f.y1));
+	for (int i = 0; i < f.n; i++) g.setColorAt(f.at[i], rgb(f.rgb[i]));
+	return QBrush(g);
+}
+
+static void draw_art(QPainter &p, const struct pods_shape *shapes, int count, const struct pods_xf &t, bool pro, bool lit) {
 	/* outlines first, all of them, so where two shapes meet is no line */
-	for (int pass = 0; pass < 2; pass++) {
-		for (int i = 0; i < count; i++) {
-			struct pods_shape sh = pods_place(&shapes[i], box_w, x, y, s, mirror);
-			if (sh.pro_only && !pro) continue;
-			bool edged = sh.paint == PODS_P_BODY || sh.paint == PODS_P_TIP;
-			if (pass == 0) {
-				if (edged) p.strokePath(outline(sh), QPen(rgb(PODS_C_EDGE), 2.0 * qMax(s, 0.6f)));
-				continue;
-			}
-			if (sh.kind == PODS_S_LINE) {
-				p.setPen(QPen(rgb(PODS_C_SEAM), sh.r, Qt::SolidLine, Qt::FlatCap));
-				p.drawLine(QPointF(sh.x, sh.y), QPointF(sh.x + sh.w, sh.y + sh.h));
-				continue;
-			}
-			QBrush brush;
-			switch (sh.paint) {
-			case PODS_P_BODY: brush = QBrush(body); break;
-			case PODS_P_TIP: brush = rgb(PODS_C_TIP); break;
-			case PODS_P_DARK: brush = rgb(PODS_C_DARK); break;
-			case PODS_P_METAL: brush = rgb(PODS_C_METAL); break;
-			case PODS_P_LED: brush = rgb(lit ? PODS_C_LED_ON : PODS_C_LED_OFF); break;
-			default: brush = rgb(PODS_C_SEAM); break;
-			}
-			p.fillPath(outline(sh), brush);
+	for (int i = 0; i < count; i++) {
+		if (shapes[i].edged && !(shapes[i].pro_only && !pro)) {
+			p.strokePath(outline(shapes[i], t), QPen(rgb(PODS_C_EDGE), 1.6 * qMax(t.s, 0.7f)));
 		}
+	}
+	for (int i = 0; i < count; i++) {
+		const struct pods_shape &sh = shapes[i];
+		if (sh.pro_only && !pro) continue;
+		int fill = sh.fill == PODS_F_LED_OFF && lit ? int(PODS_F_LED_ON) : int(sh.fill);
+		if (sh.kind == PODS_S_LINE) {
+			p.setPen(QPen(paint(fill, t), sh.r * t.s, Qt::SolidLine, Qt::FlatCap));
+			p.drawLine(QPointF(pods_xf_x(&t, sh.x), pods_xf_y(&t, sh.y)), QPointF(pods_xf_x(&t, sh.x + sh.w), pods_xf_y(&t, sh.y + sh.h)));
+			continue;
+		}
+		p.fillPath(outline(sh, t), paint(fill, t));
 	}
 }
 
@@ -84,8 +93,9 @@ void PodsHero::paintEvent(QPaintEvent *) {
 	p.translate(0, 2);
 	for (int i = 0; i < h.n_art; i++) {
 		auto &a = h.art[i];
-		if (a.art == PODS_ART_CASE) draw_art(p, PODS_CASE, PODS_N_CASE, PODS_CASE_W, PODS_CASE_H, a.x, a.y, a.s, false, pro, lit);
-		else draw_art(p, PODS_BUD, PODS_N_BUD, PODS_BUD_W, PODS_BUD_H, a.x, a.y, a.s, a.art == PODS_ART_BUD_R, pro, lit);
+		struct pods_xf t = { a.x, a.y, a.s, a.art == PODS_ART_CASE ? PODS_CASE_W : PODS_BUD_W, a.art == PODS_ART_BUD_R };
+		if (a.art == PODS_ART_CASE) draw_art(p, PODS_CASE, PODS_N_CASE, t, pro, lit);
+		else draw_art(p, PODS_BUD, PODS_N_BUD, t, pro, lit);
 	}
 	QColor text = palette().color(QPalette::WindowText);
 	QColor track = palette().color(QPalette::WindowText);
