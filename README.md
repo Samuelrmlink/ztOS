@@ -500,7 +500,9 @@ charge, Type-C Rp 3 A 3 A / 2.15 A, a computer 500 mA, Qi 900 mA), from the
 BC_STATUS and the Type-C Rp level over I2C. It leaves AICL's cuts in place,
 applies stock's battery temperature limits (stop at 50 °C and 0 °C, 1090 mA
 and 4.15 V above 41 °C, 700 mA below 15 °C), and asks for 9 V (`hv_enable`)
-only when they allow it; the kernel driver alone stays at 500 mA.
+only when they allow it; the kernel driver alone stays at 500 mA. Chargers that
+tripped over-current or had a PD anomaly are remembered in /var/lib/zrn-charge
+(`zrn-charge --show`, `zrn-charge --forget FINGERPRINT|all`).
 `devices/samsung-starlte/test-zrn-charge.sh` runs it against a fake sysfs.
 
 **Idle and ambient light**: the shell provides `ext-idle-notify-v1` and

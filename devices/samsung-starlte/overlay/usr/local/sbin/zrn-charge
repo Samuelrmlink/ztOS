@@ -37,6 +37,15 @@
 # either way the input limit drops to 500 mA first, and the new limit is
 # written once usbc's voltage_now has moved.
 #
+# Over-current trips (the driver's count, or on a kernel without it CHGIN
+# dropping out and back within 5 s at 1 A or more) and PD anomalies (a Hard
+# Reset, then other source caps) are remembered per charger in /var/lib/
+# zrn-charge for 30 days: a charger that tripped gets at most its trip limit
+# less 200 mA (500 mA at least) from then on, and 5 V only if the trip was at
+# 9 V or it had a PD anomaly. A PD anomaly, or a second Hard Reset on one plug,
+# also means 5 V and at most 1500 mA (or the caps' 5 V current) for the rest
+# of that plug. Other caps without a Hard Reset are just followed.
+#
 # It also tells zrn-ledd, which owns the front LED, what the battery is doing:
 # charging, full, low (discharging at 15 % or less) or none.
 #
@@ -44,6 +53,8 @@
 #				slow timer, for the temperature), one pass per burst
 #	zrn-charge		one pass (zboot-charge-hold, early in the boot); if
 #				the daemon runs, it just asks it for one
+#	zrn-charge --show	the chargers remembered (see MEM below)
+#	zrn-charge --forget FINGERPRINT|all
 #
 # ZRN_CHARGE_ROOT puts every path under another directory (tests);
 # ZRN_CHARGE_I2CGET and ZRN_CHARGE_MONITOR replace i2cget and udevadm monitor.
@@ -69,6 +80,22 @@ AICL_NAME=input_current_limit_aicl	# on the charger: uA, 0 = AICL has not cut it
 RAMP_EFFECTIVE=input_current_limit_effective	# uA, what applies now
 RAMP_FOUND=input_current_limit_found		# uA, what the ramp settled on
 RAMP_STATE=input_current_ramp			# the ramp's state, a word
+# Over-current trips the charger driver counts (contract.md), and the usbc
+# driver's PD source caps, Hard Reset count and "caps changed after a Hard
+# Reset" count (on usbc or its device; not named in the contract yet, these
+# are the names asked for). Without the trip count a trip is a CHGIN drop-out.
+TRIP_COUNT=input_current_trips			# chargers cutting VBUS, this boot
+TRIP_LIMIT=input_current_trip_limit		# uA in force at the last trip
+TRIP_VOLTAGE=input_current_trip_voltage		# uV at the last trip, 0 = unknown
+PD_CAPS=pd_source_caps				# the source's PDOs, "mV:mA mV:mA ..."
+PD_HARD_RESETS=pd_hard_resets			# a count
+PD_CAPS_REDUCED=pd_caps_reduced_after_hard_reset	# a count
+# What each charger did before, per fingerprint (charger_type, usb_type and
+# the PD source caps: what the charger says it is, nothing private), one file
+# each: "held tripped 5v-only pd-anomaly last-seen fingerprint".
+MEM=$R/var/lib/zrn-charge
+MEM_DAYS=30	# forgotten when not seen for this long
+HELD_S=60	# a limit that stayed this long "held"
 LOW=15		# per cent: at this or below, off the charger, the battery is low
 REPLUG_S=5	# out for less than this is the same plug (VBUS drop-outs keep the AICL cut)
 PREPARE_S=10	# 500 mA while a source is asked for 9 V, at most this long
@@ -84,11 +111,13 @@ sel() {	# a sysfs choice list, "a [b] c": the chosen one
 	get "$1" || return 1
 	case $REPLY in *\[*\]*) REPLY=${REPLY#*\[}; REPLY=${REPLY%%\]*} ;; esac
 }
+cget() { get "$C/$1" || get "$C/device/$1"; }
+uget() { get "$U/$1" || get "$U/device/$1"; }
 put() {
 	[ -n "${ZRN_CHARGE_TRACE:-}" ] && echo "${1#$PS/} $2" >> "$ZRN_CHARGE_TRACE"	# tests: the order
 	[ -e "$1" ] && { echo "$2" > "$1"; } 2>/dev/null
 }
-now() { get "$UPTIME"; NOW=${REPLY%%.*}; NOW=${NOW:-0}; }
+now() { get "$UPTIME"; NOW=${REPLY%%.*}; NOW=${NOW:-0}; EPOCH=${ZRN_CHARGE_EPOCH:-$EPOCHSECONDS}; }
 min() { [ "$2" -lt "${!1}" ] && printf -v "$1" %d "$2"; }
 
 table() {	# type: lin, lchg (mA), stock's cable-info
@@ -112,7 +141,7 @@ i2c() {	# register of the USB-C MCU (0x25): a plain status read, or 0
 
 detect() {	# src (none, wired, wireless), type, cmax (mA, 0 = not said), volt (mV)
 	local wired=0 wl=0 bc cc chg pr r a
-	type=none cmax=0 volt=5000
+	type=none cmax=0 volt=5000 utype= caps= wl_busy=0
 	get "$C/online" && [ "$REPLY" = 1 ] && wired=1
 	get "$W/online" && [ "$REPLY" = 1 ] && wl=1
 	if [ -d "$U" ]; then
@@ -120,10 +149,11 @@ detect() {	# src (none, wired, wireless), type, cmax (mA, 0 = not said), volt (m
 		if [ $wired = 1 ]; then
 			num "$U/current_max" && cmax=$((REPLY / 1000))
 			num "$U/voltage_now" && [ "$REPLY" -gt 0 ] && volt=$((REPLY / 1000))
+			sel "$U/usb_type" && utype=$REPLY
+			uget $PD_CAPS && caps=$REPLY
 			get "$U/charger_type"; type=$REPLY
 			if [ -z "$type" ]; then
-				sel "$U/usb_type"
-				case $REPLY in
+				case $utype in
 				SDP) type=sdp ;; CDP) type=cdp ;; DCP) type=dcp ;; PD*) type=pd ;;
 				C) if [ $cmax -ge 3000 ]; then type=rp-3a
 				   elif [ $cmax -ge 1500 ]; then type=rp-1.5a; else type=unknown; fi ;;
@@ -158,7 +188,12 @@ detect() {	# src (none, wired, wireless), type, cmax (mA, 0 = not said), volt (m
 	if [ $wired = 1 ]; then src=wired
 	elif [ $wl = 1 ]; then
 		src=wireless type=wireless
-		num "$RX/voltage_now" && [ "$REPLY" -ge 7500000 ] && { type=wireless-hv; volt=$((REPLY / 1000)); }
+		if get "$RX/hv_state"; then
+			# the receiver caps WCIN itself while it changes voltage
+			case $REPLY in 10v) type=wireless-hv ;; prepare|stepdown) wl_busy=1 ;; esac
+		elif num "$RX/voltage_now" && [ "$REPLY" -ge 7500000 ]; then
+			type=wireless-hv
+		fi
 	else src=none
 	fi
 }
@@ -205,6 +240,8 @@ setlim() {	# input file, the variable holding what was last written there,
 	local f=$1 v=$2 cur=${!2} tol=0 d
 	if [ $ramp = 0 ] && [ "$f" = "$C/input_current_limit" ] && num "$f"; then
 		cur=$((REPLY / 1000)) tol=60	# the read-back is in 25 mA codes
+	elif [ "$f" = "$W/input_current_limit" ] && num "$f"; then
+		cur=$((REPLY / 1000)) tol=24	# the WCIN ceiling, which the receiver also sets
 	fi
 	d=$((cur - $3)); d=${d#-}
 	if [ $3 -gt $cur ]; then
@@ -223,10 +260,74 @@ setone() {
 	[ $d -gt 49 ] && put "$1" $(($2 * 1000))	# the read-back is in 50 mA codes
 }
 
+mem_file() { REPLY=$MEM/${1//[^A-Za-z0-9._:,+-]/_}; }
+mem_get() {	# fingerprint: m_held m_trip (mA, 0 = none) m_hv m_anom m_seen; false if unknown
+	m_held=0 m_trip=0 m_hv=0 m_anom=0 m_seen=0
+	[ -n "$1" ] || return 1
+	mem_file "$1"
+	[ -r "$REPLY" ] && read -r m_held m_trip m_hv m_anom m_seen _ < "$REPLY" 2>/dev/null &&
+		[[ "$m_held $m_trip $m_hv $m_anom $m_seen" =~ ^[0-9]+\ [0-9]+\ [01]\ [01]\ [0-9]+$ ]] && return 0
+	m_held=0 m_trip=0 m_hv=0 m_anom=0 m_seen=0
+	return 1
+}
+mem_put() {	# fingerprint: write what m_* say
+	[ -n "$1" ] || return 0
+	[ -d "$MEM" ] || mkdir -p "$MEM" 2>/dev/null
+	mem_file "$1"
+	{ echo "$m_held $m_trip $m_hv $m_anom $m_seen $1" > "$REPLY"; } 2>/dev/null
+}
+mem_age() {	# forget the chargers not seen for MEM_DAYS
+	local f s
+	for f in "$MEM"/*; do
+		[ -f "$f" ] || continue
+		read -r _ _ _ _ s _ < "$f" 2>/dev/null
+		[[ $s =~ ^[0-9]+$ ]] && [ $((EPOCH - s)) -le $((MEM_DAYS * 86400)) ] && continue
+		rm -f "$f"
+	done
+}
+bumped() {	# state variable, a count read now: true if it went up since the last look
+	local v=$1
+	if [ -z "${!v}" ] || [ $2 -lt ${!v} ]; then printf -v $v %d $2; return 1; fi
+	[ $2 -gt ${!v} ] || return 1
+	printf -v $v %d $2
+}
+pd_back() {	# why, 1 to remember it: 5 V and at most 1500 mA (or the caps' 5 V
+		# current, if lower) until unplugged
+	local p ma
+	anom=1 anom_cap=1500
+	for p in $caps; do
+		ma=${p#*:}; ma=${ma%%[!0-9]*}; p=${p%%:*}; p=${p%%[!0-9]*}
+		[ -n "$p" ] && [ -n "$ma" ] && [ $p -le 5500 ] && [ $ma -lt $anom_cap ] && anom_cap=$ma
+	done
+	if [ $2 = 1 ] && [ -n "$sess_fp" ]; then
+		mem_get "$sess_fp"; m_anom=1 m_seen=$EPOCH; mem_put "$sess_fp"
+	fi
+	echo "<4>zrn-charge: PD ANOMALY, worth investigating: ${sess_fp:-the source}: $1; 5 V and at most $anom_cap mA until it is unplugged"
+}
+trip() {	# fingerprint, limit mA, 1 if at 9 V, how it was seen: remember, and say so loudly
+	local c=$(($2 - 200)) t
+	[ $c -lt 500 ] && c=500
+	if mem_get "$1" || [ -n "$1" ]; then
+		[ $m_trip = 0 ] || [ $2 -lt $m_trip ] && m_trip=$2
+		[ $3 = 1 ] && m_hv=1
+		m_seen=$EPOCH; mem_put "$1"
+	fi
+	t="CHARGER TRIP: ${1:-an unknown charger} cut out at $2 mA"
+	[ $3 = 1 ] && t+=" at 9 V"
+	t+=" ($4); from now on it gets at most $c mA"
+	[ $3 = 1 ] && t+=", and 5 V only"
+	echo "<3>zrn-charge: $t"
+}
+
 # what one pass remembers for the next (the daemon keeps it; a lone pass reads it)
-STATE="src_was key_was cap win ceil wceil off_since plug_at settle hot_stop cold_stop warm cold cool vhold hv_at logged"
+STATE="src_was key_was cap win ceil wceil off_since plug_at settle hot_stop cold_stop warm cold cool vhold hv_at logged
+	sess_fp held_val held_since trips_seen hr_seen reduced_seen hr_sess hr_caps caps_was anom anom_cap
+	last_fp last_in last_hv"
 src_was=none key_was= cap=0 win=0 ceil=0 wceil=0 off_since=0 plug_at=0 settle=0
 hot_stop=0 cold_stop=0 warm=0 cold=0 cool=0 vhold=0 hv_at=0 logged=
+sess_fp= held_val=0 held_since=0 trips_seen= hr_seen= reduced_seen= hr_sess=0 hr_caps= caps_was=
+anom=0 anom_cap=1500
+last_fp= last_in=0 last_hv=0
 load() { [ -r "$RUN/state" ] && . "$RUN/state"; }
 save() {
 	local v
@@ -235,7 +336,7 @@ save() {
 
 pass() {	# look, decide, write; nap: when to look again without an event (s)
 	local T=250 mv in chg why= stop=0 hvbus=0 hvok=1 hvf= hv=0 want=0 rb a f t s key nominal fl
-	local ramp=0 rs=
+	local ramp=0 rs= n p ma
 	# (all builtins: no process is started, but for i2cget on the old kernel)
 	now; detect
 
@@ -245,8 +346,26 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	else
 		if [ "$src_was" = none ] && [ $((NOW - off_since)) -ge $REPLUG_S ]; then
 			cap=0 win=0 ceil=0 wceil=0 hv_at=0 plug_at=$NOW settle=$((NOW + 15))
+			sess_fp= held_val=0 held_since=0 anom=0 anom_cap=1500 hr_sess=0 hr_caps= caps_was=
+			mem_age
+		elif [ "$src_was" = none ] && [ $src = wired ] && [ -n "$last_fp" ] &&
+		     [ $last_in -ge 1000 ] && ! cget $TRIP_COUNT; then
+			# without the driver's count: CHGIN gone and back within REPLUG_S
+			# at 1 A or more is taken for an over-current trip
+			trip "$last_fp" $last_in $last_hv "the input dropped out for $((NOW - off_since)) s"
 		fi
 		off_since=0
+	fi
+	# the driver's own trip count
+	if cget $TRIP_COUNT && [[ $REPLY =~ ^[0-9]+$ ]]; then
+		n=$REPLY
+		if [ -z "$trips_seen" ] || [ $n -lt $trips_seen ]; then trips_seen=$n
+		elif [ $n -gt $trips_seen ]; then
+			trips_seen=$n p=$last_in a=$last_hv
+			cget $TRIP_LIMIT && [[ $REPLY =~ ^[0-9]+$ ]] && p=$((REPLY / 1000))
+			cget $TRIP_VOLTAGE && [[ $REPLY =~ ^[0-9]+$ ]] && [ $REPLY -gt 0 ] && { a=0; [ $REPLY -ge 8000000 ] && a=1; }
+			trip "${sess_fp:-$last_fp}" $p $a "the charger's over-current count, now $n"
+		fi
 	fi
 	[ "$src" != "$src_was" ] && settle=$((NOW + 10))	# the gauge's status lags the plug
 	src_was=$src
@@ -257,6 +376,49 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 		[ "$key" != "$key_was" ] && cap=0
 		key_was=$key
 	fi
+	# the charger's fingerprint, fixed at the first type it was known as on this
+	# plug: type, usb_type and the voltages of its PDOs up to 9 V. Not their
+	# currents: a multi-port charger shares its current between its ports, and
+	# a throttling one lowers it, and it is still the same charger.
+	if [ $src = wired ] && [ -z "$sess_fp" ] && [ $type != unknown ]; then
+		sess_fp=$type
+		[ -n "$utype" ] && sess_fp+="+$utype"
+		if [ -n "$caps" ]; then
+			a=
+			for p in $caps; do
+				p=${p%%:*}; p=${p%%[!0-9]*}
+				[ -n "$p" ] && [ $p -le 9000 ] && [[ ",$a," != *",$((p / 1000))V,"* ]] && a+=",$((p / 1000))V"
+			done
+			[ -n "$a" ] && sess_fp+="+${a#,}"
+		fi
+		mem_get "$sess_fp"; m_seen=$EPOCH; mem_put "$sess_fp"
+	fi
+	# PD. A Hard Reset is logged, always; one followed by other source caps is
+	# the anomaly (5 V, little current, remembered for the charger), and so is a
+	# second one on the same plug (5 V, little current, not remembered). Other
+	# caps without a Hard Reset are normal (throttling, or a multi-port charger
+	# sharing): followed, the ceiling from current_max as ever, one line.
+	n=0
+	if uget $PD_HARD_RESETS && [[ $REPLY =~ ^[0-9]+$ ]] && bumped hr_seen $REPLY && [ $src = wired ]; then
+		n=1 hr_sess=$((hr_sess + 1)) hr_caps=${caps_was:--}
+		echo "<4>zrn-charge: PD Hard Reset (number $hr_sess on this plug): ${sess_fp:-the source} at $((volt / 1000)) V, in $last_in mA, caps ${caps:-not known}"
+		[ $hr_sess -ge 2 ] && pd_back "a second Hard Reset on this plug" 0
+	fi
+	a=0
+	if uget $PD_CAPS_REDUCED && [[ $REPLY =~ ^[0-9]+$ ]]; then
+		bumped reduced_seen $REPLY && a=1
+	elif [ -n "$hr_caps" ] && [ -n "$caps" ] && [ "$caps" != "$hr_caps" ]; then
+		a=1	# no count from the driver: the caps seen to change after the reset
+	fi
+	if [ $a = 1 ] && [ $src = wired ]; then
+		pd_back "other source caps after a Hard Reset (before: ${hr_caps#-}; after: ${caps:-not known})" 1
+		hr_caps=
+	elif [ $n = 0 ] && [ $src = wired ] && [ -n "$caps" ] && [ -n "$caps_was" ] && [ "$caps" != "$caps_was" ]; then
+		echo "zrn-charge: PD source caps changed, followed: $caps_was -> $caps"
+	elif [ $n = 0 ] && [ "$caps" = "$hr_caps" ]; then
+		hr_caps=	# the same caps after the reset
+	fi
+	[ -n "$caps" ] && caps_was=$caps
 
 	# the battery's temperature, with stock's hysteresis
 	num "$B/temp" && T=$REPLY
@@ -315,6 +477,18 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 		else
 			get "$C/$RAMP_STATE" && rs=$REPLY
 		fi
+		# what this charger did before: below its trip, and 5 V only after a
+		# trip at 9 V or a PD anomaly
+		if mem_get "$sess_fp"; then
+			if [ $m_trip -gt 0 ]; then
+				a=$((m_trip - 200)); [ $a -lt 500 ] && a=500
+				[ $in -gt $a ] && { in=$a; why+=" tripped at $m_trip before"; }
+			fi
+			[ $((m_hv | m_anom)) = 1 ] && [ $hvok = 1 ] && { hvok=0; why+=" 5 V only"; }
+		fi
+		if [ $anom = 1 ]; then
+			hvok=0; min in $anom_cap; why+=" pd anomaly"
+		fi
 	fi
 
 	# 9 V: asked for through hv_enable; going back, the input limit drops first
@@ -338,6 +512,13 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 		fi
 	fi
 
+	# 10 V on a pad: the receiver's hv_enable, only on a pad and when the
+	# temperature allows (it has gates of its own); off at any wired attach
+	if [ -e "$RX/hv_enable" ]; then
+		a=0; [ $src = wireless ] && [ $hvok = 1 ] && a=1
+		get "$RX/hv_enable"; [ "$REPLY" = $a ] || put "$RX/hv_enable" $a
+	fi
+
 	# write
 	if [ ! -e "$C/charge_behaviour" ]; then
 		[ $stop = 1 ] && chg=100
@@ -348,10 +529,23 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	fi
 	case $src in
 	wired)	setlim "$C/input_current_limit" ceil $in $chg; win=$in ;;
-	wireless) setlim "$W/input_current_limit" wceil $in $chg; win=0 ;;
+	wireless) if [ $wl_busy = 1 ]; then setone "$C/constant_charge_current" $chg; why+=" pad changing voltage"
+		else setlim "$W/input_current_limit" wceil $in $chg; fi; win=0 ;;
 	none)	setlim "$C/input_current_limit" ceil 500 500; win=0 wceil=0 ;;
 	esac
 	if [ $src = none ]; then led_now 0; else led_now 1; fi
+	if [ $src = wired ]; then
+		last_fp=$sess_fp last_in=$in last_hv=$hvbus
+		# the highest limit that held for HELD_S, for --show
+		a=$in
+		if [ $ramp = 1 ]; then num "$C/$RAMP_EFFECTIVE" && a=$((REPLY / 1000))
+		else num "$C/input_current_limit" && a=$((REPLY / 1000)); fi
+		if [ "$a" != "$held_val" ]; then held_val=$a held_since=$NOW
+		elif [ $((NOW - held_since)) -ge $HELD_S ] && [ -n "$sess_fp" ] && mem_get "$sess_fp" &&
+		     [ $a -gt $m_held ]; then
+			m_held=$a; mem_put "$sess_fp"
+		fi
+	fi
 
 	# one line per decision, not per uevent
 	t="$src $type"; [ $hvbus = 1 ] && t+=" $((volt / 1000)) V"
@@ -375,6 +569,7 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	elif [ $hv = 1 ]; then nap=10	# the screen, for the 9 V limit
 	else nap=30
 	fi
+	[ $src = wired ] && [ $held_since = $NOW ] && [ $nap -gt $HELD_S ] && nap=$HELD_S
 }
 
 daemon_pid() {	# the running daemon's pid, if there is one
@@ -405,6 +600,36 @@ daemon() {
 	done
 }
 
+show() {
+	local f h t v a s fp d any=0
+	now; mem_age 2>/dev/null
+	for f in "$MEM"/*; do
+		[ -f "$f" ] || continue
+		read -r h t v a s fp < "$f" 2>/dev/null || continue
+		any=1 d=
+		[ "$h" -gt 0 ] && d+=", held $h mA"
+		[ "$t" -gt 0 ] && d+=", tripped at $t mA (now at most $(( t - 200 < 500 ? 500 : t - 200 )) mA)"
+		[ "$v" = 1 ] && d+=", 5 V only (tripped at 9 V)"
+		[ "$a" = 1 ] && d+=", PD anomaly (Hard Reset, other caps): 5 V only"
+		printf '%s: last seen %(%Y-%m-%d)T%s\n' "$fp" "$s" "$d"
+	done
+	[ $any = 1 ] || echo "zrn-charge: no charger remembered"
+}
+forget() {	# fingerprint, or all
+	local f
+	case ${1:-} in
+	'')	echo "usage: zrn-charge --forget FINGERPRINT|all" >&2; return 2 ;;
+	all)	for f in "$MEM"/*; do [ -f "$f" ] && { rm -f "$f" || return 1; }; done ;;
+	*)	mem_file "$1"
+		[ -f "$REPLY" ] || { echo "zrn-charge: no charger \"$1\" remembered" >&2; return 1; }
+		rm -f "$REPLY" ;;
+	esac
+}
+
+case ${1:-} in
+--show) show; exit 0 ;;
+--forget) forget "${2:-}"; exit ;;
+esac
 mkdir -p "$RUN" 2>/dev/null
 case ${1:-} in
 --daemon) daemon ;;

@@ -9,6 +9,8 @@ Type=simple
 ExecStart=/usr/local/sbin/zrn-charge --daemon
 Restart=on-failure
 RestartSec=2
+# what each charger did before (zrn-charge --show / --forget)
+StateDirectory=zrn-charge
 
 [Install]
 WantedBy=multi-user.target
