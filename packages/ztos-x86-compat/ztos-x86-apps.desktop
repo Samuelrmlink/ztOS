@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=x86 Apps
+Comment=Install and start x86_64 Linux apps through the compatibility layer
+Exec=/usr/bin/ztos-x86-apps %F
+TryExec=/usr/bin/ztos-x86-apps
+Icon=ztos-x86-apps
+Terminal=false
+Categories=System;Utility;
+MimeType=application/vnd.appimage;application/x-iso9660-appimage;application/vnd.debian.binary-package;
+Keywords=x86;x86_64;AppImage;box64;compatibility;

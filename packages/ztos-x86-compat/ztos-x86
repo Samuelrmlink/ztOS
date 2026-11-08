@@ -1,0 +1,350 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# ztos-x86: run and install x86_64 Linux programs on ztOS through Box64.
+# Part of the optional ztos-x86-compat package; see `ztos-x86 help`.
+set -u
+VERSION=1
+DATA=${XDG_DATA_HOME:-$HOME/.local/share}
+APPS=$DATA/ztos-x86/apps          # one folder per installed app
+ICONS=$DATA/ztos-x86/icons
+MENU=$DATA/applications            # where ztMETRO's app list looks
+BOX64=${ZTOS_X86_BOX64:-/usr/bin/box64}
+BINFMT=/proc/sys/fs/binfmt_misc/ztos-x86_64
+
+die() { echo "ztos-x86: $*" >&2; exit 1; }
+
+usage() {
+	cat <<'EOF'
+ztos-x86: x86_64 Linux programs on ztOS, through Box64
+
+  ztos-x86 run FILE [ARGS...]      run an x86_64 program, script or AppImage
+  ztos-x86 install FILE [options]  add an app to the app list; FILE is an
+                                   AppImage, a .deb, a .tar.* / .zip, a folder
+                                   or a single program
+      --name NAME      name in the app list (default: from the app)
+      --exec PATH      the program inside a .deb/archive/folder to start
+      --icon FILE      icon (PNG or SVG)
+      --args "ARGS"    extra arguments to start it with
+  ztos-x86 list [--tsv]            the apps installed this way
+  ztos-x86 remove ID               remove one of them (and its files)
+  ztos-x86 remove-all              remove every one of them
+  ztos-x86 status                  Box64, binfmt and kernel state
+  ztos-x86 is-x86 FILE             exit 0 if FILE is an x86_64 program/AppImage
+
+Programs run with Box64; libraries ztOS has natively (glibc, GTK, SDL,
+OpenGL/Mesa, Vulkan, Wayland, ...) are used natively, others must ship with
+the app. With binfmt (CONFIG_BINFMT_MISC) an x86_64 program also runs as
+plain ./program.
+EOF
+}
+
+# --- what a file is ---------------------------------------------------------
+# the first 20 bytes as hex
+head_hex() { od -An -tx1 -N20 -v -- "$1" 2>/dev/null | tr -d ' \n'; }
+is_x86_elf() {	# ELF64, little-endian, EM_X86_64 (0x3e)
+	local h; h=$(head_hex "$1")
+	[[ ${h:0:10} == 7f454c4602 && ${h:36:4} == 3e00 ]]
+}
+is_appimage() {	# x86_64 ELF with "AI" 0x02 at offset 8 (type 2)
+	local h; h=$(head_hex "$1")
+	is_x86_elf "$1" && [[ ${h:16:6} == 414902 ]]
+}
+is_bash_script() {
+	local l; IFS= read -r l < "$1" 2>/dev/null || return 1
+	[[ $l == '#!'*/sh || $l == '#!'*/sh\ * || $l == '#!'*bash* ]]
+}
+binfmt_on() { [[ -r $BINFMT ]] && head -1 "$BINFMT" | grep -qx enabled; }
+
+# where the squashfs inside a type 2 AppImage starts: the end of its ELF
+appimage_offset() {
+	local shoff shentsize shnum
+	shoff=$(od -An -tu8 -j40 -N8 -- "$1" | tr -d ' ')
+	shentsize=$(od -An -tu2 -j58 -N2 -- "$1" | tr -d ' ')
+	shnum=$(od -An -tu2 -j60 -N2 -- "$1" | tr -d ' ')
+	echo $((shoff + shentsize * shnum))
+}
+
+# environment for every emulated program
+box_env() {
+	export BOX64_NOBANNER=${BOX64_NOBANNER:-1}
+	export BOX64_LOG=${BOX64_LOG:-0}
+	# shell scripts started from emulated programs run in Box64's x86_64 bash,
+	# so the programs they start in turn stay inside Box64 (needed without binfmt)
+	[[ -x /usr/bin/box64-bash ]] && export BOX64_BASH=${BOX64_BASH:-/usr/bin/box64-bash}
+	# ztMETRO is Wayland only: no X server, no Xwayland
+	export GDK_BACKEND=${GDK_BACKEND:-wayland}
+	export QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-wayland}
+	export SDL_VIDEODRIVER=${SDL_VIDEODRIVER:-wayland}
+	export ELECTRON_OZONE_PLATFORM_HINT=${ELECTRON_OZONE_PLATFORM_HINT:-wayland}
+	# Panfrost: GLES is the well-trodden path for GTK
+	export GSK_RENDERER=${GSK_RENDERER:-gl}
+}
+
+# electron/chromium need a few flags: their setuid sandbox can't work under
+# emulation, and they must be told to use Wayland
+electron_flags() {	# $1: program path
+	local d; d=$(dirname -- "$1")
+	if [[ -e $d/chrome-sandbox || -e $d/libffmpeg.so || -e $d/resources/app.asar || -e $d/chrome_crashpad_handler ]]; then
+		echo "--no-sandbox --ozone-platform=wayland --enable-features=UseOzonePlatform"
+	fi
+}
+
+# start FILE however it needs starting; never returns
+launch() {
+	local f=$1; shift
+	[[ -e $f ]] || die "no such file: $f"
+	box_env
+	if is_appimage "$f"; then
+		run_appimage "$f" "$@"
+	elif is_x86_elf "$f"; then
+		# shellcheck disable=SC2046
+		exec "$BOX64" "$f" $(electron_flags "$f") "$@"
+	elif is_bash_script "$f"; then
+		if binfmt_on; then exec "$f" "$@"; fi
+		exec "$BOX64" /usr/bin/box64-bash "$f" "$@"
+	else
+		exec "$f" "$@"	# native program, or a script with its own interpreter
+	fi
+}
+
+# mount the AppImage's squashfs natively (no emulated FUSE), run its AppRun,
+# unmount when it exits
+run_appimage() {
+	local img; img=$(readlink -f -- "$1"); shift
+	local off; off=$(appimage_offset "$img")
+	local base=${XDG_RUNTIME_DIR:-/tmp}/ztos-x86
+	mkdir -p "$base"
+	local mnt; mnt=$(mktemp -d "$base/appimage.XXXXXX")
+	if ! squashfuse -o offset="$off" "$img" "$mnt" 2>/dev/null; then
+		rmdir "$mnt"
+		# fall back on the AppImage's own runtime, emulated
+		exec "$BOX64" "$img" --appimage-extract-and-run "$@"
+	fi
+	local run=$mnt/AppRun rc
+	export APPIMAGE=$img APPDIR=$mnt ARGV0=$img OWD=$PWD
+	local -a flags=()
+	if is_x86_elf "$run"; then
+		read -ra flags <<< "$(electron_flags "$run")"
+		"$BOX64" "$run" "${flags[@]}" "$@"
+	elif is_bash_script "$run" && ! binfmt_on; then
+		# AppRun scripts often exec the real program: keep them inside Box64
+		local main
+		main=$(find "$mnt" -maxdepth 1 -type f -perm -u+x ! -name AppRun -print 2>/dev/null | head -1)
+		[[ -n $main ]] && read -ra flags <<< "$(electron_flags "$main")"
+		"$BOX64" /usr/bin/box64-bash "$run" "${flags[@]}" "$@"
+	else
+		"$run" "$@"
+	fi
+	rc=$?
+	fusermount3 -u "$mnt" 2>/dev/null || fusermount -u "$mnt" 2>/dev/null || umount "$mnt" 2>/dev/null
+	rmdir "$mnt" 2>/dev/null
+	exit $rc
+}
+
+# --- installing apps ---------------------------------------------------------
+slug() { tr -cs 'A-Za-z0-9._-' '-' <<< "$1" | sed 's/^-*//; s/-*$//' | tr 'A-Z' 'a-z'; }
+
+# value of KEY= in the [Desktop Entry] group of a .desktop file
+desktop_get() {
+	awk -F= -v k="$2" '/^\[/{g=($0=="[Desktop Entry]")} g && $1==k {sub(/^[^=]*=/,""); print; exit}' "$1"
+}
+
+# best icon file for NAME under ROOT (an AppDir or an unpacked package)
+find_icon() {	# root name
+	local r=$1 n=$2 f
+	for f in "$r/$n.png" "$r/$n.svg" \
+		"$r"/usr/share/icons/hicolor/256x256/apps/"$n".png \
+		"$r"/usr/share/icons/hicolor/scalable/apps/"$n".svg \
+		"$r"/usr/share/icons/hicolor/512x512/apps/"$n".png \
+		"$r"/usr/share/icons/hicolor/128x128/apps/"$n".png \
+		"$r"/usr/share/pixmaps/"$n".png "$r"/usr/share/pixmaps/"$n".svg \
+		"$r"/opt/*/"$n".png "$r"/opt/*/*/"$n".png; do
+		[[ -f $f ]] && { echo "$f"; return; }
+	done
+	f=$(find "$r" -path '*/icons/*' -name "$n.png" -size +2k 2>/dev/null | sort -V | tail -1)
+	[[ -n $f ]] && { echo "$f"; return; }
+	[[ -f $r/.DirIcon ]] && echo "$r/.DirIcon"
+}
+
+# the biggest x86_64 executable under DIR (the main program of an archive)
+find_main() {
+	local f best="" size=0 s
+	while IFS= read -r -d '' f; do
+		is_x86_elf "$f" || continue
+		[[ $(basename "$f") == *.so* || $(basename "$f") == chrome_crashpad_handler || $(basename "$f") == chrome-sandbox ]] && continue
+		s=$(stat -c %s "$f")
+		((s > size)) && { size=$s; best=$f; }
+	done < <(find "$1" -type f -perm -u+x -print0 2>/dev/null)
+	echo "$best"
+}
+
+write_entry() {	# id name exec-path icon-src args comment
+	local id=$1 name=$2 exe=$3 icon=$4 args=$5 comment=${6:-}
+	mkdir -p "$MENU" "$ICONS"
+	local icon_line=""
+	if [[ -n $icon && -f $icon ]]; then
+		local ext=png
+		head -c 512 "$icon" | grep -qi '<svg' && ext=svg
+		cp -L -- "$icon" "$ICONS/$id.$ext"
+		icon_line="Icon=$ICONS/$id.$ext"
+	else
+		icon_line="Icon=ztos-x86-apps"
+	fi
+	[[ $exe == *[[:space:]\"\'\\]* ]] && die "path has spaces or quotes, which a menu entry can't carry: $exe"
+	{
+		echo "[Desktop Entry]"
+		echo "Type=Application"
+		echo "Name=$name"
+		echo "Comment=${comment:-x86_64 app}: runs through the compatibility layer"
+		echo "TryExec=/usr/bin/ztos-x86"
+		echo "Exec=/usr/bin/ztos-x86 run $exe${args:+ $args} %U"
+		echo "$icon_line"
+		echo "Terminal=false"
+		echo "Categories=X-ZtOS-X86;"
+		echo "X-ZtOS-X86=true"
+		echo "X-ZtOS-X86-Id=$id"
+	} > "$MENU/ztos-x86-$id.desktop.tmp"
+	mv "$MENU/ztos-x86-$id.desktop.tmp" "$MENU/ztos-x86-$id.desktop"
+	echo "installed $id: $name"
+	echo "  menu entry: $MENU/ztos-x86-$id.desktop"
+}
+
+# NAME, EXEC and ICON from the first .desktop file under ROOT, if any
+read_desktop_from() {	# root
+	local d
+	d=$(find "$1" -maxdepth 1 -name '*.desktop' 2>/dev/null | head -1)
+	[[ -z $d ]] && d=$(find "$1" -path '*/share/applications/*.desktop' 2>/dev/null | head -1)
+	[[ -z $d ]] && return 1
+	DT_NAME=$(desktop_get "$d" Name)
+	DT_EXEC=$(desktop_get "$d" Exec)
+	DT_ICON=$(desktop_get "$d" Icon)
+	DT_COMMENT=$(desktop_get "$d" Comment)
+}
+
+install_app() {
+	local src="" name="" exe="" icon="" args=""
+	while (($#)); do
+		case $1 in
+		--name) name=$2; shift 2 ;;
+		--exec) exe=$2; shift 2 ;;
+		--icon) icon=$2; shift 2 ;;
+		--args) args=$2; shift 2 ;;
+		-*) die "unknown option $1" ;;
+		*) src=$1; shift ;;
+		esac
+	done
+	[[ -n $src && -e $src ]] || die "install what? (see ztos-x86 help)"
+	src=$(readlink -f -- "$src")
+	DT_NAME="" DT_EXEC="" DT_ICON="" DT_COMMENT=""
+	local base; base=$(basename -- "$src")
+	local id; id=$(slug "${name:-${base%%.*}}")
+	[[ -n $id ]] || id=app
+	local dir=$APPS/$id
+	[[ -e $dir ]] && die "$id is already installed (ztos-x86 remove $id first)"
+	mkdir -p "$dir"
+	trap 'rm -rf "$dir"' ERR
+
+	if [[ -f $src ]] && is_appimage "$src"; then
+		cp -- "$src" "$dir/$base"; chmod +x "$dir/$base"
+		local mnt; mnt=$(mktemp -d)
+		if squashfuse -o offset="$(appimage_offset "$src")" "$src" "$mnt" 2>/dev/null; then
+			read_desktop_from "$mnt" || true
+			local ic; ic=$(find_icon "$mnt" "${DT_ICON:-x}")
+			[[ -z $icon && -n $ic ]] && { cp -L -- "$ic" "$dir/.icon"; icon=$dir/.icon; }
+			fusermount3 -u "$mnt" 2>/dev/null || fusermount -u "$mnt"
+		fi
+		rmdir "$mnt" 2>/dev/null
+		exe=$dir/$base
+	elif [[ -f $src && $base == *.deb ]]; then
+		mkdir -p "$dir/root"
+		# a .deb is an ar archive holding data.tar.*; bsdtar reads both
+		local data; data=$(bsdtar -tf "$src" | grep '^data\.tar')
+		bsdtar -xOf "$src" "$data" | bsdtar -xf - -C "$dir/root" || die "can't unpack $src"
+		read_desktop_from "$dir/root" || true
+		if [[ -z $exe && -n $DT_EXEC ]]; then
+			# the Exec of the package's own entry, moved into our folder
+			local cmd=${DT_EXEC%% *}
+			if [[ $cmd == /* ]]; then exe=$dir/root$cmd
+			else exe=$(find "$dir/root" -name "$cmd" -perm -u+x | head -1); fi
+			[[ -L $exe ]] && exe=$dir/root$(readlink "$exe" | sed "s|^$dir/root||")
+		fi
+		[[ -n $exe && $exe != /* ]] && exe=$dir/root/$exe
+		[[ -z $exe || ! -e $exe ]] && exe=$(find_main "$dir/root")
+		[[ -z $icon && -n $DT_ICON ]] && icon=$(find_icon "$dir/root" "$DT_ICON")
+	elif [[ -f $src && ( $base == *.tar* || $base == *.tgz || $base == *.zip ) ]]; then
+		bsdtar -xf "$src" -C "$dir" || die "can't unpack $src"
+		read_desktop_from "$dir" || true
+		[[ -n $exe && $exe != /* ]] && exe=$(find "$dir" -path "*/$exe" -type f | head -1)
+		[[ -z $exe ]] && exe=$(find_main "$dir")
+		[[ -z $icon && -n $DT_ICON ]] && icon=$(find_icon "$dir" "$DT_ICON")
+		[[ -z $icon ]] && icon=$(find_icon "$(dirname "$exe")" "$(basename "$exe")")
+	elif [[ -d $src ]]; then
+		cp -a -- "$src/." "$dir/"
+		read_desktop_from "$dir" || true
+		[[ -n $exe && $exe != /* ]] && exe=$dir/$exe
+		[[ -z $exe ]] && exe=$(find_main "$dir")
+	elif [[ -f $src ]] && is_x86_elf "$src"; then
+		cp -- "$src" "$dir/$base"; chmod +x "$dir/$base"
+		exe=$dir/$base
+	else
+		die "$src is not an x86_64 program, AppImage, .deb, archive or folder"
+	fi
+	trap - ERR
+	[[ -n $exe && -e $exe ]] || { rm -rf "$dir"; die "found no x86_64 program in $src (give --exec)"; }
+	chmod +x "$exe" 2>/dev/null
+	[[ -z $name ]] && name=${DT_NAME:-$id}
+	echo "$src" > "$dir/.source"
+	write_entry "$id" "$name" "$exe" "$icon" "$args" "$DT_COMMENT"
+}
+
+list_apps() {
+	local tsv=${1:-} f id name exe icon
+	for f in "$MENU"/ztos-x86-*.desktop; do
+		[[ -e $f ]] || continue
+		id=$(desktop_get "$f" X-ZtOS-X86-Id)
+		name=$(desktop_get "$f" Name)
+		exe=$(desktop_get "$f" Exec); exe=${exe#/usr/bin/ztos-x86 run }; exe=${exe%% %U}
+		icon=$(desktop_get "$f" Icon)
+		if [[ $tsv == --tsv ]]; then
+			printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$exe" "$icon" "$(du -sh "$APPS/$id" 2>/dev/null | cut -f1)"
+		else
+			printf '%-20s %-28s %s\n' "$id" "$name" "$exe"
+		fi
+	done
+}
+
+remove_app() {
+	local id; id=$(slug "$1")
+	[[ -n $id ]] || die "remove what?"
+	[[ -e $MENU/ztos-x86-$id.desktop || -e $APPS/$id ]] || die "$id is not installed"
+	rm -f "$MENU/ztos-x86-$id.desktop" "$ICONS/$id".*
+	rm -rf "${APPS:?}/$id"
+	echo "removed $id"
+}
+
+status() {
+	echo "box64:    $("$BOX64" --version 2>/dev/null | grep -m1 -o 'v[0-9][^ ]*' || echo missing) ($BOX64)"
+	if ! grep -qw binfmt_misc /proc/filesystems; then
+		echo "binfmt:   unavailable: this kernel has no CONFIG_BINFMT_MISC"
+		echo "          run x86_64 programs with: ztos-x86 run ./program"
+	elif binfmt_on; then
+		echo "binfmt:   on: x86_64 programs run directly (./program)"
+	else
+		echo "binfmt:   registered rule missing (sudo systemctl restart systemd-binfmt)"
+	fi
+	echo "apps:     $(list_apps | wc -l) installed ($(du -sh "$APPS" 2>/dev/null | cut -f1 || echo 0))"
+	echo "cpu:      $(grep -m1 '^Features' /proc/cpuinfo | cut -d: -f2-)"
+}
+
+case ${1:-help} in
+run) shift; [[ $# -ge 1 ]] || die "run what?"; launch "$@" ;;
+install) shift; install_app "$@" ;;
+list) shift; list_apps "${1:-}" ;;
+remove) shift; remove_app "${1:-}" ;;
+remove-all) for d in "$MENU"/ztos-x86-*.desktop; do [[ -e $d ]] && remove_app "$(desktop_get "$d" X-ZtOS-X86-Id)"; done; rm -rf "$DATA/ztos-x86" ;;
+status) status ;;
+is-x86) is_x86_elf "${2:?}" ;;
+version|--version) echo "ztos-x86 $VERSION" ;;
+help|-h|--help) usage ;;
+*) [[ -e $1 ]] && launch "$@"; usage; exit 2 ;;
+esac

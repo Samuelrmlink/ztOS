@@ -1,0 +1,33 @@
+# ztOS: the optional x86_64 compatibility layer, as one installable unit.
+#
+#   install:  pacman -U box64-*.pkg.tar.* ztos-x86-compat-*.pkg.tar.*   (or ./build.sh --install)
+#   remove:   pacman -Rns ztos-x86-compat     (takes box64 and squashfuse with it)
+#
+# Not in the base image or any device package list. Everything the layer needs
+# on the system ships here: the binfmt rule (registered by the .install script
+# and at boot by systemd-binfmt, unregistered on removal), the ztos-x86 command,
+# the x86 Apps frontend and its menu entry, and the docs. Apps the user adds
+# live in ~/.local/share/ztos-x86 and their menu entries carry
+# TryExec=/usr/bin/ztos-x86, so they leave the app list with the package.
+pkgname=ztos-x86-compat
+pkgver=1
+pkgrel=1
+pkgdesc='ztOS: run x86_64 Linux apps through Box64 (binfmt, launcher, x86 Apps)'
+arch=('aarch64')
+url='https://github.com/Zerone-Laboratories/ztOS'
+license=('GPL-2.0-or-later')
+depends=('box64' 'bash' 'coreutils' 'libarchive' 'squashfuse' 'fuse3'
+	'python' 'python-gobject' 'gtk4')
+install=ztos-x86-compat.install
+source=('ztos-x86' 'ztos-x86-apps' 'ztos-x86-apps.desktop' 'ztos-x86-apps.svg'
+	'ztos-x86_64.conf' 'README.md')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+	install -Dm755 ztos-x86 "$pkgdir/usr/bin/ztos-x86"
+	install -Dm755 ztos-x86-apps "$pkgdir/usr/bin/ztos-x86-apps"
+	install -Dm644 ztos-x86-apps.desktop "$pkgdir/usr/share/applications/ztos-x86-apps.desktop"
+	install -Dm644 ztos-x86-apps.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/ztos-x86-apps.svg"
+	install -Dm644 ztos-x86_64.conf "$pkgdir/usr/lib/binfmt.d/ztos-x86_64.conf"
+	install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

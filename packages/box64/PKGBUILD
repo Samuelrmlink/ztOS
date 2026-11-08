@@ -1,0 +1,41 @@
+# ztOS: Box64, the x86_64 user-space emulator behind ztos-x86-compat.
+# Not part of the base system: ztos-x86-compat pulls it in, and removing that
+# package (pacman -Rns ztos-x86-compat) removes this one too.
+#
+# Differences from a plain `make install`:
+#  - no /etc/binfmt.d/box64.conf: ztos-x86-compat owns the binfmt rule, so the
+#    rule exists only while the compatibility layer is installed;
+#  - no box64-configurator (a PyQt tool ztOS doesn't carry) or its menu entry.
+# Generic ARM64 build: the dynarec checks the CPU's features (LSE atomics,
+# LRCPC, ...) at run time, which matters on the S9, whose Mongoose M3 cores are
+# ARMv8.0 and so leave the whole system without LSE atomics.
+pkgname=box64
+pkgver=0.4.4
+pkgrel=1
+pkgdesc='Linux userspace x86_64 emulator with a dynamic recompiler (ztOS build)'
+arch=('aarch64')
+url='https://github.com/ptitSeb/box64'
+license=('MIT')
+depends=('glibc' 'gcc-libs')
+makedepends=('cmake' 'python')
+options=('!lto' '!debug')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/ptitSeb/box64/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('99c6de4f509e46ab1de15df740d0e0ea338a7790efa3f67510dfbb975cc24029')
+
+build() {
+	cmake -S "$pkgname-$pkgver" -B build \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_BUILD_TYPE=RelWithDebInfo \
+		-DARM64=ON -DARM_DYNAREC=ON \
+		-DNOGIT=ON
+	cmake --build build
+}
+
+package() {
+	DESTDIR="$pkgdir" cmake --install build
+	rm -rf "$pkgdir/etc/binfmt.d"
+	rm -f "$pkgdir/usr/bin/box64-configurator" \
+		"$pkgdir/usr/share/applications/box64-configurator.desktop"
+	rmdir "$pkgdir/usr/share/applications" 2>/dev/null || true
+	install -Dm644 "$pkgname-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

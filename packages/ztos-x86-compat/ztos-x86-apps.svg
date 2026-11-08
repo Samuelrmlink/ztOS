@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <!-- a chip with "x86" on it: one flat shape, as ztMETRO's glyphs are -->
+  <path fill="#fff" fill-rule="evenodd" d="M14 8h4v4h4V8h4v4h4V8h4v4h2a2 2 0 0 1 2 2v2h4v4h-4v4h4v4h-4v4h4v4h-4v2a2 2 0 0 1-2 2h-2v4h-4v-4h-4v4h-4v-4h-4v4h-4v-4h-2a2 2 0 0 1-2-2v-2H8v-4h4v-4H8v-4h4v-4H8v-4h4v-2a2 2 0 0 1 2-2h0zM15 15v18h18V15zm2.5 4.5h2.2l1.6 2.4 1.6-2.4h2.2l-2.7 4 2.7 4.5h-2.2l-1.6-2.6-1.6 2.6h-2.2l2.7-4.5zm8.5 0h3.5a1.5 1.5 0 0 1 1.5 1.5v1.5a1.5 1.5 0 0 1-.7 1.25 1.5 1.5 0 0 1 .7 1.25v1.5a1.5 1.5 0 0 1-1.5 1.5H26a1.5 1.5 0 0 1-1.5-1.5V25a1.5 1.5 0 0 1 .7-1.25 1.5 1.5 0 0 1-.7-1.25V21a1.5 1.5 0 0 1 1.5-1.5zm.3 1.8v1.6h2.9v-1.6zm0 3.4v1.8h2.9v-1.8z"/>
+</svg>

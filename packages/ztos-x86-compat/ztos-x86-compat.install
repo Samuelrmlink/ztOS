@@ -1,0 +1,38 @@
+# ztos-x86-compat: register the x86_64 binfmt rule while installed, and only
+# then. systemd-binfmt reads /usr/lib/binfmt.d at every boot, so the rule
+# comes back after a reboot for as long as the package is installed.
+
+_rule=/proc/sys/fs/binfmt_misc/ztos-x86_64
+
+_register() {
+	if ! grep -qw binfmt_misc /proc/filesystems; then
+		echo ":: ztos-x86-compat: this kernel has no CONFIG_BINFMT_MISC;"
+		echo "   run x86_64 programs with 'ztos-x86 run ./program' (or from x86 Apps)."
+		return 0
+	fi
+	mountpoint -q /proc/sys/fs/binfmt_misc ||
+		systemctl start proc-sys-fs-binfmt_misc.mount 2>/dev/null ||
+		mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null
+	[ -e "$_rule" ] && echo -1 > "$_rule"
+	/usr/lib/systemd/systemd-binfmt /usr/lib/binfmt.d/ztos-x86_64.conf &&
+		echo ":: ztos-x86-compat: x86_64 programs now run directly (./program)."
+}
+
+_unregister() {
+	[ -e "$_rule" ] && echo -1 > "$_rule"
+	return 0
+}
+
+post_install() {
+	_register
+	echo ":: x86 Apps is in the app list; 'ztos-x86 help' for the command line."
+}
+
+pre_upgrade() { _unregister; }
+post_upgrade() { _register; }
+
+pre_remove() {
+	_unregister
+	echo ":: ztos-x86-compat: apps you installed stay in ~/.local/share/ztos-x86"
+	echo "   (hidden from the app list); 'ztos-x86 remove-all' before removing deletes them."
+}

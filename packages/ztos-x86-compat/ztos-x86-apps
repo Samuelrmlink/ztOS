@@ -1,0 +1,157 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""x86 Apps: the frontend of ztos-x86-compat.
+
+Lists the x86_64 apps installed through the compatibility layer, starts and
+removes them, and adds new ones (AppImage, .deb, archive, program). All the
+work is done by the ztos-x86 command; this is only a window over it.
+"""
+import os
+import subprocess
+import sys
+import threading
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gio, GLib, Gtk  # noqa: E402
+
+CLI = "/usr/bin/ztos-x86"
+
+
+def cli(*args):
+    p = subprocess.run([CLI, *args], capture_output=True, text=True)
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
+class Window(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="x86 Apps")
+        self.set_default_size(400, 700)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(box, f"set_margin_{m}")(16)
+        self.set_child(box)
+
+        title = Gtk.Label(xalign=0)
+        title.set_markup("<span size='xx-large'>x86 apps</span>")
+        box.append(title)
+        self.status = Gtk.Label(xalign=0, wrap=True)
+        self.status.add_css_class("dim-label")
+        box.append(self.status)
+
+        add = Gtk.Button(label="Add an x86_64 app…")
+        add.connect("clicked", self.on_add)
+        box.append(add)
+
+        self.list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.list.add_css_class("boxed-list")
+        scroll = Gtk.ScrolledWindow(vexpand=True, child=self.list)
+        box.append(scroll)
+
+        self.note = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        box.append(self.note)
+        self.refresh()
+
+    def refresh(self):
+        _, st = cli("status")
+        lines = dict(line.split(":", 1) for line in st.splitlines() if ":" in line)
+        self.status.set_text(
+            "Box64 " + lines.get("box64", "?").split("(")[0].strip()
+            + " · binfmt " + lines.get("binfmt", "?").strip().split(":")[0])
+        while (row := self.list.get_first_child()) is not None:
+            self.list.remove(row)
+        _, out = cli("list", "--tsv")
+        apps = [line.split("\t") for line in out.splitlines() if line.count("\t") >= 4]
+        if not apps:
+            self.list.append(Gtk.Label(
+                label="None yet. Add an AppImage, a .deb, a .tar.gz or an x86_64 program.",
+                wrap=True, margin_top=24, margin_bottom=24))
+        for app_id, name, exe, icon, size in apps:
+            self.list.append(self.row(app_id, name, exe, icon, size))
+
+    def row(self, app_id, name, exe, icon, size):
+        r = Gtk.Box(spacing=12, margin_top=8, margin_bottom=8, margin_start=8, margin_end=8)
+        img = Gtk.Image(pixel_size=48)
+        if icon.startswith("/") and os.path.exists(icon):
+            img.set_from_file(icon)
+        else:
+            img.set_from_icon_name(icon or "application-x-executable")
+        r.append(img)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        text.append(Gtk.Label(label=name, xalign=0, ellipsize=3))
+        sub = Gtk.Label(label=f"{app_id} · {size}", xalign=0, ellipsize=3)
+        sub.add_css_class("dim-label")
+        text.append(sub)
+        r.append(text)
+        run = Gtk.Button(icon_name="media-playback-start-symbolic", tooltip_text="Start")
+        run.connect("clicked", lambda *_: self.start(exe))
+        r.append(run)
+        rm = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Remove")
+        rm.connect("clicked", lambda *_: self.remove(app_id, name))
+        r.append(rm)
+        return r
+
+    def start(self, exe):
+        subprocess.Popen([CLI, "run", *exe.split(" ")], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.note.set_text("Starting… the first start of an emulated app is slow.")
+
+    def remove(self, app_id, name):
+        d = Gtk.AlertDialog(message=f"Remove {name}?",
+                            detail="Its files in ~/.local/share/ztos-x86 are deleted.",
+                            buttons=["Cancel", "Remove"], cancel_button=0, default_button=0)
+
+        def done(dialog, res):
+            try:
+                if dialog.choose_finish(res) == 1:
+                    _, out = cli("remove", app_id)
+                    self.note.set_text(out)
+                    self.refresh()
+            except GLib.Error:
+                pass
+        d.choose(self, None, done)
+
+    def on_add(self, _button):
+        dlg = Gtk.FileDialog(title="An x86_64 app")
+        dlg.open(self, None, self.on_file)
+
+    def on_file(self, dlg, res):
+        try:
+            f = dlg.open_finish(res)
+        except GLib.Error:
+            return
+        path = f.get_path()
+        self.note.set_text(f"Installing {os.path.basename(path)}…")
+
+        def work():
+            rc, out = cli("install", path)
+            GLib.idle_add(self.installed, out)
+        threading.Thread(target=work, daemon=True).start()
+
+    def installed(self, out):
+        self.note.set_text(out)
+        self.refresh()
+        return False
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="org.ztos.X86Apps",
+                         flags=Gio.ApplicationFlags.HANDLES_OPEN)
+
+    def do_activate(self):
+        (self.props.active_window or Window(self)).present()
+
+    def do_open(self, files, _n, _hint):
+        # "Open with x86 Apps" on an AppImage/.deb: install it
+        w = self.props.active_window or Window(self)
+        w.present()
+        for f in files:
+            rc, out = cli("install", f.get_path())
+            w.note.set_text(out)
+        w.refresh()
+
+
+if __name__ == "__main__":
+    App().run(sys.argv)
