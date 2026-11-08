@@ -179,6 +179,7 @@ struct p9320 {
 	struct gpio_desc *int_gpio;
 	int det_irq;
 	int int_irq;
+	bool afc_reasked;		/* the AFC question sent a second time */
 	bool int_enabled;
 	struct workqueue_struct *wq;	/* ordered: works never run in parallel */
 	struct delayed_work attach_work;
@@ -565,6 +566,7 @@ static void p9320_reset_state(struct p9320 *p)
 	p->mode = 0;
 	p->fod = P9320_FOD_DEFAULT;
 	p->txid_tries = 0;
+	p->afc_reasked = false;
 	p->tx_id_done = false;
 	p->tx_id = 0;
 	p->tx_err = 0;
@@ -593,6 +595,12 @@ static void p9320_attach(struct p9320 *p)
 	if (p->have_fod_cc)
 		p9320_write_fod(p, p->fod_cc, P9320_FOD_CC);
 
+	/* the pad's answers raise INT: listen before asking it anything */
+	if (!p->int_enabled) {
+		enable_irq(p->int_irq);
+		p->int_enabled = true;
+	}
+
 	/*
 	 * A pad already at high voltage: the receiver kept stock's 10 V across
 	 * a reboot. Treat it as HV; the monitor brings it down unless 10 V is
@@ -620,10 +628,6 @@ static void p9320_attach(struct p9320 *p)
 
 	p9320_write(p, P9320_RPP_SCALE, p->rpp);
 
-	if (!p->int_enabled) {
-		enable_irq(p->int_irq);
-		p->int_enabled = true;
-	}
 	p9320_queue(p, &p->txid_work, 2500);
 	p9320_queue(p, &p->monitor_work, P9320_MONITOR_MS);
 	power_supply_changed(p->psy);
@@ -806,6 +810,18 @@ static void p9320_txid_work(struct work_struct *work)
 	mutex_lock(&p->lock);
 	if (!p->attached || p->tx_id_done)
 		goto out;
+	/*
+	 * The AFC question at attach can be answered before the pad is ready
+	 * to talk (a Samsung fast pad answered only its TX id, 0xf0, on the
+	 * bench): ask once more now, before the TX id requests.
+	 */
+	if (!p->afc_reasked && !p->hv_capable && p->hv == P9320_HV_OFF) {
+		p->afc_reasked = true;
+		dev_info(p->dev, "asking the pad for AFC again\n");
+		p9320_send_packet(p, P9320_RXCMD_REQ_AFC_TX, 0x00);
+		p9320_queue(p, &p->txid_work, 700);
+		goto out;
+	}
 	if (p->txid_tries++ < P9320_TXID_TRIES) {
 		p9320_send_packet(p, P9320_RXCMD_TX_ID, 0x00);
 		p9320_queue(p, &p->txid_work, 1500);
