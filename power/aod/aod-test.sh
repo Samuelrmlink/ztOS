@@ -16,6 +16,7 @@ expect() {	# label, want-regex
 	if echo "$s" | grep -qE "$2"; then log "PASS $1 ($s)"; else log "FAIL $1: want /$2/, have ($s)"; fi
 }
 PID=$(pgrep -x ztmetro)
+was=$(grep "^screen " $R/ztmetro.state)
 log "start, ztmetro $PID, battery $(cat /sys/class/power_supply/max170xx_battery/capacity)%, charger $(cat /sys/class/power_supply/max77705-charger/online)"
 
 ctl "screen on"; sleep 3
@@ -106,4 +107,5 @@ expect "awake at the end" "screen on aod off"
 [ "$(cat $BL/brightness)" = "$BL_ON" ] && log "PASS brightness back ($BL_ON)" || log "FAIL brightness $(cat $BL/brightness), was $BL_ON"
 pkill -HUP -x ztmetro	# the config's aod again
 [ "$(pgrep -x ztmetro)" = "$PID" ] && log "PASS ztmetro still $PID" || log "FAIL ztmetro now $(pgrep -x ztmetro), was $PID"
+[ "$was" = "screen off" ] && { sleep 1; ctl "screen off"; }
 log "done"
