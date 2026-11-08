@@ -192,6 +192,68 @@ leds-max77705 puts them: the ramp is 0x36 and the blink times 0x38 (0x35 and
 - **Wi-Fi**: zrnperfd switches the radio off after 5 minutes of screen-off on battery, and back on with the screen or the charger.
 - **Not done**: SICD/cluster power-down in `zrn-idle` (can freeze the phone; only with someone at it and the charger in), and UFS/USB/PCIe runtime power management (needs an unplugged A/B first).
 
+## Wi-Fi with the screen off: Android's suspend settings, from userspace (2026-11-08)
+
+Since 11f4aaa Wi-Fi stays associated with the screen off (reachable over ssh and
+Tailscale). What that costs, and what bcmdhd's `dhd_set_suspend()` saves, on the
+BCM4361 (firmware 13.50.31.5, mainline brcmfmac). The AP here: DTIM 3, beacon
+100 TU, the phone announcing a listen interval of 10 beacons; ~10 broadcast and
+multicast frames/s on the LAN.
+
+Battery `current_now`, screen off and dark (AOD off), each configuration 150 s
+of samples every 2 s after 30 s to settle (`wifi/screenoff-ab.sh`, root, on the
+phone, under ztlock; `wifi/probe.sh` on the PC for ping/ssh; A repeated last):
+
+| configuration | mean | median |
+| --- | --- | --- |
+| A: associated, power save on (PM_FAST, brcmfmac's `pm2_sleep_ret` 2000 ms) | 406 / 408 mA | 398 / 397 |
+| B: power save off | 403 | 396 |
+| D: A + every 2nd DTIM (`bcn_li_dtim 2`) + back to sleep after 200 ms | 354 | 325 |
+| E: D + the chip's packet filter (unicast, RA, NS, DHCP only) | 342 | 318 |
+| C: radio off (`nmcli radio wifi off`) | 325 | 311 |
+
+- **Power save "on" saved nothing** (A vs B): with 2 s awake after every frame
+  and frames every 100 ms, the radio never slept. brcmfmac sets 2000 ms because
+  cfg80211 passes no timeout (-1) and it clamps that to its maximum.
+- **E keeps ~80% of the radio's cost off** (65 of 82 mA) with the phone still
+  reachable: spaced pings 68-675 ms (the listen interval is 614 ms), ssh over
+  the LAN 0.50-0.75 s and over Tailscale 0.59-0.76 s, against 3-7 ms and
+  0.29-0.38 s with the defaults. None lost.
+- ARP needs nothing: brcmfmac turns on the firmware's ARP agent at boot
+  (`arp_ol` 9, `arpoe` 1); it answers for our address and drops the rest
+  (`arp_stats`: 140 answered, 2873 dropped of 3037 in an hour). IPv6 ND offload
+  (`ndoe`) is on too.
+
+How: mainline brcmfmac has no suspend knob, but its nl80211 vendor command
+(`BROADCOM_OUI`, `BRCMF_VNDR_CMDS_DCMD`, root) passes any firmware ioctl/iovar
+through, so no kernel patch is needed. zrnperfd (`perfd/wlpm.c`) sets them on
+screen off and puts them back on screen on; `wifi-suspend`, `wifi-filter`,
+`wifi-listen MS` (700: the wait for a frame stays under ~0.7 s) switch it.
+
+| bcmdhd (Android) | iovar / ioctl | here |
+| --- | --- | --- |
+| skip DTIMs in suspend (`dhd_get_suspend_bcn_li_dtim`, capped by `MAX_DTIM_ALLOWED_INTERVAL` and the listen interval) | `bcn_li_dtim` | yes, capped by `wifi-listen` and `assoc_listen` |
+| PM_MAX in suspend (not with Samsung's `SUPPORT_PM2_ONLY`) | `WLC_SET_PM` 1 | no: PM_FAST stays, as Samsung's |
+| return to sleep | `pm2_sleep_ret` | 200 ms screen off (brcmfmac: 2000) |
+| ARP / ND offload | `arp_ol`, `arpoe`, `ndoe` | brcmfmac already, always |
+| packet filters, forward-on-match (`dhd_enable_packet_filter`, filter 100 "unicast") | `pkt_filter_add/enable/mode` | yes, plus RA, NS, DHCP |
+| roam scans, `roam_off` in suspend (`ENABLE_FW_ROAM_SUSPEND`), `bcn_timeout` raised | `roam_off`, `bcn_timeout` | no (firmware roaming kept; see below) |
+| WoWLAN for system suspend | `wowl*` | not reachable: PCIe `wowl_supported` needs PME from D3hot, absent here (`iw phy0 wowlan show`: not supported) |
+
+Not changed: wpa_supplicant's bgscan (NetworkManager gives it
+`simple:30:-65:300`; a full 40-channel scan, ~2.9 s, every 1.5-2.5 min was seen)
+measured no different from E with it off (482 vs 489 mA, AOD lit, noisy), and
+firmware roaming, which ping-pongs between the 2.4 GHz and 5 GHz BSSIDs of the
+same SSID about once in 10-60 min. **zrn-sleepd** unbinds brcmfmac for SoC
+sleep: once that is switched on, Wi-Fi is gone while the phone sleeps.
+
+Logging (journal, `zrnperfd:`): each screen-off/on settings change, each
+connect/roam/disconnect with BSSID, band, channel, RSSI and reason, and every
+5 min with the screen off a line with the link, PM mode, DTIM listen, traffic and
+frames filtered. NetworkManager logs DHCP leases, wpa_supplicant the
+disconnects' reasons as well. `ztprofile` (perfd/ztprofile.c) is an opt-in
+profiler for what the LAN sends and what keeps the phone awake.
+
 ## The panel: why sleeping it left dark patches, and the fix (2026-10-13)
 
 The S6E3HA8 overlays an image from its own side memory on rows 0-149 and 2810-2959 (the rounded corners): the

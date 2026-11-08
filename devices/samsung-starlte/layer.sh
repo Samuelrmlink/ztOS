@@ -69,5 +69,5 @@ chmod 755 "$R"/usr/local/sbin/* 2>/dev/null || true
 # prebuilt module also predates the script's parameters; on 2026-10-18 it oopsed on
 # a fresh install's first boot, which is how that phone got its held-back mark.)
 DEVICE_UNITS="systemd-networkd ztos-variant zboot-boot-ok zboot-usb-gadget zboot-firstboot zboot-charge-hold zrn-charge ztoscirrusaudio
-	ztoscsf-sensorhub ztoscsf-sensord ztoscorenetworking-modem ztoscorenetworking zrnperfd zrn-ledd zrn-sleepd
+	ztoscsf-sensorhub ztoscsf-sensord ztoscorenetworking-modem ztoscorenetworking zrnperfd ztprofile zrn-ledd zrn-sleepd
 	ztos-panel-selfmask ztos-panel-selfmask-again.timer ztos-panel-bl zrn-bluetooth bluetooth ztos-gnss-gate ztos-gnss-lto.timer ztos-waydroid-location"

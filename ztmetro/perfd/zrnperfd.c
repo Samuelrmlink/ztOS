@@ -30,6 +30,13 @@
  *				screen, on battery (off by default: Wi-Fi stays
  *				associated, in power save, like Android's Doze)
  *	wifi-powersave on | off	the chip's 802.11 power save (on by default)
+ *	wifi-suspend on | off	with the screen off, the chip's settings Android
+ *				uses in suspend: DTIMs skipped, back to sleep
+ *				sooner, broadcast/multicast filtered in the chip
+ *				(on by default; see wlpm.c)
+ *	wifi-filter on | off	that filter on its own (on by default)
+ *	wifi-listen MS		the longest wait for a frame with DTIMs skipped
+ *				(700 by default; 0: every DTIM)
  *	motion MS		the touch boost's lift, held for MS (at most 3 s):
  *				the shell animating on its own clock past a touch
  *
@@ -111,6 +118,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+#include "wlpm.h"
 
 #define CTL	"/run/zrnperfd.ctl"
 #define STATUS	"/run/zrnperfd.status"
@@ -1245,6 +1253,7 @@ static void status(void) {
 		fprintf(f, "wifi=%s\n", wifi_asleep ? "sleeping" : "on");
 		fprintf(f, "wifi_sleep=%s\nwifi_powersave=%s\n", wifi_sleep_enabled ? "on" : "off",
 			wifi_powersave ? "on" : "off");
+		wlpm_status(f);
 		fprintf(f, "ib=%s\nib_engine=%s\nib_rung=%s\n", ib_names[ib_mode], ibnet_engine(),
 			ib_last >= 0 ? boost_names[ib_last] : "-");
 		for (int c = 0; c < 3; c++) {
@@ -1264,6 +1273,8 @@ static void save(void) {
 		fprintf(f, "profile %s\ndeepsleep %s\n", names[profile], deepsleep ? "on" : "off");
 		fprintf(f, "wifi-sleep %s\nwifi-powersave %s\n", wifi_sleep_enabled ? "on" : "off",
 			wifi_powersave ? "on" : "off");
+		fprintf(f, "wifi-suspend %s\nwifi-filter %s\nwifi-listen %d\n", wlpm_suspend_enabled ? "on" : "off",
+			wlpm_filter_enabled ? "on" : "off", wlpm_listen_ms);
 		fprintf(f, "ib %s\n", ib_names[ib_mode]);
 		fprintf(f, "ib engine %s\n", ibnet_using_score() ? "score" : "cpu");
 		for (int c = 0; c < 3; c++) {
@@ -1399,10 +1410,23 @@ static int command(char *line, bool persist) {
 			wifi_powersave = v;
 			if (persist) wifi_powersave_apply();
 		}
+	} else if (strcmp(what, "wifi-suspend") == 0 || strcmp(what, "wifi-filter") == 0 ||
+		   strcmp(what, "wifi-listen") == 0) {
+		if (strcmp(what, "wifi-suspend") == 0) wlpm_suspend_enabled = strcmp(value, "on") == 0;
+		else if (strcmp(what, "wifi-filter") == 0) wlpm_filter_enabled = strcmp(value, "on") == 0;
+		else {
+			int ms = atoi(value);
+			wlpm_listen_ms = ms < 0 ? 0 : ms > 1000 ? 1000 : ms;	/* reachable within a second */
+		}
+		if (persist) {
+			wlpm_reconfigure();
+			fprintf(stderr, "zrnperfd: %s %s\n", what, value);
+		}
 	} else if (strcmp(what, "screen") == 0) {
 		screen_on = strcmp(value, "off") != 0;
 		persist = false;
 		tickle_screen(screen_on);
+		wlpm_screen(screen_on);
 		if (screen_on) {
 			/* the screen takes the radio back at once; the timer stops */
 			wifi_sleep_at = 0;
@@ -1480,6 +1504,8 @@ int main(void) {
 		fclose(f);
 	}
 	wifi_powersave_apply();
+	int wl = wlpm_open();	/* nl80211: the chip's screen-off settings, the link's log */
+	wlpm_screen(screen_on);
 	plugged = read_plugged();
 	tickle_init();
 	tickle_screen(screen_on);
@@ -1511,9 +1537,9 @@ int main(void) {
 	char pending[1024];
 	size_t pending_len = 0;
 	while (!stopping) {
-		struct pollfd fds[5] = { { .fd = ctl, .events = POLLIN }, { .fd = uev, .events = POLLIN },
-			{ .fd = touch, .events = POLLIN } };
-		int n = 3 + tickle_pollfds(fds + 3, 2);
+		struct pollfd fds[6] = { { .fd = ctl, .events = POLLIN }, { .fd = uev, .events = POLLIN },
+			{ .fd = touch, .events = POLLIN }, { .fd = wl, .events = POLLIN } };
+		int n = 4 + tickle_pollfds(fds + 4, 2);
 		if (touch < 0 && boost_ms() >= touch_next_try) {
 			touch = touch_open();
 			touch_next_try = boost_ms() + 2000;
@@ -1542,6 +1568,10 @@ int main(void) {
 			if (wait < 0 || wait > left) {
 				wait = left < 1 ? 1 : (int)left;
 			}
+		}
+		int wl_wait = wlpm_timeout();
+		if (wl_wait >= 0 && (wait < 0 || wait > wl_wait)) {
+			wait = wl_wait;
 		}
 		if (poll(fds, n, wait) < 0 && errno != EINTR) {
 			break;
@@ -1681,7 +1711,11 @@ int main(void) {
 				}
 			}
 		}
-		tickle_ready(fds + 3, n - 3);
+		if (wl >= 0 && (fds[3].revents & POLLIN)) {
+			wlpm_event();
+		}
+		wlpm_tick();
+		tickle_ready(fds + 4, n - 4);
 		if (tickle_background_count() && wifi_asleep) { wifi_radio(true); changed = 1; }
 		if (tickle_run() && !changed) {
 			changed = 1;	/* an app paused, resumed, or started playing */
@@ -1694,6 +1728,7 @@ int main(void) {
 		}
 	}
 	tickle_stop();
+	wlpm_screen(true);	/* the chip's screen-on settings back */
 	iblog_flush();
 	led_claim(0);
 	if (wifi_asleep) {

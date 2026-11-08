@@ -1,5 +1,5 @@
 /* Run on the host: cc -O2 -Wno-unused-parameter -o /tmp/wifi-radio-test
- * ztmetro/perfd/tests/wifi-radio.c ztmetro/perfd/tickle.c && /tmp/wifi-radio-test
+ * ztmetro/perfd/tests/wifi-radio.c ztmetro/perfd/wlpm.c ztmetro/perfd/tickle.c && /tmp/wifi-radio-test
  * No daemon is started; shell commands are replaced by controlled responses. */
 #define main perfd_program_main
 #define system fake_system
@@ -38,6 +38,7 @@ int fake_pclose(FILE *f) {
 }
 
 int main(void) {
+	wifi_sleep_enabled = true;	/* off by default since the radio stays on */
 	/* A user's disabled radio must stay disabled across the sleep cycle. */
 	radio_state = "disabled\n";
 	wifi_sleep_at = 123;
