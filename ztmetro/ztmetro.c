@@ -16910,9 +16910,16 @@ static int uevent_readable(int fd, uint32_t mask, void *data) {
 		}
 	}
 	if (power && server->width > 0 && !server->screen_on) {
-		/* a charger in or out: the always-on display may come or go */
+		/* a charger in or out: the always-on display may come or go, and
+		 * says so. (Other power events, each per cent, wait for the
+		 * minute: they come every few seconds while charging.) */
+		static int charger_was = -1;
+		int charger = on_charger();
 		aod_sync(server);
-		aod_refresh(server);
+		if (charger != charger_was) {
+			aod_refresh(server);
+		}
+		charger_was = charger;
 	}
 	if (power && server->width > 0 && server->screen_on) {
 		power_tick(server, true);	/* (only if the draw is being looked at) */
