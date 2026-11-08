@@ -2646,7 +2646,11 @@ static double draw_date(cairo_t *cr) {
         date_clock_minute = now / 60;
         char hm[16], ampm[4], day[64];
         zt_clock_parts(&tm, app.clock_24h, hm, sizeof(hm), ampm, sizeof(ampm));
-        strftime(day, sizeof(day), "%A, %B %-d %Y", &tm);
+        /* the day first where the regional formats put it (the names stay
+         * English: the page draws in the C locale) */
+        bool month_first = !strncmp(date_region, "en_US", 5) || !strncmp(date_region, "C.", 2) ||
+            !strncmp(date_region, "ja_", 3) || !strncmp(date_region, "zh_", 3);
+        strftime(day, sizeof(day), month_first ? "%A, %B %-d, %Y" : "%A %-d %B %Y", &tm);
         cairo_set_source_rgb(cr, 1, 1, 1);
         zmc_text(cr, hm, FONT_LIGHT, 48, ZMC_MARGIN, y, 0);
         if (ampm[0]) {
