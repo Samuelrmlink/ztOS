@@ -79,7 +79,7 @@ def fetch(kind):
     partial = target.with_suffix('.part')
     say(f'downloading {pin["file"]} ({entry["size"] // (1 << 20)} MB)')
     # curl resumes an interrupted download; urllib does not
-    subprocess.run(['curl', '-L', '--fail', '--retry', '5', '-C', '-', '-o', str(partial), entry['url']], check=True)
+    subprocess.run(['curl', '-L', '--fail', '--no-progress-meter', '--retry', '5', '-C', '-', '-o', str(partial), entry['url']], check=True)
     if sha256(partial) != pin['sha256']:
         partial.unlink()
         raise SystemExit(f'{pin["file"]}: hash mismatch, deleted')
