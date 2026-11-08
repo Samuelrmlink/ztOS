@@ -493,9 +493,17 @@ protection is not ported. No earpiece, headphones or microphones yet.
 **Volume keys** drop a banner with the level out of 30 and set the PipeWire
 sink's volume (`wpctl`).
 
-**Charging**: `zrn-charge` (udev, and once at boot) reads the charger type from
-the MUIC and raises the MAX77705's limits to 1.5 A for a wall charger; the
-kernel driver alone stays at 500 mA. No 9 V fast charge.
+**Charging**: `zrn-charge`, a small daemon woken by power-supply uevents, sets
+the MAX77705's limits to stock's per charger type (wall charger 1.8 A in / 2.1 A
+charge, Type-C Rp 3 A 3 A / 2.15 A, a computer 500 mA, Qi 900 mA), from the
+`max77705-usbc` supply where the kernel has one, else from the MUIC's
+BC_STATUS and the Type-C Rp level over I2C. It leaves AICL's cuts in place,
+applies stock's battery temperature limits (stop at 50 °C and 0 °C, 1090 mA
+and 4.15 V above 41 °C, 700 mA below 15 °C), and asks for 9 V (`hv_enable`)
+only when they allow it; the kernel driver alone stays at 500 mA. Chargers that
+tripped over-current or had a PD anomaly are remembered in /var/lib/zrn-charge
+(`zrn-charge --show`, `zrn-charge --forget FINGERPRINT|all`).
+`devices/samsung-starlte/test-zrn-charge.sh` runs it against a fake sysfs.
 
 **Idle and ambient light**: the shell provides `ext-idle-notify-v1` and
 starts `hypridle` if installed (`~/.config/hypr/hypridle.conf`), which runs

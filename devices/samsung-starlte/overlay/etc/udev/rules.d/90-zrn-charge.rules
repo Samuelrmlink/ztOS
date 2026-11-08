@@ -1,4 +1,5 @@
-# a charger went in or out: look at what it is and set the limits to suit
-ACTION=="change", SUBSYSTEM=="power_supply", KERNEL=="max77705-charger", RUN+="/usr/bin/systemctl start --no-block zrn-charge.service"
-# the battery going from charging to full: the LED turns green
-ACTION=="change", SUBSYSTEM=="power_supply", KERNEL=="max170xx_battery", RUN+="/usr/bin/systemctl start --no-block zrn-charge.service"
+# Nothing here any more: zrn-charge.service is a daemon that watches the
+# power-supply uevents itself. A oneshot started from here on every charger and
+# battery event hit systemd's start limit hundreds of times a boot, and a real
+# plug-in could be dropped. (The file stays, empty, so that copying the overlay
+# over an older install replaces the old rules.)

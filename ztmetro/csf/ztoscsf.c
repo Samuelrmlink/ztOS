@@ -437,8 +437,8 @@ static void battery_look(void)
 		closedir(dir);
 	if (level < 0)
 		return;
-	/* the front light breathes while it is low (zrn-charge sets it; it only
-	 * runs by itself when a cable comes or goes) */
+	/* the front light breathes while it is low (zrn-charge sets it; this asks
+	 * its daemon for a look, in case no uevent came) */
 	static int was_low = -1;
 	char status[24] = "";
 	f = fopen("/sys/class/power_supply/max170xx_battery/status", "r");
