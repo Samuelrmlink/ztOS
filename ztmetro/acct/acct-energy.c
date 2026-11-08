@@ -87,7 +87,7 @@ static struct {
 	.base_awake_mw = 1190, .base_suspend_mw = 100,	/* 325 mA x 3.67 V; suspend: an estimate */
 	.screen_mw = 250, .screen_full_mw = 1100,
 	.wifi_idle_on_mw = 315, .wifi_idle_off_mw = 65,
-	.wifi_pkt_mj = 0.5, .wifi_byte_uj = 0.12,
+	.wifi_pkt_mj = 0.15, .wifi_byte_uj = 0.1,	/* fitted to a 1.2 GB download, 2026-11-08 */
 	.mobile_idle_mw = 40, .mobile_active_mw = 900, .mobile_tail_s = 5, .mobile_pkt_s = 0.002,
 	.wake_mj = 300,
 	.cpu_scale = 1,

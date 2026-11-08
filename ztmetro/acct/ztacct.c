@@ -117,7 +117,7 @@ static int top(json_object *r, bool procs, bool all) {
 		}
 		char name[64];
 		int live = (int)num(g, "live");
-		snprintf(name, sizeof(name), "%s%s", str(g, "name"), live ? "" : " (gone)");
+		snprintf(name, sizeof(name), "%s%s", str(g, "name"), live || !strchr("aAsul", str(g, "kind")[0]) ? "" : " (gone)");
 		printf("%-34.34s %-8s %10s %10s %9s %9s %9s %8s\n", name, kind_name(str(g, "kind")), wh(e), dur(cpu),
 			dur(num(g, "fg_s")), dur(num(g, "bg_cpu_s")), bytes(rx, NULL), bytes(tx, NULL));
 		json_object *ps = obj(g, "procs");
