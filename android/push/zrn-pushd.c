@@ -98,6 +98,14 @@ extern char **environ;
 #define ACTION_RECEIVE "com.google.android.c2dm.intent.RECEIVE"
 #define RECOVER "/usr/local/libexec/ztos-waydroid-recover"
 #define WAYDROID_POWER "/usr/local/bin/ztos-waydroid-power"
+#define WAYDROID_CFG "/var/lib/waydroid/waydroid.cfg"	/* written by waydroid init */
+
+/* The ztos-waydroid package is installed (its root helper) and Waydroid is
+ * initialised: two stats, cheap enough to ask each time. */
+static bool waydroid_set_up(void)
+{
+	return access(RECOVER, X_OK) == 0 && access(WAYDROID_CFG, F_OK) == 0;
+}
 #define LIBEXEC "/usr/local/lib/zrn-pushd"
 
 /* MCS stanza tags */
@@ -493,16 +501,15 @@ static void identity_refresh(void)
 {
 	if (identity_running)
 		return;
-	/* Waydroid's helpers come with android/waydroid/install.sh, run once its
-	 * images are there. Until then there's no microG to ask: said once, and
-	 * looked for again without starting sudo every time something reconnects. */
-	if (access(RECOVER, X_OK) != 0) {
+	/* Waydroid is an optional package (ztos-waydroid), and set up only once
+	 * its images are there and the kernel has binder. Until then there's no
+	 * microG to ask: said once, and no timer. The next login to Google (a
+	 * reconnect) looks again, so installing it later needs no restart. */
+	if (!waydroid_set_up()) {
 		static bool said;
 		if (!said)
-			say("%s isn't installed: no microG identity until Waydroid is set up", RECOVER);
+			say("Waydroid isn't set up: no microG identity, no Waydroid deliveries");
 		said = true;
-		if (!identity_known())
-			timer_arm(&identity_timer, 10 * 60 * 1000);
 		return;
 	}
 	char *argv[] = { "/usr/bin/sudo", "-n", RECOVER, "microg", NULL };
@@ -767,7 +774,7 @@ static void hold_release(void)
 		return;
 	}
 	unlink(path);
-	if (access(WAYDROID_POWER, X_OK) != 0)
+	if (access(WAYDROID_POWER, X_OK) != 0 || !waydroid_set_up())
 		return;		/* no Waydroid set up: nothing to freeze */
 	char *argv[] = { WAYDROID_POWER, "sync", NULL };
 	spawn(argv, NULL, 0, false, NULL, NULL);
@@ -805,6 +812,19 @@ static void waydroid_done(struct child *c, int status, const char *out)
 /* records of type NUL key NUL value NUL, read by recover.sh's push action */
 static void waydroid_start(struct push *p)
 {
+	/* Waydroid removed, or not set up yet: nobody to hand it to. Not
+	 * acknowledged (Google sends it again at a later login), not retried. */
+	if (!waydroid_set_up()) {
+		static bool said;
+		if (!said)
+			say("Waydroid isn't set up: not taking %s's message (nor later ones for Waydroid apps)", p->package);
+		said = true;
+		stat_failed++;
+		snprintf(stat_last_error, sizeof(stat_last_error), "%s: Waydroid not set up", p->package);
+		status_write();
+		push_free(p);
+		return;	/* (dispatch() goes on with the queue) */
+	}
 	size_t cap = 1024, len = 0;
 	for (int i = 0; i < p->n; i++)
 		cap += strlen(p->x[i].key) + (p->x[i].value ? strlen(p->x[i].value) : 0) + 4;
