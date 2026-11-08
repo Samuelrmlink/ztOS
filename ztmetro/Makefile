@@ -113,8 +113,8 @@ osial/ztosial: osial/ztosial.c $(CORE_DEPS)
 power/ztpower: power/ztpower.c $(CORE_DEPS)
 	$(APP_BUILD) -o $@ power/ztpower.c $(CORE) $(APP_LIBS)
 
-perfd/zrnperfd: perfd/zrnperfd.c perfd/tickle.c perfd/tickle.h background-apps.h ztos-user.h perfd/iblog.c perfd/iblog.h perfd/ibnet.c perfd/ibnet.h perfd/perfial.c perfd/perfial.h
-	$(CC) $(CFLAGS) $(WARN) -o $@ perfd/zrnperfd.c perfd/tickle.c perfd/iblog.c perfd/ibnet.c perfd/perfial.c -lm
+perfd/zrnperfd: perfd/zrnperfd.c perfd/wlpm.c perfd/wlpm.h perfd/tickle.c perfd/tickle.h background-apps.h ztos-user.h perfd/iblog.c perfd/iblog.h perfd/ibnet.c perfd/ibnet.h perfd/perfial.c perfd/perfial.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ perfd/zrnperfd.c perfd/wlpm.c perfd/tickle.c perfd/iblog.c perfd/ibnet.c perfd/perfial.c -lm
 
 touchkeyd/ztos-touchkeyd: touchkeyd/ztos-touchkeyd.c
 	$(CC) $(CFLAGS) $(WARN) -o $@ touchkeyd/ztos-touchkeyd.c
