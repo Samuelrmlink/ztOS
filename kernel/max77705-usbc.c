@@ -32,6 +32,14 @@
  * switches in their post-reset state. The switches are only ever set by the
  * AP (CONTROL1, opcode 0x06), so without a CONTROL1 write the USB gadget is
  * not on the connector: the old s9p-max77705-muic driver existed for that.
+ *
+ * Written from Samsung's S9 sources (drivers/ccic/max77705_*.c, muic/
+ * max77705-muic*.c, battery_v2/sec_battery.c; GPL-2.0). The design was then
+ * checked against the hardware-tested Galaxy Tab S8+ driver in
+ * aaronsb/sm-x800-linux (drivers/usb/typec/max77705.c, GPL-2.0), which
+ * agrees on the IRQ line, the mailbox and the PSRDY -> 0x30 -> 0x32 order;
+ * its firmware (5F.00) takes opcodes the S9's 0x32 does not (0x2e), so its
+ * allowlist is not this one.
  */
 #include <linux/bitfield.h>
 #include <linux/completion.h>
@@ -48,6 +56,7 @@
 #include <linux/regmap.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
+#include <linux/unaligned.h>
 #include <linux/workqueue.h>
 
 #define REG_HW_REV		0x00
@@ -132,6 +141,20 @@
 #define SYSMSG_POWER_NEGO	0x80
 
 /* mailbox opcodes (include/linux/ccic/max77705.h, muic/max77705-muic.h) */
+#define OP_BC_CTRL2_W		0x04
+#define  BC_CTRL2_AFC_RESET	0x13	/* DPDNMan on, D+ to GND, D- open */
+#define OP_AFC			0x21	/* COMMAND_AFC_RESULT_READ: one TX byte */
+#define  AFC_TX_5V		0x08
+#define  AFC_TX_9V		0x46	/* high nibble: 0 = 5 V, 4 = 9 V */
+#define  AFC_ANSWER_LEN		10	/* result, VBADC, 8 RX bytes */
+#define OP_QC2			0x22	/* COMMAND_QC_2_0_SET: "dpdndrv" */
+#define  QC2_5V			0x04
+#define  QC2_9V			0x09
+#define  QC2_ANSWER_LEN		2	/* result, VBADC */
+#define OP_CUR_SRCCAP		0x30	/* pos/n, then n PDOs LE */
+#define OP_GET_SRCCAP		0x31
+#define OP_SRCCAP_REQUEST	0x32	/* object position, 1-based */
+#define  SRCCAP_ANSWER_LEN	31
 #define OP_CONTROL1_R		0x05
 #define OP_CONTROL1_W		0x06
 #define OP_FW_AUTOIBUS		0x57	/* OPCODE_SAMSUNG_FW_AUTOIBUS */
@@ -242,6 +265,41 @@ struct usbc_pub {
 	unsigned int vmax_uv;
 };
 
+#define PDQ_N			16
+
+enum hv_mode { HV_NONE, HV_AFC_9V, HV_QC2_9V };
+
+#define PD_MAX_PDO		7
+struct pd_caps {
+	u8 n;
+	u32 pdo[PD_MAX_PDO];
+};
+
+/* USB-PD as a sink, one CC attach */
+struct usbc_pd {
+	bool have_first;
+	struct pd_caps first;		/* the first caps seen on this attach */
+	struct pd_caps cur;		/* the ones in force (latest read) */
+	u8 pos;				/* object position in the contract, 0: none */
+	u8 req_pos;			/* what we asked for, 0: nothing */
+	unsigned int req_tries;
+	bool hv_blocked;		/* hard reset after we went above 5 V */
+
+	/* since boot, never reset */
+	bool hr_pending;		/* a hard reset since the last caps read */
+	struct pd_caps hr_caps;		/* the caps in force at that hard reset */
+	unsigned long req_jiffies;	/* our last request (0x32/AFC/QC2) */
+
+	/* since boot, never reset */
+	unsigned int hard_resets, hr_sent, hr_received;
+	unsigned int err_recovery, srt_timeouts;
+	unsigned int caps_renegotiated;	/* new caps, no hard reset: normal */
+	unsigned int caps_changed_after_hr; /* different caps after a hard reset */
+	struct pd_caps before, after;	/* the last change of either kind */
+	char last_event[200];
+	char last_hard_reset[256];
+};
+
 #define LOG_N			256
 #define LOG_DATA		33
 
@@ -291,9 +349,26 @@ struct max77705_usbc {
 	unsigned int autoibus_resends;	/* this attach */
 	unsigned long autoibus_checked;	/* jiffies */
 
+	/* PD event codes (PD_STATUS0) read in the interrupt thread, in order */
+	u8 pdq[PDQ_N];
+	unsigned int pdq_n, pdq_lost;
+
+	/* high voltage: all in the ordered work, hv_enable from sysfs */
+	struct delayed_work hv_work;
+	bool hv_enable;
+	bool hv_rearm;			/* hv_enable written 0 -> 1 */
+	bool stopping;
+	enum hv_mode hv_mode;		/* AFC/QC2 9 V reached */
+	bool hv_dcp_done;		/* AFC/QC2 tried on this attach */
+	unsigned int hv_prepare_ma;	/* published ceiling while switching */
+	unsigned int hv_waits;		/* for the charger's limit to come down */
+
+	struct usbc_pd pd;
+
 	struct power_supply *psy;
-	struct mutex pub_lock;
+	struct mutex pub_lock;		/* pub, and pd's caps/strings for readers */
 	struct usbc_pub pub;
+	int notified_uv;		/* VBUS at the last power_supply_changed */
 
 	spinlock_t log_lock;
 	struct log_entry *log;
@@ -484,7 +559,7 @@ static int usbc_read_status(struct max77705_usbc *u)
 static void usbc_read_ints(struct max77705_usbc *u)
 {
 	u8 f[4] = {};
-	u8 sysmsg = 0;
+	u8 sysmsg = 0, pdmsg = 0;
 	unsigned long flags;
 	int i, ret;
 
@@ -506,8 +581,17 @@ static void usbc_read_ints(struct max77705_usbc *u)
 			usbc_read(u, REG_USBC_STATUS2, &s[i], 1);
 		sysmsg = (s[0] == s[1] && s[1] == s[2]) ? s[0] : s[2];
 	}
+	/* the PD event code now: one register, the next event overwrites it */
+	if ((f[2] & PD_PDMSG) && usbc_read(u, REG_PD_STATUS0, &pdmsg, 1))
+		f[2] &= ~PD_PDMSG;
 
 	spin_lock_irqsave(&u->ev_lock, flags);
+	if (f[2] & PD_PDMSG) {
+		if (u->pdq_n < PDQ_N)
+			u->pdq[u->pdq_n++] = pdmsg;
+		else
+			u->pdq_lost++;
+	}
 	for (i = 0; i < 4; i++)
 		u->pend[i] |= f[i];
 	if (f[0] & UIC_SYSMSG) {
@@ -529,6 +613,9 @@ static void usbc_read_ints(struct max77705_usbc *u)
 	if (f[0] & UIC_SYSMSG)
 		usbc_log(u, LOG_SYSMSG, sysmsg, NULL, 0, NULL, 0, 0,
 			 sysmsg_name(sysmsg));
+	if (f[2] & PD_PDMSG)
+		usbc_log(u, LOG_PDMSG, pdmsg, NULL, 0, NULL, 0, 0,
+			 pdmsg_name(pdmsg));
 	queue_work(u->wq, &u->event_work);
 }
 
@@ -546,6 +633,67 @@ static int usbc_set_masks(struct max77705_usbc *u)
 	if (!ret)
 		u->vdm_unmasked = m[3] != 0xff;
 	return ret;
+}
+
+/* ---- PDOs ----------------------------------------------------------------- */
+
+#define HV_MAX_MV		9000	/* stock DT max_input_voltage */
+#define HV_MAX_MW		15000	/* stock DT pd_charging_charge_power */
+#define PD_MAX_MA		3000	/* stock DT max_input_current */
+#define HV_DCP_MA		1650	/* stock 9V_TA input current */
+
+static bool pdo_fixed(u32 pdo)
+{
+	return (pdo >> 30) == 0;	/* PDO_TYPE_FIXED */
+}
+
+static unsigned int pdo_mv(u32 pdo)
+{
+	return ((pdo >> 10) & 0x3ff) * 50;
+}
+
+static unsigned int pdo_ma(u32 pdo)
+{
+	return (pdo & 0x3ff) * 10;
+}
+
+/* what we would draw from a fixed PDO: its current, at most 3 A and 15 W */
+static unsigned int pdo_use_ma(u32 pdo)
+{
+	unsigned int mv = pdo_mv(pdo), ma = min(pdo_ma(pdo), PD_MAX_MA);
+
+	if (mv && mv * ma > HV_MAX_MW * 1000)
+		ma = HV_MAX_MW * 1000 / mv;
+	return ma;
+}
+
+static bool usbc_pdo_allowed(struct max77705_usbc *u, u8 pos)
+{
+	u32 pdo;
+
+	if (pos < 1 || pos > u->pd.cur.n)
+		return false;
+	pdo = u->pd.cur.pdo[pos - 1];
+	return pdo_fixed(pdo) && pdo_mv(pdo) && pdo_mv(pdo) <= HV_MAX_MV;
+}
+
+static int pd_caps_fmt(char *buf, size_t len, const struct pd_caps *c)
+{
+	int n = 0, i;
+
+	for (i = 0; i < c->n && n < len; i++) {
+		u32 p = c->pdo[i];
+
+		if (pdo_fixed(p))
+			n += scnprintf(buf + n, len - n, "%s%d:%umV/%umA", i ? " " : "",
+				       i + 1, pdo_mv(p), pdo_ma(p));
+		else
+			n += scnprintf(buf + n, len - n, "%s%d:type%u/%08x", i ? " " : "",
+				       i + 1, p >> 30, p);
+	}
+	if (!c->n)
+		n += scnprintf(buf + n, len - n, "(none)");
+	return n;
 }
 
 /* ---- mailbox ------------------------------------------------------------ */
@@ -568,6 +716,21 @@ static bool usbc_op_allowed(struct max77705_usbc *u, u8 op, const u8 *w, int wle
 	case OP_FW_AUTOIBUS:
 		/* only "USBC fw on, auto IBUS off": stock's AUTOIBUS_AT_OFF */
 		return wlen == 1 && w[0] == AUTOIBUS_AT_OFF;
+	case OP_AFC:
+		/* 5 V or 9 V TX bytes only: never 12 V (high nibble 8) */
+		return wlen == 1 && ((w[0] >> 4) == 0 || (w[0] >> 4) == 4);
+	case OP_QC2:
+		/* 5 V and 9 V; never QC2's 12 V or 20 V */
+		return wlen == 1 && (w[0] == QC2_5V || w[0] == QC2_9V);
+	case OP_BC_CTRL2_W:
+		/* only stock's AFC reset (back to 5 V) */
+		return wlen == 1 && w[0] == BC_CTRL2_AFC_RESET;
+	case OP_CUR_SRCCAP:
+	case OP_GET_SRCCAP:
+		return wlen == 0;
+	case OP_SRCCAP_REQUEST:
+		/* a fixed PDO of at most 9 V in the caps now in force */
+		return wlen == 1 && usbc_pdo_allowed(u, w[0]);
 	default:
 		return false;
 	}
@@ -752,7 +915,7 @@ static void usbc_compute(struct max77705_usbc *u, struct usbc_pub *n)
 	u8 bc = u->st[ST(REG_BC_STATUS)];
 	u8 ccstat = FIELD_GET(CC0_CCSTAT, u->st[ST(REG_CC_STATUS0)]);
 	enum usbc_kind k = usbc_bc_kind(bc);
-	unsigned int ma = kind_ma[k], rp = usbc_rp_ma(u);
+	unsigned int ma = kind_ma[k], rp = usbc_rp_ma(u), mv = 5000;
 
 	memset(n, 0, sizeof(*n));
 	n->online = (bc & BC_VBUSDET) && ccstat != CCSTAT_SOURCE;
@@ -769,9 +932,26 @@ static void usbc_compute(struct max77705_usbc *u, struct usbc_pub *n)
 			k = rp >= 3000 ? K_RP_3A : K_RP_1_5A;
 	}
 
+	/* a PD contract, or AFC/QC2 at 9 V, is what is in force */
+	if (u->pd.pos && u->pd.pos <= u->pd.cur.n && ccstat == CCSTAT_SINK &&
+	    pdo_fixed(u->pd.cur.pdo[u->pd.pos - 1])) {
+		u32 pdo = u->pd.cur.pdo[u->pd.pos - 1];
+
+		k = K_PD;
+		mv = pdo_mv(pdo);
+		ma = pdo_use_ma(pdo);
+	} else if (u->hv_mode == HV_AFC_9V || u->hv_mode == HV_QC2_9V) {
+		k = u->hv_mode == HV_AFC_9V ? K_AFC_9V : K_QC2_9V;
+		mv = 9000;
+		ma = HV_DCP_MA;
+	}
+	/* while switching: the lower of the two sides */
+	if (u->hv_prepare_ma)
+		ma = min(ma, u->hv_prepare_ma);
+
 	n->kind = k;
 	n->cur_ua = ma * 1000;
-	n->vmax_uv = 5000000;
+	n->vmax_uv = mv * 1000;
 	switch (k) {
 	case K_SDP:
 		n->usb_type = POWER_SUPPLY_USB_TYPE_SDP;
@@ -797,17 +977,29 @@ static void usbc_compute(struct max77705_usbc *u, struct usbc_pub *n)
 static void usbc_publish(struct max77705_usbc *u)
 {
 	struct usbc_pub n;
-	bool changed;
+	bool changed, vchanged;
+	int uv;
 
 	usbc_compute(u, &n);
+	uv = n.online ? usbc_vbus_uv(u) : 0;
 	mutex_lock(&u->pub_lock);
 	changed = n.online != u->pub.online || n.kind != u->pub.kind ||
 		  n.usb_type != u->pub.usb_type || n.cur_ua != u->pub.cur_ua ||
 		  n.vmax_uv != u->pub.vmax_uv;
 	u->pub = n;
 	mutex_unlock(&u->pub_lock);
-	if (!changed)
+	/* the charger re-ramps its input current on a 1 V step of VBUS:
+	 * tell it, but not about the VBADC window's own jitter */
+	vchanged = abs(uv - u->notified_uv) >= 1000000;
+	if (!changed && !vchanged)
 		return;
+	u->notified_uv = uv;
+	if (!changed) {
+		dev_dbg(u->dev, "VBUS now about %d mV\n", uv / 1000);
+		if (u->psy)
+			power_supply_changed(u->psy);
+		return;
+	}
 	dev_info(u->dev, "%s: %s, %u mA, %u mV max (bc=%02x cc0=%02x pd1=%02x)\n",
 		 n.online ? "online" : "offline", kind_name[n.kind],
 		 n.cur_ua / 1000, n.vmax_uv / 1000, u->st[ST(REG_BC_STATUS)],
@@ -872,8 +1064,96 @@ static ssize_t charger_type_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(charger_type);
 
+/*
+ * hv_enable: 1 lets the driver ask for 9 V (AFC, QC2 or a fixed PDO, at
+ * most 15 W); 0 (the default) keeps or brings the bus back to 5 V. Written
+ * by zrn-charge, which drops the input limit first when it writes 0.
+ */
+static ssize_t hv_enable_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	struct max77705_usbc *u = power_supply_get_drvdata(to_power_supply(dev));
+
+	return sysfs_emit(buf, "%d\n", READ_ONCE(u->hv_enable));
+}
+
+static ssize_t hv_enable_store(struct device *dev, struct device_attribute *attr,
+			       const char *buf, size_t len)
+{
+	struct max77705_usbc *u = power_supply_get_drvdata(to_power_supply(dev));
+	bool v;
+	int ret = kstrtobool(buf, &v);
+
+	if (ret)
+		return ret;
+	if (READ_ONCE(u->stopping))
+		return -ENODEV;
+	if (v && !READ_ONCE(u->hv_enable))
+		WRITE_ONCE(u->hv_rearm, true);
+	WRITE_ONCE(u->hv_enable, v);
+	mod_delayed_work(u->wq, &u->hv_work, 0);
+	return len;
+}
+static DEVICE_ATTR_RW(hv_enable);
+
+#define PD_COUNTER_ATTR(name, field)					\
+static ssize_t name##_show(struct device *dev,				\
+			   struct device_attribute *attr, char *buf)	\
+{									\
+	struct max77705_usbc *u = power_supply_get_drvdata(to_power_supply(dev)); \
+									\
+	return sysfs_emit(buf, "%u\n", READ_ONCE(u->pd.field));		\
+}									\
+static DEVICE_ATTR_RO(name)
+
+/* every hard reset; then the ones the source sent (our draw or our
+ * messages) and the ones our firmware sent (our state machine) */
+PD_COUNTER_ATTR(pd_hard_resets, hard_resets);
+PD_COUNTER_ATTR(pd_hard_resets_received, hr_received);
+PD_COUNTER_ATTR(pd_hard_resets_sent, hr_sent);
+/* new caps with no hard reset: a normal renegotiation (thermal, multi-port) */
+PD_COUNTER_ATTR(pd_caps_renegotiated, caps_renegotiated);
+/* caps after a hard reset differ from before it: the anomaly */
+PD_COUNTER_ATTR(pd_caps_changed_after_hard_reset, caps_changed_after_hr);
+
+static ssize_t pd_string_show(struct max77705_usbc *u, const char *s, char *buf)
+{
+	ssize_t n;
+
+	mutex_lock(&u->pub_lock);
+	n = sysfs_emit(buf, "%s\n", s);
+	mutex_unlock(&u->pub_lock);
+	return n;
+}
+
+static ssize_t pd_last_event_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct max77705_usbc *u = power_supply_get_drvdata(to_power_supply(dev));
+
+	return pd_string_show(u, u->pd.last_event, buf);
+}
+static DEVICE_ATTR_RO(pd_last_event);
+
+static ssize_t pd_last_hard_reset_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct max77705_usbc *u = power_supply_get_drvdata(to_power_supply(dev));
+
+	return pd_string_show(u, u->pd.last_hard_reset, buf);
+}
+static DEVICE_ATTR_RO(pd_last_hard_reset);
+
 static struct attribute *usbc_psy_attrs[] = {
 	&dev_attr_charger_type.attr,
+	&dev_attr_hv_enable.attr,
+	&dev_attr_pd_hard_resets.attr,
+	&dev_attr_pd_hard_resets_received.attr,
+	&dev_attr_pd_hard_resets_sent.attr,
+	&dev_attr_pd_caps_renegotiated.attr,
+	&dev_attr_pd_caps_changed_after_hard_reset.attr,
+	&dev_attr_pd_last_event.attr,
+	&dev_attr_pd_last_hard_reset.attr,
 	NULL
 };
 ATTRIBUTE_GROUPS(usbc_psy);
@@ -1001,6 +1281,483 @@ static void usbc_autoibus(struct max77705_usbc *u, bool vbus)
 	usbc_autoibus_send(u, "DETAILS_00 says the USBC set ILIM");
 }
 
+/* ---- high voltage: shared ------------------------------------------------- */
+
+#define HV_AFC_DELAY_MS		500	/* stock: "afc work after 500ms" */
+#define HV_WAIT_MS		1000	/* recheck of the charger's limit */
+#define HV_WAIT_MAX		10	/* then give up for this attach */
+#define HV_RETRIES		3	/* stock RETRY_COUNT */
+#define PD_REQ_TRIES		2
+#define PD_REQ_WAIT_MS		2000	/* for PSRDY after a request */
+
+/* the charger's input limit, uA, or a negative error */
+static int usbc_chg_ilim_ua(void)
+{
+	struct power_supply *chg = power_supply_get_by_name("max77705-charger");
+	union power_supply_propval v;
+	int ret;
+
+	if (!chg)
+		return -ENODEV;
+	ret = power_supply_get_property(chg, POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT, &v);
+	power_supply_put(chg);
+	return ret ? ret : v.intval;
+}
+
+/*
+ * Before the bus voltage goes up, the input limit has to be at or below what
+ * the source will give at the new voltage: drawing 5 V-sized current at 9 V
+ * is exactly what makes a charger hard-reset. The kernel does not set the
+ * limit (zrn-charge does, from current_max); this only refuses to go up
+ * until it has come down. The charger reads (code+1)*25 mA: 25 mA slack.
+ */
+static bool usbc_limit_ok(struct max77705_usbc *u, unsigned int target_ma)
+{
+	int ua = usbc_chg_ilim_ua();
+
+	if (ua < 0) {
+		dev_warn_once(u->dev, "no input limit to read (%d): staying at 5 V\n", ua);
+		return false;
+	}
+	return ua <= (int)(target_ma + 25) * 1000;
+}
+
+/* ---- USB-PD (sink) ---------------------------------------------------------- */
+
+static bool pd_caps_equal(const struct pd_caps *a, const struct pd_caps *b)
+{
+	return a->n == b->n && !memcmp(a->pdo, b->pdo, a->n * sizeof(a->pdo[0]));
+}
+
+/* stock's make_pd_list(), in effect: fixed PDOs up to 9 V, each worth
+ * min(I, 3 A, 15 W / V); the most power, the lower voltage on a tie */
+static u8 usbc_pd_select(struct max77705_usbc *u)
+{
+	unsigned int best_mw = 0, best_mv = 0, i;
+	u8 best = 0;
+
+	for (i = 0; i < u->pd.cur.n; i++) {
+		u32 p = u->pd.cur.pdo[i];
+		unsigned int mv = pdo_mv(p), mw;
+
+		if (!usbc_pdo_allowed(u, i + 1))
+			continue;
+		mw = mv * pdo_use_ma(p) / 1000;
+		if (mw > best_mw || (mw == best_mw && mv < best_mv)) {
+			best = i + 1;
+			best_mw = mw;
+			best_mv = mv;
+		}
+	}
+	return best;
+}
+
+static void usbc_pd_forget(struct max77705_usbc *u)
+{
+	mutex_lock(&u->pub_lock);
+	u->pd.have_first = false;
+	memset(&u->pd.first, 0, sizeof(u->pd.first));
+	memset(&u->pd.cur, 0, sizeof(u->pd.cur));
+	u->pd.pos = 0;
+	u->pd.req_pos = 0;
+	u->pd.req_tries = 0;
+	u->pd.hv_blocked = false;
+	u->pd.hr_pending = false;
+	mutex_unlock(&u->pub_lock);
+}
+
+/* 0x30: the source caps and the position of the contract */
+static void usbc_pd_read_caps(struct max77705_usbc *u)
+{
+	u8 r[SRCCAP_ANSWER_LEN];
+	char a[160], b[160];
+	struct pd_caps c = {};
+	bool hr, changed = false;
+	unsigned int i;
+	u8 pos;
+
+	if (usbc_cmd(u, OP_CUR_SRCCAP, NULL, 0, r, sizeof(r)))
+		return;
+	pos = (r[0] >> 3) & 0x7;
+	c.n = min_t(unsigned int, r[0] & 0x7, PD_MAX_PDO);
+	for (i = 0; i < c.n; i++)
+		c.pdo[i] = get_unaligned_le32(&r[1 + 4 * i]);
+	if (pos > c.n)
+		pos = 0;
+
+	mutex_lock(&u->pub_lock);
+	hr = u->pd.hr_pending;
+	u->pd.hr_pending = false;
+	if (!u->pd.have_first) {
+		u->pd.have_first = true;
+		u->pd.first = c;
+	} else if (!pd_caps_equal(&u->pd.cur, &c)) {
+		changed = true;
+		u->pd.before = u->pd.cur;
+		u->pd.after = c;
+	}
+	if (hr && !pd_caps_equal(&u->pd.hr_caps, &c)) {
+		/* the anomaly: we were hard-reset and the source offers less */
+		u->pd.caps_changed_after_hr++;
+		u->pd.before = u->pd.hr_caps;
+		u->pd.after = c;
+		changed = true;
+	} else if (changed && !hr) {
+		u->pd.caps_renegotiated++;
+	}
+	u->pd.cur = c;
+	u->pd.pos = pos;
+	if (pos && pos == u->pd.req_pos) {
+		u->pd.req_pos = 0;
+		u->pd.req_tries = 0;
+	}
+	if (changed)
+		scnprintf(u->pd.last_event, sizeof(u->pd.last_event),
+			  "%lld s: caps %s",
+			  ktime_to_ms(ktime_get_boottime()) / 1000,
+			  hr ? "changed after a hard reset" : "renegotiated");
+	mutex_unlock(&u->pub_lock);
+
+	pd_caps_fmt(b, sizeof(b), &c);
+	if (changed) {
+		pd_caps_fmt(a, sizeof(a), &u->pd.before);
+		if (hr)
+			dev_warn(u->dev, "PD: source caps after a hard reset differ: before [%s] after [%s]; only the new ones are used\n",
+				 a, b);
+		else
+			dev_info(u->dev, "PD: source renegotiated its caps: before [%s] after [%s]\n",
+				 a, b);
+		usbc_log(u, LOG_NOTE, 0, NULL, 0, NULL, 0, 0,
+			 hr ? "caps changed after hard reset" : "caps renegotiated");
+		/* a uevent even if nothing published changes */
+		power_supply_changed(u->psy);
+	} else {
+		dev_info(u->dev, "PD: contract pdo %u of [%s]\n", pos, b);
+	}
+	if (!u->pd.req_pos) {		/* nothing of ours still pending */
+		u->hv_prepare_ma = 0;
+		u->hv_waits = 0;
+	}
+}
+
+static void usbc_pd_hard_reset(struct max77705_usbc *u, u8 code)
+{
+	bool theirs = code == 0x16;	/* HARDRESET_RECEIVED; 0x19 _SENT is ours */
+	u32 pdo = u->pd.pos ? u->pd.cur.pdo[u->pd.pos - 1] : 0;
+	int ilim = usbc_chg_ilim_ua();
+	long since = u->pd.req_jiffies ?
+		(long)jiffies_to_msecs(jiffies - u->pd.req_jiffies) : -1;
+
+	mutex_lock(&u->pub_lock);
+	u->pd.hard_resets++;
+	if (theirs)
+		u->pd.hr_received++;
+	else
+		u->pd.hr_sent++;
+	scnprintf(u->pd.last_hard_reset, sizeof(u->pd.last_hard_reset),
+		  "%lld s: hard reset %s; contract pdo %u (%u mV %u mA), requested pdo %u, hv_enable %d, input limit %d mA, vbus %d mV, %ld ms after our last request",
+		  ktime_to_ms(ktime_get_boottime()) / 1000,
+		  theirs ? "from the source" : "sent by our firmware",
+		  u->pd.pos, pdo ? pdo_mv(pdo) : 0, pdo ? pdo_ma(pdo) : 0,
+		  u->pd.req_pos, u->hv_enable, ilim < 0 ? ilim : ilim / 1000,
+		  usbc_vbus_uv(u) / 1000, since);
+	strscpy(u->pd.last_event, u->pd.last_hard_reset, sizeof(u->pd.last_event));
+	if (!u->pd.hr_pending) {
+		u->pd.hr_pending = true;
+		u->pd.hr_caps = u->pd.cur;
+	}
+	/* went above 5 V and got reset: no more of that on this attach */
+	if ((pdo && pdo_mv(pdo) > 5000) || u->pd.req_pos > 1)
+		u->pd.hv_blocked = true;
+	u->pd.pos = 0;
+	u->pd.req_pos = 0;
+	u->pd.req_tries = 0;
+	mutex_unlock(&u->pub_lock);
+
+	u->hv_prepare_ma = 0;
+	dev_warn(u->dev, "PD: %s%s\n", u->pd.last_hard_reset,
+		 u->pd.hv_blocked ? "; above 5 V blocked until detach or hv_enable 0->1" : "");
+	power_supply_changed(u->psy);
+}
+
+/* one PD event code (PD_STATUS0), in the order they came */
+static void usbc_pd_event(struct max77705_usbc *u, u8 code)
+{
+	switch (code) {
+	case 0x16:	/* HARDRESET_RECEIVED */
+	case 0x19:	/* HARDRESET_SENT */
+		usbc_pd_hard_reset(u, code);
+		break;
+	case 0x02:	/* SNK/SRC error recovery */
+	case 0x05:
+		u->pd.err_recovery++;
+		dev_warn(u->dev, "PD: %s\n", pdmsg_name(code));
+		break;
+	case 0x03:	/* SenderResponseTimer */
+	case 0x06:
+		u->pd.srt_timeouts++;
+		dev_info(u->dev, "PD: %s\n", pdmsg_name(code));
+		break;
+	default:
+		break;
+	}
+}
+
+/* ---- AFC / QC2 ------------------------------------------------------------ */
+
+static bool vbadc_is_9v(u8 v)
+{
+	return v >= 5 && v <= 7;	/* 7.5..10.5 V */
+}
+
+static u8 usbc_vbadc(struct max77705_usbc *u)
+{
+	usbc_read_status(u);
+	return FIELD_GET(STATUS1_VBADC, u->st[0]);
+}
+
+/* still a DCP, switch open, not PD, VBUS there */
+static bool usbc_dcp_attached(struct max77705_usbc *u)
+{
+	u8 bc = u->st[ST(REG_BC_STATUS)];
+
+	return (bc & BC_VBUSDET) && FIELD_GET(BC_CHGTYP, bc) == CHGTYP_DCP &&
+	       u->path == COM_OPEN && !(u->st[ST(REG_PD_STATUS1)] & PD1_PSRDY) &&
+	       !u->pd.have_first;
+}
+
+static void usbc_afc_reset(struct max77705_usbc *u)
+{
+	u8 v = BC_CTRL2_AFC_RESET;
+
+	dev_info(u->dev, "AFC/QC2: reset to 5 V\n");
+	usbc_cmd(u, OP_BC_CTRL2_W, &v, 1, NULL, 0);
+}
+
+/*
+ * QC2 at 9 V (stock: only after AFC's master ping is NACKed): 0x22/0x09,
+ * answer [result, VBADC], three retries. Returns true at 9 V.
+ */
+static bool usbc_qc2_9v(struct max77705_usbc *u)
+{
+	u8 v = QC2_9V, r[QC2_ANSWER_LEN];
+	unsigned int tries = 0;
+
+	while (tries++ <= HV_RETRIES) {
+		if (!usbc_dcp_attached(u) || !u->hv_enable)
+			return false;
+		u->pd.req_jiffies = jiffies;
+		if (usbc_cmd(u, OP_QC2, &v, 1, r, sizeof(r)))
+			return false;
+		if (!r[1])
+			r[1] = usbc_vbadc(u);
+		dev_info(u->dev, "QC2: result %u, vbadc %u\n", r[0], r[1]);
+		switch (r[0]) {
+		case 0:
+			return vbadc_is_9v(r[1]);
+		case 1: case 2: case 3:		/* no CHGIN, not HVDCP, not DCP */
+			return false;
+		default:			/* 6, 7, ...: retry */
+			if (tries > HV_RETRIES && r[1] >= 5)
+				usbc_afc_reset(u);
+			break;
+		}
+	}
+	return false;
+}
+
+/*
+ * AFC 9 V as max77705_muic_afc_hv_set()/handle_detect_dev_afc(): 0x21 with
+ * TX byte 0x46, answer [result, VBADC, RX bytes]. Result 0 with VBADC in
+ * the 9 V window is success; 4 (master ping NACK) goes to QC2; 5 picks a
+ * 9 V byte from the charger's own list; NACK-type results retry three
+ * times, then reset to 5 V if VBUS went up anyway.
+ */
+static enum hv_mode usbc_afc_9v(struct max77705_usbc *u)
+{
+	u8 tx = AFC_TX_9V, r[AFC_ANSWER_LEN];
+	unsigned int tries = 0, i;
+
+	while (tries++ <= HV_RETRIES) {
+		if (!usbc_dcp_attached(u) || !u->hv_enable)
+			return HV_NONE;
+		u->pd.req_jiffies = jiffies;
+		if (usbc_cmd(u, OP_AFC, &tx, 1, r, sizeof(r)))
+			return HV_NONE;
+		if (!r[1])
+			r[1] = usbc_vbadc(u);	/* stock's W/A */
+		dev_info(u->dev, "AFC: tx %02x result %u vbadc %u rx %*phN\n",
+			 tx, r[0], r[1], 8, &r[2]);
+		switch (r[0]) {
+		case 0:
+			return vbadc_is_9v(r[1]) ? HV_AFC_9V : HV_NONE;
+		case 4:				/* MPing NACK: not AFC, try QC2 */
+			return usbc_qc2_9v(u) ? HV_QC2_9V : HV_NONE;
+		case 5:				/* unsupported TX: take its 9 V byte */
+			for (i = 2; i < AFC_ANSWER_LEN && r[i]; i++)
+				if ((r[i] & 0xf0) == 0x40)
+					break;
+			if (i == AFC_ANSWER_LEN || !r[i])
+				return HV_NONE;
+			tx = r[i];
+			break;
+		case 1: case 2: case 3: case 11: /* not an HV DCP after all */
+		case 8: case 9: case 10:	/* CC/SBU shorts */
+			return HV_NONE;
+		default:			/* 6, 7, 16..18: NACK, retry */
+			if (tries > HV_RETRIES && r[1] >= 5)
+				usbc_afc_reset(u);
+			break;
+		}
+	}
+	return HV_NONE;
+}
+
+/* back to 5 V on hv_enable 0: AFC 0x08 / QC2 0x04, else the reset */
+static void usbc_dcp_5v(struct max77705_usbc *u)
+{
+	u8 r[AFC_ANSWER_LEN] = {}, v;
+	int ret;
+
+	if (u->hv_mode == HV_AFC_9V) {
+		v = AFC_TX_5V;
+		ret = usbc_cmd(u, OP_AFC, &v, 1, r, AFC_ANSWER_LEN);
+	} else {
+		v = QC2_5V;
+		ret = usbc_cmd(u, OP_QC2, &v, 1, r, QC2_ANSWER_LEN);
+	}
+	if (!r[1])
+		r[1] = usbc_vbadc(u);
+	if (ret || r[0] || vbadc_is_9v(r[1])) {
+		dev_warn(u->dev, "back to 5 V: ret %d result %u vbadc %u: resetting\n",
+			 ret, r[0], r[1]);
+		usbc_afc_reset(u);
+	}
+	dev_info(u->dev, "%s: back to 5 V\n", u->hv_mode == HV_AFC_9V ? "AFC" : "QC2");
+	u->hv_mode = HV_NONE;
+}
+
+/* ---- high voltage: the policy step ------------------------------------------- */
+
+/* returns ms until it wants to run again, or 0 */
+static unsigned int usbc_hv_step(struct max77705_usbc *u)
+{
+	u8 ccstat = FIELD_GET(CC0_CCSTAT, u->st[ST(REG_CC_STATUS0)]);
+
+	if (!u->mbox_allowed || u->mbox_dead || !u->pub.online)
+		return 0;
+
+	/* USB-PD: we only pick among fixed PDOs the firmware has */
+	if (ccstat == CCSTAT_SINK && u->pd.pos) {
+		u32 cur = u->pd.cur.pdo[u->pd.pos - 1];
+		u8 want = 1, pos;
+
+		if (u->hv_enable && !u->pd.hv_blocked)
+			want = usbc_pd_select(u);
+		if (!want || want == u->pd.pos)
+			return 0;
+		if (u->pd.req_pos == want) {
+			unsigned long due = u->pd.req_jiffies +
+					    msecs_to_jiffies(PD_REQ_WAIT_MS);
+
+			/* asked already: PSRDY and the 0x30 read end it */
+			if (time_before(jiffies, due))
+				return jiffies_to_msecs(due - jiffies) + 1;
+			if (u->pd.req_tries >= PD_REQ_TRIES) {
+				if (u->hv_prepare_ma)
+					dev_warn(u->dev, "PD: pdo %u not granted, staying at pdo %u\n",
+						 want, u->pd.pos);
+				u->hv_prepare_ma = 0;
+				return 0;
+			}
+		}
+		if (pdo_mv(u->pd.cur.pdo[want - 1]) > pdo_mv(cur)) {
+			unsigned int ma = pdo_use_ma(u->pd.cur.pdo[want - 1]);
+
+			if (!usbc_limit_ok(u, ma)) {
+				u->hv_prepare_ma = ma;
+				if (u->hv_waits++ < HV_WAIT_MAX)
+					return HV_WAIT_MS;
+				dev_warn(u->dev, "PD: input limit not at %u mA after %d s: staying at pdo %u\n",
+					 ma, HV_WAIT_MAX * HV_WAIT_MS / 1000, u->pd.pos);
+				u->pd.req_pos = want;
+				u->pd.req_tries = PD_REQ_TRIES;
+				u->hv_prepare_ma = 0;
+				return 0;
+			}
+			u->hv_prepare_ma = ma;
+		} else {
+			u->hv_prepare_ma = 0;
+		}
+		u->hv_waits = 0;
+		if (u->pd.req_pos != want)
+			u->pd.req_tries = 0;
+		u->pd.req_pos = want;
+		u->pd.req_tries++;
+		u->pd.req_jiffies = jiffies;
+		pos = want;
+		dev_info(u->dev, "PD: requesting pdo %u (%u mV %u mA)\n", pos,
+			 pdo_mv(u->pd.cur.pdo[pos - 1]), pdo_ma(u->pd.cur.pdo[pos - 1]));
+		if (usbc_cmd(u, OP_SRCCAP_REQUEST, &pos, 1, NULL, 0))
+			u->hv_prepare_ma = 0;
+		/* PSRDY then re-reads 0x30 and clears hv_prepare_ma */
+		return 0;
+	}
+
+	/* AFC / QC2 on a DCP */
+	if (!u->hv_enable) {
+		u->hv_prepare_ma = 0;
+		u->hv_waits = 0;
+	}
+	if (u->hv_mode != HV_NONE && !u->hv_enable) {
+		usbc_dcp_5v(u);
+		return 0;
+	}
+	if (u->hv_mode != HV_NONE || !u->hv_enable || u->hv_dcp_done ||
+	    !usbc_dcp_attached(u))
+		return 0;
+	/* stock's PREPARE_TA: 500 mA while it switches; 1650 at most after */
+	u->hv_prepare_ma = 500;
+	if (!usbc_limit_ok(u, HV_DCP_MA)) {
+		if (u->hv_waits++ < HV_WAIT_MAX)
+			return HV_WAIT_MS;
+		dev_warn(u->dev, "AFC: input limit not at %u mA after %d s: staying at 5 V\n",
+			 HV_DCP_MA, HV_WAIT_MAX * HV_WAIT_MS / 1000);
+		u->hv_dcp_done = true;
+		u->hv_prepare_ma = 0;
+		return 0;
+	}
+	u->hv_waits = 0;
+	u->hv_dcp_done = true;
+	u->hv_mode = usbc_afc_9v(u);
+	u->hv_prepare_ma = 0;
+	dev_info(u->dev, "AFC/QC2: %s\n", u->hv_mode == HV_AFC_9V ? "AFC 9 V" :
+		 u->hv_mode == HV_QC2_9V ? "QC2 9 V" : "stays at 5 V");
+	return 0;
+}
+
+static void usbc_hv_work(struct work_struct *work)
+{
+	struct max77705_usbc *u = container_of(to_delayed_work(work),
+					       struct max77705_usbc, hv_work);
+	unsigned int again;
+
+	/* hv_enable went 0 -> 1: what this attach had given up on, try again */
+	if (xchg(&u->hv_rearm, false)) {
+		u->pd.hv_blocked = false;
+		u->pd.req_tries = 0;
+		u->hv_dcp_done = false;
+		u->hv_waits = 0;
+	}
+	if (usbc_read_status(u))
+		return;
+	usbc_publish(u);	/* pub.online for the step */
+	again = usbc_hv_step(u);
+	usbc_publish(u);
+	if (again)
+		queue_delayed_work(u->wq, &u->hv_work, msecs_to_jiffies(again));
+}
+
 /* ---- events --------------------------------------------------------------- */
 
 /* SYSMsg: log it; after an MCU (re)boot re-apply the masks and forget what
@@ -1032,8 +1789,9 @@ static void usbc_handle_sysmsg(struct max77705_usbc *u, u8 msg)
 static void usbc_event_work(struct work_struct *work)
 {
 	struct max77705_usbc *u = container_of(work, struct max77705_usbc, event_work);
-	u8 pend[4], sysmsg;
-	bool sysmsg_new, vbus;
+	u8 pend[4], sysmsg, pdq[PDQ_N], ccstat;
+	unsigned int pdq_n, lost, i;
+	bool sysmsg_new, vbus, psrdy = false, dcp_was_open;
 	unsigned long flags;
 
 	spin_lock_irqsave(&u->ev_lock, flags);
@@ -1042,27 +1800,62 @@ static void usbc_event_work(struct work_struct *work)
 	sysmsg = u->sysmsg;
 	sysmsg_new = u->sysmsg_new;
 	u->sysmsg_new = false;
+	pdq_n = u->pdq_n;
+	memcpy(pdq, u->pdq, pdq_n);
+	u->pdq_n = 0;
+	lost = u->pdq_lost;
+	u->pdq_lost = 0;
 	spin_unlock_irqrestore(&u->ev_lock, flags);
 
 	if (sysmsg_new)
 		usbc_handle_sysmsg(u, sysmsg);
 
+	dcp_was_open = usbc_dcp_attached(u);
 	if (usbc_read_status(u))
 		return;
 	vbus = u->st[ST(REG_BC_STATUS)] & BC_VBUSDET;
+	ccstat = FIELD_GET(CC0_CCSTAT, u->st[ST(REG_CC_STATUS0)]);
 
-	if (pend[2] & PD_PDMSG) {
-		u8 code = u->st[ST(REG_PD_STATUS0)];
-
-		usbc_log(u, LOG_PDMSG, code, NULL, 0, NULL, 0, 0, pdmsg_name(code));
+	/* detach: PD per CC attach, AFC/QC2 per VBUS */
+	if (ccstat != CCSTAT_SINK && (u->pd.have_first || u->pd.pos))
+		usbc_pd_forget(u);
+	if (!vbus) {
+		u->hv_mode = HV_NONE;
+		u->hv_dcp_done = false;
+		u->hv_waits = 0;
+		if (!u->pd.req_pos)
+			u->hv_prepare_ma = 0;
 	}
+
+	if (lost)
+		dev_warn(u->dev, "PD: %u event codes lost\n", lost);
+	for (i = 0; i < pdq_n; i++) {
+		usbc_pd_event(u, pdq[i]);
+		if (pdq[i] == 0x01)	/* SNK_PSRDY_RECEIVED */
+			psrdy = true;
+	}
+	if (pend[2] & PD_PSRDY)
+		psrdy = true;
 
 	usbc_route(u);
 	if (!vbus)
 		u->path_tried = 0;	/* the next attach writes it again */
 	usbc_autoibus(u, vbus);
 
+	/* a contract as a sink (or one already there at probe): its caps */
+	if (ccstat == CCSTAT_SINK && (u->st[ST(REG_PD_STATUS1)] & PD1_PSRDY) &&
+	    (psrdy || !u->pd.have_first))
+		usbc_pd_read_caps(u);
+
 	usbc_publish(u);
+
+	if (!u->pub.online)
+		return;
+	if (u->pd.pos)
+		queue_delayed_work(u->wq, &u->hv_work, 0);
+	else if (usbc_dcp_attached(u) && !dcp_was_open)
+		queue_delayed_work(u->wq, &u->hv_work,
+				   msecs_to_jiffies(HV_AFC_DELAY_MS));
 }
 
 static void usbc_poll_work(struct work_struct *work)
@@ -1151,11 +1944,46 @@ static int usbc_regs_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(usbc_regs);
 
+static int usbc_pd_show(struct seq_file *s, void *unused)
+{
+	struct max77705_usbc *u = s->private;
+	struct usbc_pd *pd = &u->pd;
+	char b[160];
+
+	mutex_lock(&u->pub_lock);
+	pd_caps_fmt(b, sizeof(b), &pd->first);
+	seq_printf(s, "caps at attach: %s\n", b);
+	pd_caps_fmt(b, sizeof(b), &pd->cur);
+	seq_printf(s, "caps in force:  %s\n", b);
+	seq_printf(s, "contract pdo:   %u\nrequested pdo:  %u (tries %u)\n",
+		   pd->pos, pd->req_pos, pd->req_tries);
+	seq_printf(s, "hv_enable %d, above 5 V blocked: %d, AFC/QC2: %s, ceiling while switching: %u mA\n",
+		   u->hv_enable, pd->hv_blocked,
+		   u->hv_mode == HV_AFC_9V ? "afc 9 V" :
+		   u->hv_mode == HV_QC2_9V ? "qc2 9 V" : "none", u->hv_prepare_ma);
+	seq_printf(s, "hard resets %u (from the source %u, sent by our firmware %u)\n",
+		   pd->hard_resets, pd->hr_received, pd->hr_sent);
+	seq_printf(s, "error recoveries %u, sender response timeouts %u\n",
+		   pd->err_recovery, pd->srt_timeouts);
+	seq_printf(s, "caps renegotiated %u, changed after a hard reset %u\n",
+		   pd->caps_renegotiated, pd->caps_changed_after_hr);
+	pd_caps_fmt(b, sizeof(b), &pd->before);
+	seq_printf(s, "last change, before: %s\n", b);
+	pd_caps_fmt(b, sizeof(b), &pd->after);
+	seq_printf(s, "last change, after:  %s\n", b);
+	seq_printf(s, "last event: %s\nlast hard reset: %s\n",
+		   pd->last_event, pd->last_hard_reset);
+	mutex_unlock(&u->pub_lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(usbc_pd);
+
 static void usbc_debugfs_init(struct max77705_usbc *u)
 {
 	u->debugfs = debugfs_create_dir("max77705-usbc", NULL);
 	debugfs_create_file("events", 0400, u->debugfs, u, &usbc_events_fops);
 	debugfs_create_file("registers", 0400, u->debugfs, u, &usbc_regs_fops);
+	debugfs_create_file("pd", 0400, u->debugfs, u, &usbc_pd_fops);
 }
 
 /* ---- probe ---------------------------------------------------------------- */
@@ -1165,9 +1993,11 @@ static void usbc_stop_work(void *data)
 {
 	struct max77705_usbc *u = data;
 
+	WRITE_ONCE(u->stopping, true);
 	debugfs_remove_recursive(u->debugfs);
 	cancel_delayed_work_sync(&u->poll_work);
 	cancel_work_sync(&u->event_work);
+	cancel_delayed_work_sync(&u->hv_work);
 }
 
 static void usbc_destroy_wq(void *data)
@@ -1198,6 +2028,7 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	init_completion(&u->cmd_done);
 	INIT_WORK(&u->event_work, usbc_event_work);
 	INIT_DELAYED_WORK(&u->poll_work, usbc_poll_work);
+	INIT_DELAYED_WORK(&u->hv_work, usbc_hv_work);
 	i2c_set_clientdata(client, u);
 	u->log = devm_kcalloc(dev, LOG_N, sizeof(*u->log), GFP_KERNEL);
 
