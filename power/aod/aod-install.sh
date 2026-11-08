@@ -4,7 +4,7 @@
 # the tree is built there:
 #
 #   cd ~/ztdev-aod/ztmetro && make -j2 ztmetro settings/ztsettings sensord/ztoscsf-sensord
-#   sudo bash ~/ztdev-aod/power/aod/aod-install.sh [BUILD_DIR]
+#   sudo bash ~/ztdev-aod/power/aod/aod-install.sh [BUILD_DIR [--no-restart]]
 #   sudo bash ~/ztdev-aod/power/aod/aod-install.sh --undo
 #
 # The binaries it replaces are kept as *.pre-aod (the first time only), and
@@ -35,4 +35,23 @@ else
 	systemctl restart ztoscsf-sensord
 	echo "installed from $BUILD"
 fi
-/usr/local/sbin/zboot-session ztmetro | tail -1
+# Start the shell again: only greetd's own session (its scope: the shell and the apps it
+# started) ends, never the user's other processes (ssh logins, builds, user services), as
+# zboot-session's "loginctl terminate-user; pkill -9 -u" would. With --no-restart, nothing.
+[ "${2:-}" = --no-restart ] || [ "${1:-}" = --no-restart ] && exit 0
+s=$(loginctl list-sessions --no-legend | while read -r id _ _ seat _; do
+	[ "$(loginctl show-session "$id" -p Service --value)" = greetd ] && echo "$id"
+done | head -1)
+systemctl stop greetd
+if [ -n "$s" ]; then
+	loginctl terminate-session "$s"
+	for i in $(seq 20); do loginctl show-session "$s" > /dev/null 2>&1 || break; sleep 0.25; done
+	systemctl kill -s KILL "session-$s.scope" 2> /dev/null || true
+fi
+rm -f /run/greetd.run	# so the start logs in again ([initial_session])
+systemctl start greetd
+sleep 3
+n=$(loginctl list-sessions --no-legend | while read -r id _; do
+	[ "$(loginctl show-session "$id" -p Service --value)" = greetd ] && echo "$id"
+done | head -1)
+echo "shell session: was ${s:-none}, now ${n:-none} ($(loginctl show-session "${n:-0}" -p Service -p Remote -p Type 2>/dev/null | tr '\n' ' '))"
