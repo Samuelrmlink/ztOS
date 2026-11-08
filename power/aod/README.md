@@ -39,11 +39,11 @@ back to the AOD. The SoC never sleeps while the AOD shows (see the cost).
 | Off until switched on | Settings > Display > Always-on display | the shell: `load_config` (`aod_mode = AOD_OFF`); Settings: `config_load` |
 | Mode when switched on | "Show it": **Always** / Only while charging | `AOD_DEFAULT_CHARGING` (false) in `ztmetro/settings/ztsettings.c` |
 | Dark below 15 % on battery | a switch, **off** | `aod_low_battery_off`; `AOD_MIN_BATTERY` in `ztmetro/ztmetro.c` |
-| Brightness from the room | a switch, **on**; 5 levels, L* 18-45 | `aod_auto_brightness`; `AOD_LEVELS`, `AOD_LIGHT_*` |
+| Brightness from the room | a switch, **on**; 6 levels, ~2 to ~55 nits (off: level 2, ~7 nits) | `aod_auto_brightness`; `AOD_LEVELS`, `AOD_FIXED_LEVEL`, `AOD_LIGHT_*` |
 | Moves every | 10 minutes, round 9 places | `AOD_SHIFT_S`, `AOD_SPOTS` |
-| Colours | time 0.92, the rest grey 0.62, the force mark 0.30 | `AOD_WHITE`, `AOD_GREY`, `AOD_FORCE_GREY` |
+| Colours | time 0.92, the rest grey 0.62, the force mark 0.34 tinted with the accent; all times the level's pixel factor | `AOD_WHITE`, `AOD_GREY`, `AOD_FORCE_LEVEL`, `AOD_FORCE_TINT` |
 | Waiting apps' glyphs | 16 points, grey, outline only | `AOD_ICON`, `aod_icon` |
-| The force press's mark | a squircle outline, 34 x 26 points, own 7-place cycle | `AOD_FORCE_*`, `aod_force_mark` |
+| The force press's mark | a squircle outline like stock's: 19 x 18 points, 0.55-point line, exponent 3.2, own 7-place cycle | `AOD_FORCE_*`, `aod_force_mark` |
 | Double tap wakes | Settings > Lock Screen, **on**; taps of 200 ms at most, the second within 300 ms and 120 panel pixels (~5.5 mm), 40 px of movement | `double_tap_wake`; `AOD_DOUBLE_TAP`, `AOD_TAP_*` |
 | Lock-screen timeout | Settings > Lock Screen, **10 s** (5, 10, 15, 30 s, 1 min, or as the screen) | `lock_timeout`; `LOCK_TIMEOUT_S`; Settings `LOCK_TIMEOUT_DEFAULT` |
 | 12/24-hour clock | 24-hour unless `clock_24h = off` | `core/zt-clock.h` (`ZT_CLOCK_24H_DEFAULT`); Settings > date + region |
@@ -75,11 +75,17 @@ No kernel or boot image change. In `ztmetro/ztmetro.c` (search `aod_`):
   sensor on with the screen off, at that rate (zrnperfd's "screen off" is
   unchanged); the shell reads `/run/ztoscsf-sensors/light` every 5 s for a
   minute after the AOD appears or the room changes level, then every 30 s.
-  Levels: a dark room the panel's floor (L* 18, level 0), then L* 25, 32,
-  39 and, in daylight (6000 lux and up), L* 45: about 15 % of the panel's
-  normal peak of 400 nits, some 60 nits, which is Samsung's own AOD
-  ceiling, far under what the screen uses in daylight. 1.6x lux hysteresis;
-  one step glides (3 L* a second), two or more snap at once.
+  Levels (after a side-by-side photo with Samsung's AOD, 2026-11-08: ours
+  was clearly brighter): the panel's own dimming (AOR) goes no lower than
+  the table's level 0 (L* 18, ~2.5 % of its 400-nit peak, ~10 nits for
+  white), so below that the pixels are dimmed instead, which on OLED cuts
+  light and current alike. For the time's white: dark room (< 5 lux) floor
+  x0.52, ~2 nits; dim (5-40) x0.70, ~4; a lit room (40-250) x0.88, ~7;
+  bright (250-2000) L* 25, ~15; daylight indoors (2000-10000) L* 34, ~30;
+  sun L* 45, ~55, Samsung's AOD ceiling. Nits are estimates from the
+  shell's table, not measured. 1.6x lux hysteresis; the panel's part of one
+  step glides (3 L* a second), more snap; the pixels' part goes with the
+  next frame, drawn at once.
 - One frame a minute (`clock_tick`), plus one on a charger event and one
   when a notification comes or goes (`led_notes_sync`). A frame is the AOD
   layer alone on black (`aod_render_frame`).

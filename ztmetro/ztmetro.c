@@ -881,6 +881,7 @@ struct zt_server {
 	bool aod_auto;			/* config aod_auto_brightness */
 	bool aod_low_off;		/* config aod_low_battery_off: dark below AOD_MIN_BATTERY */
 	int aod_level;			/* AOD_LEVELS' index now; -1 none yet */
+	double aod_scale;		/* the pixels' multiplier, AOD_LEVELS' scale */
 	int aod_light_ms;		/* the rate sensord was told; 0 none */
 	uint32_t aod_fast_until;	/* read the room often until then */
 	struct wl_event_source *aod_light_timer;
@@ -12415,15 +12416,16 @@ static void aod_bl_release(void) {
 	atomic_store(&aod_bl_quiet, false);
 }
 
-/* The picture's multiplier: at the panel's floor nothing more is taken off;
- * without a table the panel may be anywhere, so the pixels go down instead.
- * The colour temperature still applies: less blue is less wear. */
+/* The picture's multiplier: the level's own (AOD_LEVELS: below the panel's
+ * floor the pixels themselves go down, which on OLED is less light and less
+ * current alike); without a table the panel may be anywhere, so the pixels go
+ * down instead. The colour temperature still applies: less blue is less wear. */
 static void aod_tint(struct zt_server *server) {
 	float rgb[3] = { 1.0f, 1.0f, 1.0f };
 	if (server->tone_k > 0 && server->tone_k < 6450) {
 		tone_rgb(server->tone_k, rgb);
 	}
-	float k = bl.mode == BL_TABLE ? 1.0f : 0.35f;
+	float k = bl.mode == BL_TABLE ? (float)server->aod_scale : 0.35f;
 	for (int i = 0; i < 3; i++) {
 		server->tint[i] = k * rgb[i];
 	}
@@ -12434,25 +12436,32 @@ static void aod_tint(struct zt_server *server) {
 #define AOD_ICON	16	/* points: a waiting app's glyph */
 /*
  * Its brightness, from the room (Settings: "Adjust AOD brightness
- * automatically", aod_auto_brightness, on by default; off, it stays at the
- * floor). ztoscsf-sensord keeps the light sensor on with the screen off while
- * told "aod MS" (only the light, at that rate) and publishes the lux in
- * /run/ztoscsf-sensors/light; the shell reads it every AOD_LIGHT_FAST_MS for
- * AOD_LIGHT_FAST_FOR_MS after the display appears or the room changes by a
- * level or more, then every AOD_LIGHT_SLOW_MS. Five levels, in L* (the ramp's
- * scale): the panel's floor (L* 18, level 0) in a dark room up to L* 45 in
- * daylight, about 15 % of the panel's normal peak (400 nits): some 60 nits,
- * Samsung's own AOD ceiling, and well under the screen in daylight. A level
- * is left only past AOD_LIGHT_HYST times its threshold (or under it divided
- * by that); one step glides at the light sensor's speed, more snap at once.
+ * automatically", aod_auto_brightness, on by default; off, it stays at
+ * AOD_FIXED_LEVEL). ztoscsf-sensord keeps the light sensor on with the screen
+ * off while told "aod MS" (only the light, at that rate) and publishes the
+ * lux in /run/ztoscsf-sensors/light; the shell reads it every
+ * AOD_LIGHT_FAST_MS for AOD_LIGHT_FAST_FOR_MS after the display appears or
+ * the room changes by a level or more, then every AOD_LIGHT_SLOW_MS.
+ *
+ * A level is the panel's (L*, the ramp's scale; the panel's own dimming, AOR,
+ * goes no lower than the table's level 0, L* 18, ~2.5 % of its 400-nit peak:
+ * some 10 nits for white) and a multiplier for the pixels below that, after
+ * Samsung's AOD side by side (2026-11-08): very dim indoors, readable in
+ * daylight. The nits are for the time's white (0.92), estimated from the
+ * shell's table; the grey text is about a third of that. A level is left
+ * only past AOD_LIGHT_HYST times its threshold (or under it divided by that);
+ * the panel's part of one step glides, more snap; the pixels' part goes with
+ * the next frame, drawn at once.
  */
-static const struct { double lux, lstar; } AOD_LEVELS[] = {
-	{ 0, BL_L_FLOOR },	/* a dark room: the panel's floor */
-	{ 8, 25 },		/* a dim room */
-	{ 60, 32 },		/* a lit room */
-	{ 600, 39 },		/* a bright room, shade outdoors */
-	{ 6000, 45 },		/* daylight: the ceiling */
+static const struct { double lux, lstar, scale; } AOD_LEVELS[] = {
+	{ 0, BL_L_FLOOR, 0.52 },	/* a dark room: ~2 nits */
+	{ 5, BL_L_FLOOR, 0.70 },	/* a dim room: ~4 */
+	{ 40, BL_L_FLOOR, 0.88 },	/* a lit room (a kitchen, ~100 lux): ~7 */
+	{ 250, 25, 1.0 },		/* a bright room: ~15 */
+	{ 2000, 34, 1.0 },		/* daylight indoors, shade outdoors: ~30 */
+	{ 10000, 45, 1.0 },		/* daylight, sun: ~55, the ceiling */
 };
+#define AOD_FIXED_LEVEL		2	/* with the switch off */
 #define AOD_N_LEVELS		(int)(sizeof(AOD_LEVELS) / sizeof(AOD_LEVELS[0]))
 #define AOD_LIGHT_HYST		1.6
 #define AOD_LIGHT_GLIDE		3.0	/* L* a second: a step takes about two seconds */
@@ -12474,22 +12483,26 @@ static const struct { double lux, lstar; } AOD_LEVELS[] = {
 #define AOD_FORCE_BAND_PX	2810	/* the bottom self-mask band's first row */
 #define AOD_FORCE_PANEL_W	1440
 #define AOD_FORCE_PANEL_H	2960
-#define AOD_FORCE_W		34	/* points */
-#define AOD_FORCE_H		26
-#define AOD_FORCE_GAP		4	/* points between it (at its lowest) and the band */
-#define AOD_FORCE_GREY		0.30	/* dimmer than AOD_GREY */
-#define AOD_FORCE_LINE		1.0	/* points */
+/* the size, line and place of Samsung's own (photographed side by side,
+ * 2026-11-08: about 76 x 72 panel pixels, its middle near row 2747) */
+#define AOD_FORCE_W		19	/* points */
+#define AOD_FORCE_H		18
+#define AOD_FORCE_GAP		7	/* points between it (at its lowest) and the band */
+#define AOD_FORCE_N		3.2	/* the squircle's exponent: rounder corners than 4 */
+#define AOD_FORCE_LEVEL		0.34	/* its light, dimmer than AOD_GREY */
+#define AOD_FORCE_TINT		0.4	/* how much of the accent colour is in it */
+#define AOD_FORCE_LINE		0.55	/* points: ~2 panel pixels */
 static const signed char AOD_FORCE_SPOTS[][2] = {	/* pixels: dx, dy (dy <= 0) */
 	{ 0, 0 }, { 4, -2 }, { -4, -4 }, { 2, -6 }, { -2, -2 }, { 6, -4 }, { -6, -6 },
 };
 #define AOD_FORCE_N_SPOTS	(int)(sizeof(AOD_FORCE_SPOTS) / sizeof(AOD_FORCE_SPOTS[0]))
 
-/* A squircle (|x|^4 + |y|^4 = 1, stretched to w x h) about (cx, cy). */
-static void squircle_path(cairo_t *cr, double cx, double cy, double w, double h) {
+/* A squircle (|x|^e + |y|^e = 1, stretched to w x h) about (cx, cy). */
+static void squircle_path(cairo_t *cr, double cx, double cy, double w, double h, double e) {
 	const int n = 96;
 	for (int i = 0; i < n; i++) {
 		double t = 2 * M_PI * i / n, c = cos(t), s = sin(t);
-		double x = copysign(sqrt(fabs(c)), c) * w / 2, y = copysign(sqrt(fabs(s)), s) * h / 2;
+		double x = copysign(pow(fabs(c), 2 / e), c) * w / 2, y = copysign(pow(fabs(s), 2 / e), s) * h / 2;
 		if (i == 0) {
 			cairo_move_to(cr, cx + x, cy + y);
 		} else {
@@ -12510,10 +12523,19 @@ static void aod_force_mark(struct zt_server *server, cairo_t *cr, time_t now) {
 	double cx = AOD_FORCE_X_PX * kx + AOD_FORCE_SPOTS[i][0] * kx;
 	double bottom = AOD_FORCE_BAND_PX * ky - AOD_FORCE_GAP;	/* its lowest edge, at dy 0 */
 	double cy = bottom - AOD_FORCE_H / 2.0 - AOD_FORCE_LINE / 2 + AOD_FORCE_SPOTS[i][1] * ky;
+	/* a faint tint of the accent, at AOD_FORCE_LEVEL's light */
+	double a[3] = { ((server->accent >> 16) & 0xff) / 255.0, ((server->accent >> 8) & 0xff) / 255.0,
+		(server->accent & 0xff) / 255.0 };
+	double c[3], top = 0;
+	for (int k = 0; k < 3; k++) {
+		c[k] = 1 - AOD_FORCE_TINT + AOD_FORCE_TINT * a[k];
+		if (c[k] > top) top = c[k];
+	}
 	cairo_save(cr);
-	cairo_set_source_rgb(cr, AOD_FORCE_GREY, AOD_FORCE_GREY, AOD_FORCE_GREY);
+	cairo_set_source_rgb(cr, AOD_FORCE_LEVEL * c[0] / top, AOD_FORCE_LEVEL * c[1] / top,
+		AOD_FORCE_LEVEL * c[2] / top);
 	cairo_set_line_width(cr, AOD_FORCE_LINE);
-	squircle_path(cr, cx, cy, AOD_FORCE_W, AOD_FORCE_H);
+	squircle_path(cr, cx, cy, AOD_FORCE_W, AOD_FORCE_H, AOD_FORCE_N);
 	cairo_stroke(cr);
 	cairo_restore(cr);
 }
@@ -12784,10 +12806,15 @@ static int aod_light_tick(void *data) {
 			if (server->aod_level >= 0) {
 				server->aod_fast_until = now + AOD_LIGHT_FAST_FOR_MS;	/* the room changed */
 			}
-			wlr_log(WLR_INFO, "aod: %d lux, level %d (L* %.0f)%s", lux, level,
-				AOD_LEVELS[level].lstar, jump ? "" : ", gliding");
+			wlr_log(WLR_INFO, "aod: %d lux, level %d (L* %.0f, pixels x%.2f)%s", lux, level,
+				AOD_LEVELS[level].lstar, AOD_LEVELS[level].scale, jump ? "" : ", gliding");
 			server->aod_level = level;
 			aod_bl_set(AOD_LEVELS[level].lstar, !jump);
+			if (AOD_LEVELS[level].scale != server->aod_scale) {
+				server->aod_scale = AOD_LEVELS[level].scale;
+				server->aod_dirty = true;	/* the pixels' part: a frame now */
+				wlr_output_schedule_frame(server->output->wlr_output);
+			}
 		}
 	}
 	int ms = (int32_t)(server->aod_fast_until - now) > 0 ? AOD_LIGHT_FAST_MS : AOD_LIGHT_SLOW_MS;
@@ -12804,6 +12831,11 @@ static int aod_light_tick(void *data) {
 /* The display appeared: read the room (the last reading, from before the
  * screen went off, and then the sensor's) often for a minute. */
 static void aod_light_start(struct zt_server *server) {
+	/* the fixed level first: the switch off, or no reading yet */
+	server->aod_scale = AOD_LEVELS[AOD_FIXED_LEVEL].scale;
+	if (bl.mode == BL_TABLE && aod_bl.on) {
+		aod_bl_set(AOD_LEVELS[AOD_FIXED_LEVEL].lstar, false);
+	}
 	if (!server->aod_auto || bl.mode != BL_TABLE || !server->aod_light_timer) {
 		return;
 	}
@@ -17479,7 +17511,9 @@ static int reload(int signal_number, void *data) {
 			aod_light_start(server);
 		} else if (!server->aod_auto && server->aod_light_ms) {
 			aod_light_stop(server);
-			aod_bl_set(BL_L_FLOOR, false);
+			aod_bl_set(AOD_LEVELS[AOD_FIXED_LEVEL].lstar, false);
+			server->aod_scale = AOD_LEVELS[AOD_FIXED_LEVEL].scale;
+			aod_refresh(server);
 		}
 	}
 	wlr_log(WLR_INFO, "configuration reloaded: accent %06x, %d columns, haptics %s",
@@ -17741,6 +17775,7 @@ int main(int argc, char *argv[]) {
 	server.uevent_fd = -1;
 	server.aod_test_battery = server.aod_test_charger = server.aod_test_lux = -1;	/* the real ones */
 	server.aod_place_shown = -1;
+	server.aod_scale = 1.0;
 	for (int i = 0; i < 8; i++) {
 		server.shade_press[i] = 1.0f;
 	}
