@@ -12,6 +12,11 @@
 #include "json.h"
 
 void sections_path(char *out, size_t size) {
+	const char *env = getenv("ZTSTORE_SECTIONS");	/* (to try a file out) */
+	if (env && *env) {
+		snprintf(out, size, "%s", env);
+		return;
+	}
 	config_path(out, size, "sections");
 	if (access(out, R_OK) != 0) {
 		snprintf(out, size, "/etc/ztstore/sections");
@@ -51,7 +56,8 @@ bool sections_read(struct vec *out, const char *path) {
 			s->caption = xstrdup(field[4]);
 		} else {
 			char cap[160];
-			snprintf(cap, sizeof(cap), "%s · by %s", !strcmp(s->source, "aur") ? "AUR" : "your repos", s->sort);
+			snprintf(cap, sizeof(cap), "%s · by %s", !strcmp(s->source, "aur") ? "AUR" :
+				!strcmp(s->source, "flathub") ? "Flathub" : "your repos", s->sort);
 			s->caption = xstrdup(cap);
 		}
 		vec_push(out, s);
@@ -188,6 +194,8 @@ void sections_fill(struct vec *sections, const struct repo_index *ri, const char
 			vec_push(&aur, s);
 		} else if (!strcmp(s->source, "repo")) {
 			fill_repo(s, ri, popular);
+		} else if (!strcmp(s->source, "flathub")) {
+			/* (sections_fill_flathub) */
 		} else {
 			s->note = xstrdup("unknown source in the sections file");
 		}
@@ -265,16 +273,31 @@ static int by_count(const void *a, const void *b) {
 	return strcmp(x->label, y->label);
 }
 
-static void facets(const struct repo_index *ri, struct vec *out, int max, bool group) {
-	for (int i = 0; i < ri->sync.n; i++) {
-		struct pkg *p = ri->sync.v[i];
+/* freedesktop's main categories: Flathub's apps also carry "GTK", "KDE" and
+ * the like, which are no way to browse */
+static bool main_category(const char *w) {
+	static const char *const main[] = { "AudioVideo", "Development", "Education", "Game", "Graphics", "Network",
+		"Office", "Science", "Settings", "System", "Utility", NULL };
+	for (int i = 0; main[i]; i++) {
+		if (!strcmp(main[i], w)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void facets_of(const struct vec *pkgs, struct vec *out, int max, bool group, bool main_only) {
+	for (int i = 0; i < pkgs->n; i++) {
+		struct pkg *p = pkgs->v[i];
 		const char *words = group ? p->groups : p->categories;
 		if (!words || (!group && !is_app(p))) {
 			continue;
 		}
 		char *copy = xstrdup(words), *save = NULL;
 		for (char *w = strtok_r(copy, " ", &save); w; w = strtok_r(NULL, " ", &save)) {
-			count_word(out, w, !group);
+			if (!main_only || main_category(w)) {
+				count_word(out, w, !group);
+			}
 		}
 		free(copy);
 	}
@@ -285,11 +308,15 @@ static void facets(const struct repo_index *ri, struct vec *out, int max, bool g
 }
 
 void facets_categories(const struct repo_index *ri, struct vec *out, int max) {
-	facets(ri, out, max, false);
+	facets_of(&ri->sync, out, max, false, false);
 }
 
 void facets_groups(const struct repo_index *ri, struct vec *out, int max) {
-	facets(ri, out, max, true);
+	facets_of(&ri->sync, out, max, true, false);
+}
+
+void facets_flathub(const struct vec *apps, struct vec *out, int max) {
+	facets_of(apps, out, max, false, true);
 }
 
 static bool has_word(const char *words, const char *w) {
@@ -302,11 +329,81 @@ static bool has_word(const char *words, const char *w) {
 	return false;
 }
 
-void facet_members(const struct repo_index *ri, bool group, const char *key, struct vec *out) {
-	for (int i = 0; i < ri->sync.n; i++) {
-		struct pkg *p = ri->sync.v[i];
+static void members_of(const struct vec *pkgs, bool group, const char *key, struct vec *out) {
+	for (int i = 0; i < pkgs->n; i++) {
+		struct pkg *p = pkgs->v[i];
 		if (has_word(group ? p->groups : p->categories, key) && (group || is_app(p))) {
 			vec_push(out, pkg_copy(p));
 		}
+	}
+}
+
+void facet_members(const struct repo_index *ri, bool group, const char *key, struct vec *out) {
+	members_of(&ri->sync, group, key, out);
+}
+
+void facet_members_flathub(const struct vec *apps, const char *key, struct vec *out) {
+	members_of(apps, false, key, out);
+}
+
+/* ---- Flathub's lists ------------------------------------------------------------- */
+
+void sections_fill_flathub(struct vec *sections, const struct flathub *fh, long max_age) {
+	/* each collection is asked for once, however many lists use it */
+	struct { const char *which; struct vec ids; bool ok; } got[8];
+	int n_got = 0;
+	for (int i = 0; i < sections->n; i++) {
+		struct section *s = sections->v[i];
+		if (strcmp(s->source, "flathub")) {
+			continue;
+		}
+		vec_free(&s->items, pkg_free);
+		free(s->note);
+		s->note = NULL;
+		if (!fh || !fh->apps.n) {
+			s->note = xstrdup("Flathub's catalogue is not on this phone yet");
+			continue;
+		}
+		const char *which = s->sort;
+		int k;
+		for (k = 0; k < n_got && strcmp(got[k].which, which); k++) {
+		}
+		if (k == n_got) {
+			if (n_got == 8) {
+				continue;
+			}
+			got[k].which = which;
+			memset(&got[k].ids, 0, sizeof(got[k].ids));
+			got[k].ok = flathub_collection(which, &got[k].ids, max_age);
+			n_got++;
+		}
+		if (!got[k].ok) {
+			/* (from the cache only, a missing copy is no news: the network
+			 * comes next) */
+			if (max_age >= 0) {
+				s->note = xstrdup("could not reach flathub.org");
+			}
+			continue;
+		}
+		bool mobile_only = !strcmp(s->sort, "mobile");
+		for (int j = 0; j < got[k].ids.n && s->items.n < s->count; j++) {
+			struct pkg *p = flathub_find(fh, got[k].ids.v[j]);
+			if (!p || (mobile_only && !p->mobile)) {
+				continue;	/* not built for this phone (or not made for one) */
+			}
+			bool dup = false;
+			for (int m = 0; m < s->items.n && !dup; m++) {
+				dup = !strcmp(((struct pkg *)s->items.v[m])->name, p->name);
+			}
+			if (!dup) {
+				vec_push(&s->items, pkg_copy(p));
+			}
+		}
+		if (!s->items.n) {
+			s->note = xstrdup("none of these are built for this phone");
+		}
+	}
+	for (int k = 0; k < n_got; k++) {
+		vec_free(&got[k].ids, free);
 	}
 }

@@ -216,8 +216,8 @@ install-browser: browser/superscan
 .PHONY: check-store
 check-store:
 	sh store/tests/make_fixture.sh /tmp/ztstore-fixture
-	cd store && for t in json repo appstream aur sections; do \
-		$(CC) -std=c11 -Wall -o /tmp/ztstore-test-$$t tests/test_$$t.c util.c json.c pkg.c repo.c appstream.c aur.c sections.c -lz && \
+	cd store && for t in json repo appstream aur sections flathub; do \
+		$(CC) -std=c11 -Wall -o /tmp/ztstore-test-$$t tests/test_$$t.c util.c json.c pkg.c repo.c appstream.c aur.c sections.c flathub.c -lz && \
 		/tmp/ztstore-test-$$t || exit 1; done
 
 # ztOSCoreSensorFramework: starts every piece of hardware support with the

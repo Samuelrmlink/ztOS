@@ -17,7 +17,7 @@ struct pkg *pkg_new(const char *name, const char *repo) {
 
 #define STR_FIELDS(X) X(name) X(repo) X(version) X(desc) X(url) X(license) X(arch) X(packager) \
 	X(groups) X(depends) X(makedepends) X(app_name) X(summary) X(icon) X(categories) \
-	X(installed_version) X(desktop)
+	X(installed_version) X(desktop) X(keywords)
 
 struct pkg *pkg_copy(const struct pkg *p) {
 	struct pkg *q = malloc(sizeof(*q));
@@ -66,6 +66,10 @@ void append_word(char **field, const char *word) {
 
 bool pkg_is_aur(const struct pkg *p) {
 	return p->repo && !strcmp(p->repo, "aur");
+}
+
+bool pkg_is_flathub(const struct pkg *p) {
+	return p->repo && !strcmp(p->repo, "flathub");
 }
 
 const char *pkg_title(const struct pkg *p) {

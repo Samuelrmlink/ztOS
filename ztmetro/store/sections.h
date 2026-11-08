@@ -7,10 +7,12 @@
  *
  * source "aur": sort popularity, votes, modified or submitted (the AUR's daily
  * metadata dump). source "repo": sort popular (pkgstats.archlinux.org: how many
- * Arch systems have it) or builddate; only packages that are apps (AppStream). */
+ * Arch systems have it) or builddate; only packages that are apps (AppStream).
+ * source "flathub": see sections_fill_flathub. */
 #ifndef ZTSTORE_SECTIONS_H
 #define ZTSTORE_SECTIONS_H
 
+#include "flathub.h"
 #include "repo.h"
 
 struct section {
@@ -41,5 +43,15 @@ void facets_groups(const struct repo_index *ri, struct vec *out, int max);
 void facet_free(void *f);
 /* the packages under one category or group */
 void facet_members(const struct repo_index *ri, bool group, const char *key, struct vec *out);
+
+/* Flathub: its main categories (freedesktop's: not "GTK" or "KDE"), and the
+ * apps under one */
+void facets_flathub(const struct vec *apps, struct vec *out, int max);
+void facet_members_flathub(const struct vec *apps, const char *key, struct vec *out);
+/* fill the lists whose source is "flathub" (sort: popular, trending,
+ * recently-added, recently-updated, verified, picks, or mobile: the popular
+ * ones made for a phone) from Flathub's API, at most max_age old (-1: only
+ * what is cached), keeping only apps built for this phone (in `fh`) */
+void sections_fill_flathub(struct vec *sections, const struct flathub *fh, long max_age);
 
 #endif
