@@ -42,6 +42,7 @@
 
 #include "zrnmetrocore.h"
 #include "zrnboard.h"
+#include "zt-clock.h"
 #include "../background-apps.h"
 #include "config-merge.h"
 #include "page-tree.h"
@@ -130,7 +131,8 @@ enum action {
 	ACT_DEV_TOUCHES,
 	ACT_DEV_LOCK,
 	ACT_AOD,		/* the always-on display: on or off */
-	ACT_AOD_CHARGING,	/* and only on a charger */
+	ACT_AOD_MODE,		/* a picker: always, or only on a charger */
+	ACT_CLOCK_24H,		/* "21:41" or "9:41 PM", for every clock */
 	ACT_DEV_DEMOLOOP,
 	ACT_DEV_DEMOLOOP_STOP,
 	ACT_HAPTIC_STRENGTH,
@@ -246,6 +248,7 @@ static struct {
 	char tickle_now[96];	/* what zrnperfd says it is doing */
 	bool dev_demo_tiles, dev_slow, dev_touches, dev_lock;
 	bool aod, aod_charging;	/* the always-on display ("aod": off, on, charging) */
+	bool clock_24h;		/* "clock_24h": on, or off for 12-hour time (core/zt-clock.h) */
 	bool about_show_repo;
 	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
 	int haptic_strength;	/* percent */
@@ -333,6 +336,10 @@ static void config_remember_loaded(void);
 /* The list picker that is open, by its action; 0 when none is. */
 static int open_picker;
 
+/* The always-on display, when switched on in Settings, starts in "Only while
+ * charging" (true) or "Always" (false). Off is the default either way. */
+#define AOD_DEFAULT_CHARGING	true
+
 static double picker(cairo_t *cr, double y, const char *caption, const char *const *options,
 		int count, int selected, int action) {
 	return zmc_picker(cr, y, caption, options, count, selected, open_picker == action, action);
@@ -342,6 +349,9 @@ static void config_load(void) {
 	char path[512], line[256];
 	config_path(path, sizeof(path));
 	led_config_defaults(&app.led);
+	app.aod = false;			/* off until switched on */
+	app.aod_charging = AOD_DEFAULT_CHARGING;
+	app.clock_24h = true;			/* as ZT_CLOCK_24H_DEFAULT */
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
@@ -442,8 +452,11 @@ static void config_load(void) {
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			app.wifi_suspend = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
 		} else if (strcmp(key, "aod") == 0) {
-			app.aod_charging = strcmp(val, "charging") == 0;
-			app.aod = app.aod_charging || strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
+			app.aod = strcmp(val, "charging") == 0 || strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
+			/* switched off, it comes back on in the default mode */
+			app.aod_charging = app.aod ? strcmp(val, "charging") == 0 : AOD_DEFAULT_CHARGING;
+		} else if (strcmp(key, "clock_24h") == 0) {
+			app.clock_24h = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		}
 	}
 	if (f) fclose(f);
@@ -573,7 +586,7 @@ static void auto_load(void) {
 }
 
 /* Every key Settings can write, as it would write it now. */
-enum { N_CONFIG_KEYS = 28 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };
+enum { N_CONFIG_KEYS = 29 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };
 static struct config_key config_keys[N_CONFIG_KEYS];
 static int config_n;	/* how many config_format filled in: N_CONFIG_KEYS is only the room */
 
@@ -617,6 +630,7 @@ static void config_format(void) {
 	KEY("quick", "%s", quick);
 	KEY("wifi_suspend", "%s", app.wifi_suspend ? "on" : "off");
 	KEY("aod", "%s", !app.aod ? "off" : app.aod_charging ? "charging" : "on");
+	KEY("clock_24h", "%s", app.clock_24h ? "on" : "off");
 	KEY("key_height", "%d", app.key_height);
 	KEY("key_sound", "%s", app.key_sound ? "on" : "off");
 	KEY("ring_volume", "%d", app.ring_vol);
@@ -1948,7 +1962,8 @@ static double draw_display(cairo_t *cr) {
 	 * screen is off; it keeps the phone from sleeping (see the shell) */
 	y = zmc_switch(cr, y, "Always-on display", app.aod, ACT_AOD);
 	if (app.aod) {
-		y = zmc_switch(cr, y, "Only while charging", app.aod_charging, ACT_AOD_CHARGING);
+		static const char *const aod_modes[] = { "Always", "Only while charging" };
+		y = picker(cr, y, "Show it", aod_modes, 2, app.aod_charging ? 1 : 0, ACT_AOD_MODE);
 	}
 	/* the shell sizes itself to the panel (360 points across); this is a step either side */
 	static const char *const scales[] = { "Compact", "Standard", "Large" };
@@ -2614,12 +2629,54 @@ static void date_job(int operation) {
     zmc_watch_fd(fd, date_ready, NULL);
 }
 
+/* The page's clock: drawn again when the minute turns (date_clock_tick). */
+static time_t date_clock_minute;
+
+static void date_clock_tick(void) {
+    if (time(NULL) / 60 != date_clock_minute) zmc_redraw();
+}
+
 static double draw_date(cairo_t *cr) {
     double y = zmc_header(cr, "date + region");
+    /* the time and date now, as every clock shows them (24-hour time below) */
+    {
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        date_clock_minute = now / 60;
+        char hm[16], ampm[4], day[64];
+        zt_clock_parts(&tm, app.clock_24h, hm, sizeof(hm), ampm, sizeof(ampm));
+        strftime(day, sizeof(day), "%A, %B %-d %Y", &tm);
+        cairo_set_source_rgb(cr, 1, 1, 1);
+        zmc_text(cr, hm, FONT_LIGHT, 48, ZMC_MARGIN, y, 0);
+        if (ampm[0]) {
+            PangoLayout *l = pango_cairo_create_layout(cr);
+            PangoFontDescription *d = pango_font_description_from_string(FONT_LIGHT);
+            pango_font_description_set_absolute_size(d, 48 * PANGO_SCALE);
+            pango_layout_set_font_description(l, d);
+            pango_layout_set_text(l, hm, -1);
+            int tw, th;
+            pango_layout_get_pixel_size(l, &tw, &th);
+            pango_font_description_free(d);
+            g_object_unref(l);
+            cairo_set_source_rgb(cr, .62, .62, .62);
+            zmc_text(cr, ampm, FONT_SEMILIGHT, 20, ZMC_MARGIN + tw + 8, y + 30, 0);
+        }
+        cairo_set_source_rgb(cr, .62, .62, .62);
+        zmc_text(cr, day, FONT_REGULAR, 15, ZMC_MARGIN, y + 64, 0);
+        if (date_fields[2][0]) {
+            zmc_text(cr, date_fields[2], FONT_REGULAR, 13, ZMC_MARGIN, y + 86, 0);
+        }
+        cairo_set_source_rgb(cr, 1, 1, 1);
+        y += date_fields[2][0] ? 116 : 96;
+    }
+    /* how every clock shows the time: saved at once, unlike the rest here */
+    y = zmc_switch(cr, y, "24-hour time", app.clock_24h, ACT_CLOCK_24H);
     y = zmc_switch(cr, y, "Set time automatically", date_auto, ACT_DATE_AUTO);
     if (!date_auto) {
         y = zmc_textbox(cr, y, "Date (YYYY-MM-DD)", date_fields[0], date_focus == 0, ACT_DATE_FIELD, 0);
-        y = zmc_textbox(cr, y, "Time (HH:MM)", date_fields[1], date_focus == 1, ACT_DATE_FIELD, 1);
+        /* typed as 24-hour time whatever the clocks show: what timedatectl takes */
+        y = zmc_textbox(cr, y, "Time (HH:MM, 24-hour)", date_fields[1], date_focus == 1, ACT_DATE_FIELD, 1);
     }
     y = zmc_textbox(cr, y, "Time zone", date_fields[2], date_focus == 2, ACT_DATE_FIELD, 2);
     y = picker(cr, y, "Display language", LANG_NAMES, 11, date_lang, ACT_DATE_LANG);
@@ -3359,7 +3416,7 @@ static double draw_power(cairo_t *cr) {
 static double draw_system(cairo_t *cr) {
 	double y = zmc_header(cr, "system");
 	char detail[128];
-	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
+	y = zmc_entry(cr, y, "date + region", "date, time, 24-hour clock, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
 	snprintf(detail, sizeof(detail), "key height %d, keyboard sounds %s", app.key_height, app.key_sound ? "on" : "off");
 	y = zmc_entry(cr, y, "keyboard", detail, ACT_OPEN_PAGE, PAGE_KEYBOARD);
 	y = zmc_entry(cr, y, "developer", "demo tiles, show touches, ZrnDevTest", ACT_OPEN_PAGE, PAGE_DEV);
@@ -3487,6 +3544,7 @@ static bool is_picker(int action) {
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
 	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
+	case ACT_AOD_MODE:
 		return true;
 	}
 	return (action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST) ||
@@ -3980,8 +4038,12 @@ static void activate(int action, int arg) {
 		app.aod = !app.aod;
 		config_save();
 		break;
-	case ACT_AOD_CHARGING:
-		app.aod_charging = !app.aod_charging;
+	case ACT_AOD_MODE:
+		app.aod_charging = arg == 1;
+		config_save();
+		break;
+	case ACT_CLOCK_24H:
+		app.clock_24h = !app.clock_24h;
 		config_save();
 		break;
 	case ACT_DEV_DEMOLOOP: {
@@ -4423,7 +4485,7 @@ static void arrived(int page) {
 			fprintf(stderr, "ztsettings: could not end Bluetooth discovery\n");
 		}
 	}
-    if (page == PAGE_DATE) { date_focus = -1; date_job(false); }
+    if (page == PAGE_DATE) { date_focus = -1; date_job(false); zmc_every(5000, date_clock_tick); }
 	if (page == PAGE_MOBILE) {
 		cell_load();
 		zmc_every(3000, cell_tick);	/* "connecting" becomes "connected" by itself */

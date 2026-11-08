@@ -4,7 +4,20 @@
 hours to avoid burn-in." With the screen off, the panel shows the time, the
 date, the battery and the apps with notifications waiting.
 
-## Stage 1: drawn by the shell, the SoC awake (feature/aod)
+## Stage 1: drawn by the shell, the SoC awake (feature/aod, feature/aod-2)
+
+### Choices, and where each one lives
+
+| What | Now | Where |
+|---|---|---|
+| Off until switched on | Settings > Display > Always-on display | the shell: `load_config` (`aod_mode = AOD_OFF`); Settings: `config_load` |
+| Mode when switched on | "Show it": Always / **Only while charging** | `AOD_DEFAULT_CHARGING` in `ztmetro/settings/ztsettings.c` |
+| Dark on battery below | 15 % | `AOD_MIN_BATTERY` in `ztmetro/ztmetro.c` |
+| Moves every | 10 minutes, round 9 places | `AOD_SHIFT_S`, `AOD_SPOTS` |
+| Colours | time 0.92, the rest grey 0.62 | `AOD_WHITE`, `AOD_GREY` |
+| Waiting apps' glyphs | 16 points, grey, outline only | `AOD_ICON`, `aod_icon` |
+| Double tap wakes | on; 300 ms tap, 450 ms gap, 48 points | `AOD_DOUBLE_TAP`, `AOD_TAP_MS`, `AOD_TAP_GAP_MS`, `AOD_TAP_SLOP` |
+| 12/24-hour clock | 24-hour unless `clock_24h = off` | `core/zt-clock.h` (`ZT_CLOCK_24H_DEFAULT`); Settings > date + region |
 
 No kernel or boot image change. In `ztmetro/ztmetro.c` (search `aod_`):
 
@@ -12,7 +25,12 @@ No kernel or boot image change. In `ztmetro/ztmetro.c` (search `aod_`):
   does everything it did (lock sound, Waydroid freeze, perfd's "screen
   off", Wi-Fi suspend, apps told they are hidden) except disabling the
   output. `screen_on` is false, so touches, apps and timers behave as for a
-  dark screen; the power and home keys wake it as before.
+  dark screen; the power key, home and the force press wake it as before.
+- A double tap on the glass wakes it too: the touchscreen keeps sensing
+  while the panel is lit (s6sy761 stays runtime-active with the screen off;
+  it always did, the shell just ignored the touches). A single tap, a touch
+  held longer than 300 ms or moved, and two fingers do nothing. With the
+  always-on display off, the glass does nothing, as before.
 - The panel goes to the brightness table's level 0 (L* 18, the floor of the
   shell's own ramp; about 2.5 % of the peak's luminance). The ramp is held:
   a goal that comes meanwhile (light sensor, Settings) is kept for the wake,
@@ -22,23 +40,27 @@ No kernel or boot image change. In `ztmetro/ztmetro.c` (search `aod_`):
   drawn while it shows.
 - **Only while charging** (`aod=charging`). On battery it goes dark below
   15 %, and comes back on a charger.
-- The ctl takes `aod off|on|charging` for the session (tests, scripts).
-- `ztmetro --render DIR` writes `aod.png` and `aod-place-0..8.png`.
+- The ctl takes `aod off|on|charging` for the session (tests, scripts),
+  and `aod test battery N|real` and `aod test charger on|off|real`: the
+  rules (15 %, only while charging) tried without touching charging.
+- `ztmetro --render DIR` writes `aod.png`, `aod-place-0..8.png`, and the
+  12-hour clock's longest time (12:59 PM) at each place,
+  `aod-12h-place-0..8.png`, with `lock-clock-12h.png` and `-24h.png`.
 
 ### Burn-in
 
 - Everything moves together to the next of 9 places (up to 14 points, 56
-  pixels, sideways and 16 up or down) every 2 hours (`AOD_SHIFT_S`): 12
-  moves a day over 9 places, so a place is not tied to an hour.
+  pixels, sideways and 16 up or down) every 10 minutes (`AOD_SHIFT_S`), as
+  the research report advised: the date and the battery stand still between
+  moves, so they should not stand long. Each place gets the same share.
 - Thin strokes (Segoe UI Light for the time), grey (0.62) for all but the
-  time, no filled area but the battery's level. The night-light colour
-  temperature applies (less blue).
+  time, no filled area but the battery's level. A waiting app's glyph is
+  drawn as an outline whatever it is (`aod_icon`: the shape less itself
+  shrunk by 1.1 points, so a solid glyph keeps only its edge). The
+  night-light colour temperature applies (less blue).
 - The block starts 18 % down the screen: clear of the status bar and the
   panel's top self-mask band (rows 0-149, 1.1b) at every place, and far
   from the nav bar and the bottom band.
-- Open: the earlier research report suggests moving every 10-15 minutes
-  rather than 2 hours, since the date and battery stand still between
-  moves. One constant.
 - A hung shell leaves a static picture lit until the battery ends. Stage 3
   (the panel's own self-move) is the only real fix.
 
