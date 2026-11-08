@@ -88,6 +88,7 @@ enum action {
 	ACT_FORCE_MS,		/* the force press's vibration: a slider */
 	ACT_WIFI_RADIO,
 	ACT_WIFI_SUSPEND,
+	ACT_WIFI_POWERSAVE,	/* the chip's 802.11 power save, through zrnperfd */
 	ACT_WIFI_CONNECT,
 	ACT_WIFI_RESCAN,
 	ACT_WIFI_PASSWORD,	/* the box */
@@ -240,6 +241,7 @@ static struct {
 
 	int perf_profile;	/* 0 power saver, 1 balanced, 2 performance */
 	bool perf_deepsleep;
+	bool wifi_powersave;	/* zrnperfd's wifi_powersave */
 	int tickle[3];		/* mode on battery, plugged in, power saver: 0 none .. 3 high */
 	char tickle_now[96];	/* what zrnperfd says it is doing */
 	bool dev_demo_tiles, dev_slow, dev_touches, dev_lock;
@@ -280,6 +282,7 @@ static struct {
 	.swappiness = 60,
 	.perf_profile = 1,
 	.perf_deepsleep = true,
+	.wifi_powersave = true,
 	.menu_speed_idx = 1,
 	.tickle = { 2, 1, 3 },
 	.dev_lock = true,
@@ -473,6 +476,8 @@ static void perf_load(void) {
 				strcmp(value, "performance") == 0 ? 2 : 1;
 		} else if (sscanf(line, "deepsleep=%31s", value) == 1) {
 			app.perf_deepsleep = strcmp(value, "on") == 0;
+		} else if (sscanf(line, "wifi_powersave=%31s", value) == 1) {
+			app.wifi_powersave = strcmp(value, "on") == 0;
 		}
 		static const char *const conditions[] = { "battery", "charging", "saver" };
 		static const char *const modes[] = { "none", "nominal", "moderate", "high" };
@@ -2299,7 +2304,10 @@ static void bt_tick(void) {
 static double draw_wifi(cairo_t *cr) {
 	double y = zmc_header(cr, "Wi-Fi");
 	y = zmc_switch(cr, y, "Wi-Fi networking", app.wifi_on, ACT_WIFI_RADIO);
-	y = zmc_switch(cr, y, "Suspend Wi-Fi on sleep", app.wifi_suspend, ACT_WIFI_SUSPEND);
+	/* off by default, as Android: Wi-Fi stays connected with the screen off, the
+	 * chip in power save, so the phone is reachable and push arrives */
+	y = zmc_switch(cr, y, "Wi-Fi power saving", app.wifi_powersave, ACT_WIFI_POWERSAVE);
+	y = zmc_switch(cr, y, "Turn Wi-Fi off when the screen is off", app.wifi_suspend, ACT_WIFI_SUSPEND);
 
 	if (app.wifi_status[0]) {
 		zmc_set_rgb(cr, ACCENTS[app.accent].color);
@@ -3926,6 +3934,10 @@ static void activate(int action, int arg) {
 	case ACT_IB_ENGINE:
 		perf_tell(arg == 1 ? "ib engine score\n" : "ib engine cpu\n");
 		snprintf(ib.prefer, sizeof(ib.prefer), "%s", arg == 1 ? "score" : "cpu");
+		break;
+	case ACT_WIFI_POWERSAVE:
+		app.wifi_powersave = !app.wifi_powersave;
+		perf_tell(app.wifi_powersave ? "wifi-powersave on\n" : "wifi-powersave off\n");
 		break;
 	case ACT_PERF_DEEPSLEEP:
 		app.perf_deepsleep = !app.perf_deepsleep;

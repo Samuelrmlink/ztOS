@@ -26,6 +26,10 @@
  *				the tickle mode for each condition (see tickle.c):
  *				on battery, plugged in, and with the power saver
  *				profile, which wins over the other two
+ *	wifi-sleep on | off	the Wi-Fi radio switched off 5 min after the
+ *				screen, on battery (off by default: Wi-Fi stays
+ *				associated, in power save, like Android's Doze)
+ *	wifi-powersave on | off	the chip's 802.11 power save (on by default)
  *	motion MS		the touch boost's lift, held for MS (at most 3 s):
  *				the shell animating on its own clock past a touch
  *
@@ -228,12 +232,19 @@ static bool plugged;
 static bool wifi_asleep;
 static long wifi_sleep_at;
 #define WIFI_SLEEP_MS	300000
+/* wifi-sleep: whether that 5-minute switch-off happens at all (default no:
+ * the phone stays reachable); wifi-powersave: the chip's own power save */
+static bool wifi_sleep_enabled = false, wifi_powersave = true;
 
 /* While this file exists the radio is never switched off: for working on the
  * phone over Wi-Fi or Tailscale with the cable out (delete it to save the power) */
 #define WIFI_KEEP_FILE	"/etc/zrnperfd/keep-wifi"
 
 static void wifi_radio(bool on) {
+	if (!on && !wifi_sleep_enabled) {
+		wifi_sleep_at = 0;
+		return;
+	}
 	if (!on && access(WIFI_KEEP_FILE, F_OK) == 0) {
 		static bool said;
 		if (!said)
@@ -264,6 +275,35 @@ static void wifi_radio(bool on) {
 	fprintf(stderr, on ? "zrnperfd: Wi-Fi radio back on\n" :
 		"zrnperfd: Wi-Fi radio off: screen off on battery for 5 min, nothing holding it"
 		" (" WIFI_KEEP_FILE " keeps it on)\n");
+}
+
+/*
+ * The chip's 802.11 power save (sleep between beacons, wake for traffic).
+ * NetworkManager sets it again on each connection from its own wifi.powersave
+ * (2 disable, 3 enable), so that is written too; iw makes it take now.
+ */
+#define NM_PS_CONF	"/etc/NetworkManager/conf.d/50-ztos-wifi-powersave.conf"
+static void wifi_powersave_apply(void) {
+	FILE *f = fopen(NM_PS_CONF, "w");
+	if (f) {
+		fprintf(f, "# zrnperfd (Settings > Wi-Fi > Wi-Fi power saving)\n"
+			"[connection]\nwifi.powersave = %d\n", wifi_powersave ? 3 : 2);
+		fclose(f);
+	}
+	DIR *d = opendir("/sys/class/net");
+	struct dirent *e;
+	while (d && (e = readdir(d))) {
+		char path[300], cmd[160];
+		if (e->d_name[0] == '.' || strlen(e->d_name) > 32) continue;
+		snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", e->d_name);
+		if (access(path, F_OK) != 0) continue;
+		snprintf(cmd, sizeof(cmd), "iw dev %s set power_save %s >/dev/null 2>&1",
+			 e->d_name, wifi_powersave ? "on" : "off");
+		if (system(cmd) != 0)
+			fprintf(stderr, "zrnperfd: %s: power save not set\n", e->d_name);
+	}
+	if (d) closedir(d);
+	fprintf(stderr, "zrnperfd: Wi-Fi power save %s\n", wifi_powersave ? "on" : "off");
 }
 
 /* a cable in: any power supply other than the battery says it is online */
@@ -1203,6 +1243,8 @@ static void status(void) {
 		fprintf(f, "cpus=%d\nclusters=%d\n", cpu_count, n_clusters);
 		fprintf(f, "condition=%s\nboost=%s\n", conditions[condition()], boost_names[boost]);
 		fprintf(f, "wifi=%s\n", wifi_asleep ? "sleeping" : "on");
+		fprintf(f, "wifi_sleep=%s\nwifi_powersave=%s\n", wifi_sleep_enabled ? "on" : "off",
+			wifi_powersave ? "on" : "off");
 		fprintf(f, "ib=%s\nib_engine=%s\nib_rung=%s\n", ib_names[ib_mode], ibnet_engine(),
 			ib_last >= 0 ? boost_names[ib_last] : "-");
 		for (int c = 0; c < 3; c++) {
@@ -1220,6 +1262,8 @@ static void save(void) {
 	FILE *f = fopen(STATE, "w");
 	if (f) {
 		fprintf(f, "profile %s\ndeepsleep %s\n", names[profile], deepsleep ? "on" : "off");
+		fprintf(f, "wifi-sleep %s\nwifi-powersave %s\n", wifi_sleep_enabled ? "on" : "off",
+			wifi_powersave ? "on" : "off");
 		fprintf(f, "ib %s\n", ib_names[ib_mode]);
 		fprintf(f, "ib engine %s\n", ibnet_using_score() ? "score" : "cpu");
 		for (int c = 0; c < 3; c++) {
@@ -1341,6 +1385,20 @@ static int command(char *line, bool persist) {
 		}
 	} else if (strcmp(what, "deepsleep") == 0) {
 		deepsleep = strcmp(value, "on") == 0;
+	} else if (strcmp(what, "wifi-sleep") == 0) {
+		wifi_sleep_enabled = strcmp(value, "on") == 0;
+		if (!wifi_sleep_enabled) {
+			wifi_sleep_at = 0;
+			if (wifi_asleep) wifi_radio(true);
+		} else if (!screen_on && !plugged && !wifi_asleep) {
+			wifi_sleep_at = boost_ms();
+		}
+	} else if (strcmp(what, "wifi-powersave") == 0) {
+		bool v = strcmp(value, "on") == 0;
+		if (v != wifi_powersave || !persist) {
+			wifi_powersave = v;
+			if (persist) wifi_powersave_apply();
+		}
 	} else if (strcmp(what, "screen") == 0) {
 		screen_on = strcmp(value, "off") != 0;
 		persist = false;
@@ -1421,6 +1479,7 @@ int main(void) {
 	if (f) {
 		fclose(f);
 	}
+	wifi_powersave_apply();
 	plugged = read_plugged();
 	tickle_init();
 	tickle_screen(screen_on);
