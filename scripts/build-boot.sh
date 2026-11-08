@@ -7,7 +7,7 @@
 #     --fallback boot|recovery   where a watchdog reset / panic lands (default
 #                                boot: TWRP on BOOT, this image on RECOVERY)
 #     --no-ufs                   leave the UFS host disabled
-#     --power                    MAX77705 charger + fuel gauge
+#     --power                    MAX77705 charger + fuel gauge, P9320 wireless receiver
 #     --acpm                     ACPM mailbox to the S2MPS18 PMIC (rails)
 #     --cpufreq                  CPU frequency scaling, vendor PLL tables (implies --acpm)
 #     --touch                    S6SY761 touch controller (implies --acpm: its
@@ -40,12 +40,12 @@ FALLBACK=boot
 DTS_FLAGS=()
 EXTRA=
 WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
-UFS=1 ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP=
+UFS=1 ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= POWER=
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--fallback) FALLBACK=$2; shift ;;
 	--no-ufs) UFS= ;;
-	--power) DTS_FLAGS+=(--power) ;;
+	--power) DTS_FLAGS+=(--power); POWER=1 ;;
 	--touch) DTS_FLAGS+=(--touch); ACPM=1 ;;
 	--gpu) DTS_FLAGS+=(--gpu); GPU=1; ACPM=1 ;;
 	--decon) DTS_FLAGS+=(--decon); DECON=1 ;;
@@ -110,6 +110,8 @@ python3 "$ROOT/kernel/patch-touch-force.py" "$SRC"
 python3 "$ROOT/kernel/patch-pinctrl-resume.py" "$SRC"
 # the firmware's roams are reported to the host the way Samsung's driver does
 python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
+# the wireless charging receiver (IDT P9320), built in with --power
+python3 "$ROOT/kernel/patch-p9320.py" "$SRC"
 
 echo "=== initramfs ==="
 LIST=$B/initramfs.list
@@ -223,6 +225,11 @@ if [ -n "$CPUFREQ" ]; then
 else
 	cfg --disable CPU_FREQ
 	cfg --disable ARM_S9P_CPUFREQ
+fi
+if [ -n "$POWER" ]; then
+	cfg --enable CHARGER_P9320
+else
+	cfg --disable CHARGER_P9320
 fi
 if [ -n "$GPU" ]; then
 	cfg --enable DRM_PANFROST
