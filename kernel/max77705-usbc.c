@@ -43,6 +43,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/power_supply.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
@@ -145,6 +146,83 @@
 
 #define POLL_MS			1000	/* only without an interrupt */
 
+/* BC_STATUS ChgTyp / PrChgTyp, CC_STATUS0 CCStat / CCIStat */
+#define CHGTYP_NONE		0
+#define CHGTYP_SDP		1
+#define CHGTYP_CDP		2
+#define CHGTYP_DCP		3
+#define CCSTAT_NONE		0
+#define CCSTAT_SINK		1	/* the phone sinks: a source is attached */
+#define CCSTAT_SOURCE		2
+#define CCI_DEFAULT		1
+#define CCI_1_5A		2
+#define CCI_3_0A		3
+
+/*
+ * The charger types this driver tells apart: the max77705-usbc
+ * power_supply's charger_type attribute (names as in the charging contract).
+ */
+enum usbc_kind {
+	K_NONE,		/* no VBUS */
+	K_UNKNOWN,	/* VBUS, BC1.2 not (yet) resolved */
+	K_SDP,
+	K_CDP,
+	K_DCP,
+	K_DCD_TIMEOUT,
+	K_SAMSUNG_2A,	/* PrChgTyp 1..6 */
+	K_APPLE_05A,
+	K_APPLE_1A,
+	K_APPLE_2A,
+	K_APPLE_12W,
+	K_DCP_3A,
+	K_RP_1_5A,	/* Type-C current wins over BC1.2 */
+	K_RP_3A,
+	K_AFC_9V,
+	K_QC2_9V,
+	K_PD,
+	K_N
+};
+
+static const char * const kind_name[K_N] = {
+	[K_NONE] = "none",		[K_UNKNOWN] = "unknown",
+	[K_SDP] = "sdp",		[K_CDP] = "cdp",
+	[K_DCP] = "dcp",		[K_DCD_TIMEOUT] = "dcd-timeout",
+	[K_SAMSUNG_2A] = "samsung-2a",	[K_APPLE_05A] = "apple-0.5a",
+	[K_APPLE_1A] = "apple-1a",	[K_APPLE_2A] = "apple-2a",
+	[K_APPLE_12W] = "apple-12w",	[K_DCP_3A] = "dcp-3a",
+	[K_RP_1_5A] = "rp-1.5a",	[K_RP_3A] = "rp-3a",
+	[K_AFC_9V] = "afc-9v",		[K_QC2_9V] = "qc2-9v",
+	[K_PD] = "pd",
+};
+
+/*
+ * Input current per type, mA: stock's cable-info table (DT, rev26) via
+ * sec_bat_cable_check(): USB 475, CDP 1500, TA (DCP and every "unofficial
+ * TA") 1800, DCD timeout 500, 9V TA 1650; Rp 1.5 A 1500, Rp 3.0 A 3000
+ * (sec_bat_set_rp_current). Two are below stock on purpose: stock gives
+ * Apple 0.5 A and 1 A signatures the TA's 1800 and lets AICL find out.
+ */
+static const unsigned int kind_ma[K_N] = {
+	[K_NONE] = 0,			[K_UNKNOWN] = 500,
+	[K_SDP] = 475,			[K_CDP] = 1500,
+	[K_DCP] = 1800,			[K_DCD_TIMEOUT] = 500,
+	[K_SAMSUNG_2A] = 1800,		[K_APPLE_05A] = 500,
+	[K_APPLE_1A] = 1000,		[K_APPLE_2A] = 1800,
+	[K_APPLE_12W] = 1800,		[K_DCP_3A] = 1800,
+	[K_RP_1_5A] = 1500,		[K_RP_3A] = 3000,
+	[K_AFC_9V] = 1650,		[K_QC2_9V] = 1650,
+	[K_PD] = 0,			/* from the contract */
+};
+
+/* what the power_supply shows; voltage_now is read live from st[] */
+struct usbc_pub {
+	bool online;
+	enum usbc_kind kind;
+	enum power_supply_usb_type usb_type;
+	unsigned int cur_ua;
+	unsigned int vmax_uv;
+};
+
 #define LOG_N			256
 #define LOG_DATA		33
 
@@ -188,6 +266,10 @@ struct max77705_usbc {
 	u8 st[STATUS_N];		/* 0x06..0x0d, last read */
 
 	u8 path;			/* last CONTROL1 written, 0 = none */
+
+	struct power_supply *psy;
+	struct mutex pub_lock;
+	struct usbc_pub pub;
 
 	spinlock_t log_lock;
 	struct log_entry *log;
@@ -576,6 +658,215 @@ static int usbc_set_path(struct max77705_usbc *u, u8 val)
 	return 0;
 }
 
+/* ---- charger type --------------------------------------------------------- */
+
+/* BC1.2 and the proprietary signatures, as max77705_resolve_chgtyp() and
+ * muic_vps_table do */
+static enum usbc_kind usbc_bc_kind(u8 bc)
+{
+	static const enum usbc_kind prop[8] = {
+		K_NONE, K_SAMSUNG_2A, K_APPLE_05A, K_APPLE_1A, K_APPLE_2A,
+		K_APPLE_12W, K_DCP_3A, K_NONE,
+	};
+	enum usbc_kind p = prop[FIELD_GET(BC_PRCHGTYP, bc)];
+
+	if (!(bc & BC_VBUSDET))
+		return K_NONE;
+	switch (FIELD_GET(BC_CHGTYP, bc)) {
+	case CHGTYP_SDP:
+		if (bc & BC_DCDTMO)
+			return K_DCD_TIMEOUT;
+		/* a Samsung/Apple signature on an SDP/CDP is an "Unofficial TA" */
+		return (p != K_NONE && p != K_DCP_3A) ? p : K_SDP;
+	case CHGTYP_CDP:
+		return (p != K_NONE && p != K_DCP_3A) ? p : K_CDP;
+	case CHGTYP_DCP:
+		return p != K_NONE ? p : K_DCP;
+	default:
+		return K_UNKNOWN;
+	}
+}
+
+static bool kind_is_dcp(enum usbc_kind k)
+{
+	return k == K_DCP || (k >= K_SAMSUNG_2A && k <= K_DCP_3A) ||
+	       k == K_AFC_9V || k == K_QC2_9V;
+}
+
+/* the source's Rp current while the phone is its sink, mA (0: none) */
+static unsigned int usbc_rp_ma(struct max77705_usbc *u)
+{
+	u8 cc0 = u->st[ST(REG_CC_STATUS0)];
+
+	if (FIELD_GET(CC0_CCSTAT, cc0) != CCSTAT_SINK)
+		return 0;
+	switch (FIELD_GET(CC0_CCISTAT, cc0)) {
+	case CCI_DEFAULT: return 500;
+	case CCI_1_5A: return 1500;
+	case CCI_3_0A: return 3000;
+	default: return 0;
+	}
+}
+
+/* VBADC (USBC_STATUS1[7:4]) is a 1 V-wide window: report its middle, uV */
+static int usbc_vbus_uv(struct max77705_usbc *u)
+{
+	unsigned int code = FIELD_GET(STATUS1_VBADC, READ_ONCE(u->st[0]));
+
+	if (!(READ_ONCE(u->st[ST(REG_BC_STATUS)]) & BC_VBUSDET) || code == 0)
+		return 0;
+	if (code == 1)
+		return 4150000;			/* 3.8..4.5 V */
+	return (code + 3) * 1000000;		/* 2: 4.5..5.5 V, ... */
+}
+
+static void usbc_compute(struct max77705_usbc *u, struct usbc_pub *n)
+{
+	u8 bc = u->st[ST(REG_BC_STATUS)];
+	u8 ccstat = FIELD_GET(CC0_CCSTAT, u->st[ST(REG_CC_STATUS0)]);
+	enum usbc_kind k = usbc_bc_kind(bc);
+	unsigned int ma = kind_ma[k], rp = usbc_rp_ma(u);
+
+	memset(n, 0, sizeof(*n));
+	n->online = (bc & BC_VBUSDET) && ccstat != CCSTAT_SOURCE;
+	if (!n->online) {
+		n->kind = K_NONE;
+		n->usb_type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
+		return;
+	}
+
+	/* Type-C current is what the source guarantees whatever BC1.2 says */
+	if (rp > ma) {
+		ma = rp;
+		if (k == K_SDP || k == K_DCD_TIMEOUT || k == K_UNKNOWN)
+			k = rp >= 3000 ? K_RP_3A : K_RP_1_5A;
+	}
+
+	n->kind = k;
+	n->cur_ua = ma * 1000;
+	n->vmax_uv = 5000000;
+	switch (k) {
+	case K_SDP:
+		n->usb_type = POWER_SUPPLY_USB_TYPE_SDP;
+		break;
+	case K_CDP:
+		n->usb_type = POWER_SUPPLY_USB_TYPE_CDP;
+		break;
+	case K_PD:
+		n->usb_type = POWER_SUPPLY_USB_TYPE_PD;
+		break;
+	default:
+		if (kind_is_dcp(k))
+			n->usb_type = POWER_SUPPLY_USB_TYPE_DCP;
+		else if (ccstat == CCSTAT_SINK)
+			n->usb_type = POWER_SUPPLY_USB_TYPE_C;
+		else
+			n->usb_type = POWER_SUPPLY_USB_TYPE_UNKNOWN;
+		break;
+	}
+}
+
+/* publish; a uevent only when something other than voltage_now changed */
+static void usbc_publish(struct max77705_usbc *u)
+{
+	struct usbc_pub n;
+	bool changed;
+
+	usbc_compute(u, &n);
+	mutex_lock(&u->pub_lock);
+	changed = n.online != u->pub.online || n.kind != u->pub.kind ||
+		  n.usb_type != u->pub.usb_type || n.cur_ua != u->pub.cur_ua ||
+		  n.vmax_uv != u->pub.vmax_uv;
+	u->pub = n;
+	mutex_unlock(&u->pub_lock);
+	if (!changed)
+		return;
+	dev_info(u->dev, "%s: %s, %u mA, %u mV max (bc=%02x cc0=%02x pd1=%02x)\n",
+		 n.online ? "online" : "offline", kind_name[n.kind],
+		 n.cur_ua / 1000, n.vmax_uv / 1000, u->st[ST(REG_BC_STATUS)],
+		 u->st[ST(REG_CC_STATUS0)], u->st[ST(REG_PD_STATUS1)]);
+	if (u->psy)
+		power_supply_changed(u->psy);
+}
+
+/* ---- power_supply --------------------------------------------------------- */
+
+static const enum power_supply_property usbc_props[] = {
+	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_USB_TYPE,
+	POWER_SUPPLY_PROP_CURRENT_MAX,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_VOLTAGE_MAX,
+};
+
+static int usbc_get_property(struct power_supply *psy,
+			     enum power_supply_property psp,
+			     union power_supply_propval *val)
+{
+	struct max77705_usbc *u = power_supply_get_drvdata(psy);
+	struct usbc_pub p;
+
+	mutex_lock(&u->pub_lock);
+	p = u->pub;
+	mutex_unlock(&u->pub_lock);
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_ONLINE:
+		val->intval = p.online;
+		break;
+	case POWER_SUPPLY_PROP_USB_TYPE:
+		val->intval = p.usb_type;
+		break;
+	case POWER_SUPPLY_PROP_CURRENT_MAX:
+		val->intval = p.cur_ua;
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		val->intval = p.online ? usbc_vbus_uv(u) : 0;
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
+		val->intval = p.vmax_uv;
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static ssize_t charger_type_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct max77705_usbc *u = power_supply_get_drvdata(to_power_supply(dev));
+	enum usbc_kind k;
+
+	mutex_lock(&u->pub_lock);
+	k = u->pub.kind;
+	mutex_unlock(&u->pub_lock);
+	return sysfs_emit(buf, "%s\n", kind_name[k]);
+}
+static DEVICE_ATTR_RO(charger_type);
+
+static struct attribute *usbc_psy_attrs[] = {
+	&dev_attr_charger_type.attr,
+	NULL
+};
+ATTRIBUTE_GROUPS(usbc_psy);
+
+static char *usbc_supplied_to[] = { "max77705-charger" };
+
+static const struct power_supply_desc usbc_psy_desc = {
+	.name		= "max77705-usbc",
+	.type		= POWER_SUPPLY_TYPE_USB,
+	.usb_types	= BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
+			  BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+			  BIT(POWER_SUPPLY_USB_TYPE_DCP) |
+			  BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+			  BIT(POWER_SUPPLY_USB_TYPE_C) |
+			  BIT(POWER_SUPPLY_USB_TYPE_PD),
+	.properties	= usbc_props,
+	.num_properties	= ARRAY_SIZE(usbc_props),
+	.get_property	= usbc_get_property,
+};
+
 /* ---- events --------------------------------------------------------------- */
 
 /* SYSMsg: log it; after an MCU (re)boot re-apply the masks and forget what
@@ -635,6 +926,8 @@ static void usbc_event_work(struct work_struct *work)
 	 * reboot, and whenever VBUS comes back (the MCU may have dropped it) */
 	if (!u->path || (vbus && !was_vbus))
 		usbc_set_path(u, COM_USB);
+
+	usbc_publish(u);
 }
 
 static void usbc_poll_work(struct work_struct *work)
@@ -732,20 +1025,29 @@ static void usbc_debugfs_init(struct max77705_usbc *u)
 
 /* ---- probe ---------------------------------------------------------------- */
 
-static void usbc_teardown(void *data)
+/* runs after the interrupt is freed and before the power_supply goes */
+static void usbc_stop_work(void *data)
 {
 	struct max77705_usbc *u = data;
 
 	debugfs_remove_recursive(u->debugfs);
 	cancel_delayed_work_sync(&u->poll_work);
+	cancel_work_sync(&u->event_work);
+}
+
+static void usbc_destroy_wq(void *data)
+{
+	struct max77705_usbc *u = data;
+
 	destroy_workqueue(u->wq);
 }
 
 static int max77705_usbc_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
+	struct power_supply_config psy_cfg = {};
 	struct max77705_usbc *u;
-	u8 rev[2], minor = 0;
+	u8 rev[2], mask[4], minor = 0;
 	int ret;
 
 	u = devm_kzalloc(dev, sizeof(*u), GFP_KERNEL);
@@ -757,6 +1059,7 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	spin_lock_init(&u->ev_lock);
 	spin_lock_init(&u->log_lock);
 	mutex_init(&u->mbox_lock);
+	mutex_init(&u->pub_lock);
 	init_completion(&u->cmd_done);
 	INIT_WORK(&u->event_work, usbc_event_work);
 	INIT_DELAYED_WORK(&u->poll_work, usbc_poll_work);
@@ -786,22 +1089,33 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	u->wq = alloc_ordered_workqueue("max77705-usbc", 0);
 	if (!u->wq)
 		return -ENOMEM;
-	ret = devm_add_action_or_reset(dev, usbc_teardown, u);
+	ret = devm_add_action_or_reset(dev, usbc_destroy_wq, u);
 	if (ret)
 		return ret;
 
-	{
-		u8 m[4];
-
-		if (!usbc_read(u, REG_UIC_INT_M, m, 4))
-			dev_info(dev, "masks were %02x %02x %02x %02x\n",
-				 m[0], m[1], m[2], m[3]);
-	}
+	if (!usbc_read(u, REG_UIC_INT_M, mask, 4))
+		dev_info(dev, "masks were %02x %02x %02x %02x\n",
+			 mask[0], mask[1], mask[2], mask[3]);
 	ret = usbc_set_masks(u);
 	if (ret)
 		return dev_err_probe(dev, ret, "mask write failed\n");
 
+	usbc_compute(u, &u->pub);
+	psy_cfg.drv_data = u;
+	psy_cfg.fwnode = dev_fwnode(dev);
+	psy_cfg.attr_grp = usbc_psy_groups;
+	/* by name, not a power-supplies phandle on the charger node: the
+	 * charger must not wait for this driver to probe */
+	psy_cfg.supplied_to = usbc_supplied_to;
+	psy_cfg.num_supplicants = ARRAY_SIZE(usbc_supplied_to);
+	u->psy = devm_power_supply_register(dev, &usbc_psy_desc, &psy_cfg);
+	if (IS_ERR(u->psy))
+		return dev_err_probe(dev, PTR_ERR(u->psy), "power_supply\n");
+
 	usbc_debugfs_init(u);
+	ret = devm_add_action_or_reset(dev, usbc_stop_work, u);
+	if (ret)
+		return ret;
 
 	if (u->irq > 0) {
 		ret = devm_request_threaded_irq(dev, u->irq, NULL, usbc_irq,
