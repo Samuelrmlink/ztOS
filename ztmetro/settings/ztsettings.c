@@ -137,6 +137,9 @@ enum action {
 	ACT_AOD_MODE,		/* a picker: always, or only on a charger */
 	ACT_CLOCK_24H,		/* "21:41" or "9:41 PM", for every clock */
 	ACT_LOCK_TIMEOUT,	/* a picker: how long the lock screen stays lit */
+	ACT_DOUBLE_TAP_WAKE,	/* a double tap on the always-on display wakes it */
+	ACT_AOD_AUTO,		/* the always-on display's level from the room */
+	ACT_AOD_LOW_OFF,	/* and dark below 15 % on battery */
 	ACT_DEV_DEMOLOOP,
 	ACT_DEV_DEMOLOOP_STOP,
 	ACT_HAPTIC_STRENGTH,
@@ -256,7 +259,10 @@ static struct {
 	bool dev_demo_tiles, dev_slow, dev_touches, dev_lock;
 	bool aod, aod_charging;	/* the always-on display ("aod": off, on, charging) */
 	bool clock_24h;		/* "clock_24h": on, or off for 12-hour time (core/zt-clock.h) */
+	bool aod_auto;		/* "aod_auto_brightness": the AOD's level from the room */
+	bool aod_low_off;	/* "aod_low_battery_off": dark below 15 % on battery */
 	int lock_timeout_idx;	/* "lock_timeout": an index into LOCK_TIMEOUT_SECONDS */
+	bool double_tap_wake;	/* "double_tap_wake" */
 	bool about_show_repo;
 	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
 	int haptic_strength;	/* percent */
@@ -331,6 +337,7 @@ static const int TIMEOUT_SECONDS[] = { 30, 60, 180, 300, 0 };
 /* the lock screen, woken and left: 0 is the screen's own timeout (as before) */
 static const int LOCK_TIMEOUT_SECONDS[] = { 0, 5, 10, 15, 30, 60 };
 #define N_LOCK_TIMEOUTS	(int)(sizeof(LOCK_TIMEOUT_SECONDS) / sizeof(LOCK_TIMEOUT_SECONDS[0]))
+#define LOCK_TIMEOUT_DEFAULT	2	/* 10 s, as the shell's LOCK_TIMEOUT_S */
 
 /* The timeout the shell is really using, however the file came to say it. */
 static const char *timeout_text(char *out, size_t size, int seconds) {
@@ -351,9 +358,9 @@ static void config_remember_loaded(void);
 /* The list picker that is open, by its action; 0 when none is. */
 static int open_picker;
 
-/* The always-on display, when switched on in Settings, starts in "Only while
- * charging" (true) or "Always" (false). Off is the default either way. */
-#define AOD_DEFAULT_CHARGING	true
+/* The always-on display, when switched on in Settings, starts in "Always"
+ * (false) or "Only while charging" (true). Off is the default either way. */
+#define AOD_DEFAULT_CHARGING	false
 
 static double picker(cairo_t *cr, double y, const char *caption, const char *const *options,
 		int count, int selected, int action) {
@@ -367,7 +374,10 @@ static void config_load(void) {
 	app.aod = false;			/* off until switched on */
 	app.aod_charging = AOD_DEFAULT_CHARGING;
 	app.clock_24h = true;			/* as ZT_CLOCK_24H_DEFAULT */
-	app.lock_timeout_idx = 0;		/* the screen's own timeout */
+	app.lock_timeout_idx = LOCK_TIMEOUT_DEFAULT;
+	app.aod_auto = true;
+	app.aod_low_off = false;
+	app.double_tap_wake = true;
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
@@ -479,6 +489,12 @@ static void config_load(void) {
 			app.aod_charging = app.aod ? strcmp(val, "charging") == 0 : AOD_DEFAULT_CHARGING;
 		} else if (strcmp(key, "clock_24h") == 0) {
 			app.clock_24h = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "aod_low_battery_off") == 0) {
+			app.aod_low_off = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
+		} else if (strcmp(key, "aod_auto_brightness") == 0) {
+			app.aod_auto = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "double_tap_wake") == 0) {
+			app.double_tap_wake = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "lock_timeout") == 0) {
 			int t = atoi(val), best = 0;	/* the nearest choice */
 			for (int i = 0; i < N_LOCK_TIMEOUTS; i++) {
@@ -666,6 +682,9 @@ static void config_format(void) {
 	KEY("aod", "%s", !app.aod ? "off" : app.aod_charging ? "charging" : "on");
 	KEY("clock_24h", "%s", app.clock_24h ? "on" : "off");
 	KEY("lock_timeout", "%d", LOCK_TIMEOUT_SECONDS[app.lock_timeout_idx]);
+	KEY("double_tap_wake", "%s", app.double_tap_wake ? "on" : "off");
+	KEY("aod_auto_brightness", "%s", app.aod_auto ? "on" : "off");
+	KEY("aod_low_battery_off", "%s", app.aod_low_off ? "on" : "off");
 	KEY("key_height", "%d", app.key_height);
 	KEY("key_sound", "%s", app.key_sound ? "on" : "off");
 	KEY("ring_volume", "%d", app.ring_vol);
@@ -1934,6 +1953,8 @@ static double draw_lock(cairo_t *cr) {
 		"15 seconds", "30 seconds", "1 minute" };
 	y = picker(cr, y, "Screen timeout on the lock screen", lock_timeouts, N_LOCK_TIMEOUTS,
 		app.lock_timeout_idx, ACT_LOCK_TIMEOUT);
+	/* only the power key, the force press and this wake the always-on display */
+	y = zmc_switch(cr, y, "Double-tap to wake", app.double_tap_wake, ACT_DOUBLE_TAP_WAKE);
 	return y + 20;
 }
 
@@ -2005,6 +2026,9 @@ static double draw_display(cairo_t *cr) {
 	if (app.aod) {
 		static const char *const aod_modes[] = { "Always", "Only while charging" };
 		y = picker(cr, y, "Show it", aod_modes, 2, app.aod_charging ? 1 : 0, ACT_AOD_MODE);
+		/* off: the panel's lowest level always */
+		y = zmc_switch(cr, y, "Adjust AOD brightness automatically", app.aod_auto, ACT_AOD_AUTO);
+		y = zmc_switch(cr, y, "Turn off AOD below 15 % battery", app.aod_low_off, ACT_AOD_LOW_OFF);
 	}
 	/* the shell sizes itself to the panel (360 points across); this is a step either side */
 	static const char *const scales[] = { "Compact", "Standard", "Large" };
@@ -4108,6 +4132,18 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_CLOCK_24H:
 		app.clock_24h = !app.clock_24h;
+		config_save();
+		break;
+	case ACT_AOD_LOW_OFF:
+		app.aod_low_off = !app.aod_low_off;
+		config_save();
+		break;
+	case ACT_AOD_AUTO:
+		app.aod_auto = !app.aod_auto;
+		config_save();
+		break;
+	case ACT_DOUBLE_TAP_WAKE:
+		app.double_tap_wake = !app.double_tap_wake;
 		config_save();
 		break;
 	case ACT_LOCK_TIMEOUT:

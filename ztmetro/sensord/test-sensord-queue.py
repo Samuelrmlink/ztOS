@@ -171,6 +171,29 @@ def main():
             t = hub.token(1)
             check(t and t[0] == 'payload', '(d) REMOVE accel payload')
 
+            # (f) the always-on display: with the screen off, the light alone at its rate
+            def added(what, ms):
+                kind, h, _ = header(hub, 2)
+                check(kind == 'header' and h[0] == 0xa1, f'{what}: ADD light header')
+                hub.echo(h)
+                t = hub.token(1)
+                check(t and t[0] == 'payload' and t[1][0] == 9 and struct.unpack_from('<i', t[1], 1)[0] == ms,
+                      f'{what}: ADD light at {ms} ms')
+            def removed(what):
+                kind, h, _ = header(hub, 2)
+                check(kind == 'header' and h[0] == 0xa2, f'{what}: REMOVE light header')
+                hub.echo(h)
+                t = hub.token(1)
+                check(t and t[0] == 'payload' and t[1][0] == 9, f'{what}: REMOVE light payload')
+            say('aod 5000')
+            added('(f) aod 5000', 5000)
+            say('aod 30000')
+            removed('(f) a new rate')
+            added('(f) aod 30000', 30000)
+            say('aod 0')
+            removed('(f) aod 0')
+            check(hub.token(0.5) is None, '(f) nothing else, accel stays off')
+
             proc.send_signal(signal.SIGTERM)
             proc.wait(3)
             check(proc.returncode == 0, 'stops cleanly')
