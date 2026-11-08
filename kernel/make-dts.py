@@ -213,6 +213,25 @@ if args.power:
 };
 '''
     # ---- end of wireless charging ----
+# ---- MAX77705 USB-C controller (usbc agent, kernel/max77705-usbc.c) --------
+# The USB-C MCU at 0x25 gets the IRQ-driven driver instead of the port's
+# polling s9p-max77705-muic: hwirq 3 of the MFD's domain is its line (USBC
+# in INTSRC). Its max77705-usbc power_supply names max77705-charger in
+# supplied_to itself: a power-supplies phandle on the charger node would make
+# the charger (and the gauge behind it) defer until this driver probes.
+# Without --power the MFD's interrupt controller is off, so the old node and
+# driver stay as they are.
+if args.power:
+    sub("""		muic@25 {
+			compatible = "samsung,s9p-max77705-muic";
+			reg = <0x25>;
+		};""", """		max77705_usbc: usb-c@25 {
+			compatible = "maxim,max77705-usbc";
+			reg = <0x25>;
+			interrupt-parent = <&max77705>;
+			interrupts = <3>;
+		};""")
+# ---- end MAX77705 USB-C controller -----------------------------------------
 
 if not args.touch:
     disable("			touchscreen-size-y = <4096>;")

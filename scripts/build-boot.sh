@@ -120,6 +120,8 @@ python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
 [ -n "$POWER" ] && python3 "$ROOT/kernel/patch-max77705-charger.py" "$SRC"
 # the wireless charging receiver (IDT P9320), built in with --power
 python3 "$ROOT/kernel/patch-p9320.py" "$SRC"
+# the MAX77705 USB-C controller driver (replaces s9p-max77705-muic with --power)
+python3 "$ROOT/kernel/patch-max77705-usbc.py" "$SRC"
 
 echo "=== initramfs ==="
 LIST=$B/initramfs.list
@@ -238,6 +240,12 @@ if [ -n "$POWER" ]; then
 	cfg --enable CHARGER_P9320
 else
 	cfg --disable CHARGER_P9320
+fi
+# MAX77705 USB-C controller: needs the MFD's interrupt domain, so --power only
+if [ -n "$POWER" ]; then
+	cfg --enable CHARGER_MAX77705_USBC
+else
+	cfg --disable CHARGER_MAX77705_USBC
 fi
 if [ -n "$GPU" ]; then
 	cfg --enable DRM_PANFROST
