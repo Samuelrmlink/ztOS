@@ -14307,6 +14307,7 @@ static void state_file_write(struct zt_server *server) {
  *
  *     down ID X Y | move ID X Y | up ID | cancel ID | tap X Y | screen off | screen on | state
  *     key CODE down|up    a phone key, as its evdev code: see ctl_key()
+ *     aod off|on|charging the always-on display, until the next reload
  *
  * It goes through the same code as the touchscreen, which is what makes the
  * shell testable over ssh.
@@ -14754,6 +14755,13 @@ static void ctl_command(struct zt_server *server, char *line) {
 		/* a new display size: greetd starts the session again at it */
 		wlr_log(WLR_INFO, "restart asked for");
 		wl_display_terminate(server->wl_display);
+	} else if (strncmp(line, "aod ", 4) == 0) {
+		/* the always-on display for this session (Settings' "aod" is the
+		 * lasting one): aod off | on | charging */
+		server->aod_mode = strncmp(line + 4, "charging", 8) == 0 ? AOD_CHARGING :
+			strncmp(line + 4, "on", 2) == 0 ? AOD_ON : AOD_OFF;
+		wlr_log(WLR_INFO, "aod: mode %d (ctl)", server->aod_mode);
+		aod_sync(server);
 	} else if (strncmp(line, "screen off", 10) == 0) {
 		screen_set(server, false);
 	} else if (strncmp(line, "screen on", 9) == 0) {
