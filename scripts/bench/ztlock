@@ -1,0 +1,15 @@
+#!/bin/sh
+# ztlock: one agent at a time on the phone for anything that disturbs it
+# (screen on/off, power measurements, installs, service/shell restarts, builds).
+#   ztlock run OWNER 'command...'   wait (up to 30 min) for the lock, run, release
+#   ztlock who                       who holds it, since when, doing what
+# The lock is /run/ztbench/lock (flock); /run/ztbench/owner says who has it (tmpfiles.d makes the dir).
+L=/run/ztbench/lock O=/run/ztbench/owner
+# inside a queued ztbench test the queue already holds the lock: run straight through
+if [ "${ZTB_LOCKED:-}" = 1 ] && [ "$1" = run ]; then shift 2; exec sh -c "$*"; fi
+case "$1" in
+who) if flock -n "$L" true 2>/dev/null; then echo free; else cat "$O" 2>/dev/null || echo held; fi ;;
+run) owner=$2; shift 2
+	exec flock -w 1800 "$L" sh -c 'echo "$1 since $(date +%T): $2" > '"$O"'; trap "rm -f '"$O"'" EXIT; sh -c "$2"' _ "$owner" "$*" ;;
+*) echo "usage: ztlock run OWNER 'cmd' | ztlock who" >&2; exit 2 ;;
+esac

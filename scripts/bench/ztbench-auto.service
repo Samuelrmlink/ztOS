@@ -1,0 +1,6 @@
+[Unit]
+Description=ztbench: run the queued battery/power tests if the phone is quiet, on battery, >= 40 %
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ztbench auto

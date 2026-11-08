@@ -1,0 +1,102 @@
+#!/bin/bash
+# ztbench: a queue of battery and power tests, run unattended (overnight), one at
+# a time under the phone lock (ztlock), each with its own log directory.
+#
+#   ztbench add NAME SCRIPT [MINUTES]   queue SCRIPT (copied in) as NAME
+#   ztbench list                         the queue, and the last run's results
+#   ztbench start                        run the queue now (detached)
+#   ztbench auto                         run it if it's a good time (the timer:
+#                                        screen off >= 10 min, on battery, >= 40 %)
+#   ztbench stop                         stop after the running test
+#   ztbench remove NAME | clear          take tests out of the queue
+#
+# A test is a bash script run as root with these set:
+#   OUT        its result directory (/var/log/ztbench/DATE/NAME)
+#   ZTB_LOCKED 1: the lock is already held, so it must not take ztlock itself
+# It should leave the phone as it found it (the AOD back to the config, settings
+# restored). A test that exits nonzero is reported as failed; the queue goes on.
+# Tests stay queued after a run until removed, so a night that is cut short
+# (screen turned on, charger in) can simply run again.
+set -u
+Q=/var/lib/ztbench/queue
+LOGS=/var/log/ztbench
+STOP=/run/ztbench/stop
+LOCK=/run/ztbench/lock
+STATUS=/run/ztbench/queue-status
+B=/sys/class/power_supply
+
+need_root() { [ "$(id -u)" = 0 ] || exec sudo "$0" "$@"; }
+screen_off() { grep -q '^screen=off' /run/zrnperfd.status 2>/dev/null; }
+plugged() { for s in $B/*; do [ "$(cat $s/type 2>/dev/null)" != Battery ] && [ "$(cat $s/online 2>/dev/null)" = 1 ] && return 0; done; return 1; }
+capacity() { cat $B/max170xx_battery/capacity 2>/dev/null || echo 0; }
+
+run_queue() {
+	mkdir -p /run/ztbench "$LOGS"
+	rm -f "$STOP"
+	local day=$LOGS/$(date +%Y%m%d-%H%M)
+	mkdir -p "$day"
+	exec 9<"$LOCK"
+	flock -w 3600 9 || { echo "ztbench: the phone lock stayed busy" | tee "$day/queue.log"; exit 1; }
+	echo "ztbench queue since $(date +%T)" > /run/ztbench/owner
+	trap 'rm -f /run/ztbench/owner "$STATUS"' EXIT
+	for t in $(ls "$Q" 2>/dev/null | sort); do
+		[ -e "$STOP" ] && { echo "$(date +%T) stopped by request" >> "$day/queue.log"; break; }
+		local name=${t#*-}; name=${name%.sh}
+		local out=$day/$name
+		mkdir -p "$out"
+		echo "running $name since $(date +%T)" > "$STATUS"
+		echo "ztbench queue since $(date +%T): $name" > /run/ztbench/owner
+		echo "$(date +%T) $name: start (battery $(capacity) %, $(plugged && echo plugged || echo on battery), screen $(screen_off && echo off || echo on))" >> "$day/queue.log"
+		OUT=$out ZTB_LOCKED=1 bash "$Q/$t" > "$out/log" 2>&1
+		local rc=$?
+		echo "$(date +%T) $name: $( [ $rc = 0 ] && echo ok || echo "FAILED ($rc)" ), battery $(capacity) %" >> "$day/queue.log"
+	done
+	echo "$(date +%T) queue done" >> "$day/queue.log"
+	ln -sfn "$day" "$LOGS/last"
+}
+
+cmd=${1:-list}
+case $cmd in
+add)
+	need_root "$@"
+	name=$2 src=$3 min=${4:-?}
+	mkdir -p "$Q"
+	n=$(ls "$Q" 2>/dev/null | wc -l)
+	dst=$Q/$(printf %02d $((n + 1)))-$name.sh
+	{ echo "# ztbench test: $name, about $min min, added $(date +%F)"; cat "$src"; } > "$dst"
+	chmod 755 "$dst"
+	echo "queued $name ($min min) as $(basename "$dst")" ;;
+list)
+	echo "queue ($Q):"
+	for t in $(ls "$Q" 2>/dev/null | sort); do echo "  $t  $(sed -n 1p "$Q/$t" | sed 's/^# ztbench test: //')"; done
+	[ -e "$STATUS" ] && echo "now: $(cat "$STATUS")"
+	[ -e "$LOGS/last/queue.log" ] && { echo "last run ($(readlink "$LOGS/last")):"; sed 's/^/  /' "$LOGS/last/queue.log"; }
+	true ;;
+start)
+	need_root "$@"
+	systemd-run --unit=ztbench-queue --collect "$0" run >/dev/null && echo "started: ztbench list for progress, journalctl -u ztbench-queue" ;;
+run)
+	need_root "$@"
+	run_queue ;;
+auto)
+	need_root "$@"
+	# a good time: a quiet phone on battery with enough charge, nothing queued already running
+	[ -z "$(ls "$Q" 2>/dev/null)" ] && exit 0
+	systemctl -q is-active ztbench-queue && exit 0
+	[ -e "$LOGS/last" ] && [ "$(find "$LOGS/last/queue.log" -mmin -720 2>/dev/null)" ] && exit 0	# one run a night
+	plugged && { echo "ztbench auto: plugged in, not tonight"; exit 0; }
+	[ "$(capacity)" -ge 40 ] || { echo "ztbench auto: battery $(capacity) % < 40 %"; exit 0; }
+	off=0; for i in $(seq 1 60); do screen_off && off=$((off + 1)) || off=0; [ $off -ge 60 ] && break; sleep 10; done
+	[ $off -ge 60 ] || { echo "ztbench auto: screen not off for 10 min"; exit 0; }
+	exec "$0" start ;;
+stop)
+	need_root "$@"
+	touch "$STOP"; echo "the queue stops after the running test" ;;
+remove)
+	need_root "$@"
+	rm -v "$Q"/*-"$2".sh ;;
+clear)
+	need_root "$@"
+	rm -fv "$Q"/*.sh ;;
+*) sed -n 2,20p "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
