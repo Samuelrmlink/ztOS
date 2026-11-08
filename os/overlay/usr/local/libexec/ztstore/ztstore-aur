@@ -57,6 +57,9 @@ build)
 	cd "$name" || fail "fetch the recipe first"
 	echo "@stage building"
 	rm -f ./*.pkg.tar.*
+	# zstd on every core, not the system's xz: it is installed at once, and
+	# xz took 10 minutes on one core over Chrome's 400 MB (it looked stuck)
+	export PKGEXT=.pkg.tar.zst
 	makepkg -f --noconfirm 2>&1 || fail "the build stopped (see the log)"
 	for f in $(makepkg --packagelist); do
 		base=${f##*/}

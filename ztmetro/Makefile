@@ -206,7 +206,7 @@ contacts/ztcontacts: contacts/ztcontacts.c comm/comm.h comm/contact-store.h $(CO
 
 # the App Store: the repos in pacman.conf and the AUR (see store/README.md)
 STORE = store/ztstore.c store/util.c store/json.c store/pkg.c store/repo.c store/appstream.c store/aur.c \
-	store/sections.c store/search.c store/jobs.c store/icons.c store/install.c
+	store/sections.c store/search.c store/jobs.c store/icons.c store/install.c store/flathub.c store/shots.c
 STORE_PKGS = librsvg-2.0 zlib
 store/ztstore: $(STORE) $(wildcard store/*.h) $(CORE_DEPS)
 	$(APP_BUILD) -DHAVE_RSVG $(shell pkg-config --cflags $(STORE_PKGS)) -o $@ $(STORE) $(CORE) $(APP_LIBS) \
@@ -239,8 +239,8 @@ install-browser: browser/superscan
 .PHONY: check-store
 check-store:
 	sh store/tests/make_fixture.sh /tmp/ztstore-fixture
-	cd store && for t in json repo appstream aur sections; do \
-		$(CC) -std=c11 -Wall -o /tmp/ztstore-test-$$t tests/test_$$t.c util.c json.c pkg.c repo.c appstream.c aur.c sections.c -lz && \
+	cd store && for t in json repo appstream aur sections flathub; do \
+		$(CC) -std=c11 -Wall -o /tmp/ztstore-test-$$t tests/test_$$t.c util.c json.c pkg.c repo.c appstream.c aur.c sections.c flathub.c -lz && \
 		/tmp/ztstore-test-$$t || exit 1; done
 
 # ztOSCoreSensorFramework: starts every piece of hardware support with the
