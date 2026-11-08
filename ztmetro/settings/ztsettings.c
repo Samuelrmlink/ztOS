@@ -129,6 +129,8 @@ enum action {
 	ACT_DEV_MENU_SPEED,
 	ACT_DEV_TOUCHES,
 	ACT_DEV_LOCK,
+	ACT_AOD,		/* the always-on display: on or off */
+	ACT_AOD_CHARGING,	/* and only on a charger */
 	ACT_DEV_DEMOLOOP,
 	ACT_DEV_DEMOLOOP_STOP,
 	ACT_HAPTIC_STRENGTH,
@@ -243,6 +245,7 @@ static struct {
 	int tickle[3];		/* mode on battery, plugged in, power saver: 0 none .. 3 high */
 	char tickle_now[96];	/* what zrnperfd says it is doing */
 	bool dev_demo_tiles, dev_slow, dev_touches, dev_lock;
+	bool aod, aod_charging;	/* the always-on display ("aod": off, on, charging) */
 	bool about_show_repo;
 	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
 	int haptic_strength;	/* percent */
@@ -438,6 +441,9 @@ static void config_load(void) {
 			else app.timeout_idx = 4;
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			app.wifi_suspend = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
+		} else if (strcmp(key, "aod") == 0) {
+			app.aod_charging = strcmp(val, "charging") == 0;
+			app.aod = app.aod_charging || strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
 		}
 	}
 	if (f) fclose(f);
@@ -567,7 +573,7 @@ static void auto_load(void) {
 }
 
 /* Every key Settings can write, as it would write it now. */
-enum { N_CONFIG_KEYS = 26 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };
+enum { N_CONFIG_KEYS = 28 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };
 static struct config_key config_keys[N_CONFIG_KEYS];
 static int config_n;	/* how many config_format filled in: N_CONFIG_KEYS is only the room */
 
@@ -610,6 +616,7 @@ static void config_format(void) {
 	}
 	KEY("quick", "%s", quick);
 	KEY("wifi_suspend", "%s", app.wifi_suspend ? "on" : "off");
+	KEY("aod", "%s", !app.aod ? "off" : app.aod_charging ? "charging" : "on");
 	KEY("key_height", "%d", app.key_height);
 	KEY("key_sound", "%s", app.key_sound ? "on" : "off");
 	KEY("ring_volume", "%d", app.ring_vol);
@@ -1937,6 +1944,12 @@ static double draw_display(cairo_t *cr) {
 
 	static const char *const timeouts[] = { "30 seconds", "1 minute", "3 minutes", "5 minutes", "Never" };
 	y = picker(cr, y, "Screen times out after", timeouts, 5, app.timeout_idx, ACT_TIMEOUT_CYCLE);
+	/* the time, the date, the battery and notifications, dim, while the
+	 * screen is off; it keeps the phone from sleeping (see the shell) */
+	y = zmc_switch(cr, y, "Always-on display", app.aod, ACT_AOD);
+	if (app.aod) {
+		y = zmc_switch(cr, y, "Only while charging", app.aod_charging, ACT_AOD_CHARGING);
+	}
 	/* the shell sizes itself to the panel (360 points across); this is a step either side */
 	static const char *const scales[] = { "Compact", "Standard", "Large" };
 	y = picker(cr, y, "Display scaling", scales, 3, app.scale_pending, ACT_SCALE_CYCLE);
@@ -3961,6 +3974,14 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_DEV_LOCK:
 		app.dev_lock = !app.dev_lock;
+		config_save();
+		break;
+	case ACT_AOD:
+		app.aod = !app.aod;
+		config_save();
+		break;
+	case ACT_AOD_CHARGING:
+		app.aod_charging = !app.aod_charging;
 		config_save();
 		break;
 	case ACT_DEV_DEMOLOOP: {
