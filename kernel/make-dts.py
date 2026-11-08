@@ -102,6 +102,36 @@ if not args.power:
     disable("""			interrupt-parent = <&max77705>;
 			interrupts = <2>;""")
 
+if args.power:
+    # --- MAX77705 charger: the wireless input (charger agent's block) ---
+    # kernel/patch-max77705-charger.py registers max77705-wireless (WCIN) on a
+    # "wireless" child node of the charger, so the fuel gauge can list it as a
+    # supplier and read "Charging" on a pad. The charger also holds stock's
+    # pull-down on WPC_DET (gpa2-0): ztOS left the pin floating (it read 1 with
+    # no pad). Pull only, no function, so a receiver node that later claims the
+    # pin as its interrupt does not collide with this.
+    sub("""			monitored-battery = <&battery>;
+			interrupt-parent = <&max77705>;
+			interrupts = <0>;""", """			monitored-battery = <&battery>;
+			interrupt-parent = <&max77705>;
+			interrupts = <0>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&wpc_det_pd>;
+
+			max77705_wireless: wireless {
+			};""")
+    sub("""			power-supplies = <&max77705_charger>;""",
+        """			power-supplies = <&max77705_charger>, <&max77705_wireless>;""")
+    s += '''
+/* charger agent: WPC_DET pull-down, as stock's wpc_det pinctrl (no function) */
+&pinctrl_alive {
+	wpc_det_pd: wpc-det-pd-pins {
+		samsung,pins = "gpa2-0";
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+	};
+};
+'''
+
 if not args.touch:
     disable("			touchscreen-size-y = <4096>;")
 
