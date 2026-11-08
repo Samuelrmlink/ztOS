@@ -8,8 +8,16 @@ L=/run/ztbench/lock O=/run/ztbench/owner
 # inside a queued ztbench test the queue already holds the lock: run straight through
 if [ "${ZTB_LOCKED:-}" = 1 ] && [ "$1" = run ]; then shift 2; exec sh -c "$*"; fi
 case "$1" in
-who) if flock -n "$L" true 2>/dev/null; then echo free; else cat "$O" 2>/dev/null || echo held; fi ;;
+# The lock file is opened read-only on a descriptor, never by name: flock FILE opens
+# it with O_CREAT, which fs.protected_regular refuses even to root for a file another
+# user owns in the sticky /run/ztbench.
+who) exec 9<"$L" || exit 1
+	if flock -n 9; then echo free; else cat "$O" 2>/dev/null || echo held; fi ;;
 run) owner=$2; shift 2
-	exec flock -w 1800 "$L" sh -c 'echo "$1 since $(date +%T): $2" > '"$O"'; trap "rm -f '"$O"'" EXIT; sh -c "$2"' _ "$owner" "$*" ;;
+	exec 9<"$L" || exit 1
+	flock -w 1800 9 || { echo "ztlock: still busy after 30 min: $(cat "$O" 2>/dev/null)" >&2; exit 1; }
+	echo "$owner since $(date +%T): $*" > "$O" 2>/dev/null || true
+	trap 'rm -f "$O"' EXIT
+	sh -c "$*" ;;
 *) echo "usage: ztlock run OWNER 'cmd' | ztlock who" >&2; exit 2 ;;
 esac
