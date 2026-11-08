@@ -89,6 +89,8 @@ enum action {
 	ACT_FORCE_MS,		/* the force press's vibration: a slider */
 	ACT_FORCE_STRENGTH,	/* its strength, % of the heavy pulse: a slider */
 	ACT_FORCE_LEVEL,	/* how hard to press, 0 firmware / 1-5: a slider */
+	ACT_FORCE_REL_MS,	/* the release's vibration length: a slider */
+	ACT_FORCE_REL_STRENGTH,	/* and its strength: a slider */
 	ACT_WIFI_RADIO,
 	ACT_WIFI_SUSPEND,
 	ACT_WIFI_POWERSAVE,	/* the chip's 802.11 power save, through zrnperfd */
@@ -270,6 +272,8 @@ static struct {
 	int force_ms;		/* how long it vibrates; 0 not at all */
 	int force_strength;	/* how strongly, % of the heavy pulse */
 	int force_level;	/* pressure needed: 0 the firmware's, 1-5 light to firm */
+	int force_rel_ms;	/* the release ("pop out"): length, 0 none */
+	int force_rel_strength;	/* and strength, % of the heavy pulse, 0 none */
 	int haptic_group[N_HAPTIC_GROUPS];	/* percent of the strength; 0 off */
 	int quick[8];		/* indexes into QUICK_IDS */
 } app = {
@@ -282,6 +286,8 @@ static struct {
 	.force_press = true,
 	.force_ms = FORCE_MS_DEFAULT,
 	.force_strength = FORCE_STRENGTH_DEFAULT,
+	.force_rel_ms = FORCE_MS_DEFAULT,
+	.force_rel_strength = 50,	/* ztmetro.c FORCE_RELEASE_STRENGTH */
 	.haptic_group = { 100, 100, 100, 100, 100, 100 },
 	.quick = { 0, 1, 2, 3, 10, 5, 7, 8 },
 	.accent = 5,
@@ -424,6 +430,12 @@ static void config_load(void) {
 			app.haptics = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "force_press") == 0) {
 			app.force_press = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "force_release_vibration") == 0) {
+			int ms = strcmp(val, "off") == 0 ? 0 : atoi(val);
+			app.force_rel_ms = ms < 0 ? 0 : ms > FORCE_MS_MAX ? FORCE_MS_MAX : ms;
+		} else if (strcmp(key, "force_release_strength") == 0) {
+			int v = atoi(val);
+			app.force_rel_strength = v < 0 ? 0 : v > 100 ? 100 : v;
 		} else if (strcmp(key, "force_press_strength") == 0) {
 			int v = atoi(val);
 			app.force_strength = v < 0 ? 0 : v > 100 ? 100 : v;
@@ -671,6 +683,8 @@ static void config_format(void) {
 	KEY("force_press", "%s", app.force_press ? "on" : "off");
 	KEY("force_press_vibration", "%d", app.force_ms);
 	KEY("force_press_strength", "%d", app.force_strength);
+	KEY("force_release_vibration", "%d", app.force_rel_ms);
+	KEY("force_release_strength", "%d", app.force_rel_strength);
 	KEY("force_press_pressure", "%d", app.force_level);
 	char quick[CONFIG_VALUE_MAX - 8] = "";
 	for (int i = 0; i < 8; i++) {
@@ -3183,6 +3197,18 @@ static double draw_force_press(cairo_t *cr, double y) {
 		zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.force_strength, caption, ACT_FORCE_STRENGTH);
 		y += 58;
 	}
+	/* the release, the "pop out": its own length and strength (0: none) */
+	if (app.force_rel_ms > 0) snprintf(caption, sizeof(caption), "Release vibration: %d ms", app.force_rel_ms);
+	else snprintf(caption, sizeof(caption), "Release vibration: off");
+	zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.force_rel_ms * 100 / FORCE_MS_MAX, caption,
+		ACT_FORCE_REL_MS);
+	y += 58;
+	if (app.force_rel_ms > 0) {
+		snprintf(caption, sizeof(caption), "Release strength: %d%%", app.force_rel_strength);
+		zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.force_rel_strength, caption,
+			ACT_FORCE_REL_STRENGTH);
+		y += 58;
+	}
 	static const char *const levels[] = { "the phone's default", "lightest", "light", "medium",
 		"firm", "firmest" };
 	snprintf(caption, sizeof(caption), "Pressure needed: %s", levels[app.force_level]);
@@ -4375,6 +4401,19 @@ static void slide(int action, int value, bool done) {
 		if (app.force_ms > 0 && app.force_ms < FORCE_MS_MIN) app.force_ms = FORCE_MS_MIN;
 		if (done) {
 			config_save();	/* the shell buzzes once at the new length */
+		}
+		break;
+	case ACT_FORCE_REL_MS:
+		app.force_rel_ms = (value * FORCE_MS_MAX + 50) / 100;
+		if (app.force_rel_ms > 0 && app.force_rel_ms < FORCE_MS_MIN) app.force_rel_ms = FORCE_MS_MIN;
+		if (done) {
+			config_save();	/* the shell plays the release once */
+		}
+		break;
+	case ACT_FORCE_REL_STRENGTH:
+		app.force_rel_strength = value < 10 ? 10 : value;
+		if (done) {
+			config_save();
 		}
 		break;
 	case ACT_FORCE_STRENGTH:

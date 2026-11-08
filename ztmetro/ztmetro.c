@@ -185,6 +185,10 @@ enum aod_mode { AOD_OFF, AOD_ON, AOD_CHARGING };
 /* its strength, % of the heavy pulse: its own, not the overall haptic
  * strength (80 %: as it felt when it followed that, at its default) */
 #define FORCE_PRESS_STRENGTH	80
+/* the release ("pop out"): a lighter pulse of the same length by default;
+ * Samsung's own profile is in its framework, not known here, so both are
+ * settings */
+#define FORCE_RELEASE_STRENGTH	50
 /* how hard the press must be: the sponge's pressure level, 0 the firmware's
  * own, 1-5 Samsung's steps (light to firm); the driver's sysfs force_level,
  * group video by udev (90-zrn-force.rules), kept in the driver across
@@ -1101,7 +1105,9 @@ struct zt_server {
 	int force_press_ms;		/* config force_press_vibration: 0 none */
 	int force_press_strength;	/* config force_press_strength: % of HAP_HEAVY */
 	int force_press_level;		/* config force_press_pressure: 0 firmware, 1-5 */
-	int force_effect, force_effect_ms, force_effect_mag;
+	int force_effect[2], force_effect_ms[2], force_effect_mag[2];	/* press, release */
+	int force_release_ms;		/* config force_release_vibration: 0 none */
+	int force_release_strength;	/* config force_release_strength: % of HAP_HEAVY, 0 none */
 	uint32_t haptic_scan_ms;
 
 	uint32_t demo_volume_first_ms;
@@ -2537,7 +2543,7 @@ static void haptics_init(struct zt_server *server) {
 		close(server->haptic_fd);
 	}
 	server->haptic_fd = -1;
-	server->force_effect = -1;
+	server->force_effect[0] = server->force_effect[1] = -1;
 	server->haptic_scan_ms = now_ms();
 	if (g_nested) {
 		return;
@@ -2633,8 +2639,12 @@ static void force_level_apply(struct zt_server *server);
 
 /* The force press's pulse: force_press_ms long, force_press_strength % of a long
  * press. Its own settings, so felt even when touches aren't. */
-static void hap_force(struct zt_server *server) {
-	if (g_dump_dir || server->force_press_ms <= 0) {
+/* one force-press pulse: slot 0 the press ("pop in"), slot 1 the release ("pop
+ * out"), each with its own length and strength (Settings > haptics) */
+static void hap_force_slot(struct zt_server *server, int slot) {
+	int ms = slot ? server->force_release_ms : server->force_press_ms;
+	int pct = slot ? server->force_release_strength : server->force_press_strength;
+	if (g_dump_dir || ms <= 0 || pct <= 0) {
 		return;
 	}
 	if (server->haptic_fd < 0) {
@@ -2643,33 +2653,41 @@ static void hap_force(struct zt_server *server) {
 			return;
 		}
 	}
-	double level = HAPS[HAP_HEAVY].level * server->force_press_strength / 100.0;
+	double level = HAPS[HAP_HEAVY].level * pct / 100.0;
 	int magnitude = (int)(0xffff * (level > 1 ? 1 : level));
 	if (magnitude <= 0) {
 		return;
 	}
-	if (server->force_effect < 0 || server->force_effect_ms != server->force_press_ms ||
-			server->force_effect_mag != magnitude) {
+	if (server->force_effect[slot] < 0 || server->force_effect_ms[slot] != ms ||
+			server->force_effect_mag[slot] != magnitude) {
 		struct ff_effect effect = {
 			.type = FF_RUMBLE,
-			.id = (short)server->force_effect,
+			.id = (short)server->force_effect[slot],
 			.u.rumble = { .strong_magnitude = (unsigned short)magnitude, .weak_magnitude = (unsigned short)magnitude },
-			.replay = { .length = (unsigned short)server->force_press_ms },
+			.replay = { .length = (unsigned short)ms },
 		};
 		if (ioctl(server->haptic_fd, EVIOCSFF, &effect) < 0) {
 			return;
 		}
-		server->force_effect = effect.id;
-		server->force_effect_ms = server->force_press_ms;
-		server->force_effect_mag = magnitude;
+		server->force_effect[slot] = effect.id;
+		server->force_effect_ms[slot] = ms;
+		server->force_effect_mag[slot] = magnitude;
 	}
-	struct input_event play = { .type = EV_FF, .code = (unsigned short)server->force_effect, .value = 1 };
+	struct input_event play = { .type = EV_FF, .code = (unsigned short)server->force_effect[slot], .value = 1 };
 	if (write(server->haptic_fd, &play, sizeof(play)) < 0) {
 		close(server->haptic_fd);
 		server->haptic_fd = -1;
-		server->force_effect = -1;
+		server->force_effect[0] = server->force_effect[1] = -1;
 		server->haptic_scan_ms = now_ms();
 	}
+}
+
+static void hap_force(struct zt_server *server) {
+	hap_force_slot(server, 0);
+}
+
+static void hap_force_release(struct zt_server *server) {
+	hap_force_slot(server, 1);
 }
 
 /* ---- configuration and tiles --------------------------------------------- */
@@ -3299,6 +3317,8 @@ static void load_config(struct zt_server *server) {
 	server->force_press_ms = FORCE_PRESS_MS;
 	server->force_press_strength = FORCE_PRESS_STRENGTH;
 	server->force_press_level = 0;
+	server->force_release_ms = FORCE_PRESS_MS;		/* as the press, */
+	server->force_release_strength = FORCE_RELEASE_STRENGTH;	/* lighter */
 	for (int i = 0; i < 8; i++) {
 		server->haptic_level[i] = 100;
 	}
@@ -3385,6 +3405,12 @@ static void load_config(struct zt_server *server) {
 			server->haptics_enabled = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "force_press") == 0) {
 			server->force_press = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+		} else if (strcmp(key, "force_release_vibration") == 0) {
+			int ms = strcmp(value, "off") == 0 ? 0 : atoi(value);
+			server->force_release_ms = ms < 0 ? 0 : ms > FORCE_PRESS_MS_MAX ? FORCE_PRESS_MS_MAX : ms;
+		} else if (strcmp(key, "force_release_strength") == 0) {
+			int v = atoi(value);
+			server->force_release_strength = v < 0 ? 0 : v > 100 ? 100 : v;
 		} else if (strcmp(key, "force_press_strength") == 0) {
 			int v = atoi(value);
 			server->force_press_strength = v < 0 ? 0 : v > 100 ? 100 : v;
@@ -15554,6 +15580,9 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 			if (server->screen_on) {
 				touches_cancel_all(server);
 			}
+		} else if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+			/* the "pop out", as Samsung's: lighter than the press */
+			hap_force_release(server);
 		}
 	}
 	int nav = hwkey_nav(event->keycode);
@@ -17318,6 +17347,7 @@ static int reload(int signal_number, void *data) {
 	int strength = server->haptic_strength;
 	int force_ms = server->force_press_ms;
 	int force_strength = server->force_press_strength;
+	int release_ms = server->force_release_ms, release_strength = server->force_release_strength;
 	int force_level = server->force_press_level;
 	int ring_before = server->ring_volume;
 	reload_config(server);
@@ -17353,6 +17383,8 @@ static int reload(int signal_number, void *data) {
 		hap(server, HAP_CLICK, HG_SYSTEM);	/* this is how it feels now */
 	} else if (force_ms != server->force_press_ms || force_strength != server->force_press_strength) {
 		hap_force(server);	/* the force press's pulse, as it is now */
+	} else if (release_ms != server->force_release_ms || release_strength != server->force_release_strength) {
+		hap_force_release(server);	/* and the release's */
 	}
 	/* nothing may keep animating a tile that is about to be replaced */
 	for (int i = 0; i < MAX_ANIMS; i++) {
