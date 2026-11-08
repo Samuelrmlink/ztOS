@@ -65,6 +65,7 @@ struct agroup {
 	uint32_t n_exited;
 	struct exited ex[EXITED_KEEP];
 	double pend[NEK];	/* modelled joules not yet checked against the gauge */
+	double tick_cpu;	/* CPU seconds this scan of processes no longer in the table */
 	time_t last_active;
 	int live;		/* processes now (counted each scan) */
 };
@@ -82,7 +83,7 @@ struct proc {
 	uint32_t gen;
 	struct tally t;		/* since it started (or since we first saw it) */
 	double d_cpu;		/* this interval's CPU seconds, for the energy model */
-	double e_raw;		/* modelled joules, before checking against the gauge */
+	double pend[NEK];	/* modelled joules, not yet checked against the gauge */
 };
 
 #define MAX_GROUPS	320

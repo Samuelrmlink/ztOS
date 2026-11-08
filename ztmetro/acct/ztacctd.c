@@ -695,12 +695,15 @@ static void proc_gone(struct proc *p) {
 		struct tally d = { .cpu_s = p->exit_since };
 		if (!(now.screen_on && now.front_g == p->g)) d.bg_cpu_s = d.cpu_s;
 		p->t.cpu_s += d.cpu_s;
-		p->d_cpu += d.cpu_s;
+		p->t.bg_cpu_s += d.bg_cpu_s;
 		group_add(p->g, &d);
+		if (p->g >= 0 && p->g < n_groups) groups[p->g].tick_cpu += d.cpu_s;	/* for the energy model */
 		p->exit_since = 0;
 	}
 	if (p->g < 0 || p->g >= n_groups) return;
 	struct agroup *g = &groups[p->g];
+	/* energy not yet checked against the gauge stays with the app (its pend) */
+	for (int k = 0; k < NEK; k++) p->t.e[k] += p->pend[k];
 	tally_add(&g->exited_t, &p->t);
 	g->n_exited++;
 	int slot = -1, small = 0;
@@ -778,7 +781,6 @@ static void scan(void) {
 				if (saved[i].pid == pid && saved[i].start == s.start) {
 					p->ticks = saved[i].ticks;
 					p->t = saved[i].t;
-					p->e_raw = saved[i].e_raw;
 					break;
 				}
 			}
@@ -916,6 +918,7 @@ static void task_exited(const struct taskstats *t) {
 	struct tally d = { .cpu_s = cpu };
 	if (!(now.screen_on && now.front_g == g)) d.bg_cpu_s = cpu;
 	group_add(g, &d);
+	groups[g].tick_cpu += cpu;	/* for the energy model */
 	if (t->ac_pid == (uint32_t)tgid) {
 		/* the whole short life of a process, for its app's exited list */
 		struct agroup *gr = &groups[g];
@@ -1047,7 +1050,7 @@ static void read_charger(void) {
 		}
 		for (int i = 0; i < n_procs; i++) {
 			memset(&procs[i].t, 0, sizeof(procs[i].t));
-			procs[i].e_raw = 0;
+			memset(procs[i].pend, 0, sizeof(procs[i].pend));
 		}
 		charge_since = now.wall;
 		full_seen = 0;
@@ -1120,7 +1123,7 @@ static void save_state(void) {
 	}
 	for (int i = 0; i < n_procs; i++) {
 		struct saved_proc sp = { .pid = procs[i].pid, .start = procs[i].start, .ticks = procs[i].ticks,
-			.t = procs[i].t, .e_raw = procs[i].e_raw };
+			.t = procs[i].t };
 		if (procs[i].g >= 0 && procs[i].g < n_groups)
 			snprintf(sp.group, sizeof(sp.group), "%s", groups[procs[i].g].name);
 		fwrite(&sp, sizeof(sp), 1, f);
