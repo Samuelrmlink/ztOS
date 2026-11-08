@@ -1,6 +1,8 @@
 [Unit]
 Description=ztOS Waydroid network recovery
 After=waydroid-container.service
+# Waydroid set up (images, and a kernel with binder): ztos-waydroid-images
+ConditionPathExists=/var/lib/waydroid/waydroid.cfg
 
 [Service]
 Type=simple

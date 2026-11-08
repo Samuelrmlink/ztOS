@@ -79,7 +79,7 @@ def fetch(kind):
     partial = target.with_suffix('.part')
     say(f'downloading {pin["file"]} ({entry["size"] // (1 << 20)} MB)')
     # curl resumes an interrupted download; urllib does not
-    subprocess.run(['curl', '-L', '--fail', '--retry', '5', '-C', '-', '-o', str(partial), entry['url']], check=True)
+    subprocess.run(['curl', '-L', '--fail', '--no-progress-meter', '--retry', '5', '-C', '-', '-o', str(partial), entry['url']], check=True)
     if sha256(partial) != pin['sha256']:
         partial.unlink()
         raise SystemExit(f'{pin["file"]}: hash mismatch, deleted')
@@ -100,15 +100,20 @@ def unpack(kind, archive):
 def main():
     if READY.exists():
         return 0
-    if not binder_allowed():
-        say('no binder in this kernel: Waydroid stays off, ATL runs Android apps')
-        return 0
     if (IMAGES / 'system.img').exists() and (IMAGES / 'vendor.img').exists() and \
             pathlib.Path('/var/lib/waydroid/waydroid.cfg').exists():
         say('images already in place: kept as they are')
     else:
+        # The download does not need binder: a kernel without it still gets
+        # the images, so Android is ready soon after a kernel that has it.
         for kind in ('system', 'vendor'):
-            unpack(kind, fetch(kind))
+            if not (IMAGES / f'{kind}.img').exists():
+                unpack(kind, fetch(kind))
+            pathlib.Path(CACHE / PINNED[kind]['file']).unlink(missing_ok=True)
+        if not binder_allowed():
+            say('images in place; no binder in this kernel: Waydroid stays off until a '
+                'kernel built with --waydroid (docs/waydroid.md), ATL runs Android apps')
+            return 0
         say('initialising Waydroid')
         subprocess.run(['waydroid', 'init', '-f', '-i', str(IMAGES)], check=True)
         say('stripping and patching (install.sh)')

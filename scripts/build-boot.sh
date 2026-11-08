@@ -18,6 +18,10 @@
 #                                phone's own firmware from firmware/
 #     --pm-debug                 suspend stage tests and device PM diagnostics
 #     --lockup                   soft/hard lockup detectors that panic (backtrace in ramoops)
+#     --waydroid                 the kernel side of the optional ztos-waydroid package:
+#                                binder + binderfs, PSI, bridge/veth, nftables NAT,
+#                                policy routing, Android netd's xtables matches
+#                                (kernel/waydroid.config, docs/waydroid.md)
 #     --cmdline "..."            extra kernel command line (zboot.rescue=1 ...)
 #     --wifi-nvram FILE          Wi-Fi calibration to build in, for --wlan (default:
 #                                firmware/nvram.txt_r02a_b2, the G960N's; see
@@ -40,7 +44,7 @@ FALLBACK=boot
 DTS_FLAGS=()
 EXTRA=
 WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
-UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP=
+UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID=
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--fallback) FALLBACK=$2; shift ;;
@@ -52,6 +56,7 @@ while [ $# -gt 0 ]; do
 	--wlan) DTS_FLAGS+=(--wlan); WLAN=1 ;;
 	--pm-debug) PMDEBUG=1 ;;
 	--lockup) LOCKUP=1 ;;
+	--waydroid) WAYDROID=1 ;;
 	--acpm) ACPM=1 ;;
 	--cpufreq) CPUFREQ=1; ACPM=1 ;;
 	--cmdline) EXTRA=$2; shift ;;
@@ -303,6 +308,20 @@ if [ -n "$WLAN" ]; then
 else
 	cfg --set-str EXTRA_FIRMWARE ""
 fi
+# Waydroid (Android in a container) is an optional package, not the base
+# system: its kernel side is a switch. All built in, as this image loads no
+# modules. BRIDGE is in the disable list above and comes back only here.
+if [ -n "$WAYDROID" ]; then
+	while read -r sym val; do
+		case "$sym" in ''|'#'*) continue ;; esac
+		case "$val" in
+		y) cfg --enable "$sym" ;;
+		n) cfg --disable "$sym" ;;
+		'""') cfg --set-str "$sym" "" ;;
+		*) cfg --set-val "$sym" "$val" ;;
+		esac
+	done < "$ROOT/kernel/waydroid.config"
+fi
 cfg --set-str INITRAMFS_SOURCE "$LIST"
 cfg --set-val CMA_SIZE_MBYTES 128
 cfg --set-str LOCALVERSION "-zboot"
@@ -316,6 +335,18 @@ make -s O=out olddefconfig
 grep -E '^CONFIG_(CMDLINE|SCSI_UFS_EXYNOS9810|USB_CONFIGFS_NCM|S3C2410_WATCHDOG|PSTORE_RAM|DRM_EXYNOS_BOOTFB|PHY_EXYNOS5_USBDRD|USB_DWC3_GADGET|USB_DWC3_MODE)' out/.config ||
 	true
 grep -E '^(# )?CONFIG_(S9P_ACPM|ARM_S9P_CPUFREQ|DRM_PANFROST|DRM_S9P_DECON|CPU_FREQ)[ =]' out/.config || true
+# each =y of the fragment has to survive olddefconfig (one whose dependency
+# is off is dropped without a word)
+if [ -n "$WAYDROID" ]; then
+	missing=
+	while read -r sym val; do
+		case "$sym" in ''|'#'*) continue ;; esac
+		[ "$val" = y ] || continue
+		grep -q "^CONFIG_$sym=y$" out/.config || missing="$missing $sym"
+	done < "$ROOT/kernel/waydroid.config"
+	[ -z "$missing" ] || { echo "--waydroid: not enabled:$missing" >&2; exit 1; }
+	echo "waydroid: kernel/waydroid.config applied"
+fi
 
 echo "=== kernel ==="
 make -j"$(nproc)" O=out Image dtbs > "$B/kernel-build.log" 2>&1 || {

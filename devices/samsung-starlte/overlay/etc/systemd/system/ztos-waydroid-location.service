@@ -1,6 +1,10 @@
 [Unit]
 Description=ztOS: GNSS for Android apps in Waydroid ("gps" and "network" providers fed by ztos-gnss-gate)
 After=ztos-gnss-gate.service waydroid-container.service
+# Waydroid is the optional ztos-waydroid package: without it set up, this
+# loop has no Android to serve and is not started at all
+ConditionPathExists=/usr/local/libexec/ztos-waydroid-recover
+ConditionPathExists=/var/lib/waydroid/waydroid.cfg
 
 [Service]
 ExecStart=/usr/local/sbin/ztos-waydroid-location
