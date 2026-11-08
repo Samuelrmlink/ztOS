@@ -335,7 +335,7 @@ save() {
 }
 
 pass() {	# look, decide, write; nap: when to look again without an event (s)
-	local T=250 mv in chg why= stop=0 hvbus=0 hvok=1 hvf= hv=0 want=0 rb a f t s key nominal fl
+	local T=250 tknown=0 mv in chg why= stop=0 hvbus=0 hvok=1 hvf= hv=0 want=0 rb a f t s key nominal fl
 	local ramp=0 rs= n p ma
 	# (all builtins: no process is started, but for i2cget on the old kernel)
 	now; detect
@@ -421,7 +421,8 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	[ -n "$caps" ] && caps_was=$caps
 
 	# the battery's temperature, with stock's hysteresis
-	num "$B/temp" && T=$REPLY
+	# unreadable (the gauge probes after us at boot): 25 C for the limits, never 9 V
+	num "$B/temp" && { T=$REPLY; tknown=1; }
 	[ $T -ge 500 ] && hot_stop=1;	[ $T -le 450 ] && hot_stop=0
 	[ $T -le 0 ] && cold_stop=1;	[ $T -ge 50 ] && cold_stop=0
 	[ $T -ge 410 ] && warm=1;	[ $T -le 390 ] && warm=0
@@ -460,6 +461,7 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	[ $cold_stop = 1 ] && stop=1 why+=" too cold"
 	[ $vhold = 1 ] && stop=1 why+=" at 4.15 V"
 	[ $((warm | hot_stop | cold_stop)) = 1 ] && hvok=0
+	[ $tknown = 1 ] || hvok=0
 
 	if [ $src = wired ]; then
 		if [ $hvbus = 1 ] && screen_on; then min in 500; min chg 1000; why+=" screen on"; fi
@@ -556,7 +558,7 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	if [ "$t" != "$logged" ]; then
 		logged=$t
 		a=$T s=; [ $a -lt 0 ] && a=$((-a)) s=-
-		t+=", battery $s$((a / 10)).$((a % 10)) C"
+		if [ $tknown = 1 ]; then t+=", battery $s$((a / 10)).$((a % 10)) C"; else t+=", battery temperature unknown"; fi
 		if [ $ramp = 1 ] && [ $src = wired ]; then
 			num "$C/$RAMP_EFFECTIVE" && t+=", effective $((REPLY / 1000)) mA"
 			num "$C/$RAMP_FOUND" && t+=", found $((REPLY / 1000)) mA"
