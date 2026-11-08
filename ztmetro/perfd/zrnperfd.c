@@ -229,7 +229,19 @@ static bool wifi_asleep;
 static long wifi_sleep_at;
 #define WIFI_SLEEP_MS	300000
 
+/* While this file exists the radio is never switched off: for working on the
+ * phone over Wi-Fi or Tailscale with the cable out (delete it to save the power) */
+#define WIFI_KEEP_FILE	"/etc/zrnperfd/keep-wifi"
+
 static void wifi_radio(bool on) {
+	if (!on && access(WIFI_KEEP_FILE, F_OK) == 0) {
+		static bool said;
+		if (!said)
+			fprintf(stderr, "zrnperfd: Wi-Fi kept on with the screen off (" WIFI_KEEP_FILE ")\n");
+		said = true;
+		wifi_sleep_at = 0;
+		return;
+	}
 	if (!on) {
 		/* Only restore a radio that this daemon actually switched off. */
 		char state[32];
@@ -249,6 +261,9 @@ static void wifi_radio(bool on) {
 		return;
 	}
 	wifi_asleep = !on;
+	fprintf(stderr, on ? "zrnperfd: Wi-Fi radio back on\n" :
+		"zrnperfd: Wi-Fi radio off: screen off on battery for 5 min, nothing holding it"
+		" (" WIFI_KEEP_FILE " keeps it on)\n");
 }
 
 /* a cable in: any power supply other than the battery says it is online */
