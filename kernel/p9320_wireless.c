@@ -879,7 +879,8 @@ out:
 static void p9320_hv_work(struct work_struct *work)
 {
 	struct p9320 *p = container_of(work, struct p9320, hv_work.work);
-	u16 vrect = 0;
+	u16 vrect = 0, vout = 0;
+	u8 cm_fet;
 	int i;
 
 	mutex_lock(&p->lock);
@@ -899,31 +900,43 @@ static void p9320_hv_work(struct work_struct *work)
 		p9320_send_packet(p, P9320_RXCMD_AFC_SET, P9320_AFC_10V);
 		msleep(100);
 	}
-	for (i = 0; i < 20; i++) {
+	/*
+	 * Stock (mfc_wpc_afc_vout_work, then the vout mode work) sets the
+	 * receiver's Vout to 10 V straight after telling the pad, without waiting:
+	 * the pad raises Vrect in answer to the receiver's own control-error
+	 * packets for the higher Vout. Waiting for Vrect first, as this driver
+	 * did, never happens (a Samsung fast pad held 5.56 V on the bench).
+	 * So: all communication-modulation FETs, Vout 10 V, then check both rose.
+	 */
+	if (p9320_read(p, P9320_CM_FET, &cm_fet))
+		cm_fet = 0xff;
+	p9320_write(p, P9320_CM_FET, 0x00);
+	if (p9320_set_vout(p, P9320_VOUT_10V))
+		goto back_to_5v;
+	for (i = 0; i < 30; i++) {
 		if (!p9320_det(p))
 			goto out;
-		if (!p9320_read16(p, P9320_ADC_VRECT, &vrect) &&
-		    vrect >= P9320_HV_VRECT_MV)
+		if (!p9320_read16(p, P9320_ADC_VRECT, &vrect) && !p9320_read16(p, P9320_ADC_VOUT, &vout) &&
+		    vrect >= P9320_HV_VRECT_MV && vout >= P9320_HV_VRECT_MV)
 			break;
 		msleep(100);
 	}
-	if (vrect < P9320_HV_VRECT_MV) {
-		dev_warn(p->dev, "pad did not raise Vrect (%u mV), staying at 5 V\n", vrect);
-		p->hv_failed = true;
-		p9320_send_packet(p, P9320_RXCMD_AFC_SET, P9320_AFC_5V);
-		p9320_set_hv(p, P9320_HV_OFF);
-		goto out;
+	if (vrect < P9320_HV_VRECT_MV || vout < P9320_HV_VRECT_MV) {
+		dev_warn(p->dev, "pad did not follow to 10 V (Vrect %u mV, Vout %u mV): back to 5 V\n", vrect, vout);
+		goto back_to_5v;
 	}
-
-	/* stock: all communication-modulation FETs for 10 V */
-	p9320_write(p, P9320_CM_FET, 0x00);
-	if (p9320_set_vout(p, P9320_VOUT_10V)) {
-		p->hv_failed = true;
-		p9320_send_packet(p, P9320_RXCMD_AFC_SET, P9320_AFC_5V);
-		p9320_set_hv(p, P9320_HV_OFF);
-		goto out;
-	}
+	dev_info(p->dev, "fast wireless: Vrect %u mV, Vout %u mV\n", vrect, vout);
 	p9320_set_hv(p, P9320_HV_ON);
+	goto out;
+
+back_to_5v:
+	p->hv_failed = true;
+	p9320_write(p, P9320_VOUT_SET, p9320_vout_val[P9320_VOUT_5V]);
+	p->vout_idx = P9320_VOUT_5V;
+	if (cm_fet != 0xff)
+		p9320_write(p, P9320_CM_FET, cm_fet);
+	p9320_send_packet(p, P9320_RXCMD_AFC_SET, P9320_AFC_5V);
+	p9320_set_hv(p, P9320_HV_OFF);
 out:
 	mutex_unlock(&p->lock);
 }
