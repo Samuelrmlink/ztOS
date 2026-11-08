@@ -616,7 +616,9 @@ static void auto_load(void) {
 }
 
 /* Every key Settings can write, as it would write it now. */
-enum { N_CONFIG_KEYS = 32 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };	/* 32: the KEY("...") lines below */
+/* room, not a count (config_n is the count): an exact number fell behind twice
+ * as settings were added, and config_save dropped the last keys (the LEDs) */
+enum { N_CONFIG_KEYS = 64 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };
 static struct config_key config_keys[N_CONFIG_KEYS];
 static int config_n;	/* how many config_format filled in: N_CONFIG_KEYS is only the room */
 
