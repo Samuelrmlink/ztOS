@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Fit ztacctd's power profile to the gauge: calib.csv -> power_profile lines.
 
-    fit-calib.py /var/lib/ztacct/calib.csv [--wifi-on MW] [--wifi-off MW]
+    fit-calib.py /var/lib/ztacct/calib.csv [--wifi-on MW] [--wifi-off MW] [--fix KEY=VALUE]...
+
+--fix holds a coefficient at a measured value (base_awake_mw=1190, say) and
+fits the rest.
 
 Each row of calib.csv is a 5-minute window on battery: what the model saw
 (awake and asleep seconds, screen seconds and screen x backlight seconds, the
@@ -51,6 +54,11 @@ def main():
         wifi_on = float(args[args.index("--wifi-on") + 1])
     if "--wifi-off" in args:
         wifi_off = float(args[args.index("--wifi-off") + 1])
+    fixed = {}
+    for i, a in enumerate(args):
+        if a == "--fix" and i + 1 < len(args):
+            k, v = args[i + 1].split("=")
+            fixed[k] = float(v)
     rows = list(csv.DictReader(open(args[0])))
     data = []
     for r in rows:
@@ -60,9 +68,12 @@ def main():
         v["cpu"] = v["cpu_little_j"] + v["cpu_big_j"]
         on = min(v["screen_s"], v["wifi_assoc_s"])
         y = v["measured_j"] - (wifi_on * on + wifi_off * (v["wifi_assoc_s"] - on)) / 1000
+        for name, col, scale in COLS:
+            if name in fixed:
+                y -= fixed[name] / scale * v[col]
         data.append((v, y))
     print(f"{len(data)} windows")
-    cols = [c for c in COLS if any(v[c[1]] > 0 for v, _ in data)]
+    cols = [c for c in COLS if c[0] not in fixed and any(v[c[1]] > 0 for v, _ in data)]
     while cols:
         a = [[sum(v[ci[1]] * v[cj[1]] for v, _ in data) for cj in cols] for ci in cols]
         b = [sum(v[ci[1]] * y for v, y in data) for ci in cols]

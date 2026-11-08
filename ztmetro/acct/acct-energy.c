@@ -56,9 +56,15 @@
 
 struct ptab { int n; double khz[MAX_FREQS], mw[MAX_FREQS]; };
 
+/* mW per busy core, with what a busy core pulls along (L3, memory, the bus).
+ * The little cores: fitted to the gauge on 2026-11-08 by fit-calib.py, two
+ * cores busy compiling with the screen off at 1.15 GHz: 430 mW each (4.5 x
+ * the core-only estimate); the other clocks scaled alike until bench-cpu.sh
+ * (overnight) measures them. The big cores: estimates (AnandTech's Exynos
+ * 9810 figures), not yet measured. */
 static const struct ptab little_default = { 5,
 	{ 349916, 650000, 1150500, 1499333, 1794000 },
-	{ 25, 45, 95, 150, 220 } };
+	{ 110, 200, 430, 680, 1000 } };
 static const struct ptab big_default = { 6,
 	{ 400000, 1066000, 1469000, 1794000, 2327000, 2704000 },
 	{ 150, 420, 700, 1050, 1900, 2900 } };
@@ -78,7 +84,7 @@ static struct {
 	struct ptab cl[MAX_CLUSTERS], gpu;
 	bool cl_set[MAX_CLUSTERS];
 } prof = {
-	.base_awake_mw = 1150, .base_suspend_mw = 100,
+	.base_awake_mw = 1190, .base_suspend_mw = 100,	/* 325 mA x 3.67 V; suspend: an estimate */
 	.screen_mw = 250, .screen_full_mw = 1100,
 	.wifi_idle_on_mw = 315, .wifi_idle_off_mw = 65,
 	.wifi_pkt_mj = 0.5, .wifi_byte_uj = 0.12,
