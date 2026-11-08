@@ -17473,6 +17473,15 @@ static int reload(int signal_number, void *data) {
 	}
 	aod_sync(server);	/* switched on or off in Settings while dark */
 	aod_refresh(server);	/* the clock's format, say */
+	if (server->aod && !server->screen_on) {
+		/* the brightness switch changed while it shows */
+		if (server->aod_auto && !server->aod_light_ms) {
+			aod_light_start(server);
+		} else if (!server->aod_auto && server->aod_light_ms) {
+			aod_light_stop(server);
+			aod_bl_set(BL_L_FLOOR, false);
+		}
+	}
 	wlr_log(WLR_INFO, "configuration reloaded: accent %06x, %d columns, haptics %s",
 		server->accent, server->units / 2, server->haptics_enabled ? "on" : "off");
 	return 0;
