@@ -70,6 +70,7 @@
 enum { F_UNICAST = 100, F_RA, F_NS, F_DHCP, F_END };
 
 bool wlpm_suspend_enabled = true, wlpm_filter_enabled = true;
+const char *wlpm_name = "zrnperfd";	/* the log lines' prefix */
 int wlpm_listen_ms = 700;
 
 static int nlfd = -1, evfd = -1, family = -1;
@@ -389,7 +390,7 @@ static void put_back(bool say) {
 	var_set_int("pm2_sleep_ret", ret);
 	if (filtering) filters_off();
 	if (say)
-		fprintf(stderr, "zrnperfd: Wi-Fi screen-on: every DTIM, awake %d ms after traffic%s (%llu frames filtered while off)\n",
+		fprintf(stderr, "%s: Wi-Fi screen-on: every DTIM, awake %d ms after traffic%s (%llu frames filtered while off)\n", wlpm_name,
 			ret, filtering ? ", filter off" : "", dropped);
 	applied = filtering = false;
 	skip = 0;
@@ -409,7 +410,7 @@ static void apply_off(const char *why) {
 	if (r) {
 		/* down, or the radio off: the next connect brings them */
 		if (!warned)
-			fprintf(stderr, "zrnperfd: Wi-Fi screen-off settings not set (%s): %s\n", ifname, strerror(-r));
+			fprintf(stderr, "%s: Wi-Fi screen-off settings not set (%s): %s\n", wlpm_name, ifname, strerror(-r));
 		warned = true;
 		return;
 	}
@@ -418,7 +419,7 @@ static void apply_off(const char *why) {
 	if (wlpm_filter_enabled && !filtering) {
 		int f = filters_on();
 		filtering = f == 0;
-		if (f) fprintf(stderr, "zrnperfd: Wi-Fi packet filter not set: %s\n", strerror(-f));
+		if (f) fprintf(stderr, "%s: Wi-Fi packet filter not set: %s\n", wlpm_name, strerror(-f));
 	} else if (!wlpm_filter_enabled && filtering) {
 		filters_off();
 		filtering = false;
@@ -428,7 +429,7 @@ static void apply_off(const char *why) {
 	if (skip)
 		snprintf(wait, sizeof(wait), "every %d DTIMs (DTIM %d x %d TU: %ld ms)", skip, l.dtim, l.beacon,
 			 (long)skip * l.dtim * l.beacon * 1024 / 1000);
-	fprintf(stderr, "zrnperfd: Wi-Fi screen-off (%s): listen %s, awake %d ms after traffic, PM %s, %s\n",
+	fprintf(stderr, "%s: Wi-Fi screen-off (%s): listen %s, awake %d ms after traffic, PM %s, %s\n", wlpm_name,
 		why, wait, OFF_SLEEP_RET, pm_name(l.pm),
 		filtering ? (was ? "filter kept" : "broadcast/multicast filtered in the chip (unicast, RA, NS, DHCP pass)")
 			  : "no filter");
@@ -484,7 +485,7 @@ int wlpm_open(void) {
 	put(n, CTRL_ATTR_FAMILY_NAME, "nl80211", 8);
 	struct family_reply r = { -1, -1 };
 	if (request(n, got_family, &r) || r.id < 0) {
-		fprintf(stderr, "zrnperfd: no nl80211: Wi-Fi screen-off settings off\n");
+		fprintf(stderr, "%s: no nl80211: Wi-Fi screen-off settings off\n", wlpm_name);
 		return -1;
 	}
 	family = r.id;
@@ -518,14 +519,14 @@ static void link_event(int cmd, struct nlattr *attrs, int len) {
 	char off[48] = "";
 	if (!screen_on) snprintf(off, sizeof(off), ", screen off %ld min", (now_ms() - off_since) / 60000);
 	if (cmd == NL80211_CMD_DISCONNECT) {
-		fprintf(stderr, "zrnperfd: Wi-Fi: disconnected from %s, reason %d (%s), %s%s\n",
+		fprintf(stderr, "%s: Wi-Fi: disconnected from %s, reason %d (%s), %s%s\n", wlpm_name,
 			have_bssid ? mac(bssid) : "?", code, reason(code),
 			by_ap ? "by the AP" : "by this phone", off);
 		have_bssid = false;	/* the settings stay in the chip for the next link */
 		return;
 	}
 	if (cmd == NL80211_CMD_CONNECT && code != 0) {
-		fprintf(stderr, "zrnperfd: Wi-Fi: connecting to %s failed, status %d%s\n", m ? mac(m) : "?", code, off);
+		fprintf(stderr, "%s: Wi-Fi: connecting to %s failed, status %d%s\n", wlpm_name, m ? mac(m) : "?", code, off);
 		return;
 	}
 	struct link l;
@@ -534,7 +535,7 @@ static void link_event(int cmd, struct nlattr *attrs, int len) {
 		memcpy(bssid, m, 6);
 		have_bssid = true;
 	}
-	fprintf(stderr, "zrnperfd: Wi-Fi: %s %s (%s ch %d, %d dBm, DTIM %d)%s\n",
+	fprintf(stderr, "%s: Wi-Fi: %s %s (%s ch %d, %d dBm, DTIM %d)%s\n", wlpm_name,
 		cmd == NL80211_CMD_ROAM ? "roamed to" : "connected to", have_bssid ? mac(bssid) : "?",
 		band(l.channel), l.channel, l.rssi, l.dtim, off);
 	if (!screen_on && wlpm_suspend_enabled) {
@@ -575,7 +576,7 @@ void wlpm_tick(void) {
 		 * puts pm2_sleep_ret back to 2000 then */
 		if (!screen_on && wlpm_suspend_enabled && !var_get("pm2_sleep_ret", &ret) && ret != OFF_SLEEP_RET) {
 			var_set_int("pm2_sleep_ret", OFF_SLEEP_RET);
-			fprintf(stderr, "zrnperfd: Wi-Fi: awake %d ms after traffic again, not %d (power save set after the connect)\n",
+			fprintf(stderr, "%s: Wi-Fi: awake %d ms after traffic again, not %d (power save set after the connect)\n", wlpm_name,
 				OFF_SLEEP_RET, ret);
 		}
 	}
@@ -588,8 +589,8 @@ void wlpm_tick(void) {
 	var_get("bcn_li_dtim", &dtim);
 	var_get("pm2_sleep_ret", &ret);
 	unsigned long long rx = ifstat("rx_packets"), tx = ifstat("tx_packets"), drop = filtering ? filtered() : 0;
-	fprintf(stderr, "zrnperfd: Wi-Fi, screen off %ld min: %s %s ch %d %d dBm, PM %s, DTIM %d listen %d, "
-		"awake %d ms; 5 min: rx %llu tx %llu frames, %llu filtered\n",
+	fprintf(stderr, "%s: Wi-Fi, screen off %ld min: %s %s ch %d %d dBm, PM %s, DTIM %d listen %d, "
+		"awake %d ms; 5 min: rx %llu tx %llu frames, %llu filtered\n", wlpm_name,
 		(now - off_since) / 60000, have_bssid ? mac(bssid) : "not connected", band(l.channel), l.channel,
 		l.rssi, pm_name(l.pm), l.dtim, dtim, ret, rx - last_rx, tx - last_tx,
 		drop >= last_drop ? drop - last_drop : drop);
@@ -598,7 +599,7 @@ void wlpm_tick(void) {
 	last_drop = drop;
 	/* the firmware may have been restarted, or something set them back */
 	if (wlpm_suspend_enabled && applied && (dtim != skip || ret != OFF_SLEEP_RET)) {
-		fprintf(stderr, "zrnperfd: Wi-Fi screen-off settings were reset (DTIM listen %d, awake %d ms)\n", dtim, ret);
+		fprintf(stderr, "%s: Wi-Fi screen-off settings were reset (DTIM listen %d, awake %d ms)\n", wlpm_name, dtim, ret);
 		applied = filtering = false;
 		apply_off("reset");
 	}
@@ -609,4 +610,27 @@ void wlpm_status(FILE *f) {
 		wlpm_filter_enabled ? "on" : "off", wlpm_listen_ms);
 	fprintf(f, "wifi_screen_off_settings=%s\nwifi_skip_dtim=%d\nwifi_filtering=%s\n", applied ? "on" : "off",
 		skip, filtering ? "on" : "off");
+}
+
+/* for ztprofile: the link and the chip's filter counters as they are now */
+int wlpm_read(struct wlpm_info *i) {
+	memset(i, 0, sizeof(*i));
+	if (family < 0 || !find_if()) return -ENODEV;
+	struct link l;
+	link_read(&l);
+	i->channel = l.channel;
+	i->rssi = l.rssi;
+	i->pm = l.pm;
+	unsigned char b[6] = { 0 };
+	if (!dcmd(23 /* WLC_GET_BSSID */, b, 6, false)) memcpy(i->bssid, b, 6);
+	char s[64] = "pkt_filter_stats";
+	uint32_t id = F_UNICAST, v[3];
+	memcpy(s + 17, &id, 4);
+	if (!dcmd(WLC_GET_VAR, s, sizeof(s), false)) {
+		memcpy(v, s, sizeof(v));	/* matched, forwarded, discarded */
+		i->filter_on = true;
+		i->filter_matched = v[0];
+		i->filter_discarded = v[2];
+	}
+	return 0;
 }

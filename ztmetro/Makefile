@@ -18,7 +18,7 @@ ifneq ($(FOREIGN),)
 $(info removed programs built for another machine, to build them here: $(FOREIGN))
 endif
 
-all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
+all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
 	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy
 
@@ -115,6 +115,9 @@ power/ztpower: power/ztpower.c $(CORE_DEPS)
 
 perfd/zrnperfd: perfd/zrnperfd.c perfd/wlpm.c perfd/wlpm.h perfd/tickle.c perfd/tickle.h background-apps.h ztos-user.h perfd/iblog.c perfd/iblog.h perfd/ibnet.c perfd/ibnet.h perfd/perfial.c perfd/perfial.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ perfd/zrnperfd.c perfd/wlpm.c perfd/tickle.c perfd/iblog.c perfd/ibnet.c perfd/perfial.c -lm
+
+perfd/ztprofile: perfd/ztprofile.c perfd/wlpm.c perfd/wlpm.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ perfd/ztprofile.c perfd/wlpm.c -lm
 
 touchkeyd/ztos-touchkeyd: touchkeyd/ztos-touchkeyd.c
 	$(CC) $(CFLAGS) $(WARN) -o $@ touchkeyd/ztos-touchkeyd.c
@@ -299,6 +302,8 @@ install: check-arch
 	install -Dm644 store/data/ztstore.svg /usr/local/share/icons/hicolor/scalable/apps/ztstore.svg
 	install -Dm755 perfd/zrnperfd /usr/local/sbin/zrnperfd
 	install -Dm644 perfd/zrnperfd.service /etc/systemd/system/zrnperfd.service
+	install -Dm755 perfd/ztprofile /usr/local/bin/ztprofile
+	install -Dm644 perfd/ztprofile.service /etc/systemd/system/ztprofile.service
 	install -Dm755 ledd/zrn-ledd /usr/local/sbin/zrn-ledd
 	install -Dm644 ledd/zrn-ledd.service /etc/systemd/system/zrn-ledd.service
 	install -Dm755 touchkeyd/ztos-touchkeyd /usr/local/sbin/ztos-touchkeyd
@@ -324,7 +329,7 @@ install: check-arch
 	install -Dm644 csf/ztoscoresensorframework.service /etc/systemd/system/ztoscoresensorframework.service
 
 clean:
-	rm -f ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
+	rm -f ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h
 

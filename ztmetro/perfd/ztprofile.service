@@ -1,0 +1,11 @@
+[Unit]
+Description=ztprofile: opt-in Wi-Fi/network profiler (idle until started through /run/ztprofile.ctl)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/ztprofile service
+Restart=on-failure
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
