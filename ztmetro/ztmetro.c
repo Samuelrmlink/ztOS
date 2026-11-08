@@ -156,14 +156,18 @@ static int nav_h = NAV_BAR_H;
 enum aod_mode { AOD_OFF, AOD_ON, AOD_CHARGING };
 #define AOD_MIN_BATTERY	15	/* with aod_low_battery_off, on battery below this it is dark */
 #define AOD_SHIFT_S	(10 * 60)	/* everything moves to its next place this often */
-/* A double tap on the glass wakes it: the touchscreen keeps sensing while the
- * panel shows the always-on display (s6sy761 stays runtime-active), and the
- * shell sees every touch. One tap, a touch held or moved, or two fingers do
- * nothing. 0 here: only the keys wake it. */
-#define AOD_DOUBLE_TAP	1
-#define AOD_TAP_MS	300	/* a tap: down to up within this */
-#define AOD_TAP_GAP_MS	450	/* the second tap's down this soon after the first's up */
-#define AOD_TAP_SLOP	48	/* points: how far a tap may move, and the two taps lie apart */
+/* A double tap on the glass wakes it (Settings: double_tap_wake): the
+ * touchscreen keeps sensing while the panel shows the always-on display
+ * (s6sy761 stays runtime-active), and the shell sees every touch. Only a
+ * rapid, local one: two short taps, the second close to the first and soon
+ * after it. One tap, a slow or a spread double tap, a touch held or moved,
+ * or two fingers do nothing. 0 here: only the keys wake it. Distances are in
+ * the panel's pixels (1440 x 2960, about 22 a millimetre). */
+#define AOD_DOUBLE_TAP		1
+#define AOD_TAP_MS		200	/* a tap: down to up within this */
+#define AOD_TAP_GAP_MS		300	/* the second tap's down within this of the first's up */
+#define AOD_TAP_MOVE_PX		40	/* how far a finger may move within a tap (~2 mm) */
+#define AOD_TAP_APART_PX	120	/* how far apart the two taps may land (4 % of the height, ~5.5 mm) */
 #define TOP_PAD		14	/* Start: above the first row */
 #define MAX_UNITS	8	/* Start: the most small tiles a row can hold */
 #define EDGE		18	/* how close to the glass edge a system gesture starts */
@@ -12657,8 +12661,9 @@ static void aod_draw_at(struct zt_server *server, time_t now) {
 
 /* The double tap that wakes it: a touch on the dark glass while the always-on
  * display shows. A tap is a touch lifted within AOD_TAP_MS that moved less
- * than AOD_TAP_SLOP; the second must come down within AOD_TAP_GAP_MS of the
- * first lifting, near it. Its own up and moves find no touch afterwards. */
+ * than AOD_TAP_MOVE_PX; the second must come down within AOD_TAP_GAP_MS of
+ * the first lifting, within AOD_TAP_APART_PX of it. Its own up and moves
+ * find no touch afterwards. */
 static void aod_tap_down(struct zt_server *server, int32_t id, double x, double y) {
 	if (!AOD_DOUBLE_TAP || !server->double_tap_wake || !server->aod) {
 		return;
@@ -12668,8 +12673,9 @@ static void aod_tap_down(struct zt_server *server, int32_t id, double x, double 
 		server->aod_tap.down = server->aod_tap.armed = false;	/* two fingers */
 		return;
 	}
+	double k = server->scale > 0 ? server->scale : 1;	/* panel pixels a point */
 	if (server->aod_tap.armed && now - server->aod_tap.up_ms <= AOD_TAP_GAP_MS &&
-			hypot(x - server->aod_tap.x, y - server->aod_tap.y) <= AOD_TAP_SLOP) {
+			hypot(x - server->aod_tap.x, y - server->aod_tap.y) * k <= AOD_TAP_APART_PX) {
 		server->aod_tap.armed = false;
 		wlr_log(WLR_INFO, "aod: double tap, waking");
 		screen_set(server, true);
@@ -12685,8 +12691,9 @@ static void aod_tap_down(struct zt_server *server, int32_t id, double x, double 
 }
 
 static void aod_tap_move(struct zt_server *server, int32_t id, double x, double y) {
+	double k = server->scale > 0 ? server->scale : 1;
 	if (server->aod_tap.down && server->aod_tap.id == id &&
-			hypot(x - server->aod_tap.x, y - server->aod_tap.y) > AOD_TAP_SLOP) {
+			hypot(x - server->aod_tap.x, y - server->aod_tap.y) * k > AOD_TAP_MOVE_PX) {
 		server->aod_tap.down = false;	/* a swipe, not a tap */
 	}
 }

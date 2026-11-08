@@ -49,6 +49,16 @@ expect "3 locked again: the AOD" "screen off aod on"
 # 2. touches: one tap does nothing; double-tap switched off: nothing either
 ctl "tap 180 400"; sleep 1
 expect "2 one tap on the AOD: nothing" "screen off aod on"
+ctl "tap 180 400"; sleep 0.5; ctl "tap 182 402"; sleep 1
+expect "2 a slow double tap (0.5 s): nothing" "screen off aod on"
+ctl "tap 180 400"; sleep 0.15; ctl "tap 180 440"; sleep 1
+expect "2 a spread double tap (40 points, 160 px): nothing" "screen off aod on"
+ctl "tap 60 400"; sleep 0.15; ctl "tap 300 400"; sleep 1
+expect "2 a double tap across the screen: nothing" "screen off aod on"
+ctl "down 4 180 400"; sleep 0.3; ctl "up 4"; sleep 0.1; ctl "tap 182 402"; sleep 1
+expect "2 a slow press then a tap: nothing" "screen off aod on"
+ctl "down 5 180 400"; ctl "move 5 180 420"; ctl "up 5"; sleep 0.1; ctl "tap 180 420"; sleep 1
+expect "2 a short swipe then a tap: nothing" "screen off aod on"
 key double_tap_wake off
 ctl "tap 180 400"; sleep 0.15; ctl "tap 182 402"; sleep 2
 expect "2 double tap, switched off: nothing" "screen off aod on"

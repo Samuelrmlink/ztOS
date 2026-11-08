@@ -44,7 +44,7 @@ back to the AOD. The SoC never sleeps while the AOD shows (see the cost).
 | Colours | time 0.92, the rest grey 0.62, the force mark 0.30 | `AOD_WHITE`, `AOD_GREY`, `AOD_FORCE_GREY` |
 | Waiting apps' glyphs | 16 points, grey, outline only | `AOD_ICON`, `aod_icon` |
 | The force press's mark | a squircle outline, 34 x 26 points, own 7-place cycle | `AOD_FORCE_*`, `aod_force_mark` |
-| Double tap wakes | Settings > Lock Screen, **on**; 300 ms tap, 450 ms gap, 48 points | `double_tap_wake`; `AOD_DOUBLE_TAP`, `AOD_TAP_*` |
+| Double tap wakes | Settings > Lock Screen, **on**; taps of 200 ms at most, the second within 300 ms and 120 panel pixels (~5.5 mm), 40 px of movement | `double_tap_wake`; `AOD_DOUBLE_TAP`, `AOD_TAP_*` |
 | Lock-screen timeout | Settings > Lock Screen, **10 s** (5, 10, 15, 30 s, 1 min, or as the screen) | `lock_timeout`; `LOCK_TIMEOUT_S`; Settings `LOCK_TIMEOUT_DEFAULT` |
 | 12/24-hour clock | 24-hour unless `clock_24h = off` | `core/zt-clock.h` (`ZT_CLOCK_24H_DEFAULT`); Settings > date + region |
 
@@ -59,7 +59,9 @@ No kernel or boot image change. In `ztmetro/ztmetro.c` (search `aod_`):
 - Only these wake it: the power key; the force press, if switched on in
   Settings; a double tap, if switched on. A single touch, a touch held
   longer than 300 ms or moved, and two fingers do nothing (no wake, no
-  haptic, nothing reaches an app). Calls wake it as before (the modem daemon
+  haptic, nothing reaches an app). The double tap must be rapid and local:
+  each tap 200 ms at most, the second down within 300 ms and 120 panel
+  pixels (~5.5 mm) of the first; a slow, spread or swiping one does nothing. Calls wake it as before (the modem daemon
   sends "screen on"). Confirmed by hand on 2026-11-08: the touchscreen keeps
   sensing with the AOD lit (s6sy761 stays runtime-active with the screen
   off), and the force press wakes it.
