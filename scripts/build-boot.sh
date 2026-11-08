@@ -105,6 +105,8 @@ python3 "$ROOT/kernel/patch-decon-panel-io.py" "$SRC"
 python3 "$ROOT/kernel/patch-suspend-mpidr.py" "$SRC"
 python3 "$ROOT/kernel/patch-ufs-suspend.py" "$SRC"
 python3 "$ROOT/kernel/patch-touch-suspend.py" "$SRC"
+# a hard press at the bottom centre is a home key on its own device (ROADMAP 7.3)
+python3 "$ROOT/kernel/patch-touch-force.py" "$SRC"
 python3 "$ROOT/kernel/patch-pinctrl-resume.py" "$SRC"
 # the firmware's roams are reported to the host the way Samsung's driver does
 python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"

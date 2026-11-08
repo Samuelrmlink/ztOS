@@ -60,6 +60,12 @@ if old_open in s:
  if s.count(close_anchor) != 1:
   sys.exit('patch-touch-suspend: input-close anchor changed')
  s = s.replace(close_anchor, close_anchor + '\n\tpm_runtime_put(&sdata->client->dev);')
+# input_close drops the reference input_open took: once. (Before this check every
+# run added another put, so a tree patched N times underflowed the usage count.)
+close_anchor = '\t\tdev_err(&sdata->client->dev, "failed to turn off sensing\\n");'
+put = '\n\tpm_runtime_put(&sdata->client->dev);'
+while close_anchor + put + put in s:
+ s = s.replace(close_anchor + put + put, close_anchor + put)
 # A sleeping S9 controller can leave its level-low interrupt asserted.
 # Stop sensing and empty its FIFO before application sleep; masking the Linux
 # IRQ alone does not stop the always-on wake controller seeing the line.

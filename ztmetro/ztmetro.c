@@ -153,6 +153,12 @@ static int nav_h = NAV_BAR_H;
 #define SWIPE		56	/* how far a system gesture has to travel */
 #define SLOP		8	/* movement that turns a tap into a drag */
 #define LONG_PRESS_MS	450
+/* The S9's force press: the touchscreen driver reports a hard press at the bottom
+ * centre as KEY_HOMEPAGE on an input device of this name (kernel/patch-touch-force.py).
+ * It vibrates for force_press_vibration ms (Settings > haptics). */
+#define FORCE_PRESS_DEVICE	"s6sy761-force"
+#define FORCE_PRESS_MS		24
+#define FORCE_PRESS_MS_MAX	60
 /* A tile or row leans in only once the finger has stayed put this long: shown
  * at once, the start of every scroll pressed the tile under it first */
 #define PRESS_DELAY_MS	80
@@ -420,6 +426,7 @@ struct zt_keyboard {
 	struct zt_server *server;
 	struct wlr_keyboard *wlr_keyboard;
 	struct wl_listener modifiers, key, destroy;
+	bool force;		/* the touchscreen's force press: FORCE_PRESS_DEVICE */
 };
 
 #define CTL_FINGERS 12
@@ -1030,6 +1037,11 @@ struct zt_server {
 	int haptic_strength;		/* percent */
 	int haptic_level[8];		/* by enum hap_group: percent of the strength; 0 off */
 	int haptic_mag[8];		/* the magnitude each pulse is kept in the driver at */
+	/* Force press (a hard press at the bottom centre: the S9's hidden home
+	 * button). Its pulse is a length of its own, kept in an effect of its own. */
+	bool force_press;		/* config force_press */
+	int force_press_ms;		/* config force_press_vibration: 0 none */
+	int force_effect, force_effect_ms, force_effect_mag;
 	uint32_t haptic_scan_ms;
 
 	uint32_t demo_volume_first_ms;
@@ -2463,6 +2475,7 @@ static void haptics_init(struct zt_server *server) {
 		close(server->haptic_fd);
 	}
 	server->haptic_fd = -1;
+	server->force_effect = -1;
 	server->haptic_scan_ms = now_ms();
 	if (g_nested) {
 		return;
@@ -2550,6 +2563,44 @@ static void hap(struct zt_server *server, enum hap_kind kind, enum hap_group gro
 		wlr_log(WLR_ERROR, "haptics: write failed, looking for the device again");
 		close(server->haptic_fd);
 		server->haptic_fd = -1;
+		server->haptic_scan_ms = now_ms();
+	}
+}
+
+/* The force press's pulse: force_press_ms long, as strong as a long press at the
+ * overall strength. Its own setting, so felt even when touches aren't. */
+static void hap_force(struct zt_server *server) {
+	if (g_dump_dir || server->force_press_ms <= 0) {
+		return;
+	}
+	if (server->haptic_fd < 0) {
+		haptics_init(server);
+		if (server->haptic_fd < 0) {
+			return;
+		}
+	}
+	double level = HAPS[HAP_HEAVY].level * server->haptic_strength / 100.0;
+	int magnitude = (int)(0xffff * (level > 1 ? 1 : level));
+	if (server->force_effect < 0 || server->force_effect_ms != server->force_press_ms ||
+			server->force_effect_mag != magnitude) {
+		struct ff_effect effect = {
+			.type = FF_RUMBLE,
+			.id = (short)server->force_effect,
+			.u.rumble = { .strong_magnitude = (unsigned short)magnitude, .weak_magnitude = (unsigned short)magnitude },
+			.replay = { .length = (unsigned short)server->force_press_ms },
+		};
+		if (ioctl(server->haptic_fd, EVIOCSFF, &effect) < 0) {
+			return;
+		}
+		server->force_effect = effect.id;
+		server->force_effect_ms = server->force_press_ms;
+		server->force_effect_mag = magnitude;
+	}
+	struct input_event play = { .type = EV_FF, .code = (unsigned short)server->force_effect, .value = 1 };
+	if (write(server->haptic_fd, &play, sizeof(play)) < 0) {
+		close(server->haptic_fd);
+		server->haptic_fd = -1;
+		server->force_effect = -1;
 		server->haptic_scan_ms = now_ms();
 	}
 }
@@ -3159,6 +3210,8 @@ static void load_config(struct zt_server *server) {
 		"%s", "/usr/local/share/backgrounds/ztos/Lumia Cyan lock screens/Wallpaper_01.jpg");
 	server->haptics_enabled = true;
 	server->haptic_strength = 80;
+	server->force_press = true;
+	server->force_press_ms = FORCE_PRESS_MS;
 	for (int i = 0; i < 8; i++) {
 		server->haptic_level[i] = 100;
 	}
@@ -3236,6 +3289,11 @@ static void load_config(struct zt_server *server) {
             server->volume = (n < 0 ? 0 : n > 100 ? 100 : n) * VOLUME_MAX / 100;
         } else if (strcmp(key, "haptics") == 0) {
 			server->haptics_enabled = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+		} else if (strcmp(key, "force_press") == 0) {
+			server->force_press = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+		} else if (strcmp(key, "force_press_vibration") == 0) {
+			int ms = strcmp(value, "off") == 0 ? 0 : atoi(value);
+			server->force_press_ms = ms < 0 ? 0 : ms > FORCE_PRESS_MS_MAX ? FORCE_PRESS_MS_MAX : ms;
 		} else if (strcmp(key, "haptic_strength") == 0) {
 			int strength = atoi(value);
 			server->haptic_strength = strength < 10 ? 10 : strength > 100 ? 100 : strength;
@@ -14530,6 +14588,29 @@ static int power_key_held(void *data) {
 	return 0;
 }
 
+/* A force press is pressed with a finger that is already on the glass: whatever
+ * that finger is doing stops, so lifting it taps nothing. An app's touch gets a
+ * cancel (wl_touch.cancel), not an up; the shell's own end as if cancelled. */
+static void touches_cancel_all(struct zt_server *server) {
+	uint32_t now = now_ms();
+	for (int i = 0; i < MAX_TOUCH; i++) {
+		struct touch_point *p = &server->touches[i];
+		if (!p->used) {
+			continue;
+		}
+		if (p->role == ROLE_CLIENT) {
+			struct wlr_touch_point *tp = wlr_seat_touch_get_point(server->seat, p->id);
+			if (tp && tp->client) {
+				wlr_seat_touch_notify_cancel(server->seat, tp->client);
+			}
+			p->used = false;
+		} else {
+			touch_end(server, p->id, now, true);
+		}
+	}
+	damage(server);
+}
+
 /* A key, from a keyboard or (keyboard NULL) from the control pipe. */
 static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, struct wlr_keyboard_key_event *event) {
 	if (event->keycode == KEY_POWER) {
@@ -14553,6 +14634,18 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 			if (stop)
 			run_detached("systemctl", "--user", "stop", "ztos-demoloop.service");
 			return;
+		}
+	}
+	if (keyboard && keyboard->force) {
+		/* the touchscreen's force press: a home key, felt, that the finger
+		 * pressing it doesn't also tap with */
+		if (!server->force_press) {
+			return;
+		}
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && server->screen_on) {
+			wlr_log(WLR_INFO, "force press");
+			hap_force(server);
+			touches_cancel_all(server);
 		}
 	}
 	int nav = hwkey_nav(event->keycode);
@@ -14699,6 +14792,7 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 		struct zt_keyboard *keyboard = calloc(1, sizeof(*keyboard));
 		keyboard->server = server;
 		keyboard->wlr_keyboard = wlr_keyboard;
+		keyboard->force = device->name && strcmp(device->name, FORCE_PRESS_DEVICE) == 0;
 		set_default_keymap(wlr_keyboard);
 		wlr_keyboard_set_repeat_info(wlr_keyboard, 25, 600);
 		keyboard->modifiers.notify = keyboard_handle_modifiers;
@@ -16278,6 +16372,7 @@ static int reload(int signal_number, void *data) {
 	int n = server->n_tiles;
 	uint32_t accent = server->accent;
 	int strength = server->haptic_strength;
+	int force_ms = server->force_press_ms;
 	int ring_before = server->ring_volume;
 	reload_config(server);
 	{
@@ -16307,6 +16402,8 @@ static int reload(int signal_number, void *data) {
 	}
 	if (strength != server->haptic_strength) {
 		hap(server, HAP_CLICK, HG_SYSTEM);	/* this is how it feels now */
+	} else if (force_ms != server->force_press_ms) {
+		hap_force(server);	/* the force press's pulse, as it is now */
 	}
 	/* nothing may keep animating a tile that is about to be replaced */
 	for (int i = 0; i < MAX_ANIMS; i++) {

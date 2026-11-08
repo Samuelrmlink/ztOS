@@ -84,6 +84,8 @@ enum action {
 	ACT_STYLE_APPLY,
 	ACT_SCALE_APPLY,
 	ACT_HAPTICS,
+	ACT_FORCE_PRESS,
+	ACT_FORCE_MS,		/* the force press's vibration: a slider */
 	ACT_WIFI_RADIO,
 	ACT_WIFI_SUSPEND,
 	ACT_WIFI_CONNECT,
@@ -147,6 +149,12 @@ enum action {
 	ACT_APP_SCALE_SLOT,	/* then one for each app listed */
 	ACT_APP_SCALE_LAST = ACT_APP_SCALE_SLOT + 23,
 };
+
+/* The force press's vibration, ms: as the shell has them (ztmetro.c FORCE_PRESS_MS).
+ * Below the minimum the motor (160 Hz, a cycle is 6 ms) isn't felt. */
+#define FORCE_MS_DEFAULT	24
+#define FORCE_MS_MAX		60
+#define FORCE_MS_MIN		12
 
 /* The kinds of touch that can be felt, each with a switch of its own; the
  * shell reads the same keys. */
@@ -238,6 +246,8 @@ static struct {
 	bool about_show_repo;
 	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
 	int haptic_strength;	/* percent */
+	bool force_press;	/* a hard press at the bottom centre is Start */
+	int force_ms;		/* how long it vibrates; 0 not at all */
 	int haptic_group[N_HAPTIC_GROUPS];	/* percent of the strength; 0 off */
 	int quick[8];		/* indexes into QUICK_IDS */
 } app = {
@@ -247,6 +257,8 @@ static struct {
 	.lock_wall = "/usr/local/share/backgrounds/ztos/Lumia Cyan lock screens/Wallpaper_01.jpg",
 	.wall_target = WALL_TARGET_TILES,
 	.haptic_strength = 80,
+	.force_press = true,
+	.force_ms = FORCE_MS_DEFAULT,
 	.haptic_group = { 100, 100, 100, 100, 100, 100 },
 	.quick = { 0, 1, 2, 3, 10, 5, 7, 8 },
 	.accent = 5,
@@ -371,6 +383,11 @@ static void config_load(void) {
 			app.style = strcmp(val, "dotmatrix") == 0 || strcmp(val, "1") == 0;
 		} else if (strcmp(key, "haptics") == 0) {
 			app.haptics = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "force_press") == 0) {
+			app.force_press = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "force_press_vibration") == 0) {
+			int ms = strcmp(val, "off") == 0 ? 0 : atoi(val);
+			app.force_ms = ms < 0 ? 0 : ms > FORCE_MS_MAX ? FORCE_MS_MAX : ms;
 		} else if (strcmp(key, "haptic_strength") == 0) {
 			app.haptic_strength = atoi(val) < 10 ? 10 : atoi(val) > 100 ? 100 : atoi(val);
 		} else if (strncmp(key, "haptic_", 7) == 0) {
@@ -584,6 +601,8 @@ static void config_format(void) {
 	KEY("lock", "%s", app.dev_lock ? "on" : "off");
 	KEY("menu_speed", "%d", menu_speeds[app.menu_speed_idx]);
 	KEY("haptic_strength", "%d", app.haptic_strength);
+	KEY("force_press", "%s", app.force_press ? "on" : "off");
+	KEY("force_press_vibration", "%d", app.force_ms);
 	char quick[CONFIG_VALUE_MAX - 8] = "";
 	for (int i = 0; i < 8; i++) {
 		size_t at = strlen(quick);
@@ -3000,13 +3019,36 @@ static double draw_keyboard(cairo_t *cr) {
 	return y + 60;
 }
 
+/* The force press: pressing hard at the bottom centre of the screen, where the
+ * S9's home button is, goes to Start even with the navigation bar hidden. The
+ * touchscreen tells it from a touch (kernel/patch-touch-force.py); the shell
+ * buzzes for force_ms, on its own setting: not touched by the switches above. */
+static double draw_force_press(cairo_t *cr, double y) {
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_text(cr, "Force press", FONT_SEMILIGHT, 26, MARGIN, y + 6, 0);
+	y += 50;
+	y = zmc_switch(cr, y, "Press hard at the bottom for Start", app.force_press, ACT_FORCE_PRESS);
+	if (!app.force_press) {
+		return y + 20;
+	}
+	char caption[64];
+	if (app.force_ms > 0) snprintf(caption, sizeof(caption), "Vibration: %d ms", app.force_ms);
+	else snprintf(caption, sizeof(caption), "Vibration: off");
+	zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.force_ms * 100 / FORCE_MS_MAX, caption, ACT_FORCE_MS);
+	y += 58;
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	y += zmc_text(cr, "How long the phone buzzes when a hard press is felt, from off to 60 ms. Felt as you let go "
+		"of the slider. Works while the screen is on.", FONT_REGULAR, 12.5, MARGIN, y - 6, zmc.width - 2 * MARGIN) + 10;
+	return y + 20;
+}
+
 /* What is felt, and how strongly. The shell plays every pulse (it has the
  * motor) and reads these as soon as they are saved. */
 static double draw_haptics(cairo_t *cr) {
 	double y = zmc_header(cr, "haptics");
 	y = zmc_switch(cr, y, "Vibrate on touch", app.haptics, ACT_HAPTICS);
 	if (!app.haptics) {
-		return y + 20;
+		return draw_force_press(cr, y + 10);
 	}
 	zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.haptic_strength, "Overall strength", ACT_HAPTIC_STRENGTH);
 	y += 70;
@@ -3032,7 +3074,7 @@ static double draw_haptics(cairo_t *cr) {
 	for (int k = 0; k < 4; k++) {
 		y = zmc_entry(cr, y, pulses[k], what[k], ACT_HAPTIC_TRY, k);
 	}
-	return y + 20;
+	return draw_force_press(cr, y + 10);
 }
 
 /* The action centre's eight quick actions: which one stands in each place. */
@@ -3660,6 +3702,10 @@ static void activate(int action, int arg) {
 		app.haptics = !app.haptics;
 		config_save();
 		break;
+	case ACT_FORCE_PRESS:
+		app.force_press = !app.force_press;
+		config_save();
+		break;
 	case ACT_BT_POWER:
 		bt.on = !bt.on;
 		bt.status[0] = 0;
@@ -4135,6 +4181,13 @@ static void slide(int action, int value, bool done) {
 		if (done) {
 			config_brightness_chosen();
 			config_save();
+		}
+		break;
+	case ACT_FORCE_MS:
+		app.force_ms = (value * FORCE_MS_MAX + 50) / 100;
+		if (app.force_ms > 0 && app.force_ms < FORCE_MS_MIN) app.force_ms = FORCE_MS_MIN;
+		if (done) {
+			config_save();	/* the shell buzzes once at the new length */
 		}
 		break;
 	case ACT_HAPTIC_STRENGTH:
