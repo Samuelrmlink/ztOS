@@ -320,12 +320,12 @@ trip() {	# fingerprint, limit mA, 1 if at 9 V, how it was seen: remember, and sa
 }
 
 # what one pass remembers for the next (the daemon keeps it; a lone pass reads it)
-STATE="src_was key_was cap win ceil wceil off_since plug_at settle hot_stop cold_stop warm cold cool vhold hv_at logged
+STATE="redrop src_was key_was cap win ceil wceil off_since plug_at settle hot_stop cold_stop warm cold cool vhold hv_at logged
 	sess_fp held_val held_since trips_seen hr_seen reduced_seen hr_sess hr_caps caps_was anom anom_cap
 	last_fp last_in last_hv"
 src_was=none key_was= cap=0 win=0 ceil=0 wceil=0 off_since=0 plug_at=0 settle=0
 hot_stop=0 cold_stop=0 warm=0 cold=0 cool=0 vhold=0 hv_at=0 logged=
-sess_fp= held_val=0 held_since=0 trips_seen= hr_seen= reduced_seen= hr_sess=0 hr_caps= caps_was=
+redrop=0 sess_fp= held_val=0 held_since=0 trips_seen= hr_seen= reduced_seen= hr_sess=0 hr_caps= caps_was=
 anom=0 anom_cap=1500
 last_fp= last_in=0 last_hv=0
 load() { [ -r "$RUN/state" ] && . "$RUN/state"; }
@@ -343,6 +343,7 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	# a plug session: from a charger in until out for REPLUG_S or more
 	if [ $src = none ]; then
 		[ "$off_since" = 0 ] && off_since=$NOW
+		redrop=1	# a quick return may still be another charger (a cable swap)
 	else
 		if [ "$src_was" = none ] && [ $((NOW - off_since)) -ge $REPLUG_S ]; then
 			cap=0 win=0 ceil=0 wceil=0 hv_at=0 plug_at=$NOW settle=$((NOW + 15))
@@ -380,6 +381,15 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	# plug: type, usb_type and the voltages of its PDOs up to 9 V. Not their
 	# currents: a multi-port charger shares its current between its ports, and
 	# a throttling one lowers it, and it is still the same charger.
+	# A different type after a drop-out within REPLUG_S is a swapped charger, not
+	# the same one coming back: a new session (a trip keeps its type, so stays).
+	if [ $redrop = 1 ] && [ $src != none ] && [ $type != unknown ]; then
+		if [ -n "$sess_fp" ] && [ "${sess_fp%%+*}" != "$type" ]; then
+			cap=0 win=0 ceil=0 wceil=0 hv_at=0 plug_at=$NOW settle=$((NOW + 15))
+			sess_fp= held_val=0 held_since=0 anom=0 anom_cap=1500 hr_sess=0 hr_caps= caps_was=
+		fi
+		redrop=0
+	fi
 	if [ $src = wired ] && [ -z "$sess_fp" ] && [ $type != unknown ]; then
 		sess_fp=$type
 		[ -n "$utype" ] && sess_fp+="+$utype"
