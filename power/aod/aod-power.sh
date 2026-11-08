@@ -41,13 +41,25 @@ while [ "$(cat $CHG)" != 0 ]; do
 done
 say "unplugged at $(date +%T)"
 
+# the charger's own reading of the system current (mA), when its hwmon has one
+ISYS=
+for h in /sys/class/hwmon/hwmon*; do
+	if [ "$(cat $h/name 2>/dev/null)" = max77705 ] && [ "$(cat $h/curr2_label 2>/dev/null)" = ISYS_REG ]; then
+		ISYS=$h/curr2_input
+	fi
+done
+SAMPLES=${SAMPLES:-20}	# one-second readings each
+
 reading() {	# label: average battery current (mA, negative = from the battery)
-	local label=$1 sum=0 v i
+	local label=$1 sum=0 isys=0 v i
 	sleep 15
-	for i in $(seq 20); do
-		v=$(cat $BAT/current_now); sum=$((sum + v)); sleep 1
+	for i in $(seq "$SAMPLES"); do
+		v=$(cat $BAT/current_now); sum=$((sum + v))
+		[ -n "$ISYS" ] && isys=$((isys + $(cat $ISYS)))
+		sleep 1
 	done
-	say "$(printf '%-28s %7d mA   (%s mV, %s %%, backlight %s, %s)' "$label" $((sum / 20000)) \
+	say "$(printf '%-28s %7d mA  ISYS %4d mA  (%s mV, %s %%, backlight %s, %s)' "$label" \
+		$((sum / SAMPLES / 1000)) $((isys / SAMPLES)) \
 		"$(($(cat $BAT/voltage_now) / 1000))" "$(cat $BAT/capacity)" "$(cat $BL/brightness)" \
 		"$(grep -E '^(screen|aod) ' "$STATE" | tr '\n' ' ')")"
 }

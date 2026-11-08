@@ -860,6 +860,8 @@ struct zt_server {
 	/* the ctl's "aod test": a battery level and a charger to use in place of
 	 * the real ones, for testing the rules without touching charging; -1 real */
 	int aod_test_battery, aod_test_charger;
+	unsigned aod_frames;		/* frames sent to the panel, for the state file */
+	int aod_place_shown;		/* the place last drawn, to log each move */
 	int screen_timeout;		/* seconds of no input before the screen sleeps; 0: never */
 	uint32_t idle_armed_ms;
 	struct wl_event_source *idle_timer;
@@ -12542,7 +12544,13 @@ static void aod_refresh(struct zt_server *server) {
 	if (!server->aod) {
 		return;
 	}
-	aod_draw_at(server, time(NULL));
+	time_t now = time(NULL);
+	int place = aod_place(now);
+	if (place != server->aod_place_shown) {
+		wlr_log(WLR_INFO, "aod: place %d", place);	/* every AOD_SHIFT_S */
+		server->aod_place_shown = place;
+	}
+	aod_draw_at(server, now);
 	server->aod_dirty = true;
 	if (server->output) {
 		wlr_output_schedule_frame(server->output->wlr_output);
@@ -12610,6 +12618,8 @@ static void aod_render_frame(struct zt_server *server) {
 		server->plane_shown = false;
 		server->plane_surface = NULL;
 		server->aod_dirty = false;
+		server->aod_frames++;
+		state_file_write(server);	/* (its aod_frames: one write a minute) */
 	} else {
 		wlr_log(WLR_ERROR, "aod: output commit failed");
 	}
@@ -14487,8 +14497,9 @@ static void state_file_write(struct zt_server *server) {
 		return;
 	}
 	struct wlr_output *o = server->output->wlr_output;
-	fprintf(f, "points %d %d\nscale %.2f\npixels %d %d\nscreen %s\naod %s\n", server->width, server->height,
-		server->scale, o->width, o->height, server->screen_on ? "on" : "off", server->aod ? "on" : "off");
+	fprintf(f, "points %d %d\nscale %.2f\npixels %d %d\nscreen %s\naod %s\naod_frames %u\n", server->width,
+		server->height, server->scale, o->width, o->height, server->screen_on ? "on" : "off",
+		server->aod ? "on" : "off", server->aod_frames);
 	fclose(f);
 	rename(tmp, path);
 }
@@ -17351,6 +17362,7 @@ int main(int argc, char *argv[]) {
 	server.shade_pressed = -1;
 	server.uevent_fd = -1;
 	server.aod_test_battery = server.aod_test_charger = -1;	/* the real ones */
+	server.aod_place_shown = -1;
 	for (int i = 0; i < 8; i++) {
 		server.shade_press[i] = 1.0f;
 	}
