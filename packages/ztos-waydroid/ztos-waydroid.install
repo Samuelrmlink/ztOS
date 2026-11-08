@@ -1,0 +1,64 @@
+# pacman scriptlets for ztos-waydroid. Removal leaves the base system as it was
+# before: no units enabled, no sudo rule, no nftables tables, no images. The
+# user's Android data (~/.local/share/waydroid: apps, chats) is kept and named.
+
+_user_units='ztos-waydroid-boot.service ztos-waydroid-audio-reconnect.service'
+
+post_install() {
+	ztos-user-dropins > /dev/null || echo 'ztos-waydroid: ztos-user-dropins failed: no sudo rule for the user'
+	systemctl daemon-reload
+	systemctl --global enable $_user_units > /dev/null 2>&1
+	systemctl enable ztos-waydroid-images.service > /dev/null 2>&1
+	# fetch the images now, in the background (about 1 GB; then set-up, once
+	# the kernel has binder): journalctl -u ztos-waydroid-images
+	systemctl start --no-block ztos-waydroid-images.service
+	if ! grep -qw binder /proc/filesystems; then
+		echo 'ztos-waydroid: this kernel has no binder. Android starts after a boot image'
+		echo '  built with scripts/build-boot.sh --waydroid (docs/waydroid.md).'
+	fi
+}
+
+post_upgrade() {
+	ztos-user-dropins > /dev/null || true
+	systemctl daemon-reload
+}
+
+pre_remove() {
+	. /usr/lib/ztos/user.sh
+	if [ -n "$ZTOS_USER" ] && [ -S "$ZTOS_RUNTIME_DIR/bus" ]; then
+		ztos_as_user systemctl --user stop ztos-waydroid-session.service $_user_units 2>/dev/null || true
+		ztos_as_user timeout 25 waydroid session stop > /dev/null 2>&1 || true
+	fi
+	systemctl --global disable $_user_units > /dev/null 2>&1 || true
+	systemctl disable --now ztos-waydroid-images.service ztos-waydroid-network.service \
+		waydroid-container.service > /dev/null 2>&1 || true
+	# the network: ztos-waydroid-network's NAT table, and waydroid-net.sh's
+	# bridge and tables if the container left them
+	nft delete table ip ztos_waydroid 2> /dev/null || true
+	[ -x /usr/lib/waydroid/data/scripts/waydroid-net.sh ] &&
+		/usr/lib/waydroid/data/scripts/waydroid-net.sh stop > /dev/null 2>&1 || true
+	umount /dev/binderfs 2> /dev/null || true
+}
+
+post_remove() {
+	. /usr/lib/ztos/user.sh
+	rm -f /etc/sudoers.d/ztos-waydroid
+	rm -f /var/lib/ztos/waydroid-ready /run/ztos-waydroid-boot-ready /run/ztos-waydroid-settings \
+		/run/ztos-waydroid-settings.lock
+	# The images and Waydroid's own state: several GB, fetched again on a new install.
+	rm -rf /usr/share/waydroid-extra/images /var/cache/ztos-waydroid /var/lib/waydroid
+	rmdir /usr/share/waydroid-extra 2> /dev/null || true
+	if [ -n "$ZTOS_HOME" ] && [ -d "$ZTOS_HOME" ]; then
+		# Android's app entries, so no tile is left that cannot open
+		rm -f "$ZTOS_HOME"/.local/share/applications/waydroid.*.desktop \
+			"$ZTOS_HOME"/.local/share/applications/ztos-android-*-waydroid.desktop
+		rm -f "$ZTOS_RUNTIME_DIR"/ztos-waydroid-* 2> /dev/null || true
+	fi
+	systemctl daemon-reload
+	if [ -n "$ZTOS_HOME" ] && [ -d "$ZTOS_HOME/.local/share/waydroid" ]; then
+		echo "ztos-waydroid: Android's data (apps, their files) is kept in"
+		echo "  $ZTOS_HOME/.local/share/waydroid ($(du -sh "$ZTOS_HOME/.local/share/waydroid" 2>/dev/null | cut -f1))."
+		echo "  To delete it too: sudo rm -rf $ZTOS_HOME/.local/share/waydroid"
+	fi
+	echo 'ztos-waydroid: removed. pacman -Rns ztos-waydroid also removes waydroid, lxc and python-gbinder.'
+}

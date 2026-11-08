@@ -3,6 +3,8 @@
 set -u
 marker=/run/ztos-waydroid-boot-ready
 rm -f "$marker"
+# not set up yet (ztos-waydroid-images: no images, or no binder in this kernel)
+[[ -e /var/lib/waydroid/waydroid.cfg ]] || exit 0
 
 if ! sudo -n /usr/local/libexec/ztos-waydroid-recover prepare; then
 	logger -t ztos-waydroid-boot 'container prepare failed; lazy launch remains available'

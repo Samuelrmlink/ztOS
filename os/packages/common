@@ -66,11 +66,10 @@ nodejs
 npm
 gnome-terminal
 
-# Android apps: Waydroid (the GSI ships its recipe; ztos-waydroid-images fetches
-# and strips the pinned Android 13 image at first boot), with what its scripts use
-waydroid
-lxc
-python-gbinder
+# Android apps: Waydroid is not in the base system. It is the optional
+# ztos-waydroid package (packages/ztos-waydroid, docs/waydroid.md), which pulls
+# in waydroid, lxc and python-gbinder. These stay: other parts use them too
+# (dnsmasq: NetworkManager's shared/hotspot mode).
 nftables
 dnsmasq
 python-dbus

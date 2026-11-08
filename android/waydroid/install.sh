@@ -49,6 +49,19 @@ os.chmod(path + '.ztos-new', 0o644)
 os.replace(path + '.ztos-new', path)
 PY
 "$here/patch-vendor.sh"
+# Installed by the ztos-waydroid package (packages/ztos-waydroid): its files,
+# units and sudoers rule are the package's, so only the image and config work
+# above is done here. Otherwise (a checkout copied to the phone) put them in place.
+if [[ -e $here/PACKAGED ]]; then
+    waydroid upgrade -o
+    systemctl daemon-reload
+    systemctl enable --now waydroid-container.service ztos-waydroid-network.service
+    systemctl restart ztos-waydroid-network.service
+    # the device's GNSS bridge, held back until Waydroid was set up
+    systemctl start ztos-waydroid-location.service 2>/dev/null || true
+    echo 'Android images ready.'
+    exit 0
+fi
 install -Dm644 "$here/README.md" /usr/local/share/doc/ztos-waydroid/README.md
 install -Dm755 "$here/network.py" /usr/local/libexec/ztos-waydroid-network
 install -Dm755 "$here/recover.sh" /usr/local/libexec/ztos-waydroid-recover
