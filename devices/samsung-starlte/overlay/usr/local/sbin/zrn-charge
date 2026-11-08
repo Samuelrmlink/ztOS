@@ -198,8 +198,16 @@ detect() {	# src (none, wired, wireless), type, cmax (mA, 0 = not said), volt (m
 	fi
 }
 
-screen_on() {	# as zrn-sleepd sees it: off only when every connector says disabled
+screen_on() {	# what the person sees: the shell's own screen state (zrnperfd's status)
+	# first, since the always-on display keeps the output enabled with the
+	# screen "off"; else as zrn-sleepd sees it, off only when every connector
+	# says disabled
 	local f seen=0
+	if [ -r "$R/run/zrnperfd.status" ]; then
+		while read -r f; do
+			case $f in screen=off) return 1 ;; screen=on) return 0 ;; esac
+		done < "$R/run/zrnperfd.status"
+	fi
 	for f in "$DRM"/card*-*/enabled; do
 		get "$f" || continue
 		seen=1
