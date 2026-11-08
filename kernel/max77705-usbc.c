@@ -2995,6 +2995,8 @@ static void max77705_usbc_shutdown(struct i2c_client *client)
 
 	if (!u || !u->wq)
 		return;
+	dev_info(u->dev, "shutdown: hv_mode %d, contract pdo %u, mailbox %s\n", u->hv_mode,
+		 u->pd.pos, u->mbox_allowed && !u->mbox_dead ? "on" : "off");
 	cancel_delayed_work_sync(&u->hv_work);
 	cancel_work_sync(&u->event_work);
 	if (u->mbox_allowed && !u->mbox_dead) {
