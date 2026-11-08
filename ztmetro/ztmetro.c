@@ -12561,21 +12561,23 @@ static const struct { double lux, lstar, scale; } AOD_LEVELS[] = {
  * own few pixels on AOD_SHIFT_S's clock (AOD_FORCE_SPOTS, seven of them: not
  * in step with the nine places), always above the band.
  */
-#define AOD_FORCE_X_PX		753	/* the press, in panel pixels */
-#define AOD_FORCE_BAND_PX	2810	/* the bottom self-mask band's first row */
 #define AOD_FORCE_PANEL_W	1440
 #define AOD_FORCE_PANEL_H	2960
-/* the size, line and place of Samsung's own (photographed side by side,
- * 2026-11-08: about 76 x 72 panel pixels, its middle near row 2747) */
-#define AOD_FORCE_W		19	/* points */
-#define AOD_FORCE_H		18
-#define AOD_FORCE_GAP		7	/* points between it (at its lowest) and the band */
-#define AOD_FORCE_N		3.2	/* the squircle's exponent: rounder corners than 4 */
-#define AOD_FORCE_LEVEL		AOD_GREY	/* its brightest channel: as the grey text, so it shows at every level */
-#define AOD_FORCE_TINT		0.4	/* how much of the accent colour is in it */
-#define AOD_FORCE_LINE		0.75	/* points: 3 panel pixels, so its middle is lit fully (2 were smeared to 1/3) */
-static const signed char AOD_FORCE_SPOTS[][2] = {	/* pixels: dx, dy (dy <= 0) */
-	{ 0, 0 }, { 4, -2 }, { -4, -4 }, { 2, -6 }, { -2, -2 }, { 6, -4 }, { -6, -6 },
+/* where stock's is (side-by-side photos, 2026-11-08, scaled by the screen's
+ * width and corrected by our own mark's known row): on the screen's middle
+ * line and low, its middle near row 2855, inside the bottom self-mask band
+ * (rows 2810-2959: only the rounded corners there are masked, unless the
+ * panel's mask image is lost, ROADMAP 1.1b) */
+#define AOD_FORCE_CX_PX		720
+#define AOD_FORCE_CY_PX		2855
+#define AOD_FORCE_W		17	/* points: 68 x 68 panel pixels, as stock's (side by side at the same scale) */
+#define AOD_FORCE_H		17
+#define AOD_FORCE_N		2.8	/* the squircle's exponent: round corners, as stock's */
+#define AOD_FORCE_LEVEL		AOD_GREY	/* as the grey text, so it shows at every level */
+#define AOD_FORCE_TINT		0.0	/* white; a theme may give it a colour */
+#define AOD_FORCE_LINE		1.25	/* points: 5 panel pixels */
+static const signed char AOD_FORCE_SPOTS[][2] = {	/* pixels: a few about the middle, evenly */
+	{ 0, 0 }, { 3, 0 }, { 0, 3 }, { -3, 0 }, { 0, -3 },
 };
 #define AOD_FORCE_N_SPOTS	(int)(sizeof(AOD_FORCE_SPOTS) / sizeof(AOD_FORCE_SPOTS[0]))
 
@@ -12601,11 +12603,11 @@ static void aod_force_mark(struct zt_server *server, cairo_t *cr, time_t now) {
 	}
 	double kx = server->width / (double)AOD_FORCE_PANEL_W;	/* points per panel pixel */
 	double ky = server->height / (double)AOD_FORCE_PANEL_H;
+	/* its own cycle of AOD_SHIFT_S steps: five, so never in step with the nine places */
 	int i = (int)((long)(now / AOD_SHIFT_S) % AOD_FORCE_N_SPOTS);
-	double cx = AOD_FORCE_X_PX * kx + AOD_FORCE_SPOTS[i][0] * kx;
-	double bottom = AOD_FORCE_BAND_PX * ky - AOD_FORCE_GAP;	/* its lowest edge, at dy 0 */
-	double cy = bottom - AOD_FORCE_H / 2.0 - AOD_FORCE_LINE / 2 + AOD_FORCE_SPOTS[i][1] * ky;
-	/* a faint tint of the accent, at AOD_FORCE_LEVEL's light */
+	double cx = (AOD_FORCE_CX_PX + AOD_FORCE_SPOTS[i][0]) * kx;
+	double cy = (AOD_FORCE_CY_PX + AOD_FORCE_SPOTS[i][1]) * ky;
+	/* AOD_FORCE_TINT of the accent (none by default), at AOD_FORCE_LEVEL's light */
 	double a[3] = { ((server->accent >> 16) & 0xff) / 255.0, ((server->accent >> 8) & 0xff) / 255.0,
 		(server->accent & 0xff) / 255.0 };
 	double c[3], top = 0;
