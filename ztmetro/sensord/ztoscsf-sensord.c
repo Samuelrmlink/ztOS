@@ -15,6 +15,10 @@
  *
  * Lines on /run/ztoscsf-sensord.ctl (anyone may write):
  *	screen off | on		from zrnperfd, as the display goes off and on
+ *	aod MS			from the shell: the always-on display shows and wants
+ *				the room's light every MS ms with the screen off (0:
+ *				it went), for its own brightness; nothing is sent to
+ *				the shell for it, the light file is enough
  *	auto on | off		auto brightness (remembered)
  *	opentone on | off	the screen's colour follows the room's (remembered)
  *	watch NAME [MS]		also stream accel | gyro | pressure | prox, for the
@@ -90,6 +94,8 @@ static struct sensor {
 static int dev = -1;
 static volatile sig_atomic_t stopping;
 static bool screen_on = true, auto_on = true;
+#define LIGHT_MS	1000	/* the light sensor's rate with the screen on (sensors[0]) */
+static int aod_ms;		/* the always-on display's rate with it off; 0: off */
 
 /* --- transactions ------------------------------------------------------ */
 
@@ -268,7 +274,18 @@ static void sensor_set(struct sensor *s, bool on) {
  */
 static void sensors_apply(void) {
 	for (int i = 0; i < N_SENSORS; i++) {
-		sensor_set(&sensors[i], screen_on && sensors[i].wanted);
+		struct sensor *s = &sensors[i];
+		/* the always-on display: only the light, slowly */
+		bool aod = !screen_on && aod_ms > 0 && s->id == 9;
+		bool on = (screen_on && s->wanted) || aod;
+		if (s->id == 9) {
+			int ms = aod ? aod_ms : LIGHT_MS;
+			if (s->on && on && s->ms != ms) {
+				sensor_set(s, false);	/* a new rate: off and on again */
+			}
+			s->ms = ms;
+		}
+		sensor_set(s, on);
 	}
 }
 
@@ -615,8 +632,8 @@ static void save(void) {
 
 static void status(void) {
 	char text[64];
-	snprintf(text, sizeof(text), "auto=%s\nscreen=%s\nopentone=%s\n", auto_on ? "on" : "off",
-		screen_on ? "on" : "off", tone_on ? "on" : "off");
+	snprintf(text, sizeof(text), "auto=%s\nscreen=%s\nopentone=%s\naod=%d\n", auto_on ? "on" : "off",
+		screen_on ? "on" : "off", tone_on ? "on" : "off", aod_ms);
 	publish("status", text);
 }
 
@@ -630,6 +647,9 @@ static void command(char *line, bool persist) {
 		screen_on = strcmp(value, "off") != 0;
 		goal = -1;	/* coming back on: the room's level, from the next reading */
 		lux_smooth = -1;
+	} else if (strcmp(what, "aod") == 0) {
+		int ms = atoi(value);
+		aod_ms = ms <= 0 ? 0 : ms < 1000 ? 1000 : ms;
 	} else if (strcmp(what, "auto") == 0) {
 		auto_on = strcmp(value, "on") == 0;
 		goal = -1;

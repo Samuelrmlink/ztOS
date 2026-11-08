@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "zrnmetrocore.h"
+#include "zt-clock.h"
 
 enum page {
 	PAGE_SLEEP = 0,
@@ -612,9 +613,7 @@ static double draw_page_sleep(cairo_t *cr) {
 /* -------------------------------------------------------- Page 2: Drain */
 
 static void clock_label(time_t t, char *out, size_t sz) {
-	struct tm tm;
-	localtime_r(&t, &tm);
-	strftime(out, sz, "%H:%M", &tm);
+	zt_clock_text_now(t, out, sz);
 }
 
 static double draw_page_drain(cairo_t *cr) {

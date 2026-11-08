@@ -28,6 +28,7 @@
  */
 #define _GNU_SOURCE
 #include "core/zrnboard.h"
+#include "core/zt-clock.h"
 #ifdef HAVE_ZTOS_IAL
 #include <ztos-ial.h>
 #endif
@@ -145,6 +146,28 @@ static int nav_h = NAV_BAR_H;
 #define SHADE_MAX_H	((double)(server->height - NAV_H))
 #define SHADE_MS	260	/* settling after the finger lets go */
 #define SCREEN_TIMEOUT_S 60	/* idle time before the screen sleeps, by default */
+#define LOCK_TIMEOUT_S	10	/* the same on the lock screen, woken and left (0: as the screen) */
+/*
+ * The always-on display (ROADMAP 7.4): with the screen "off" the panel stays
+ * on at its lowest level and shows the time, the date, the battery and the
+ * apps with notifications waiting, white on black. Settings' "aod": off, on,
+ * charging (only on a charger). See aod_draw for the burn-in rules.
+ */
+enum aod_mode { AOD_OFF, AOD_ON, AOD_CHARGING };
+#define AOD_MIN_BATTERY	15	/* with aod_low_battery_off, on battery below this it is dark */
+#define AOD_SHIFT_S	(10 * 60)	/* everything moves to its next place this often */
+/* A double tap on the glass wakes it (Settings: double_tap_wake): the
+ * touchscreen keeps sensing while the panel shows the always-on display
+ * (s6sy761 stays runtime-active), and the shell sees every touch. Only a
+ * rapid, local one: two short taps, the second close to the first and soon
+ * after it. One tap, a slow or a spread double tap, a touch held or moved,
+ * or two fingers do nothing. 0 here: only the keys wake it. Distances are in
+ * the panel's pixels (1440 x 2960, about 22 a millimetre). */
+#define AOD_DOUBLE_TAP		1
+#define AOD_TAP_MS		200	/* a tap: down to up within this */
+#define AOD_TAP_GAP_MS		300	/* the second tap's down within this of the first's up */
+#define AOD_TAP_MOVE_PX		40	/* how far a finger may move within a tap (~2 mm) */
+#define AOD_TAP_APART_PX	120	/* how far apart the two taps may land (4 % of the height, ~5.5 mm) */
 #define TOP_PAD		14	/* Start: above the first row */
 #define MAX_UNITS	8	/* Start: the most small tiles a row can hold */
 #define EDGE		18	/* how close to the glass edge a system gesture starts */
@@ -735,6 +758,7 @@ struct zt_server {
 	int menu_speed;			/* the whole UI's motion, percent of normal speed */
 	bool show_touches;
 	bool lock_enabled;
+	bool clock_24h;		/* config clock_24h: "21:41", or off: "9:41 PM" (core/zt-clock.h) */
 	int demo_saved_timeout;
 	/* the volume keys' banner */
 	int volume;			/* 0..30, as the phone counts it */
@@ -837,7 +861,33 @@ struct zt_server {
 
 	/* power */
 	bool screen_on;
+	/* the always-on display: with it showing, screen_on is false (input,
+	 * apps, timers and radios are as for a dark screen) but the output
+	 * stays enabled and shows aod_layer alone, drawn once a minute */
+	enum aod_mode aod_mode;
+	bool aod;			/* showing now */
+	bool aod_dirty;			/* aod_layer changed: one frame to send */
+	struct zt_layer aod_layer;
+	struct {			/* the double tap that wakes it (AOD_DOUBLE_TAP) */
+		bool down, armed;
+		int32_t id;
+		uint32_t down_ms, up_ms;
+		double x, y;
+	} aod_tap;
+	/* the ctl's "aod test": a battery level and a charger to use in place of
+	 * the real ones, for testing the rules without touching charging; -1 real */
+	int aod_test_battery, aod_test_charger, aod_test_lux;
+	unsigned aod_frames;		/* frames sent to the panel, for the state file */
+	bool aod_auto;			/* config aod_auto_brightness */
+	bool aod_low_off;		/* config aod_low_battery_off: dark below AOD_MIN_BATTERY */
+	int aod_level;			/* AOD_LEVELS' index now; -1 none yet */
+	int aod_light_ms;		/* the rate sensord was told; 0 none */
+	uint32_t aod_fast_until;	/* read the room often until then */
+	struct wl_event_source *aod_light_timer;
+	int aod_place_shown;		/* the place last drawn, to log each move */
 	int screen_timeout;		/* seconds of no input before the screen sleeps; 0: never */
+	int lock_timeout;		/* the same on the lock screen; 0: screen_timeout */
+	bool double_tap_wake;		/* config double_tap_wake: a double tap wakes the AOD */
 	uint32_t idle_armed_ms;
 	struct wl_event_source *idle_timer;
 	int uevent_fd;
@@ -1152,6 +1202,8 @@ static void damage(struct zt_server *server) {
 	server->dirty = true;
 	if (server->output && server->screen_on) {
 		wlr_output_schedule_frame(server->output->wlr_output);
+	} else if (server->output && server->aod && server->aod_dirty) {
+		wlr_output_schedule_frame(server->output->wlr_output);	/* render_retry_later */
 	}
 }
 
@@ -2842,6 +2894,19 @@ static struct {
 	_Atomic float dark;	/* 1 - the picture's multiplier */
 } ramp = { .written = -1 };
 
+/*
+ * The always-on display holds the panel at its lowest level. Meanwhile a new
+ * goal (the light sensor's, a settings change) is only kept for when the
+ * screen comes on, and nothing is published: Settings' slider stays where the
+ * user left it.
+ */
+static struct {
+	bool on;
+	double goal;
+	bool automatic;
+} aod_bl;
+static _Atomic bool aod_bl_quiet;
+
 static double lstar_to_y(double l) {
 	return l > 8.0 ? pow((l + 16.0) / 116.0, 3.0) : l / 903.3;
 }
@@ -2871,7 +2936,7 @@ static void ramp_write(int fd, int level) {
  * for every step */
 static void ramp_publish(double l) {
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
-	if (!runtime) return;
+	if (!runtime || atomic_load(&aod_bl_quiet)) return;
 	char p[256], tmp[260], text[16];
 	snprintf(p, sizeof(p), "%s/ztmetro.brightness", runtime);
 	snprintf(tmp, sizeof(tmp), "%s.new", p);
@@ -2944,6 +3009,11 @@ static int bl_ramp_redraw(int fd, uint32_t mask, void *data) {
 static void ramp_goal(double l, double speed, bool automatic) {
 	if (l < BL_L_MIN) l = BL_L_MIN;
 	if (l > 100.0) l = 100.0;
+	if (aod_bl.on) {
+		aod_bl.goal = l;
+		aod_bl.automatic = automatic;
+		return;
+	}
 	pthread_mutex_lock(&bl.lock);
 	ramp.goal = l;
 	ramp.speed = speed;
@@ -3260,6 +3330,12 @@ static void load_config(struct zt_server *server) {
 	server->key_sound = true;
 	server->ring_volume = 21;
 	server->screen_timeout = SCREEN_TIMEOUT_S;
+	server->lock_timeout = LOCK_TIMEOUT_S;
+	server->aod_auto = true;
+	server->aod_low_off = false;	/* shown down to the last per cent unless asked */
+	server->double_tap_wake = true;
+	server->aod_mode = AOD_OFF;
+	server->clock_24h = ZT_CLOCK_24H_DEFAULT;
 	if (server->shade_brightness <= 0) {
 		server->shade_brightness = 50;
 	}
@@ -3281,6 +3357,7 @@ static void load_config(struct zt_server *server) {
 	}
 	char line[256];
 	bool quick_audio_done = false;
+	bool clock_24h_set = false;
 	while (fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
 		if (line[0] == '#' || !eq) {
@@ -3373,6 +3450,16 @@ static void load_config(struct zt_server *server) {
 		} else if (strcmp(key, "timeout") == 0) {
 			/* seconds without input before the screen sleeps; 0: never */
 			server->screen_timeout = atoi(value);
+		} else if (strcmp(key, "aod_low_battery_off") == 0) {
+			server->aod_low_off = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
+		} else if (strcmp(key, "aod_auto_brightness") == 0) {
+			server->aod_auto = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+		} else if (strcmp(key, "double_tap_wake") == 0) {
+			server->double_tap_wake = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+		} else if (strcmp(key, "lock_timeout") == 0) {
+			/* the same while the lock screen shows; 0: the screen's */
+			int t = atoi(value);
+			server->lock_timeout = t < 0 ? 0 : t;
 		} else if (strcmp(key, "demo_tiles") == 0) {
 			server->demo_tiles = strcmp(value, "on") == 0;
 		} else if (strcmp(key, "slow_motion") == 0) {
@@ -3386,6 +3473,10 @@ static void load_config(struct zt_server *server) {
 			server->show_touches = strcmp(value, "on") == 0;
 		} else if (strcmp(key, "lock") == 0) {
 			server->lock_enabled = strcmp(value, "off") != 0;
+		} else if (strcmp(key, "aod") == 0) {
+			/* the always-on display: off, on, charging */
+			server->aod_mode = strcmp(value, "charging") == 0 ? AOD_CHARGING :
+				strcmp(value, "on") == 0 || strcmp(value, "1") == 0 ? AOD_ON : AOD_OFF;
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			server->wifi_suspend = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
 		} else if (strcmp(key, "style") == 0) {
@@ -3404,6 +3495,10 @@ static void load_config(struct zt_server *server) {
 			server->dm_cfg.event_banners = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "dotmatrix_h24") == 0) {
 			server->dm_cfg.h24 = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
+		} else if (strcmp(key, "clock_24h") == 0) {
+			/* Settings' "24-hour time", for every clock */
+			server->clock_24h = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+			clock_24h_set = true;
 		} else if (strcmp(key, "dotmatrix_launch_delay") == 0) {
 			int ms = atoi(value);
 			server->dm_cfg.launch_delay = ms < 0 ? 0 : ms > 3000 ? 3000 : ms;
@@ -3414,6 +3509,11 @@ static void load_config(struct zt_server *server) {
 		}
 	}
 	fclose(f);
+	if (clock_24h_set) {
+		/* one setting for both styles; DotMatrix's own key (12-hour when
+		 * absent) only counts until Settings has written clock_24h */
+		server->dm_cfg.h24 = server->clock_24h;
+	}
 	if (!quick_audio_done) {
 		quick_add_audio(server);
 	}
@@ -5787,7 +5887,7 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	time_t now = time(NULL);
 	struct tm tm;
 	localtime_r(&now, &tm);
-	strftime(text, sizeof(text), "%H:%M", &tm);
+	zt_clock_text(&tm, server->clock_24h, text, sizeof(text));
 	strftime(date, sizeof(date), "%-d/%-m", &tm);
 	double clock_size = cell * 1.3;		/* digits come out about as tall as the cell */
 	PangoLayout *probe = pango_cairo_create_layout(cr);
@@ -6257,23 +6357,35 @@ static void retro_paint_lock(struct zt_server *server, cairo_t *cr) {
 #define LOCK_NOTE_Y(server) ((double)(server)->height - 100)	/* the row layer's top */
 #define LOCK_NOTE_H 80.0
 
-static void draw_lock_clock(struct zt_server *server) {
+static void draw_lock_clock_at(struct zt_server *server, time_t now) {
 	double y0 = LOCK_CLOCK_Y(server);
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, LOCK_CLOCK_H, &cr);
 	cairo_translate(cr, 0, -y0);	/* drawn in screen coordinates, at rest (low) */
-	time_t now = time(NULL);
 	struct tm tm;
 	localtime_r(&now, &tm);
 	char line[64];
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	strftime(line, sizeof(line), "%H:%M", &tm);
+	char ampm[4];
+	zt_clock_parts(&tm, server->clock_24h, line, sizeof(line), ampm, sizeof(ampm));
 	draw_text(cr, line, FONT_LIGHT, 92, 16, server->height - 268, 0, 0, false);
+	if (ampm[0]) {
+		/* 12-hour time: AM or PM after it, smaller and grey, near the
+		 * digits' baseline */
+		double tw = text_width(line, FONT_LIGHT, 92);
+		cairo_set_source_rgb(cr, 0.62, 0.62, 0.62);
+		draw_text(cr, ampm, FONT_SEMILIGHT, 30, 16 + tw + 10, server->height - 268 + 67, 0, 0, false);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+	}
 	strftime(line, sizeof(line), "%A", &tm);
 	draw_text(cr, line, FONT_SEMILIGHT, 30, 20, server->height - 156, 0, 0, false);
 	strftime(line, sizeof(line), "%B %-d", &tm);
 	draw_text(cr, line, FONT_SEMILIGHT, 30, 20, server->height - 120, 0, 0, false);
 	zt_buffer_show(server, &server->lock_clock_layer, buffer, cr, server->width, LOCK_CLOCK_H);
+}
+
+static void draw_lock_clock(struct zt_server *server) {
+	draw_lock_clock_at(server, time(NULL));
 }
 
 /* The row of each app's glyph (or initial) with its count, as Windows Phone's,
@@ -6342,7 +6454,12 @@ static void lock_lift_sync(struct zt_server *server, bool animated) {
  * Only told when that changes, and only by the running session (see ctl_init):
  * not by --render, whose notifications are pretend. */
 static bool led_notes_live;
+static void aod_refresh(struct zt_server *server);
+
 static void led_notes_sync(struct zt_server *server) {
+	if (!server->screen_on && server->aod) {
+		aod_refresh(server);	/* the waiting apps on the always-on display */
+	}
 	static int told = -1;
 	if (!led_notes_live) {
 		return;
@@ -6602,6 +6719,9 @@ static int net_tick(void *data) {
 	return 0;
 }
 
+static void aod_sync(struct zt_server *server);
+static void aod_refresh(struct zt_server *server);
+
 /* Once a minute, on the minute: the only thing that wakes an idle shell. */
 static int clock_tick(void *data) {
 	struct zt_server *server = data;
@@ -6616,6 +6736,9 @@ static int clock_tick(void *data) {
 			draw_shade(server);
 		}
 	}
+	/* the always-on display: shown or not (the battery), and the minute */
+	aod_sync(server);
+	aod_refresh(server);
 	time_t now = time(NULL);
 	wl_event_source_timer_update(server->clock_timer, (60 - now % 60) * 1000 + 50);
 	return 0;
@@ -6820,8 +6943,11 @@ static void note_draw(struct zt_server *server, cairo_t *cr, int slot) {
 	localtime_r(&today, &tm_now);
 	char when[16];
 	localtime_r(&server->notes[i].at, &tm_at);
-	strftime(when, sizeof(when), tm_at.tm_yday == tm_now.tm_yday &&
-		tm_at.tm_year == tm_now.tm_year ? "%H:%M" : "%a", &tm_at);
+	if (tm_at.tm_yday == tm_now.tm_yday && tm_at.tm_year == tm_now.tm_year) {
+		zt_clock_text(&tm_at, server->clock_24h, when, sizeof(when));
+	} else {
+		strftime(when, sizeof(when), "%a", &tm_at);
+	}
 	double when_w = text_width(when, FONT_REGULAR, 13.5);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	draw_text(cr, server->notes[i].title, FONT_SEMIBOLD, 14.5, 14, y,
@@ -12174,9 +12300,674 @@ static void tone_rgb(int kelvin, float rgb[3]) {
 	rgb[2] = (float)fmin(1.0, fmax(0.0, b / b0));
 }
 
-/* Switch the display itself off or on. Off, nothing is drawn and no frames
- * are scheduled; the power key brings it back. */
 static void state_file_write(struct zt_server *server);
+
+/* ---- the always-on display (ROADMAP 7.4) ------------------------------------
+ *
+ * Stage 1, with no kernel change: the shell keeps the output enabled when the
+ * screen goes "off", sets the panel to its lowest level (BL_TABLE's level 0,
+ * L* 18: about 2.5 % of its peak), and sends one frame a minute: the time, the
+ * date, the battery and the apps with notifications waiting. Everything else
+ * is as for a dark screen: screen_on is false, so touches, keys other than
+ * power and home, apps, Wi-Fi and Waydroid behave as they do now.
+ *
+ * What it costs: the panel stays awake, and DECON keeps fetching the frame
+ * at every TE edge, so the SoC cannot sleep (zrn-sleepd sleeps only with
+ * every DRM connector disabled). Hence AOD_CHARGING, and on battery the dark
+ * below AOD_MIN_BATTERY. The panel's own low-power mode (HLPM) and an image
+ * kept through SoC sleep are later stages (power/aod/README.md).
+ *
+ * Burn-in: thin strokes (Segoe UI Light), no filled areas but the battery's
+ * level, white only for the time and grey for the rest, nothing in the status
+ * bar's and the nav bar's rows (the panel's self-mask bands, 1.1b, included),
+ * and everything moves to the next of AOD_SPOTS every AOD_SHIFT_S. The digits
+ * change every minute; the date and the battery are the parts that stand.
+ */
+static const signed char AOD_SPOTS[][2] = {	/* points: dx, dy */
+	{ 0, 0 }, { -10, 12 }, { 10, -12 }, { -10, -12 }, { 10, 12 },
+	{ 0, 16 }, { 0, -16 }, { -14, 0 }, { 14, 0 },
+};
+#define AOD_N_SPOTS	(int)(sizeof(AOD_SPOTS) / sizeof(AOD_SPOTS[0]))
+
+static void render_retry_later(struct zt_server *server);
+
+/* Show it rather than the dark: switched on, and on battery enough of it. An
+ * unreadable battery counts as enough (the dark is the safe failure only for
+ * a battery known to be low). */
+static int aod_battery(struct zt_server *server) {
+	return server->aod_test_battery >= 0 ? server->aod_test_battery : read_battery();
+}
+
+static bool aod_charger(struct zt_server *server) {
+	return server->aod_test_charger >= 0 ? server->aod_test_charger > 0 : on_charger();
+}
+
+/* Why the screen goes dark rather than to the always-on display, or NULL if
+ * it is to be shown. Every one of these is a deliberate dark (README: "When
+ * the screen goes dark instead"); each dark is logged with its reason. */
+static const char *aod_why(struct zt_server *server) {
+	static char why[64];
+	if (server->aod_mode == AOD_OFF) {
+		return "switched off in Settings";
+	}
+	if (!server->output || server->width <= 0) {
+		return "no display yet";
+	}
+	if (g_nested || g_dump_dir) {
+		return "not on the phone's own panel";
+	}
+	if (demoloop_active()) {
+		return "the demo loop runs";
+	}
+	if (server->call_over_lock) {
+		/* no proximity sensor in use: a lit, double-tappable screen
+		 * against a cheek is worse than the dark */
+		return "a call is under way";
+	}
+	if (aod_charger(server)) {
+		return NULL;
+	}
+	if (server->aod_mode == AOD_CHARGING) {
+		return "set to only while charging, and no charger";
+	}
+	int battery = aod_battery(server);
+	if (server->aod_low_off && battery >= 0 && battery < AOD_MIN_BATTERY) {
+		snprintf(why, sizeof(why), "battery %d %% < %d %%", battery, AOD_MIN_BATTERY);
+		return why;
+	}
+	return NULL;	/* (an unreadable battery counts as enough) */
+}
+
+static bool aod_wanted(struct zt_server *server) {
+	return aod_why(server) == NULL;
+}
+
+/* The place for this time: the same for AOD_SHIFT_S, then the next, round
+ * the nine. Every place gets the same share of the hours lit. */
+static int aod_place(time_t now) {
+	return (int)((long)(now / AOD_SHIFT_S) % AOD_N_SPOTS);
+}
+
+/* The panel to its lowest level, and the goal it had kept for later. Only
+ * BL_TABLE has a level to go to; without it the pixels are darkened
+ * (aod_tint). */
+static void aod_bl_hold(void) {
+	if (bl.mode != BL_TABLE || aod_bl.on) {
+		return;
+	}
+	aod_bl.goal = ramp.goal;
+	aod_bl.automatic = ramp.automatic;
+	atomic_store(&aod_bl_quiet, true);
+	ramp_snap(BL_L_FLOOR);
+	aod_bl.on = true;	/* from here ramp_goal only keeps its goal for later */
+}
+
+/* Back to the goal kept (screen_set's ramp_snap sends it). */
+static void aod_bl_release(void) {
+	if (!aod_bl.on) {
+		return;
+	}
+	aod_bl.on = false;
+	pthread_mutex_lock(&bl.lock);
+	ramp.goal = aod_bl.goal;
+	ramp.automatic = aod_bl.automatic;
+	pthread_mutex_unlock(&bl.lock);
+	atomic_store(&aod_bl_quiet, false);
+}
+
+/* The picture's multiplier: at the panel's floor nothing more is taken off;
+ * without a table the panel may be anywhere, so the pixels go down instead.
+ * The colour temperature still applies: less blue is less wear. */
+static void aod_tint(struct zt_server *server) {
+	float rgb[3] = { 1.0f, 1.0f, 1.0f };
+	if (server->tone_k > 0 && server->tone_k < 6450) {
+		tone_rgb(server->tone_k, rgb);
+	}
+	float k = bl.mode == BL_TABLE ? 1.0f : 0.35f;
+	for (int i = 0; i < 3; i++) {
+		server->tint[i] = k * rgb[i];
+	}
+}
+
+#define AOD_WHITE	0.92	/* the time */
+#define AOD_GREY	0.62	/* the rest */
+#define AOD_ICON	16	/* points: a waiting app's glyph */
+/*
+ * Its brightness, from the room (Settings: "Adjust AOD brightness
+ * automatically", aod_auto_brightness, on by default; off, it stays at the
+ * floor). ztoscsf-sensord keeps the light sensor on with the screen off while
+ * told "aod MS" (only the light, at that rate) and publishes the lux in
+ * /run/ztoscsf-sensors/light; the shell reads it every AOD_LIGHT_FAST_MS for
+ * AOD_LIGHT_FAST_FOR_MS after the display appears or the room changes by a
+ * level or more, then every AOD_LIGHT_SLOW_MS. Five levels, in L* (the ramp's
+ * scale): the panel's floor (L* 18, level 0) in a dark room up to L* 45 in
+ * daylight, about 15 % of the panel's normal peak (400 nits): some 60 nits,
+ * Samsung's own AOD ceiling, and well under the screen in daylight. A level
+ * is left only past AOD_LIGHT_HYST times its threshold (or under it divided
+ * by that); one step glides at the light sensor's speed, more snap at once.
+ */
+static const struct { double lux, lstar; } AOD_LEVELS[] = {
+	{ 0, BL_L_FLOOR },	/* a dark room: the panel's floor */
+	{ 8, 25 },		/* a dim room */
+	{ 60, 32 },		/* a lit room */
+	{ 600, 39 },		/* a bright room, shade outdoors */
+	{ 6000, 45 },		/* daylight: the ceiling */
+};
+#define AOD_N_LEVELS		(int)(sizeof(AOD_LEVELS) / sizeof(AOD_LEVELS[0]))
+#define AOD_LIGHT_HYST		1.6
+#define AOD_LIGHT_GLIDE		3.0	/* L* a second: a step takes about two seconds */
+#define AOD_LIGHT_FAST_MS	5000
+#define AOD_LIGHT_SLOW_MS	30000
+#define AOD_LIGHT_FAST_FOR_MS	60000
+#define AOD_LIGHT_FILE		"/run/ztoscsf-sensors/light"
+#define AOD_SENSORD_CTL		"/run/ztoscsf-sensord.ctl"
+/*
+ * Where to press for Start (the force press): a squircle's outline over the
+ * place, very dim, while the force press is switched on. The controller
+ * reports the press at (753, 2899) of the 1440 x 2960 panel; that is inside
+ * the panel's bottom self-mask band (rows 2810-2959, ROADMAP 1.1b), so the
+ * mark sits just above the band, over the press's column. It moves by its
+ * own few pixels on AOD_SHIFT_S's clock (AOD_FORCE_SPOTS, seven of them: not
+ * in step with the nine places), always above the band.
+ */
+#define AOD_FORCE_X_PX		753	/* the press, in panel pixels */
+#define AOD_FORCE_BAND_PX	2810	/* the bottom self-mask band's first row */
+#define AOD_FORCE_PANEL_W	1440
+#define AOD_FORCE_PANEL_H	2960
+#define AOD_FORCE_W		34	/* points */
+#define AOD_FORCE_H		26
+#define AOD_FORCE_GAP		4	/* points between it (at its lowest) and the band */
+#define AOD_FORCE_GREY		0.30	/* dimmer than AOD_GREY */
+#define AOD_FORCE_LINE		1.0	/* points */
+static const signed char AOD_FORCE_SPOTS[][2] = {	/* pixels: dx, dy (dy <= 0) */
+	{ 0, 0 }, { 4, -2 }, { -4, -4 }, { 2, -6 }, { -2, -2 }, { 6, -4 }, { -6, -6 },
+};
+#define AOD_FORCE_N_SPOTS	(int)(sizeof(AOD_FORCE_SPOTS) / sizeof(AOD_FORCE_SPOTS[0]))
+
+/* A squircle (|x|^4 + |y|^4 = 1, stretched to w x h) about (cx, cy). */
+static void squircle_path(cairo_t *cr, double cx, double cy, double w, double h) {
+	const int n = 96;
+	for (int i = 0; i < n; i++) {
+		double t = 2 * M_PI * i / n, c = cos(t), s = sin(t);
+		double x = copysign(sqrt(fabs(c)), c) * w / 2, y = copysign(sqrt(fabs(s)), s) * h / 2;
+		if (i == 0) {
+			cairo_move_to(cr, cx + x, cy + y);
+		} else {
+			cairo_line_to(cr, cx + x, cy + y);
+		}
+	}
+	cairo_close_path(cr);
+}
+
+/* The force press's mark, for the time `now` (its place on its own cycle). */
+static void aod_force_mark(struct zt_server *server, cairo_t *cr, time_t now) {
+	if (!server->force_press) {
+		return;
+	}
+	double kx = server->width / (double)AOD_FORCE_PANEL_W;	/* points per panel pixel */
+	double ky = server->height / (double)AOD_FORCE_PANEL_H;
+	int i = (int)((long)(now / AOD_SHIFT_S) % AOD_FORCE_N_SPOTS);
+	double cx = AOD_FORCE_X_PX * kx + AOD_FORCE_SPOTS[i][0] * kx;
+	double bottom = AOD_FORCE_BAND_PX * ky - AOD_FORCE_GAP;	/* its lowest edge, at dy 0 */
+	double cy = bottom - AOD_FORCE_H / 2.0 - AOD_FORCE_LINE / 2 + AOD_FORCE_SPOTS[i][1] * ky;
+	cairo_save(cr);
+	cairo_set_source_rgb(cr, AOD_FORCE_GREY, AOD_FORCE_GREY, AOD_FORCE_GREY);
+	cairo_set_line_width(cr, AOD_FORCE_LINE);
+	squircle_path(cr, cx, cy, AOD_FORCE_W, AOD_FORCE_H);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
+
+/* What draw_glyph or draw_icon would draw for a waiting app, as an outline
+ * only: the shape drawn into a mask, less the same shape shrunk by about a
+ * stroke's width. Strokes thinner than that stay as they are; a solid glyph
+ * keeps its edge and loses its middle (no filled areas on the always-on
+ * display). Drawn in the current source colour. */
+static void aod_icon(struct zt_server *server, cairo_t *cr, const char *icon, const char *kind,
+		const char *initial, double cx, double cy, double s) {
+	double k = server->scale > 0 ? server->scale : 1;
+	int px = (int)ceil(s * 1.3 * k) + 4;
+	cairo_surface_t *mask = cairo_image_surface_create(CAIRO_FORMAT_A8, px, px);
+	cairo_t *mc = cairo_create(mask);
+	cairo_translate(mc, px / 2.0, px / 2.0);
+	cairo_scale(mc, k, k);
+	cairo_set_source_rgba(mc, 0, 0, 0, 1);
+	if (icon) {
+		draw_glyph(server, mc, icon, NULL, 0, 0, s);
+	} else if (kind) {
+		draw_icon(mc, kind, 0, 0, s);
+	} else {
+		cairo_set_line_width(mc, 1.2);
+		cairo_rectangle(mc, -s / 2 + 1, -s / 2 + 1, s - 2, s - 2);
+		cairo_stroke(mc);
+		draw_text(mc, initial, FONT_SEMILIGHT, s * 0.6, -s / 2 + 1, -s / 2 + 1, s - 2, s - 2, true);
+	}
+	cairo_destroy(mc);
+	cairo_surface_flush(mask);
+	unsigned char *a = cairo_image_surface_get_data(mask);
+	int stride = cairo_image_surface_get_stride(mask);
+	int r = (int)lround(1.1 * k);	/* a stroke's width, about: 1.1 points */
+	if (r < 1) r = 1;
+	unsigned char *h = malloc((size_t)stride * px), *e = malloc((size_t)stride * px);
+	if (h && e) {
+		/* the shape shrunk: the least of each square of 2r + 1 pixels,
+		 * one way and then the other */
+		for (int y = 0; y < px; y++) {
+			for (int x = 0; x < px; x++) {
+				unsigned char m = 255;
+				for (int d = -r; d <= r; d++) {
+					int xx = x + d;
+					unsigned char v = xx < 0 || xx >= px ? 0 : a[y * stride + xx];
+					if (v < m) m = v;
+				}
+				h[y * stride + x] = m;
+			}
+		}
+		for (int y = 0; y < px; y++) {
+			for (int x = 0; x < px; x++) {
+				unsigned char m = 255;
+				for (int d = -r; d <= r; d++) {
+					int yy = y + d;
+					unsigned char v = yy < 0 || yy >= px ? 0 : h[yy * stride + x];
+					if (v < m) m = v;
+				}
+				e[y * stride + x] = m;
+			}
+		}
+		for (int i = 0; i < stride * px; i++) {
+			a[i] = a[i] > e[i] ? (unsigned char)(a[i] - e[i]) : 0;
+		}
+		cairo_surface_mark_dirty(mask);
+	}
+	free(h);
+	free(e);
+	cairo_save(cr);
+	cairo_translate(cr, cx - px / (2.0 * k), cy - px / (2.0 * k));
+	cairo_scale(cr, 1 / k, 1 / k);
+	cairo_mask_surface(cr, mask, 0, 0);
+	cairo_restore(cr);
+	cairo_surface_destroy(mask);
+}
+
+/* The picture for the time `now` at place `place` of AOD_SPOTS, the whole
+ * screen of it. */
+static void aod_draw_place(struct zt_server *server, time_t now, int place) {
+	if (server->width <= 0) {
+		return;
+	}
+	double w = server->width, h = server->height;
+	cairo_t *cr;
+	struct zt_buffer *buffer = zt_buffer_create(server, w, h, &cr);
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_paint(cr);
+	double dx = AOD_SPOTS[place][0], dy = AOD_SPOTS[place][1];
+	struct tm tm;
+	localtime_r(&now, &tm);
+	char line[96], ampm[4];
+	/* under a sixth of the way down: clear of the status bar's rows and the
+	 * top self-mask band at any place, and of the nav bar's far below */
+	double y = round(h * 0.18) + dy;
+
+	/* the time; in 12-hour time AM or PM after it, smaller and grey, the
+	 * two centred together */
+	zt_clock_parts(&tm, server->clock_24h, line, sizeof(line), ampm, sizeof(ampm));
+	double tw = text_width(line, FONT_LIGHT, 84);
+	double aw = ampm[0] ? 8 + text_width(ampm, FONT_SEMILIGHT, 22) : 0;
+	double tx = round((w - tw - aw) / 2 + dx);
+	cairo_set_source_rgb(cr, AOD_WHITE, AOD_WHITE, AOD_WHITE);
+	/* (centred in a box wider than it: one only as wide is ellipsized) */
+	draw_text(cr, line, FONT_LIGHT, 84, tx - 20, y, tw + 40, 100, true);
+	if (ampm[0]) {
+		cairo_set_source_rgb(cr, AOD_GREY, AOD_GREY, AOD_GREY);
+		draw_text(cr, ampm, FONT_SEMILIGHT, 22, tx + tw + 8, y + 58, 0, 0, false);
+	}
+	y += 104;
+
+	cairo_set_source_rgb(cr, AOD_GREY, AOD_GREY, AOD_GREY);
+	strftime(line, sizeof(line), "%A, %B %-d", &tm);
+	draw_text(cr, line, FONT_SEMILIGHT, 20, dx + 24, y, w - 48, 28, true);
+	y += 44;
+
+	/* the battery: its outline with the level in it, and the per cent */
+	int battery = aod_battery(server);
+	bool charging = aod_charger(server);
+	if (battery >= 0) {
+		snprintf(line, sizeof(line), charging ? "%d%%  charging" : "%d%%", battery);
+		double tw = text_width(line, FONT_SEMILIGHT, 17);
+		double bw = 22, bh = 11, gap = 8;
+		double x0 = round((w - (bw + 3 + gap + tw)) / 2 + dx);
+		double by = y + 14 - bh / 2;
+		cairo_set_line_width(cr, 1.2);
+		cairo_rectangle(cr, x0 + 0.6, by + 0.6, bw - 1.2, bh - 1.2);
+		cairo_stroke(cr);
+		cairo_rectangle(cr, x0 + bw, by + 3, 2, bh - 6);	/* the terminal */
+		cairo_fill(cr);
+		double level = (battery > 100 ? 100 : battery) / 100.0;
+		if (level > 0) {
+			cairo_rectangle(cr, x0 + 2.5, by + 2.5, (bw - 5) * level, bh - 5);
+			cairo_fill(cr);
+		}
+		draw_text(cr, line, FONT_SEMILIGHT, 17, x0 + bw + 3 + gap, y + 4, 0, 0, false);
+	}
+	y += 40;
+
+	/* the apps with notifications waiting: each one's glyph, small, grey and
+	 * in outline (aod_icon), and its count */
+	const char *names[5];
+	int counts[5];
+	int n = note_apps(server, names, counts, 5);
+	if (n > 0) {
+		const double s = AOD_ICON, step = 5, space = 16;
+		double widths[5], total = 0;
+		char nums[5][12];
+		for (int i = 0; i < n; i++) {
+			snprintf(nums[i], sizeof(nums[i]), "%d", counts[i]);
+			widths[i] = s + step + text_width(nums[i], FONT_SEMILIGHT, 15);
+			total += widths[i] + (i ? space : 0);
+		}
+		double x = round((w - total) / 2 + dx), cy = y + 14;
+		for (int i = 0; i < n; i++) {
+			const char *key = note_key(server, names[i], note_who(server, names[i]));
+			char icon[80], initial[2] = { (char)toupper((unsigned char)names[i][0]), 0 };
+			snprintf(icon, sizeof(icon), "@%s", key ? key : "");
+			aod_icon(server, cr, key ? icon : NULL, key ? NULL : note_glyph(names[i]), initial,
+				x + s / 2, cy, s);
+			draw_text(cr, nums[i], FONT_SEMILIGHT, 15, x + s + step, cy - 10, 0, 0, false);
+			x += widths[i] + space;
+		}
+	}
+	aod_force_mark(server, cr, now);
+	zt_buffer_show(server, &server->aod_layer, buffer, cr, w, h);
+}
+
+/* The picture for the time `now`, at its place. */
+static void aod_draw_at(struct zt_server *server, time_t now) {
+	aod_draw_place(server, now, aod_place(now));
+}
+
+/* The double tap that wakes it: a touch on the dark glass while the always-on
+ * display shows. A tap is a touch lifted within AOD_TAP_MS that moved less
+ * than AOD_TAP_MOVE_PX; the second must come down within AOD_TAP_GAP_MS of
+ * the first lifting, within AOD_TAP_APART_PX of it. Its own up and moves
+ * find no touch afterwards. */
+static void aod_tap_down(struct zt_server *server, int32_t id, double x, double y) {
+	if (!AOD_DOUBLE_TAP || !server->double_tap_wake || !server->aod) {
+		return;
+	}
+	uint32_t now = now_ms();
+	if (server->aod_tap.down) {
+		server->aod_tap.down = server->aod_tap.armed = false;	/* two fingers */
+		return;
+	}
+	double k = server->scale > 0 ? server->scale : 1;	/* panel pixels a point */
+	if (server->aod_tap.armed && now - server->aod_tap.up_ms <= AOD_TAP_GAP_MS &&
+			hypot(x - server->aod_tap.x, y - server->aod_tap.y) * k <= AOD_TAP_APART_PX) {
+		server->aod_tap.armed = false;
+		wlr_log(WLR_INFO, "aod: double tap, waking");
+		screen_set(server, true);
+		activity(server);
+		return;
+	}
+	server->aod_tap.down = true;
+	server->aod_tap.armed = false;
+	server->aod_tap.id = id;
+	server->aod_tap.down_ms = now;
+	server->aod_tap.x = x;
+	server->aod_tap.y = y;
+}
+
+static void aod_tap_move(struct zt_server *server, int32_t id, double x, double y) {
+	double k = server->scale > 0 ? server->scale : 1;
+	if (server->aod_tap.down && server->aod_tap.id == id &&
+			hypot(x - server->aod_tap.x, y - server->aod_tap.y) * k > AOD_TAP_MOVE_PX) {
+		server->aod_tap.down = false;	/* a swipe, not a tap */
+	}
+}
+
+static void aod_tap_up(struct zt_server *server, int32_t id) {
+	if (!server->aod_tap.down || server->aod_tap.id != id) {
+		return;
+	}
+	uint32_t now = now_ms();
+	server->aod_tap.down = false;
+	server->aod_tap.armed = now - server->aod_tap.down_ms <= AOD_TAP_MS;
+	server->aod_tap.up_ms = now;
+}
+
+/* The room's light, in lux, as sensord last published it; -1 unknown. */
+static int aod_lux(struct zt_server *server) {
+	if (server->aod_test_lux >= 0) {
+		return server->aod_test_lux;
+	}
+	FILE *f = fopen(AOD_LIGHT_FILE, "r");
+	int lux = -1;
+	if (f) {
+		if (fscanf(f, "%d", &lux) != 1) lux = -1;
+		fclose(f);
+	}
+	return lux;
+}
+
+static void pipe_tell(const char *path, const char *command);
+
+/* The always-on display's level, gliding (one step) or at once. */
+static void aod_bl_set(double l, bool glide) {
+	pthread_mutex_lock(&bl.lock);
+	ramp.goal = l;
+	if (!glide) ramp.cur = l;
+	ramp.speed = AOD_LIGHT_GLIDE;	/* L* a second */
+	ramp.force = !glide;
+	ramp.moving = true;
+	pthread_cond_signal(&bl.wake);
+	pthread_mutex_unlock(&bl.lock);
+}
+
+/* Read the room and pick the level; then when to read it next. */
+static int aod_light_tick(void *data) {
+	struct zt_server *server = data;
+	if (!server->aod || !server->aod_auto || bl.mode != BL_TABLE || !aod_bl.on) {
+		return 0;
+	}
+	uint32_t now = now_ms();
+	int lux = aod_lux(server);
+	if (lux >= 0) {
+		int level = server->aod_level;
+		if (level < 0) {
+			level = 0;	/* the first: plain thresholds */
+			while (level + 1 < AOD_N_LEVELS && lux >= AOD_LEVELS[level + 1].lux) level++;
+		} else {
+			while (level + 1 < AOD_N_LEVELS && lux >= AOD_LEVELS[level + 1].lux * AOD_LIGHT_HYST) level++;
+			while (level > 0 && lux < AOD_LEVELS[level].lux / AOD_LIGHT_HYST) level--;
+		}
+		if (level != server->aod_level) {
+			bool jump = server->aod_level < 0 || abs(level - server->aod_level) >= 2;
+			if (server->aod_level >= 0) {
+				server->aod_fast_until = now + AOD_LIGHT_FAST_FOR_MS;	/* the room changed */
+			}
+			wlr_log(WLR_INFO, "aod: %d lux, level %d (L* %.0f)%s", lux, level,
+				AOD_LEVELS[level].lstar, jump ? "" : ", gliding");
+			server->aod_level = level;
+			aod_bl_set(AOD_LEVELS[level].lstar, !jump);
+		}
+	}
+	int ms = (int32_t)(server->aod_fast_until - now) > 0 ? AOD_LIGHT_FAST_MS : AOD_LIGHT_SLOW_MS;
+	if (ms != server->aod_light_ms) {
+		char line[32];
+		snprintf(line, sizeof(line), "aod %d\n", ms);
+		pipe_tell(AOD_SENSORD_CTL, line);
+		server->aod_light_ms = ms;
+	}
+	wl_event_source_timer_update(server->aod_light_timer, ms);
+	return 0;
+}
+
+/* The display appeared: read the room (the last reading, from before the
+ * screen went off, and then the sensor's) often for a minute. */
+static void aod_light_start(struct zt_server *server) {
+	if (!server->aod_auto || bl.mode != BL_TABLE || !server->aod_light_timer) {
+		return;
+	}
+	server->aod_level = -1;
+	server->aod_light_ms = 0;
+	server->aod_fast_until = now_ms() + AOD_LIGHT_FAST_FOR_MS;
+	aod_light_tick(server);
+}
+
+/* It went (woken, or the dark): the sensor goes back to sensord's rules. */
+static void aod_light_stop(struct zt_server *server) {
+	if (server->aod_light_timer) {
+		wl_event_source_timer_update(server->aod_light_timer, 0);
+	}
+	if (server->aod_light_ms) {
+		pipe_tell(AOD_SENSORD_CTL, "aod 0\n");
+		server->aod_light_ms = 0;
+	}
+	server->aod_level = -1;
+}
+
+/* Draw it again and send it: the next frame carries it. */
+static void aod_refresh(struct zt_server *server) {
+	if (!server->aod) {
+		return;
+	}
+	time_t now = time(NULL);
+	int place = aod_place(now);
+	if (place != server->aod_place_shown) {
+		wlr_log(WLR_INFO, "aod: place %d", place);	/* every AOD_SHIFT_S */
+		server->aod_place_shown = place;
+	}
+	aod_draw_at(server, now);
+	server->aod_dirty = true;
+	if (server->output) {
+		wlr_output_schedule_frame(server->output->wlr_output);
+	}
+}
+
+/* The frame of the always-on display: its layer alone on black. In place of
+ * render_frame while it shows, and only when the picture changed: one flip
+ * a minute. */
+static void aod_render_frame(struct zt_server *server) {
+	struct wlr_output *output = server->output->wlr_output;
+	struct wlr_output_state state;
+	struct wlr_output_layer_state plane_state = {0};
+	struct wlr_buffer *buffer = NULL;
+	GLuint fbo;
+	GLenum error;
+	wlr_output_state_init(&state);
+	if (!wlr_output_configure_primary_swapchain(output, &state, &output->swapchain) ||
+			!(buffer = wlr_swapchain_acquire(output->swapchain))) {
+		goto later;
+	}
+	if (buffer == server->output->last_submitted) {
+		/* the one on the panel: not to be drawn into (see render_frame) */
+		struct wlr_buffer *other = wlr_swapchain_acquire(output->swapchain);
+		wlr_buffer_unlock(buffer);
+		buffer = other;
+		if (!buffer || buffer == server->output->last_submitted) {
+			goto later;
+		}
+	}
+	fbo = wlr_gles2_renderer_get_buffer_fbo(server->renderer, buffer);
+	if (!fbo || !gl_begin(server)) {
+		goto later;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glViewport(0, 0, output->width, output->height);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+	glClearColor(0, 0, 0, 1);
+	glClear(GL_COLOR_BUFFER_BIT);
+	aod_tint(server);
+	if (server->aod_layer.tex) {
+		layer_draw(server, &server->aod_layer, 0, 0, 1.0f);
+	} else {
+		wlr_log(WLR_ERROR, "aod: no picture to show (its texture is missing): a dark frame");
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glFinish();
+	error = glGetError();
+	gl_end(server);
+	if (error != GL_NO_ERROR) {
+		wlr_log(WLR_ERROR, "aod: frame failed (GL 0x%x)", error);
+		goto later;
+	}
+	if (server->plane_shown && server->plane_layer) {
+		/* an app's page on a display plane when the screen went off */
+		plane_state = (struct wlr_output_layer_state){ .layer = server->plane_layer };
+		wlr_output_state_set_layers(&state, &plane_state, 1);
+	}
+	wlr_output_state_set_buffer(&state, buffer);
+	wlr_buffer_unlock(buffer);
+	if (wlr_output_commit_state(output, &state)) {
+		server->output->last_submitted = buffer;
+		server->plane_shown = false;
+		server->plane_surface = NULL;
+		server->aod_dirty = false;
+		server->aod_frames++;
+		state_file_write(server);	/* (its aod_frames: one write a minute) */
+	} else {
+		wlr_log(WLR_ERROR, "aod: output commit failed");
+	}
+	wlr_output_state_finish(&state);
+	return;
+later:
+	if (buffer) {
+		wlr_buffer_unlock(buffer);
+	}
+	wlr_output_state_finish(&state);
+	render_retry_later(server);	/* aod_dirty stays: that frame draws it */
+}
+
+/* With the screen off: the always-on display if it is wanted now, the dark if
+ * not (a charger pulled out, the battery down to AOD_MIN_BATTERY, the setting
+ * changed). The minute's clock, power events and a reload ask. */
+static void aod_sync(struct zt_server *server) {
+	if (server->screen_on || !server->output) {
+		return;
+	}
+	bool want = aod_wanted(server);
+	if (want == server->aod) {
+		return;
+	}
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	if (want) {
+		/* the panel to its floor before it wakes: s9p_decon_pipe_enable
+		 * sends the level it holds before display-on */
+		aod_bl_hold();
+		aod_draw_at(server, time(NULL));
+	}
+	wlr_output_state_set_enabled(&state, want);
+	bool ok = wlr_output_commit_state(server->output->wlr_output, &state);
+	wlr_output_state_finish(&state);
+	if (!ok) {
+		wlr_log(WLR_ERROR, "aod: could not switch the display %s%s", want ? "on" : "off",
+			want ? "; screen dark, AOD not shown: the display would not switch on" : "");
+		if (want) {
+			aod_bl_release();
+		}
+		return;
+	}
+	server->aod = want;
+	if (want) {
+		server->aod_dirty = true;
+		wlr_output_schedule_frame(server->output->wlr_output);
+		aod_light_start(server);
+		wlr_log(WLR_INFO, "aod: shown (the screen is off)");
+	} else {
+		aod_light_stop(server);
+		aod_bl_release();
+		wlr_log(WLR_INFO, "screen dark, AOD not shown: %s", aod_why(server));
+	}
+	state_file_write(server);
+}
+
+/* Switch the display itself off or on. Off, nothing is drawn and no frames
+ * are scheduled, or with the always-on display only its minute's frame; the
+ * power key brings it back. */
 
 static void screen_set(struct zt_server *server, bool on) {
 	if (!on) {
@@ -12222,15 +13013,31 @@ static void screen_set(struct zt_server *server, bool on) {
 	if (on) {
 		perf_tell("screen on\n");	/* clocks back up before the first frame */
 	}
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_enabled(&state, on);
-	if (!wlr_output_commit_state(server->output->wlr_output, &state)) {
-		wlr_log(WLR_ERROR, "screen: could not switch the display %s", on ? "on" : "off");
-		wlr_output_state_finish(&state);
-		return;
+	/* off, the always-on display keeps the output on; on, from it, the
+	 * output is on already */
+	const char *dark_why = on ? NULL : aod_why(server);
+	bool aod = !on && !dark_why;
+	if (aod) {
+		aod_bl_hold();
 	}
-	wlr_output_state_finish(&state);
+	if (!aod && !(on && server->aod)) {
+		struct wlr_output_state state;
+		wlr_output_state_init(&state);
+		wlr_output_state_set_enabled(&state, on);
+		if (!wlr_output_commit_state(server->output->wlr_output, &state)) {
+			wlr_log(WLR_ERROR, "screen: could not switch the display %s", on ? "on" : "off");
+			wlr_output_state_finish(&state);
+			return;
+		}
+		wlr_output_state_finish(&state);
+	}
+	if (on) {
+		if (server->aod) {
+			aod_light_stop(server);
+		}
+		server->aod = false;
+		aod_bl_release();
+	}
 	server->screen_on = on;
 	state_file_write(server);
 	if (demoloop_active()) {
@@ -12246,7 +13053,17 @@ static void screen_set(struct zt_server *server, bool on) {
 			backlight_set(server->shade_brightness);
 		}
 	}
-	wlr_log(WLR_INFO, "screen %s", on ? "on" : "off");
+	if (aod) {
+		server->aod = true;
+		memset(&server->aod_tap, 0, sizeof(server->aod_tap));
+		aod_refresh(server);
+		aod_light_start(server);
+	}
+	if (on || aod) {
+		wlr_log(WLR_INFO, "screen %s%s", on ? "on" : "off", aod ? ", always-on display" : "");
+	} else {
+		wlr_log(WLR_INFO, "screen off, dark, AOD not shown: %s", dark_why);
+	}
 	led_notes_sync(server);
 	apps_suspend_sync(server);
 	if (!on) {
@@ -12277,6 +13094,16 @@ static void screen_set(struct zt_server *server, bool on) {
 	}
 }
 
+/* Seconds without input before the screen sleeps now: the lock screen's own
+ * (Settings > Lock Screen) while it shows, else the screen's; 0: never. The
+ * demo loop's 0 (screen_timeout) holds for both. */
+static int idle_timeout_s(struct zt_server *server) {
+	if (server->locked && server->lock_timeout > 0 && !demoloop_active()) {
+		return server->lock_timeout;
+	}
+	return server->screen_timeout;
+}
+
 /* Something was touched or pressed: put the sleep timer back to the start.
  * Re-armed at most once a second, however many events a drag produces. */
 static void activity(struct zt_server *server) {
@@ -12285,7 +13112,7 @@ static void activity(struct zt_server *server) {
 		return;
 	}
 	server->idle_armed_ms = now ? now : 1;
-	wl_event_source_timer_update(server->idle_timer, server->screen_timeout * 1000);
+	wl_event_source_timer_update(server->idle_timer, idle_timeout_s(server) * 1000);
 	if (server->idle_notifier) {
 		wlr_idle_notifier_v1_notify_activity(server->idle_notifier, server->seat);
 	}
@@ -12326,7 +13153,15 @@ static bool app_keeps_screen_on(struct zt_server *server) {
 
 static int idle_fired(void *data) {
 	struct zt_server *server = data;
-	if (server->screen_timeout > 0) {
+	int timeout = idle_timeout_s(server);
+	if (timeout > 0) {
+		/* armed for the lock screen's (shorter) time and unlocked since:
+		 * the rest of the screen's own */
+		uint32_t idle = now_ms() - server->idle_armed_ms;
+		if (server->idle_armed_ms && idle + 100 < (uint32_t)timeout * 1000) {
+			wl_event_source_timer_update(server->idle_timer, (uint32_t)timeout * 1000 - idle);
+			return 0;
+		}
 		/* the pairing sheet: someone is reading the other device. The agent
 		 * ends the request within a minute. */
 		if (server->screen_on && server->bt_pair.shown) {
@@ -12456,10 +13291,16 @@ static void retro_saved(void *data) {
 	struct dm_config c;
 	dm_launcher_get_config(server->dm, &c);
 	if (memcmp(&c, &server->dm_cfg, sizeof(c))) {
+		bool h24_was = server->dm_cfg.h24;
 		server->dm_cfg = c;
 		config_keep_text("dotmatrix_stats", c.sys_stats ? "on" : "off");
 		config_keep_text("dotmatrix_banners", c.event_banners ? "on" : "off");
 		config_keep_text("dotmatrix_h24", c.h24 ? "on" : "off");
+		if (c.h24 != h24_was) {
+			/* DotMatrix's CLOCK switch is the same setting as Settings' */
+			server->clock_24h = c.h24;
+			config_keep_text("clock_24h", c.h24 ? "on" : "off");
+		}
 		config_keep("dotmatrix_launch_delay", c.launch_delay);
 		for (int i = 0; i < 5; i++) {
 			char key[24];
@@ -12794,6 +13635,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		return;
 	}
 	if (!server->screen_on) {
+		aod_tap_down(server, id, x, y);	/* only a double tap on the always-on display */
 		return;	/* asleep: the glass does nothing until the power key */
 	}
     if (!server->locked && server->android_compiling && server->pending_pid > 0 && !server->shown) {
@@ -13216,6 +14058,9 @@ static int drag_axis(double dx, double dy) {
 }
 
 static void touch_update(struct zt_server *server, int32_t id, double x, double y, uint32_t time) {
+	if (!server->screen_on) {
+		aod_tap_move(server, id, x, y);
+	}
 	struct touch_point *p = touch_find(server, id, false);
 	if (!p) {
 		return;
@@ -13504,6 +14349,13 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 }
 
 static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool cancelled) {
+	if (!server->screen_on) {
+		if (cancelled) {
+			server->aod_tap.down = false;
+		} else {
+			aod_tap_up(server, id);
+		}
+	}
 	struct touch_point *p = touch_find(server, id, false);
 	if (!p) {
 		return;
@@ -13620,6 +14472,8 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 				run_detached("ztos-waydroid-power", "sync", NULL, NULL);
 			}
 			wlr_log(WLR_INFO, "unlocked");
+			server->idle_armed_ms = 0;	/* the screen's own timeout from here */
+			activity(server);
 		} else if (!p->moved) {
 			/* a tap: it lifts a little and drops, to show which way it goes */
 			server->lock_y = -26.0f;
@@ -13964,8 +14818,9 @@ static void state_file_write(struct zt_server *server) {
 		return;
 	}
 	struct wlr_output *o = server->output->wlr_output;
-	fprintf(f, "points %d %d\nscale %.2f\npixels %d %d\nscreen %s\n", server->width, server->height,
-		server->scale, o->width, o->height, server->screen_on ? "on" : "off");
+	fprintf(f, "points %d %d\nscale %.2f\npixels %d %d\nscreen %s\naod %s\naod_frames %u\n", server->width,
+		server->height, server->scale, o->width, o->height, server->screen_on ? "on" : "off",
+		server->aod ? "on" : "off", server->aod_frames);
 	fclose(f);
 	rename(tmp, path);
 }
@@ -13975,6 +14830,7 @@ static void state_file_write(struct zt_server *server) {
  *
  *     down ID X Y | move ID X Y | up ID | cancel ID | tap X Y | screen off | screen on | state
  *     key CODE down|up    a phone key, as its evdev code: see ctl_key()
+ *     aod off|on|charging the always-on display, until the next reload
  *
  * It goes through the same code as the touchscreen, which is what makes the
  * shell testable over ssh.
@@ -14422,6 +15278,32 @@ static void ctl_command(struct zt_server *server, char *line) {
 		/* a new display size: greetd starts the session again at it */
 		wlr_log(WLR_INFO, "restart asked for");
 		wl_display_terminate(server->wl_display);
+	} else if (strncmp(line, "aod test ", 9) == 0) {
+		/* the rules without touching charging: aod test battery N|real,
+		 * aod test charger on|off|real (until the next restart) */
+		const char *v = line + 9;
+		if (strncmp(v, "battery ", 8) == 0) {
+			server->aod_test_battery = strncmp(v + 8, "real", 4) == 0 ? -1 : atoi(v + 8);
+		} else if (strncmp(v, "charger ", 8) == 0) {
+			server->aod_test_charger = strncmp(v + 8, "real", 4) == 0 ? -1 :
+				strncmp(v + 8, "on", 2) == 0 ? 1 : 0;
+		} else if (strncmp(v, "lux ", 4) == 0) {
+			server->aod_test_lux = strncmp(v + 4, "real", 4) == 0 ? -1 : atoi(v + 4);
+			if (server->aod_light_timer && server->aod) {
+				wl_event_source_timer_update(server->aod_light_timer, 1);	/* look now */
+			}
+		}
+		wlr_log(WLR_INFO, "aod: test battery %d charger %d", server->aod_test_battery,
+			server->aod_test_charger);
+		aod_sync(server);
+		aod_refresh(server);
+	} else if (strncmp(line, "aod ", 4) == 0) {
+		/* the always-on display for this session (Settings' "aod" is the
+		 * lasting one): aod off | on | charging */
+		server->aod_mode = strncmp(line + 4, "charging", 8) == 0 ? AOD_CHARGING :
+			strncmp(line + 4, "on", 2) == 0 ? AOD_ON : AOD_OFF;
+		wlr_log(WLR_INFO, "aod: mode %d (ctl)", server->aod_mode);
+		aod_sync(server);
 	} else if (strncmp(line, "screen off", 10) == 0) {
 		screen_set(server, false);
 	} else if (strncmp(line, "screen on", 9) == 0) {
@@ -15354,6 +16236,10 @@ static double ftrace_clock(void) {
 }
 
 static void render_frame(struct zt_server *server) {
+	if (server->aod) {
+		aod_render_frame(server);
+		return;
+	}
 	struct wlr_output *output = server->output->wlr_output;
 	uint32_t now = now_ms();
 	bool running = anims_step(server, now);
@@ -16219,6 +17105,13 @@ static void render_frame(struct zt_server *server) {
 static void output_frame(struct wl_listener *listener, void *data) {
 	struct zt_output *output = wl_container_of(listener, output, frame);
 	struct zt_server *server = output->server;
+	if (server->aod) {
+		/* the always-on display: a frame only when its picture changed */
+		if (server->aod_dirty) {
+			aod_render_frame(server);
+		}
+		return;
+	}
 	/* An app that is moving (a scroll, its own animation) gets a frame, and
 	 * its frame callback, on every vblank, not only when its commit came in
 	 * before this one: a commit just after it waited for the one after, and
@@ -16578,6 +17471,17 @@ static int reload(int signal_number, void *data) {
 			draw_osk(server);
 		}
 	}
+	aod_sync(server);	/* switched on or off in Settings while dark */
+	aod_refresh(server);	/* the clock's format, say */
+	if (server->aod && !server->screen_on) {
+		/* the brightness switch changed while it shows */
+		if (server->aod_auto && !server->aod_light_ms) {
+			aod_light_start(server);
+		} else if (!server->aod_auto && server->aod_light_ms) {
+			aod_light_stop(server);
+			aod_bl_set(BL_L_FLOOR, false);
+		}
+	}
 	wlr_log(WLR_INFO, "configuration reloaded: accent %06x, %d columns, haptics %s",
 		server->accent, server->units / 2, server->haptics_enabled ? "on" : "off");
 	return 0;
@@ -16595,6 +17499,18 @@ static int uevent_readable(int fd, uint32_t mask, void *data) {
 		for (char *field = buf; field < buf + n; field += strlen(field) + 1) {
 			power = power || strcmp(field, "SUBSYSTEM=power_supply") == 0;
 		}
+	}
+	if (power && server->width > 0 && !server->screen_on) {
+		/* a charger in or out: the always-on display may come or go, and
+		 * says so. (Other power events, each per cent, wait for the
+		 * minute: they come every few seconds while charging.) */
+		static int charger_was = -1;
+		int charger = aod_charger(server);
+		aod_sync(server);
+		if (charger != charger_was) {
+			aod_refresh(server);
+		}
+		charger_was = charger;
 	}
 	if (power && server->width > 0 && server->screen_on) {
 		power_tick(server, true);	/* (only if the draw is being looked at) */
@@ -16682,6 +17598,58 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	server->note_swipe_x = 90;
 	server->notes_dirty = true;
 	draw_shade(server);
+	/* the always-on display with those (Messages' two wait), now and at each
+	 * of its places */
+	if (read_battery() < 0) {
+		server->aod_test_battery = 73;	/* (a machine with no battery) */
+	}
+	/* and some apps that wait, of each kind of glyph */
+	static const struct { const char *app, *who; } WAITING[] = {
+		{ "Mail", "" }, { "WhatsApp", "waydroid.com.whatsapp" }, { "Phone", "" }, { "Grayjay", "" },
+	};
+	for (int i = 0; i < 4; i++) {
+		__typeof__(server->notes[0]) *nt = &server->notes[server->n_notes++];
+		memset(nt, 0, sizeof(*nt));
+		snprintf(nt->app, sizeof(nt->app), "%s", WAITING[i].app);
+		snprintf(nt->who, sizeof(nt->who), "%s", WAITING[i].who);
+		snprintf(nt->title, sizeof(nt->title), "Waiting");
+		nt->at = time(NULL);
+		nt->uid = (uint32_t)(10 + i);
+		nt->percent = NOTE_PLAIN;
+	}
+	g_dump_name = "aod";
+	aod_draw_at(server, time(NULL));
+	/* each place, and the 12-hour clock's longest time (12:59 PM) at each */
+	struct tm noon;
+	time_t now_t = time(NULL);
+	localtime_r(&now_t, &noon);
+	noon.tm_hour = 12;
+	noon.tm_min = 59;
+	time_t longest = mktime(&noon);
+	bool h24 = server->clock_24h;
+	for (int i = 0; i < AOD_N_SPOTS; i++) {
+		char name[32];
+		snprintf(name, sizeof(name), "aod-place-%d", i);
+		g_dump_name = name;
+		server->clock_24h = true;
+		aod_draw_place(server, now_t, i);
+		snprintf(name, sizeof(name), "aod-12h-place-%d", i);
+		server->clock_24h = false;
+		aod_draw_place(server, longest, i);
+	}
+	for (int i = 0; i < AOD_FORCE_N_SPOTS; i++) {
+		char name[32];
+		snprintf(name, sizeof(name), "aod-force-%d", i);
+		g_dump_name = name;
+		aod_draw_place(server, now_t - now_t % (AOD_SHIFT_S * AOD_FORCE_N_SPOTS) + (time_t)i * AOD_SHIFT_S,
+			aod_place(now_t));
+	}
+	g_dump_name = "lock-clock-12h";
+	draw_lock_clock_at(server, longest);
+	server->clock_24h = true;
+	g_dump_name = "lock-clock-24h";
+	draw_lock_clock_at(server, longest);
+	server->clock_24h = h24;
 	server->n_notes = 0;
 	server->note_swipe_uid = 0;
 	server->note_swipe_x = 0;
@@ -16771,6 +17739,8 @@ int main(int argc, char *argv[]) {
 	server.shade_wifi = wifi_up();
 	server.shade_pressed = -1;
 	server.uevent_fd = -1;
+	server.aod_test_battery = server.aod_test_charger = server.aod_test_lux = -1;	/* the real ones */
+	server.aod_place_shown = -1;
 	for (int i = 0; i < 8; i++) {
 		server.shade_press[i] = 1.0f;
 	}
@@ -16917,6 +17887,7 @@ int main(int argc, char *argv[]) {
 	server.press_timer = wl_event_loop_add_timer(server.loop, press_fired, &server);
 	server.key_repeat_timer = wl_event_loop_add_timer(server.loop, key_repeat_fired, &server);
 	server.repeat_index = -1;
+	server.aod_light_timer = wl_event_loop_add_timer(server.loop, aod_light_tick, &server);
 	server.idle_timer = wl_event_loop_add_timer(server.loop, idle_fired, &server);
 	uevent_init(&server);
 	wl_event_loop_add_signal(server.loop, SIGHUP, reload, &server);

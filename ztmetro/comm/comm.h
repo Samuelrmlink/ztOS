@@ -16,6 +16,8 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "../core/zt-clock.h"
 #include <stdarg.h>
 
 #define MODEM_CTL	"/run/ztoscorenetworking.ctl"
@@ -219,11 +221,15 @@ static inline void when_text(time_t at, char *out, size_t size)
 	struct tm a, n;
 	localtime_r(&at, &a);
 	localtime_r(&now, &n);
-	if (a.tm_year == n.tm_year && a.tm_yday == n.tm_yday)
-		strftime(out, size, "%H:%M", &a);
-	else if (now - at < 6 * 86400)
-		strftime(out, size, "%a %H:%M", &a);
-	else
+	char hm[16];
+	zt_clock_text(&a, zt_clock_24h(), hm, sizeof(hm));
+	if (a.tm_year == n.tm_year && a.tm_yday == n.tm_yday) {
+		snprintf(out, size, "%s", hm);
+	} else if (now - at < 6 * 86400) {
+		char day[8];
+		strftime(day, sizeof(day), "%a", &a);
+		snprintf(out, size, "%s %s", day, hm);
+	} else
 		strftime(out, size, "%-d/%-m/%y", &a);
 }
 

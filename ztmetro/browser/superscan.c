@@ -21,6 +21,7 @@
 #include <libsoup/soup.h>
 
 #include "zrnmetrocore.h"
+#include "zt-clock.h"
 #include "webview.h"
 
 enum page { P_WEB, P_TABS, P_DOWNLOADS, P_HISTORY, P_FAVOURITES };
@@ -1149,11 +1150,9 @@ static double render(cairo_t *cr, int page) {
 				cairo_set_source_rgb(cr, .65, .65, .65);
 				zmc_text_line(cr, history[i].url, FONT_REGULAR, 12, ZMC_MARGIN, row + 26,
 					zmc.width - 2 * ZMC_MARGIN - 40);
-				GDateTime *date = g_date_time_new_from_unix_local(history[i].when);
-				char *stamp = date ? g_date_time_format(date, "%H:%M") : NULL;
-				zmc_text(cr, stamp ? stamp : "", FONT_REGULAR, 11, ZMC_MARGIN, row + 46, 0);
-				g_free(stamp);
-				if (date) g_date_time_unref(date);
+				char stamp[24];
+				zt_clock_text_now((time_t)history[i].when, stamp, sizeof(stamp));
+				zmc_text(cr, history[i].when ? stamp : "", FONT_REGULAR, 11, ZMC_MARGIN, row + 46, 0);
 				zmc_add_hit(ZMC_MARGIN, row, zmc.width - 2 * ZMC_MARGIN - 40, 76, ACT_HISTORY_OPEN, i);
 				zmc_text(cr, "×", FONT_REGULAR, 24, zmc.width - ZMC_MARGIN - 28, row + 12, 0);
 				zmc_add_hit(zmc.width - ZMC_MARGIN - 40, row, 40, 76, ACT_HISTORY_DELETE, i);
