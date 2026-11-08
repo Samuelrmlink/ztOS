@@ -39,6 +39,7 @@ fi
 # started) ends, never the user's other processes (ssh logins, builds, user services), as
 # zboot-session's "loginctl terminate-user; pkill -9 -u" would. With --no-restart, nothing.
 [ "${2:-}" = --no-restart ] || [ "${1:-}" = --no-restart ] && exit 0
+set +e +o pipefail	# from here every step is tried, whatever the one before did
 s=$(loginctl list-sessions --no-legend | while read -r id _ _ seat _; do
 	[ "$(loginctl show-session "$id" -p Service --value)" = greetd ] && echo "$id"
 done | head -1)
