@@ -41,7 +41,8 @@
  *				the shell animating on its own clock past a touch
  *
  * /run/zrnperfd.ctl is that pipe (anyone may write), /run/zrnperfd.status
- * says what is set, /var/lib/zrnperfd/state keeps it across boots.
+ * says what is set (and front=PID APP_ID: the app in front, for ztacctd),
+ * /var/lib/zrnperfd/state keeps it across boots.
  *
  * There are no cpuidle states on this kernel, so "deep sleep" is both
  * clusters and the GPU held at their lowest operating points, and the big
@@ -1260,6 +1261,8 @@ static void status(void) {
 			fprintf(f, "tickle_%s=%s\n", conditions[c], tickle_names[tickle_when[c]]);
 		}
 		tickle_status(f);
+		/* the app in front, as the shell said (ztacctd gives it the screen's energy) */
+		fprintf(f, "front=%d %s\n", front_pid, front_app);
 		fclose(f);
 		chmod(STATUS ".new", 0644);
 		rename(STATUS ".new", STATUS);
