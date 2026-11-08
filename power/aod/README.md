@@ -89,7 +89,8 @@ attempted here.
 
 1. Build: `git archive feature/aod | ssh phone 'mkdir ~/ztdev-aod && tar x -C ~/ztdev-aod'`,
    then on the phone `cd ~/ztdev-aod/ztmetro && make -j8 ztmetro settings/ztsettings`.
-2. Look without installing: `./ztmetro --render /tmp/aodr` and view
+2. Look without installing: `ZTMETRO_SCALE=4 ./ztmetro --render /tmp/aodr` and view
+   (without ZTMETRO_SCALE every shell PNG comes out empty: the scale is 0)
    `/tmp/aodr/aod*.png` (offscreen; touches nothing).
 3. Install and restart the session: `sudo bash ~/ztdev-aod/power/aod/aod-install.sh`
    (`--undo` puts the old binaries back).
