@@ -266,6 +266,7 @@ struct max77705_usbc {
 	u8 st[STATUS_N];		/* 0x06..0x0d, last read */
 
 	u8 path;			/* last CONTROL1 written, 0 = none */
+	u8 path_tried;			/* value written for this attach */
 
 	struct power_supply *psy;
 	struct mutex pub_lock;
@@ -867,6 +868,48 @@ static const struct power_supply_desc usbc_psy_desc = {
 	.get_property	= usbc_get_property,
 };
 
+/* ---- D+/D- routing -------------------------------------------------------- */
+
+/*
+ * As stock's muic_vps_table: the switch goes to the AP (COM_USB) only for a
+ * host port (SDP, CDP) and a DCD timeout, and is open (COM_OPEN) for every
+ * charger (TA, unofficial TA, AFC, QC). An open switch is what AFC and QC2
+ * need: the MCU drives D+/D- itself, and the DWC3 PHY's pull-up on a DCP's
+ * shorted lines is not something a charger expects.
+ *
+ * Kept from the old driver: with nothing to decide on (no VBUS, or BC1.2 not
+ * finished) at start or after an MCU reboot the switch goes to the AP, and a
+ * resolved attach writes CONTROL1 again even when the value is the same,
+ * since the MCU may have dropped it. Unlike stock, a detach changes nothing.
+ * One write per attach and value: a failure is not retried in a loop.
+ */
+static u8 usbc_path_for(enum usbc_kind k)
+{
+	switch (k) {
+	case K_SDP:
+	case K_CDP:
+	case K_DCD_TIMEOUT:
+		return COM_USB;
+	default:
+		return kind_is_dcp(k) ? COM_OPEN : 0;
+	}
+}
+
+static void usbc_route(struct max77705_usbc *u)
+{
+	u8 want = usbc_path_for(usbc_bc_kind(u->st[ST(REG_BC_STATUS)]));
+
+	if (!want) {
+		if (u->path)
+			return;
+		want = COM_USB;
+	}
+	if (want == u->path_tried)
+		return;
+	u->path_tried = want;
+	usbc_set_path(u, want);
+}
+
 /* ---- events --------------------------------------------------------------- */
 
 /* SYSMsg: log it; after an MCU (re)boot re-apply the masks and forget what
@@ -881,6 +924,7 @@ static void usbc_handle_sysmsg(struct max77705_usbc *u, u8 msg)
 			 msg, sysmsg_name(msg));
 		usbc_set_masks(u);
 		u->path = 0;
+		u->path_tried = 0;
 		break;
 	case SYSMSG_CC_5V_SHORT:
 	case SYSMSG_SBU_GND_SHORT:
@@ -897,7 +941,7 @@ static void usbc_event_work(struct work_struct *work)
 {
 	struct max77705_usbc *u = container_of(work, struct max77705_usbc, event_work);
 	u8 pend[4], sysmsg;
-	bool sysmsg_new, vbus, was_vbus;
+	bool sysmsg_new, vbus;
 	unsigned long flags;
 
 	spin_lock_irqsave(&u->ev_lock, flags);
@@ -911,7 +955,6 @@ static void usbc_event_work(struct work_struct *work)
 	if (sysmsg_new)
 		usbc_handle_sysmsg(u, sysmsg);
 
-	was_vbus = u->st[ST(REG_BC_STATUS)] & BC_VBUSDET;
 	if (usbc_read_status(u))
 		return;
 	vbus = u->st[ST(REG_BC_STATUS)] & BC_VBUSDET;
@@ -922,10 +965,9 @@ static void usbc_event_work(struct work_struct *work)
 		usbc_log(u, LOG_PDMSG, code, NULL, 0, NULL, 0, 0, pdmsg_name(code));
 	}
 
-	/* as the old driver did: D+/D- to the AP at start, after an MCU
-	 * reboot, and whenever VBUS comes back (the MCU may have dropped it) */
-	if (!u->path || (vbus && !was_vbus))
-		usbc_set_path(u, COM_USB);
+	usbc_route(u);
+	if (!vbus)
+		u->path_tried = 0;	/* the next attach writes it again */
 
 	usbc_publish(u);
 }
