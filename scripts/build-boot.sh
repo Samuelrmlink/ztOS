@@ -238,6 +238,10 @@ else
 fi
 if [ -n "$POWER" ]; then
 	cfg --enable CHARGER_P9320
+	# the fuel gauge's input current (IIN: USB or wireless), system current,
+	# VBYP and VSYS, as /sys/class/hwmon (max77705-hwmon, a simple-mfd-i2c cell)
+	cfg --enable HWMON
+	cfg --enable SENSORS_MAX77705
 else
 	cfg --disable CHARGER_P9320
 fi

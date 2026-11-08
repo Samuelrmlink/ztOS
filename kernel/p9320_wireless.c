@@ -121,7 +121,12 @@
 #define P9320_OV_CLAMP_11V	0x04
 
 /* Vout set values (IDT), 5..10 V in 1 V steps */
-static const u8 p9320_vout_val[] = { 0x0f, 0x19, 0x23, 0x2d, 0x37, 0x41 };
+/*
+ * The first is the 5 V-class level: 5.5 V, stock's wpc_cc_cv_vout (0x157c in
+ * the stock DT). At 5.0 V the MAX77705's WCIN input regulation (AICL) cut a
+ * plain Qi pad to its 300 mA floor on the bench; stock keeps 0.5 V more.
+ */
+static const u8 p9320_vout_val[] = { 0x14, 0x19, 0x23, 0x2d, 0x37, 0x41 };
 #define P9320_VOUT_5V		0
 #define P9320_VOUT_10V		5
 
@@ -606,6 +611,9 @@ static void p9320_attach(struct p9320 *p)
 		else
 			p9320_start_stepdown(p, "fast wireless not allowed");
 	} else {
+		/* stock's charging Vout, 5.5 V (the chip starts at 5.0 V) */
+		if (!p9320_write(p, P9320_VOUT_SET, p9320_vout_val[P9320_VOUT_5V]))
+			dev_info(p->dev, "Vout 5.5 V (stock's wpc_cc_cv_vout)\n");
 		/* a question: the pad answers AFC_SET with what it can do */
 		p9320_send_packet(p, P9320_RXCMD_REQ_AFC_TX, 0x00);
 	}
