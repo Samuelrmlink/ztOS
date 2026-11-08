@@ -166,6 +166,11 @@
 #define  VDM_RESP_LEN		31
 #define OP_SET_ALTMODE		0x55	/* 3: the firmware runs discovery itself */
 #define  ALTMODE_SRC_VDM	0x03
+#define OP_PROBE_PPS_STATUS	0x3b	/* probes only: see usbc_probe_allowed() */
+#define OP_PROBE_READ_MESSAGE	0x5d
+#define OP_PROBE_PD_MESSAGE	0x4d
+#define PROBE_TIMEOUT_MS	1000
+#define PROBE_DRAIN_MS		2000
 #define OP_CONTROL1_R		0x05
 #define OP_CONTROL1_W		0x06
 #define OP_FW_AUTOIBUS		0x57	/* OPCODE_SAMSUNG_FW_AUTOIBUS */
@@ -211,6 +216,15 @@ static int vdm_debugfs;
 module_param(vdm_debugfs, int, 0444);
 MODULE_PARM_DESC(vdm_debugfs,
 		 "debugfs vdm file: 0 off, 1 Discover Identity/SVIDs/Modes only, 2 any VDM (default 0)");
+
+/*
+ * test_cmds: debugfs pd_request (ask for one fixed PDO by hand) and probe
+ * (a fixed list of read-only opcodes FW 0x32 is not known to answer). For
+ * hand-run tests only; set on the kernel command line.
+ */
+static bool test_cmds;
+module_param(test_cmds, bool, 0444);
+MODULE_PARM_DESC(test_cmds, "debugfs pd_request and probe files for hand-run tests (default 0)");
 
 #define CHG_DETAILS_00_ILIM_BY_CHG	BIT(7)
 #define AUTOIBUS_CHECK_MS	2000	/* at most one DETAILS_00 check per */
@@ -366,6 +380,7 @@ struct max77705_usbc {
 	bool mbox_allowed;		/* FW rev is on the allowlist */
 	bool mbox_dead;			/* a command timed out: passive from now */
 	bool vdm_unmasked;
+	u8 stale_op;			/* a probe that may still answer late */
 
 	u8 hw_rev, fw_rev, fw_minor;
 	u8 st[STATUS_N];		/* 0x06..0x0d, last read */
@@ -393,6 +408,18 @@ struct max77705_usbc {
 
 	struct usbc_pd pd;
 	unsigned int pd_gen;		/* bumped whenever pd.cur changes */
+	u8 pd_override;			/* pd_request: a PDO by hand, 0 = policy */
+	bool pd_override_new;		/* written since the last hv_work */
+
+	/* probe (test_cmds): the last one */
+	struct mutex probe_lock;
+	u8 probe_req[2];
+	int probe_req_len;
+	int probe_ret;
+	int probe_ms;			/* how long the answer took, -1 = none */
+	u8 probe_raw[MBOX_DATA_MAX + 1];
+	bool probe_done;
+	unsigned int saved_ceiling_ua;	/* the charger's, before pd_request lowered it */
 
 	/* Type-C class (CONFIG_TYPEC) */
 	struct typec_port *port;
@@ -826,24 +853,75 @@ static bool usbc_op_allowed(struct max77705_usbc *u, u8 op, const u8 *w, int wle
 }
 
 /*
+ * Hand-run read-only probes (test_cmds=1, debugfs "probe"): opcodes that
+ * Samsung's S9 code defines but never sends, or that only newer firmware
+ * has, to learn whether FW 0x32 answers them. Framing from the newer trees
+ * (charging/max77705-opcodes.md §3c/§3e/§6, max77705-newer.md):
+ *   0x3b GET_PPS_STATUS: no data (defined, never sent in any tree);
+ *   0x5d SAMSUNG_READ_MESSAGE: 1 byte, 1 = last Alert, 2 = last Status,
+ *        3 = last Enter Mode; 32 bytes back (S22 max77705_pd.c:1323-1330,
+ *        max77705_usbc.c:2195-2217);
+ *   0x4d GET_PD_MESSAGE: format unknown, defined in every tree, sent by
+ *        none; sent with no data, the whole answer buffer read back.
+ * Nothing else, ever.
+ */
+static bool usbc_probe_allowed(u8 op, const u8 *w, int wlen)
+{
+	if (!test_cmds)
+		return false;
+	switch (op) {
+	case OP_PROBE_PPS_STATUS:
+	case OP_PROBE_PD_MESSAGE:
+		return wlen == 0;
+	case OP_PROBE_READ_MESSAGE:
+		return wlen == 1 && w[0] >= 1 && w[0] <= 3;
+	default:
+		return false;
+	}
+}
+
+static unsigned long usbc_wait_answer(struct max77705_usbc *u, unsigned int ms)
+{
+	unsigned long end;
+
+	if (u->irq > 0)
+		return wait_for_completion_timeout(&u->cmd_done, msecs_to_jiffies(ms));
+	/* no interrupt: poll the flags (we are their only reader) */
+	end = jiffies + msecs_to_jiffies(ms);
+	do {
+		usleep_range(5000, 10000);
+		usbc_read_ints(u);
+	} while (!completion_done(&u->cmd_done) && time_before(jiffies, end));
+	return completion_done(&u->cmd_done);
+}
+
+/*
  * Send one command and wait for its answer: [op, w...] at 0x21, end marker
  * at 0x41, APCmdResI, then rlen+1 bytes from 0x51 whose first byte must echo
  * op. Returns 0 or a negative error; r gets rlen answer bytes (after the
  * echo). Must not be called from the interrupt thread: it waits on it.
+ *
+ * A probe (usbc_probe_allowed) differs: it is refused rather than queued
+ * when another command is in flight, it waits 1 s and then drains up to 2 s
+ * more (holding the mailbox, so a late answer cannot land on another
+ * command), and no answer is "no answer", never the end of the mailbox.
+ * If even that runs out, the opcode is remembered as stale: an answer that
+ * echoes it on a later command is discarded and that command waits again.
+ * *late_ms (probes) gets the time the answer took, or -1.
  */
-static int usbc_cmd(struct max77705_usbc *u, u8 op, const u8 *w, int wlen,
-		    u8 *r, int rlen)
+static int __usbc_cmd(struct max77705_usbc *u, u8 op, const u8 *w, int wlen,
+		      u8 *r, int rlen, bool probe, u8 *raw, int *late_ms)
 {
 	u8 out[1 + MBOX_DATA_MAX], in[1 + MBOX_DATA_MAX] = {};
 	int inlen = max(rlen, 1) + 1;
-	unsigned long flags, left;
+	unsigned long flags, left, t0;
 	int ret, err;
 
 	if (wlen < 0 || wlen > MBOX_DATA_MAX || rlen < 0 || rlen > MBOX_DATA_MAX)
 		return -EINVAL;
 	if (!u->mbox_allowed)
 		return -EPERM;	/* said at probe */
-	if (!usbc_op_allowed(u, op, w, wlen)) {
+	if (probe ? !usbc_probe_allowed(op, w, wlen) : !usbc_op_allowed(u, op, w, wlen)) {
 		dev_warn_ratelimited(u->dev, "opcode %02x refused (fw %02x)\n",
 				     op, u->fw_rev);
 		usbc_log(u, LOG_CMD, op, w, wlen, NULL, 0, -EPERM, "refused");
@@ -852,7 +930,12 @@ static int usbc_cmd(struct max77705_usbc *u, u8 op, const u8 *w, int wlen,
 	if (u->mbox_dead)
 		return -ENODEV;
 
-	mutex_lock(&u->mbox_lock);
+	if (probe) {
+		if (!mutex_trylock(&u->mbox_lock))
+			return -EBUSY;
+	} else {
+		mutex_lock(&u->mbox_lock);
+	}
 	spin_lock_irqsave(&u->ev_lock, flags);
 	reinit_completion(&u->cmd_done);
 	u->cmd_op = op;
@@ -868,18 +951,18 @@ static int usbc_cmd(struct max77705_usbc *u, u8 op, const u8 *w, int wlen,
 	if (ret)
 		goto out;
 
-	if (u->irq > 0) {
-		left = wait_for_completion_timeout(&u->cmd_done,
-						   msecs_to_jiffies(MBOX_TIMEOUT_MS));
+	t0 = jiffies;
+	if (probe) {
+		left = usbc_wait_answer(u, PROBE_TIMEOUT_MS);
+		if (!left) {
+			dev_info(u->dev, "probe %02x: no answer in %d ms, draining\n",
+				 op, PROBE_TIMEOUT_MS);
+			left = usbc_wait_answer(u, PROBE_DRAIN_MS);
+		}
+		if (late_ms)
+			*late_ms = left ? jiffies_to_msecs(jiffies - t0) : -1;
 	} else {
-		/* no interrupt: poll the flags (we are their only reader) */
-		unsigned long end = jiffies + msecs_to_jiffies(MBOX_TIMEOUT_MS);
-
-		do {
-			usleep_range(5000, 10000);
-			usbc_read_ints(u);
-		} while (!completion_done(&u->cmd_done) && time_before(jiffies, end));
-		left = completion_done(&u->cmd_done);
+		left = usbc_wait_answer(u, MBOX_TIMEOUT_MS);
 	}
 
 	spin_lock_irqsave(&u->ev_lock, flags);
@@ -888,6 +971,12 @@ static int usbc_cmd(struct max77705_usbc *u, u8 op, const u8 *w, int wlen,
 
 	if (!left) {
 		ret = -ETIMEDOUT;
+		if (probe) {
+			u->stale_op = op;
+			dev_info(u->dev, "probe %02x: no answer in %d ms\n", op,
+				 PROBE_TIMEOUT_MS + PROBE_DRAIN_MS);
+			goto out;
+		}
 		u->mbox_dead = true;
 		dev_err(u->dev,
 			"opcode %02x: no answer in %d ms; mailbox off, passive status only from now\n",
@@ -896,18 +985,41 @@ static int usbc_cmd(struct max77705_usbc *u, u8 op, const u8 *w, int wlen,
 	}
 	if (err) {
 		ret = err;
+		if (probe)
+			u->stale_op = op;	/* an APCmdResI may follow */
 		dev_warn(u->dev, "opcode %02x: MCU says %s\n", op,
 			 sysmsg_name(u->sysmsg));
 		goto out;
 	}
-	ret = usbc_read(u, REG_AP_DATAIN0, in, inlen);
+	ret = usbc_read(u, REG_AP_DATAIN0, in, probe ? MBOX_DATA_MAX + 1 : inlen);
 	if (ret)
 		goto out;
+	if (!probe && in[0] != op && u->stale_op && in[0] == u->stale_op) {
+		/* the late answer to a probe: ours is still to come */
+		dev_info(u->dev, "opcode %02x: stale answer to probe %02x discarded\n",
+			 op, u->stale_op);
+		u->stale_op = 0;
+		/* no reinit: if our APCmdResI is in already, this returns at once */
+		left = usbc_wait_answer(u, MBOX_TIMEOUT_MS);
+		if (!left) {
+			ret = -ETIMEDOUT;
+			u->mbox_dead = true;
+			dev_err(u->dev, "opcode %02x: no answer; mailbox off\n", op);
+			goto out;
+		}
+		ret = usbc_read(u, REG_AP_DATAIN0, in, inlen);
+		if (ret)
+			goto out;
+	}
+	if (raw)
+		memcpy(raw, in, MBOX_DATA_MAX + 1);
 	if (in[0] != op) {
 		dev_warn(u->dev, "opcode %02x: answer echoes %02x\n", op, in[0]);
 		ret = -EPROTO;
 		goto out;
 	}
+	if (u->stale_op == op)
+		u->stale_op = 0;
 	if (r && rlen)
 		memcpy(r, in + 1, rlen);
 out:
@@ -915,8 +1027,15 @@ out:
 	u->cmd_op = 0;
 	spin_unlock_irqrestore(&u->ev_lock, flags);
 	mutex_unlock(&u->mbox_lock);
-	usbc_log(u, LOG_CMD, op, out, wlen + 1, in, inlen, ret, NULL);
+	usbc_log(u, LOG_CMD, op, out, wlen + 1, in,
+		 probe ? MBOX_DATA_MAX + 1 : inlen, ret, probe ? "probe" : NULL);
 	return ret;
+}
+
+static int usbc_cmd(struct max77705_usbc *u, u8 op, const u8 *w, int wlen,
+		    u8 *r, int rlen)
+{
+	return __usbc_cmd(u, op, w, wlen, r, rlen, false, NULL, NULL);
 }
 
 /* ---- D+/D- switch --------------------------------------------------------- */
@@ -1469,8 +1588,19 @@ static u8 usbc_pd_select(struct max77705_usbc *u)
 	return best;
 }
 
+static void usbc_restore_ceiling(struct max77705_usbc *u, const char *why);
+
+static void usbc_pd_end_override(struct max77705_usbc *u, const char *why)
+{
+	if (u->pd_override || u->saved_ceiling_ua)
+		dev_info(u->dev, "pd_request: override %u ends (%s)\n", u->pd_override, why);
+	WRITE_ONCE(u->pd_override, 0);
+	u->saved_ceiling_ua = 0;
+}
+
 static void usbc_pd_forget(struct max77705_usbc *u)
 {
+	usbc_pd_end_override(u, "detach");
 	mutex_lock(&u->pub_lock);
 	u->pd.have_first = false;
 	memset(&u->pd.first, 0, sizeof(u->pd.first));
@@ -1554,6 +1684,10 @@ static void usbc_pd_read_caps(struct max77705_usbc *u)
 	} else {
 		dev_info(u->dev, "PD: contract pdo %u of [%s]\n", pos, b);
 	}
+	if (u->saved_ceiling_ua && pos && !u->pd.req_pos) {
+		dev_info(u->dev, "pd_request: PSRDY, contract now pdo %u\n", pos);
+		usbc_restore_ceiling(u, "request done");
+	}
 	if (!u->pd.req_pos) {		/* nothing of ours still pending */
 		u->hv_prepare_ma = 0;
 		u->hv_waits = 0;
@@ -1595,6 +1729,7 @@ static void usbc_pd_hard_reset(struct max77705_usbc *u, u8 code)
 	mutex_unlock(&u->pub_lock);
 
 	u->hv_prepare_ma = 0;
+	usbc_pd_end_override(u, "hard reset");
 	dev_warn(u->dev, "PD: %s%s\n", u->pd.last_hard_reset,
 		 u->pd.hv_blocked ? "; above 5 V blocked until detach or hv_enable 0->1" : "");
 	power_supply_changed(u->psy);
@@ -1759,6 +1894,49 @@ static void usbc_dcp_5v(struct max77705_usbc *u)
 
 /* ---- high voltage: the policy step ------------------------------------------- */
 
+/* the charger's ceiling, written from here only for a pd_request */
+static int usbc_chg_set_ceiling(int ua)
+{
+	struct power_supply *chg = power_supply_get_by_name("max77705-charger");
+	union power_supply_propval v = { .intval = ua };
+	int ret;
+
+	if (!chg)
+		return -ENODEV;
+	ret = power_supply_set_property(chg, POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT, &v);
+	power_supply_put(chg);
+	return ret;
+}
+
+static void usbc_lower_ceiling(struct max77705_usbc *u, unsigned int ma)
+{
+	int old = usbc_chg_ilim_ua(), ret;
+
+	if (old < 0)
+		return;
+	if (!u->saved_ceiling_ua)
+		u->saved_ceiling_ua = old;
+	ret = usbc_chg_set_ceiling(ma * 1000);
+	dev_info(u->dev, "pd_request: charger ceiling %d -> %u mA (saved %u mA): %d\n",
+		 old / 1000, ma, u->saved_ceiling_ua / 1000, ret);
+}
+
+/* back to what it was, but never above what the contract now gives */
+static void usbc_restore_ceiling(struct max77705_usbc *u, const char *why)
+{
+	unsigned int ua = u->saved_ceiling_ua;
+	int ret;
+
+	if (!ua)
+		return;
+	u->saved_ceiling_ua = 0;
+	if (u->pd.pos && u->pd.pos <= u->pd.cur.n)
+		ua = min(ua, pdo_use_ma(u->pd.cur.pdo[u->pd.pos - 1]) * 1000);
+	ret = usbc_chg_set_ceiling(ua);
+	dev_info(u->dev, "pd_request: charger ceiling back to %u mA (%s): %d\n",
+		 ua / 1000, why, ret);
+}
+
 /* returns ms until it wants to run again, or 0 */
 static unsigned int usbc_hv_step(struct max77705_usbc *u)
 {
@@ -1770,10 +1948,24 @@ static unsigned int usbc_hv_step(struct max77705_usbc *u)
 	/* USB-PD: we only pick among fixed PDOs the firmware has */
 	if (ccstat == CCSTAT_SINK && u->pd.pos) {
 		u32 cur = u->pd.cur.pdo[u->pd.pos - 1];
-		u8 want = 1, pos;
+		u8 want = 1, pos, ovr = READ_ONCE(u->pd_override);
 
-		if (u->hv_enable && !u->pd.hv_blocked)
+		if (ovr && !usbc_pdo_allowed(u, ovr)) {
+			dev_info(u->dev, "pd_request: pdo %u is not in the caps in force: override dropped\n", ovr);
+			WRITE_ONCE(u->pd_override, 0);
+			ovr = 0;
+		}
+		if (ovr && u->pd.hv_blocked && pdo_mv(u->pd.cur.pdo[ovr - 1]) > 5000) {
+			dev_info(u->dev, "pd_request: above 5 V is blocked after a hard reset: override dropped\n");
+			WRITE_ONCE(u->pd_override, 0);
+			ovr = 0;
+		}
+		if (ovr)
+			want = ovr;
+		else if (u->hv_enable && !u->pd.hv_blocked)
 			want = usbc_pd_select(u);
+		if (!ovr && u->saved_ceiling_ua && !u->pd.req_pos)
+			usbc_restore_ceiling(u, "override dropped");
 		if (!want || want == u->pd.pos)
 			return 0;
 		if (u->pd.req_pos == want) {
@@ -1794,6 +1986,10 @@ static unsigned int usbc_hv_step(struct max77705_usbc *u)
 		if (pdo_mv(u->pd.cur.pdo[want - 1]) > pdo_mv(cur)) {
 			unsigned int ma = pdo_use_ma(u->pd.cur.pdo[want - 1]);
 
+			/* a manual request: zrn-charge will not lower the
+			 * ceiling for it, so this does, and puts it back */
+			if (ovr && !usbc_limit_ok(u, ma))
+				usbc_lower_ceiling(u, ma);
 			if (!usbc_limit_ok(u, ma)) {
 				u->hv_prepare_ma = ma;
 				if (u->hv_waits++ < HV_WAIT_MAX)
@@ -1816,8 +2012,9 @@ static unsigned int usbc_hv_step(struct max77705_usbc *u)
 		u->pd.req_tries++;
 		u->pd.req_jiffies = jiffies;
 		pos = want;
-		dev_info(u->dev, "PD: requesting pdo %u (%u mV %u mA)\n", pos,
-			 pdo_mv(u->pd.cur.pdo[pos - 1]), pdo_ma(u->pd.cur.pdo[pos - 1]));
+		dev_info(u->dev, "PD: requesting pdo %u (%u mV %u mA)%s\n", pos,
+			 pdo_mv(u->pd.cur.pdo[pos - 1]), pdo_ma(u->pd.cur.pdo[pos - 1]),
+			 ovr ? ", by hand (pd_request)" : "");
 		if (usbc_cmd(u, OP_SRCCAP_REQUEST, &pos, 1, NULL, 0))
 			u->hv_prepare_ma = 0;
 		/* PSRDY then re-reads 0x30 and clears hv_prepare_ma */
@@ -1862,6 +2059,13 @@ static void usbc_hv_work(struct work_struct *work)
 					       struct max77705_usbc, hv_work);
 	unsigned int again;
 
+	/* a new pd_request: a fresh start for it */
+	if (xchg(&u->pd_override_new, false)) {
+		u->pd.req_tries = 0;
+		u->hv_waits = 0;
+		dev_info(u->dev, "pd_request: %s\n", READ_ONCE(u->pd_override) ?
+			 "pdo by hand, starting" : "back to the policy");
+	}
 	/* hv_enable went 0 -> 1: what this attach had given up on, try again */
 	if (xchg(&u->hv_rearm, false)) {
 		u->pd.hv_blocked = false;
@@ -2441,12 +2645,177 @@ static const struct file_operations usbc_vdm_fops = {
 	.release = single_release,
 };
 
+/* ---- hand-run tests (test_cmds) ---------------------------------------------- */
+
+/*
+ * pd_request: write N to ask for fixed PDO N (<= 9 V, as the policy allows)
+ * once, overriding the policy until 0 is written, a detach or a hard reset.
+ * Stepping up, the driver itself lowers the charger's ceiling to the new
+ * PDO's current first (zrn-charge does not for a manual request) and puts
+ * it back, capped at the new contract, after PSRDY. Read: the state.
+ */
+static ssize_t usbc_pd_request_write(struct file *file, const char __user *ubuf,
+				     size_t len, loff_t *ppos)
+{
+	struct max77705_usbc *u = file_inode(file)->i_private;
+	unsigned int n;
+	int ret = kstrtouint_from_user(ubuf, len, 0, &n);
+
+	if (ret)
+		return ret;
+	if (READ_ONCE(u->stopping))
+		return -ENODEV;
+	if (n) {
+		if (!READ_ONCE(u->pd.pos))
+			return -EAGAIN;		/* no PD contract */
+		if (n > PD_MAX_PDO || !usbc_pdo_allowed(u, n))
+			return -EINVAL;		/* not a fixed PDO <= 9 V */
+		if (u->pd.hv_blocked && pdo_mv(u->pd.cur.pdo[n - 1]) > 5000)
+			return -EPERM;		/* blocked after a hard reset */
+	}
+	dev_info(u->dev, "pd_request: %u written\n", n);
+	WRITE_ONCE(u->pd_override, n);
+	WRITE_ONCE(u->pd_override_new, true);
+	mod_delayed_work(u->wq, &u->hv_work, 0);
+	return len;
+}
+
+static ssize_t usbc_pd_request_read(struct file *file, char __user *ubuf,
+				    size_t len, loff_t *ppos)
+{
+	struct max77705_usbc *u = file_inode(file)->i_private;
+	char buf[160];
+	int n;
+
+	n = scnprintf(buf, sizeof(buf),
+		      "override %u, contract pdo %u, requested %u, above 5 V blocked %d, saved ceiling %u mA\n",
+		      READ_ONCE(u->pd_override), READ_ONCE(u->pd.pos),
+		      READ_ONCE(u->pd.req_pos), READ_ONCE(u->pd.hv_blocked),
+		      READ_ONCE(u->saved_ceiling_ua) / 1000);
+	return simple_read_from_buffer(ubuf, len, ppos, buf, n);
+}
+
+static const struct file_operations usbc_pd_request_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.write = usbc_pd_request_write,
+	.read = usbc_pd_request_read,
+	.llseek = default_llseek,
+};
+
+/*
+ * probe: write one of "3b", "5d 1", "5d 2", "5d 3", "4d" (hex); it is sent
+ * once, with usbc_probe_allowed() as the only gate. Refused (-EBUSY) while
+ * a 9 V switch or a request of ours is under way, or while another command
+ * is in flight. Read: the request, the result, how long the answer took
+ * and the whole answer buffer from 0x51 (echo byte first).
+ */
+static ssize_t usbc_probe_write(struct file *file, const char __user *ubuf,
+				size_t len, loff_t *ppos)
+{
+	struct max77705_usbc *u = file_inode(file)->i_private;
+	char kbuf[16], *p, *tok;
+	u8 req[2], raw[MBOX_DATA_MAX + 1] = {};
+	unsigned int v;
+	int n = 0, ms = -1, ret;
+
+	if (len >= sizeof(kbuf))
+		return -EINVAL;
+	if (copy_from_user(kbuf, ubuf, len))
+		return -EFAULT;
+	kbuf[len] = 0;
+	p = strim(kbuf);
+	while ((tok = strsep(&p, " \t")) && n < 2) {
+		if (!*tok)
+			continue;
+		if (kstrtouint(tok, 16, &v) || v > 0xff)
+			return -EINVAL;
+		req[n++] = v;
+	}
+	if (!n || (p && *p))
+		return -EINVAL;
+	if (!usbc_probe_allowed(req[0], req + 1, n - 1))
+		return -EPERM;
+	if (READ_ONCE(u->stopping))
+		return -ENODEV;
+	if (READ_ONCE(u->hv_prepare_ma) || READ_ONCE(u->pd.req_pos) ||
+	    READ_ONCE(u->pd_override_new) || delayed_work_pending(&u->hv_work))
+		return -EBUSY;
+
+	mutex_lock(&u->probe_lock);
+	dev_info(u->dev, "probe: sending %*phN\n", n, req);
+	ret = __usbc_cmd(u, req[0], req + 1, n - 1, NULL, 0, true, raw, &ms);
+	memcpy(u->probe_req, req, n);
+	u->probe_req_len = n;
+	u->probe_ret = ret;
+	u->probe_ms = ms;
+	memcpy(u->probe_raw, raw, sizeof(raw));
+	u->probe_done = true;
+	dev_info(u->dev, "probe %02x: ret %d, %s, answer %*phN\n", req[0], ret,
+		 ms < 0 ? "no answer" : "answered", (int)sizeof(raw), raw);
+	mutex_unlock(&u->probe_lock);
+	if (ret == -EBUSY)
+		return ret;
+	return len;	/* the outcome is in the file, firmware errors included */
+}
+
+static int usbc_probe_show(struct seq_file *s, void *unused)
+{
+	struct max77705_usbc *u = s->private;
+
+	mutex_lock(&u->probe_lock);
+	if (!u->probe_done) {
+		seq_puts(s, "no probe yet; write 3b, 5d 1, 5d 2, 5d 3 or 4d\n");
+	} else {
+		seq_printf(s, "request: %*phN\n", u->probe_req_len, u->probe_req);
+		seq_printf(s, "result: %d (%s)\n", u->probe_ret,
+			   !u->probe_ret ? "answer, echo ok" :
+			   u->probe_ret == -ETIMEDOUT ? "no answer" :
+			   u->probe_ret == -EOPNOTSUPP ? "SYSMsg APCMD_UNKNOWN" :
+			   u->probe_ret == -EIO ? "SYSMsg APCMD_FAIL" :
+			   u->probe_ret == -EBUSY ? "SYSMsg APCMD_INPROGRESS" :
+			   u->probe_ret == -EPROTO ? "answer with another echo" : "error");
+		if (u->probe_ms >= 0)
+			seq_printf(s, "answered after %d ms\n", u->probe_ms);
+		else
+			seq_puts(s, "the firmware did not answer\n");
+		seq_printf(s, "0x51.. (echo first): %*phN\n",
+			   (int)sizeof(u->probe_raw), u->probe_raw);
+	}
+	mutex_unlock(&u->probe_lock);
+	return 0;
+}
+
+static int usbc_probe_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, usbc_probe_show, inode->i_private);
+}
+
+static ssize_t usbc_probe_write_file(struct file *file, const char __user *ubuf,
+				     size_t len, loff_t *ppos)
+{
+	return usbc_probe_write(file, ubuf, len, ppos);
+}
+
+static const struct file_operations usbc_probe_fops = {
+	.owner = THIS_MODULE,
+	.open = usbc_probe_open,
+	.read = seq_read,
+	.write = usbc_probe_write_file,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 static void usbc_debugfs_init(struct max77705_usbc *u)
 {
 	u->debugfs = debugfs_create_dir("max77705-usbc", NULL);
 	debugfs_create_file("events", 0400, u->debugfs, u, &usbc_events_fops);
 	debugfs_create_file("registers", 0400, u->debugfs, u, &usbc_regs_fops);
 	debugfs_create_file("pd", 0400, u->debugfs, u, &usbc_pd_fops);
+	if (test_cmds) {
+		debugfs_create_file("pd_request", 0600, u->debugfs, u, &usbc_pd_request_fops);
+		debugfs_create_file("probe", 0600, u->debugfs, u, &usbc_probe_fops);
+	}
 	if (vdm_debugfs > 0 || vdm_discovery)
 		debugfs_create_file("vdm", vdm_debugfs > 0 ? 0600 : 0400,
 				    u->debugfs, u, &usbc_vdm_fops);
@@ -2492,6 +2861,7 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	mutex_init(&u->mbox_lock);
 	mutex_init(&u->pub_lock);
 	mutex_init(&u->vdm_lock);
+	mutex_init(&u->probe_lock);
 	init_completion(&u->cmd_done);
 	INIT_WORK(&u->event_work, usbc_event_work);
 	INIT_DELAYED_WORK(&u->poll_work, usbc_poll_work);
