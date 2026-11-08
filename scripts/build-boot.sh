@@ -114,8 +114,9 @@ python3 "$ROOT/kernel/patch-touch-force.py" "$SRC"
 python3 "$ROOT/kernel/patch-pinctrl-resume.py" "$SRC"
 # the firmware's roams are reported to the host the way Samsung's driver does
 python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
-# MAX77705 charger: stock-like AICL (masked IRQ, delayed work, 100 mA steps to
-# a 300 mA floor) instead of mainline's 25 mA ratchet that wraps to 3.2 A
+# MAX77705 charger: input_current_limit is a ceiling the limit ramps up to,
+# stock-like AICL back-off (300 mA floor) instead of mainline's ratchet that
+# wraps to 3.2 A, the battery's charge current, and max77705-wireless (WCIN)
 [ -n "$POWER" ] && python3 "$ROOT/kernel/patch-max77705-charger.py" "$SRC"
 
 echo "=== initramfs ==="
