@@ -882,6 +882,20 @@ struct zt_server {
 	bool aod_low_off;		/* config aod_low_battery_off: dark below AOD_MIN_BATTERY */
 	int aod_level;			/* AOD_LEVELS' index now; -1 none yet */
 	double aod_scale;		/* the pixels' multiplier, AOD_LEVELS' scale */
+	char aod_theme[16];		/* config aod_theme: CLOCK_THEMES' id */
+	char lock_theme[16];		/* config lock_theme */
+	char aod_image[512];		/* config aod_image: the image theme's picture */
+	int aod_image_faint;		/* config aod_image_strength: 0 muted, 1 faint */
+	bool aod_force_mark_on;		/* config aod_force_mark: the force press's mark */
+	double aod_budget_k;		/* the frame dimmed to its theme's light budget */
+	double aod_mean, aod_lit;	/* the last frame's mean linear light and lit share */
+	cairo_surface_t *aod_img;	/* the image theme's picture, made for AOD */
+	char aod_img_key[600];
+	/* the lock screen's flip clock turning on the minute */
+	double flip_t;			/* 0..1 through the turn; 1 still */
+	time_t flip_from, flip_last;	/* the minute it turns from; the last drawn */
+	uint32_t flip_start_ms;
+	struct wl_event_source *flip_timer;
 	int aod_light_ms;		/* the rate sensord was told; 0 none */
 	uint32_t aod_fast_until;	/* read the room often until then */
 	struct wl_event_source *aod_light_timer;
@@ -3334,6 +3348,11 @@ static void load_config(struct zt_server *server) {
 	server->lock_timeout = LOCK_TIMEOUT_S;
 	server->aod_auto = true;
 	server->aod_low_off = false;	/* shown down to the last per cent unless asked */
+	snprintf(server->aod_theme, sizeof(server->aod_theme), "metro");
+	snprintf(server->lock_theme, sizeof(server->lock_theme), "metro");
+	server->aod_image[0] = 0;
+	server->aod_image_faint = 0;
+	server->aod_force_mark_on = true;
 	server->double_tap_wake = true;
 	server->aod_mode = AOD_OFF;
 	server->clock_24h = ZT_CLOCK_24H_DEFAULT;
@@ -3451,6 +3470,16 @@ static void load_config(struct zt_server *server) {
 		} else if (strcmp(key, "timeout") == 0) {
 			/* seconds without input before the screen sleeps; 0: never */
 			server->screen_timeout = atoi(value);
+		} else if (strcmp(key, "aod_theme") == 0) {
+			snprintf(server->aod_theme, sizeof(server->aod_theme), "%s", value);
+		} else if (strcmp(key, "lock_theme") == 0) {
+			snprintf(server->lock_theme, sizeof(server->lock_theme), "%s", value);
+		} else if (strcmp(key, "aod_image") == 0) {
+			snprintf(server->aod_image, sizeof(server->aod_image), "%s", value);
+		} else if (strcmp(key, "aod_image_strength") == 0) {
+			server->aod_image_faint = strcmp(value, "faint") == 0;
+		} else if (strcmp(key, "aod_force_mark") == 0) {
+			server->aod_force_mark_on = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "aod_low_battery_off") == 0) {
 			server->aod_low_off = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
 		} else if (strcmp(key, "aod_auto_brightness") == 0) {
@@ -6347,6 +6376,10 @@ static void retro_paint_lock(struct zt_server *server, cairo_t *cr) {
 	dm_screen_finish(&field);
 }
 
+#define AOD_WHITE	0.92	/* the always-on display: the time */
+#define AOD_GREY	0.62	/* and the rest */
+#include "clock-themes.h"
+
 /* The Metro lock's clock block (time, day, date) is drawn low on the screen,
  * where Windows Phone has it. With notifications waiting it is raised by
  * LOCK_LIFT, so the row of marks under the date clears the bottom edge by the
@@ -6358,13 +6391,19 @@ static void retro_paint_lock(struct zt_server *server, cairo_t *cr) {
 #define LOCK_NOTE_Y(server) ((double)(server)->height - 100)	/* the row layer's top */
 #define LOCK_NOTE_H 80.0
 
-static void draw_lock_clock_at(struct zt_server *server, time_t now) {
-	double y0 = LOCK_CLOCK_Y(server);
-	cairo_t *cr;
-	struct zt_buffer *buffer = zt_buffer_create(server, server->width, LOCK_CLOCK_H, &cr);
-	cairo_translate(cr, 0, -y0);	/* drawn in screen coordinates, at rest (low) */
+/* The lock screen's clock in theme `theme`, in screen coordinates (at rest,
+ * low), turning from `from` at `t` (the flip clock; 1 still). */
+static void lock_clock_paint(struct zt_server *server, cairo_t *cr, const struct clock_theme *theme,
+		time_t now, time_t from, double t) {
 	struct tm tm;
 	localtime_r(&now, &tm);
+	if (theme->draw != theme_metro) {
+		struct clock_ctx c = { .cr = cr, .server = server, .tm = tm, .prev = tm, .flip = t,
+			.w = server->width, .h = server->height, .h24 = server->clock_24h };
+		if (t < 1) localtime_r(&from, &c.prev);
+		theme->draw(&c, server->height - 272);
+		return;
+	}
 	char line[64];
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	char ampm[4];
@@ -6382,6 +6421,45 @@ static void draw_lock_clock_at(struct zt_server *server, time_t now) {
 	draw_text(cr, line, FONT_SEMILIGHT, 30, 20, server->height - 156, 0, 0, false);
 	strftime(line, sizeof(line), "%B %-d", &tm);
 	draw_text(cr, line, FONT_SEMILIGHT, 30, 20, server->height - 120, 0, 0, false);
+}
+
+static void damage(struct zt_server *server);
+
+static void draw_lock_clock_at(struct zt_server *server, time_t now);
+/* A frame of the flip clock's turn. */
+static int flip_frame(void *data) {
+	struct zt_server *server = data;
+	double t = (now_ms() - server->flip_start_ms) / (double)FLIP_MS;
+	server->flip_t = t >= 1 || !server->screen_on || !server->locked ? 1 : t;
+	draw_lock_clock_at(server, server->flip_last);
+	damage(server);
+	if (server->flip_t < 1) {
+		wl_event_source_timer_update(server->flip_timer, FLIP_FRAME_MS);
+	}
+	return 0;
+}
+
+static void draw_lock_clock_at(struct zt_server *server, time_t now) {
+	const struct clock_theme *theme = clock_theme(server->lock_theme, THEME_LOCK);
+	if (theme->draw == theme_flip && !g_dump_dir && server->flip_timer && server->flip_t >= 1 &&
+			server->flip_last && now / 60 != server->flip_last / 60 && server->screen_on &&
+			server->locked) {
+		/* a new minute on the lock screen: the cards turn (FLIP_MS, at most
+		 * 1000 / FLIP_FRAME_MS frames a second, then nothing until the next) */
+		server->flip_from = server->flip_last;
+		server->flip_start_ms = now_ms();
+		server->flip_t = 0;
+		wl_event_source_timer_update(server->flip_timer, FLIP_FRAME_MS);
+	}
+	if (server->flip_t >= 1) {
+		server->flip_last = now;
+	}
+	double y0 = LOCK_CLOCK_Y(server);
+	cairo_t *cr;
+	struct zt_buffer *buffer = zt_buffer_create(server, server->width, LOCK_CLOCK_H, &cr);
+	cairo_translate(cr, 0, -y0);	/* drawn in screen coordinates, at rest (low) */
+	lock_clock_paint(server, cr, theme, server->flip_t < 1 ? server->flip_last : now, server->flip_from,
+		server->flip_t);
 	zt_buffer_show(server, &server->lock_clock_layer, buffer, cr, server->width, LOCK_CLOCK_H);
 }
 
@@ -12425,14 +12503,12 @@ static void aod_tint(struct zt_server *server) {
 	if (server->tone_k > 0 && server->tone_k < 6450) {
 		tone_rgb(server->tone_k, rgb);
 	}
-	float k = bl.mode == BL_TABLE ? (float)server->aod_scale : 0.35f;
+	float k = (bl.mode == BL_TABLE ? (float)server->aod_scale : 0.35f) * (float)server->aod_budget_k;
 	for (int i = 0; i < 3; i++) {
 		server->tint[i] = k * rgb[i];
 	}
 }
 
-#define AOD_WHITE	0.92	/* the time */
-#define AOD_GREY	0.62	/* the rest */
 #define AOD_ICON	16	/* points: a waiting app's glyph */
 /*
  * Its brightness, from the room (Settings: "Adjust AOD brightness
@@ -12489,9 +12565,9 @@ static const struct { double lux, lstar, scale; } AOD_LEVELS[] = {
 #define AOD_FORCE_H		18
 #define AOD_FORCE_GAP		7	/* points between it (at its lowest) and the band */
 #define AOD_FORCE_N		3.2	/* the squircle's exponent: rounder corners than 4 */
-#define AOD_FORCE_LEVEL		0.34	/* its light, dimmer than AOD_GREY */
+#define AOD_FORCE_LEVEL		AOD_GREY	/* its brightest channel: as the grey text, so it shows at every level */
 #define AOD_FORCE_TINT		0.4	/* how much of the accent colour is in it */
-#define AOD_FORCE_LINE		0.55	/* points: ~2 panel pixels */
+#define AOD_FORCE_LINE		0.75	/* points: 3 panel pixels, so its middle is lit fully (2 were smeared to 1/3) */
 static const signed char AOD_FORCE_SPOTS[][2] = {	/* pixels: dx, dy (dy <= 0) */
 	{ 0, 0 }, { 4, -2 }, { -4, -4 }, { 2, -6 }, { -2, -2 }, { 6, -4 }, { -6, -6 },
 };
@@ -12514,7 +12590,7 @@ static void squircle_path(cairo_t *cr, double cx, double cy, double w, double h,
 
 /* The force press's mark, for the time `now` (its place on its own cycle). */
 static void aod_force_mark(struct zt_server *server, cairo_t *cr, time_t now) {
-	if (!server->force_press) {
+	if (!server->force_press || !server->aod_force_mark_on) {
 		return;
 	}
 	double kx = server->width / (double)AOD_FORCE_PANEL_W;	/* points per panel pixel */
@@ -12611,45 +12687,68 @@ static void aod_icon(struct zt_server *server, cairo_t *cr, const char *icon, co
 	cairo_surface_destroy(mask);
 }
 
-/* The picture for the time `now` at place `place` of AOD_SPOTS, the whole
- * screen of it. */
-static void aod_draw_place(struct zt_server *server, time_t now, int place) {
-	if (server->width <= 0) {
-		return;
+/* The image theme's picture: the user's, made for the always-on display: few
+ * colours (a quarter of its saturation), dark (its darkest parts black, the
+ * rest at most AOD_IMAGE_MUTED or _FAINT of full light) and fading out
+ * towards its edges, so most of the frame is black. pw x ph pixels, kept
+ * until the picture, its strength or its size change. NULL without one. */
+#define AOD_IMAGE_MUTED	0.34
+#define AOD_IMAGE_FAINT	0.18
+#define AOD_IMAGE_SAT	0.25
+#define AOD_IMAGE_BLACK	0.15	/* light under this goes to black */
+static cairo_surface_t *aod_image_surface(struct zt_server *server, int pw, int ph) {
+	char key[600];
+	snprintf(key, sizeof(key), "%s|%d|%dx%d", server->aod_image, server->aod_image_faint, pw, ph);
+	if (server->aod_img && strcmp(key, server->aod_img_key) == 0) {
+		return server->aod_img;
 	}
-	double w = server->width, h = server->height;
-	cairo_t *cr;
-	struct zt_buffer *buffer = zt_buffer_create(server, w, h, &cr);
-	cairo_set_source_rgb(cr, 0, 0, 0);
-	cairo_paint(cr);
-	double dx = AOD_SPOTS[place][0], dy = AOD_SPOTS[place][1];
-	struct tm tm;
-	localtime_r(&now, &tm);
-	char line[96], ampm[4];
-	/* under a sixth of the way down: clear of the status bar's rows and the
-	 * top self-mask band at any place, and of the nav bar's far below */
-	double y = round(h * 0.18) + dy;
-
-	/* the time; in 12-hour time AM or PM after it, smaller and grey, the
-	 * two centred together */
-	zt_clock_parts(&tm, server->clock_24h, line, sizeof(line), ampm, sizeof(ampm));
-	double tw = text_width(line, FONT_LIGHT, 84);
-	double aw = ampm[0] ? 8 + text_width(ampm, FONT_SEMILIGHT, 22) : 0;
-	double tx = round((w - tw - aw) / 2 + dx);
-	cairo_set_source_rgb(cr, AOD_WHITE, AOD_WHITE, AOD_WHITE);
-	/* (centred in a box wider than it: one only as wide is ellipsized) */
-	draw_text(cr, line, FONT_LIGHT, 84, tx - 20, y, tw + 40, 100, true);
-	if (ampm[0]) {
-		cairo_set_source_rgb(cr, AOD_GREY, AOD_GREY, AOD_GREY);
-		draw_text(cr, ampm, FONT_SEMILIGHT, 22, tx + tw + 8, y + 58, 0, 0, false);
+	if (server->aod_img) {
+		cairo_surface_destroy(server->aod_img);
+		server->aod_img = NULL;
 	}
-	y += 104;
+	snprintf(server->aod_img_key, sizeof(server->aod_img_key), "%s", key);
+	if (!server->aod_image[0]) {
+		return NULL;
+	}
+	cairo_surface_t *img = image_cover(server->aod_image, pw, ph);
+	if (!img) {
+		return NULL;
+	}
+	double cap = server->aod_image_faint ? AOD_IMAGE_FAINT : AOD_IMAGE_MUTED;
+	cairo_surface_flush(img);
+	unsigned char *d = cairo_image_surface_get_data(img);
+	int stride = cairo_image_surface_get_stride(img);
+	for (int y = 0; y < ph; y++) {
+		uint32_t *row = (uint32_t *)(d + (size_t)y * stride);
+		for (int x = 0; x < pw; x++) {
+			uint32_t v = row[x];
+			double r = ((v >> 16) & 0xff) / 255.0, g = ((v >> 8) & 0xff) / 255.0, b = (v & 0xff) / 255.0;
+			double l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+			/* towards the edges, to black: 1 in the middle, 0 at the rim */
+			double ex = (x + 0.5) / pw * 2 - 1, ey = (y + 0.5) / ph * 2 - 1;
+			double e = sqrt(ex * ex + ey * ey) / M_SQRT2, fade = 1 - e * e * e;
+			if (fade < 0) fade = 0;
+			double out = l <= AOD_IMAGE_BLACK ? 0 : (l - AOD_IMAGE_BLACK) / (1 - AOD_IMAGE_BLACK) * cap * fade;
+			double k = l > 0.001 ? out / l : 0, c[3] = { r, g, b };
+			uint32_t o = 0xff000000u;
+			for (int i = 0; i < 3; i++) {
+				double cc = (l + AOD_IMAGE_SAT * (c[i] - l)) * k;
+				int q = (int)lround((cc < 0 ? 0 : cc > 1 ? 1 : cc) * 255);
+				o |= (uint32_t)q << (16 - 8 * i);
+			}
+			row[x] = o;
+		}
+	}
+	cairo_surface_mark_dirty(img);
+	server->aod_img = img;
+	return img;
+}
 
+/* The battery and the waiting apps under a theme's clock: centred, or from
+ * `left` (>= 0). Returns the bottom. */
+static double aod_rows(struct zt_server *server, cairo_t *cr, double w, double dx, double left, double y) {
+	char line[64];
 	cairo_set_source_rgb(cr, AOD_GREY, AOD_GREY, AOD_GREY);
-	strftime(line, sizeof(line), "%A, %B %-d", &tm);
-	draw_text(cr, line, FONT_SEMILIGHT, 20, dx + 24, y, w - 48, 28, true);
-	y += 44;
-
 	/* the battery: its outline with the level in it, and the per cent */
 	int battery = aod_battery(server);
 	bool charging = aod_charger(server);
@@ -12657,7 +12756,7 @@ static void aod_draw_place(struct zt_server *server, time_t now, int place) {
 		snprintf(line, sizeof(line), charging ? "%d%%  charging" : "%d%%", battery);
 		double tw = text_width(line, FONT_SEMILIGHT, 17);
 		double bw = 22, bh = 11, gap = 8;
-		double x0 = round((w - (bw + 3 + gap + tw)) / 2 + dx);
+		double x0 = left >= 0 ? left : round((w - (bw + 3 + gap + tw)) / 2 + dx);
 		double by = y + 14 - bh / 2;
 		cairo_set_line_width(cr, 1.2);
 		cairo_rectangle(cr, x0 + 0.6, by + 0.6, bw - 1.2, bh - 1.2);
@@ -12672,7 +12771,6 @@ static void aod_draw_place(struct zt_server *server, time_t now, int place) {
 		draw_text(cr, line, FONT_SEMILIGHT, 17, x0 + bw + 3 + gap, y + 4, 0, 0, false);
 	}
 	y += 40;
-
 	/* the apps with notifications waiting: each one's glyph, small, grey and
 	 * in outline (aod_icon), and its count */
 	const char *names[5];
@@ -12687,7 +12785,7 @@ static void aod_draw_place(struct zt_server *server, time_t now, int place) {
 			widths[i] = s + step + text_width(nums[i], FONT_SEMILIGHT, 15);
 			total += widths[i] + (i ? space : 0);
 		}
-		double x = round((w - total) / 2 + dx), cy = y + 14;
+		double x = left >= 0 ? left : round((w - total) / 2 + dx), cy = y + 14;
 		for (int i = 0; i < n; i++) {
 			const char *key = note_key(server, names[i], note_who(server, names[i]));
 			char icon[80], initial[2] = { (char)toupper((unsigned char)names[i][0]), 0 };
@@ -12697,8 +12795,73 @@ static void aod_draw_place(struct zt_server *server, time_t now, int place) {
 			draw_text(cr, nums[i], FONT_SEMILIGHT, 15, x + s + step, cy - 10, 0, 0, false);
 			x += widths[i] + space;
 		}
+		y += 30;
 	}
+	return y;
+}
+
+/* The whole AOD picture into `cr` (points, w x h), theme `theme`, at place
+ * `place`, for the time `now`. */
+static void aod_compose(struct zt_server *server, cairo_t *cr, double w, double h, time_t now, int place,
+		const struct clock_theme *theme) {
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_paint(cr);
+	double dx = AOD_SPOTS[place][0], dy = AOD_SPOTS[place][1];
+	struct clock_ctx c = { .cr = cr, .server = server, .flip = 1, .w = w, .h = h, .dx = dx, .aod = true,
+		.h24 = server->clock_24h, .place = place, .left = -1 };
+	localtime_r(&now, &c.tm);
+	c.prev = c.tm;
+	/* under a sixth of the way down: clear of the status bar's rows and the
+	 * top self-mask band at any place, and of the nav bar's far below */
+	double y = theme->draw(&c, round(h * 0.18) + dy);
+	aod_rows(server, cr, w, dx, theme->align == ALIGN_LEFT ? c.left : -1, y);
 	aod_force_mark(server, cr, now);
+}
+
+/* The frame's light: the mean of its pixels' linear light (0..1), and the
+ * share of them lit at all, every other pixel each way. */
+static void aod_measure(cairo_surface_t *surface, int pw, int ph, double *mean, double *lit) {
+	static double lin[256];
+	if (lin[255] == 0) {
+		for (int i = 0; i < 256; i++) lin[i] = pow(i / 255.0, 2.2);
+	}
+	cairo_surface_flush(surface);
+	unsigned char *d = cairo_image_surface_get_data(surface);
+	int stride = cairo_image_surface_get_stride(surface);
+	double sum = 0;
+	long on = 0, n = 0;
+	for (int y = 0; y < ph; y += 2) {
+		uint32_t *row = (uint32_t *)(d + (size_t)y * stride);
+		for (int x = 0; x < pw; x += 2, n++) {
+			uint32_t v = row[x];
+			int r = (v >> 16) & 0xff, g = (v >> 8) & 0xff, b = v & 0xff;
+			sum += 0.2126 * lin[r] + 0.7152 * lin[g] + 0.0722 * lin[b];
+			if (r > 10 || g > 10 || b > 10) on++;
+		}
+	}
+	*mean = n ? sum / n : 0;
+	*lit = n ? (double)on / n : 0;
+}
+
+/* The picture for the time `now` at place `place` of AOD_SPOTS, the whole
+ * screen of it, in the theme chosen; dimmed (aod_budget_k, in aod_tint) if
+ * it would use more light than its theme's budget. */
+static void aod_draw_place(struct zt_server *server, time_t now, int place) {
+	if (server->width <= 0) {
+		return;
+	}
+	double w = server->width, h = server->height;
+	cairo_t *cr;
+	struct zt_buffer *buffer = zt_buffer_create(server, w, h, &cr);
+	const struct clock_theme *theme = clock_theme(server->aod_theme, THEME_AOD);
+	aod_compose(server, cr, w, h, now, place, theme);
+	aod_measure(buffer->surface, buffer->pw, buffer->ph, &server->aod_mean, &server->aod_lit);
+	double k = server->aod_mean > theme->light_budget ? theme->light_budget / server->aod_mean : 1;
+	if (fabs(k - server->aod_budget_k) > 0.01 && !g_dump_dir) {
+		wlr_log(WLR_INFO, "aod: theme %s, light %.4f of a budget %.4f, %.0f %% lit: x%.2f", theme->id,
+			server->aod_mean, theme->light_budget, server->aod_lit * 100, k);
+	}
+	server->aod_budget_k = k;
 	zt_buffer_show(server, &server->aod_layer, buffer, cr, w, h);
 }
 
@@ -15310,6 +15473,15 @@ static void ctl_command(struct zt_server *server, char *line) {
 		/* a new display size: greetd starts the session again at it */
 		wlr_log(WLR_INFO, "restart asked for");
 		wl_display_terminate(server->wl_display);
+	} else if (strncmp(line, "aod theme ", 10) == 0 || strncmp(line, "lock theme ", 11) == 0) {
+		/* a theme for the session (Settings' aod_theme / lock_theme last) */
+		bool lock = line[0] == 'l';
+		char *id = lock ? server->lock_theme : server->aod_theme;
+		snprintf(id, sizeof(server->aod_theme), "%s", line + (lock ? 11 : 10));
+		id[strcspn(id, " \n")] = 0;
+		wlr_log(WLR_INFO, "%s theme %s (ctl)", lock ? "lock" : "aod", id);
+		if (lock) draw_lock_clock(server); else aod_refresh(server);
+		damage(server);
 	} else if (strncmp(line, "aod test ", 9) == 0) {
 		/* the rules without touching charging: aod test battery N|real,
 		 * aod test charger on|off|real (until the next restart) */
@@ -17776,6 +17948,8 @@ int main(int argc, char *argv[]) {
 	server.aod_test_battery = server.aod_test_charger = server.aod_test_lux = -1;	/* the real ones */
 	server.aod_place_shown = -1;
 	server.aod_scale = 1.0;
+	server.aod_budget_k = 1.0;
+	server.flip_t = 1.0;
 	for (int i = 0; i < 8; i++) {
 		server.shade_press[i] = 1.0f;
 	}
@@ -17923,6 +18097,7 @@ int main(int argc, char *argv[]) {
 	server.key_repeat_timer = wl_event_loop_add_timer(server.loop, key_repeat_fired, &server);
 	server.repeat_index = -1;
 	server.aod_light_timer = wl_event_loop_add_timer(server.loop, aod_light_tick, &server);
+	server.flip_timer = wl_event_loop_add_timer(server.loop, flip_frame, &server);
 	server.idle_timer = wl_event_loop_add_timer(server.loop, idle_fired, &server);
 	uevent_init(&server);
 	wl_event_loop_add_signal(server.loop, SIGHUP, reload, &server);
