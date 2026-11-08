@@ -15,7 +15,6 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QProcess>
-#include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollArea>
@@ -29,12 +28,12 @@
 
 #include <cstring>
 
+#include "hero.h"
 #include "podsclient.h"
 #include "pods-ui.h"
 
 static const char HERE[] = "this computer";
 static const int MAX_NAME = 127;	/* bytes, as the pods keep it */
-static const QColor LOW(0xda, 0x44, 0x53);
 
 static QString js(const QJsonObject &o, const char *k, const char *d = "") {
 	QJsonValue v = o.value(k);
@@ -197,46 +196,45 @@ void MainWindow::open_bluetooth() {
 	statusBar()->showMessage("Open your desktop's Bluetooth settings to pair them.", 8000);
 }
 
-/* One part: its name, its level, a bar; and how old the reading is, if it is. */
-void MainWindow::battery_row(QVBoxLayout *l, const QString &label, const QJsonObject &b, bool live) {
+static struct pods_battery reading(const QJsonObject &b) {
 	QJsonValue lv = b.value("level");
-	bool known = lv.isDouble();
-	int level = known ? lv.toInt() : 0;
-	bool charging = b.value("charging").toBool();
-	bool low = known && level <= 15 && !charging;
-	QWidget *row = new QWidget;
-	QGridLayout *g = new QGridLayout(row);
-	g->setContentsMargins(0, 0, 0, 4);
-	g->setVerticalSpacing(3);
-	QLabel *name = new QLabel(label);
-	QFont f = name->font();
-	f.setPointSizeF(f.pointSizeF() * 1.2);
-	name->setFont(f);
-	g->addWidget(name, 0, 0);
-	QLabel *value = known ? new QLabel(QString("%1%%2").arg(level).arg(charging ? ", charging" : "")) : note("not read yet");
-	if (low) {
-		QPalette p = value->palette();
-		p.setColor(QPalette::WindowText, LOW);
-		value->setPalette(p);
+	struct pods_battery r = { lv.isDouble(), lv.isDouble() ? qBound(0, lv.toInt(), 100) : 0, b.value("charging").toBool() };
+	return r;
+}
+
+/* The picture: the buds and the case, and a ring for each battery. Then, for a reading not
+ * from a connection, how old it is. */
+void MainWindow::batteries(QVBoxLayout *l, bool live) {
+	QJsonObject d = c->dev(), bat = jo(d, "battery");
+	struct pods_ring rings[3];
+	int n;
+	if (bat.contains("headset")) {
+		rings[0].parts = PODS_PART_HEADSET;
+		rings[0].b = reading(jo(bat, "headset"));
+		n = 1;
+	} else {
+		struct pods_battery lb = reading(jo(bat, "left")), rb = reading(jo(bat, "right")), cb = reading(jo(bat, "case"));
+		n = pods_rings(&lb, &rb, &cb, rings);
 	}
-	g->addWidget(value, 0, 1, Qt::AlignRight);
-	QProgressBar *bar = new QProgressBar;
-	bar->setRange(0, 100);
-	bar->setValue(level);
-	bar->setTextVisible(false);
-	bar->setFixedHeight(8);
-	if (low) {
-		QPalette p = bar->palette();
-		p.setColor(QPalette::Highlight, LOW);
-		bar->setPalette(p);
-	}
-	g->addWidget(bar, 1, 0, 1, 2);
-	if (known && !live) {
+	l->addWidget(new PodsHero(rings, n, js(d, "model_label").contains("Pro"), js(d, "lid") == "open"), 0, Qt::AlignHCenter);
+	struct heard { int parts; QString age, from; };
+	QList<heard> said;
+	for (int i = 0; i < n; i++) {
+		int p = rings[i].parts;
+		QJsonObject b = jo(bat, p == PODS_PART_HEADSET ? "headset" : p & PODS_PART_LEFT ? "left" : p & PODS_PART_RIGHT ? "right" : "case");
+		/* over a link too, the case says nothing when it is away: its reading has an age */
 		QString from = js(b, "source");
-		g->addWidget(note("Last heard " + c->age(jl(b, "seen", 0)) + (from == "case" ? ", from the case" :
-			from == "ble-coarse" ? ", to the nearest 10%" : "")), 2, 0, 1, 2);
+		bool fresh = p == PODS_PART_CASE ? live && (from == "aap" || from == "case") && c->now() - jl(b, "seen", 0) < 300 : live;
+		if (rings[i].b.known && !fresh) said.append({ p, c->age(jl(b, "seen", 0)), from });
 	}
-	l->addWidget(row);
+	bool same = said.size() > 1;	/* all the same: said once */
+	for (const heard &h : said) same &= h.age == said[0].age && h.from == said[0].from;
+	for (int i = 0; i < (same ? 1 : int(said.size())); i++) {
+		char line[160];
+		pods_heard_text(line, sizeof(line), same ? nullptr : pods_ring_name(said[i].parts), said[i].age.toUtf8().constData(),
+			said[i].from.toUtf8().constData());
+		l->addWidget(note(QString::fromUtf8(line)));
+	}
 }
 
 /* Connecting them here: BlueZ does it, and only for this click. May take them from
@@ -349,20 +347,7 @@ QWidget *MainWindow::build_status() {
 	l->addWidget(note(line));
 	connect_row(l);
 
-	QGroupBox *bats = new QGroupBox("Battery");
-	QVBoxLayout *bl = new QVBoxLayout(bats);
-	QJsonObject bat = jo(d, "battery");
-	if (bat.contains("headset")) {
-		battery_row(bl, "Headphones", jo(bat, "headset"), live);
-	} else {
-		battery_row(bl, "Left", jo(bat, "left"), live);
-		battery_row(bl, "Right", jo(bat, "right"), live);
-		/* over a link too, the case says nothing when it is away: its reading has an age */
-		QJsonObject kase = jo(bat, "case");
-		QString from = js(kase, "source");
-		battery_row(bl, "Case", kase, live && (from == "aap" || from == "case") && c->now() - jl(kase, "seen", 0) < 300);
-	}
-	l->addWidget(bats);
+	batteries(l, live);
 
 	QJsonObject ear = jo(d, "ear");
 	const char *lp = pods_place_text(js(ear, "left").toUtf8().constData());

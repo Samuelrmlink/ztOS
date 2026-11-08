@@ -6,6 +6,7 @@ The AirPods app has two front ends over one daemon. On the phone it is `ztpods` 
 |---|---|
 | `main.cpp` | Arguments: `ztpods-qt [--tray] [MAC]`, `--render` |
 | `mainwindow.cpp` | The four tabs: Status, Listening, Controls, About |
+| `hero.cpp`, `hero.h` | The status tab's picture: buds, case and battery rings, from `../pods-art.h` (shared with ztMETRO's page) |
 | `podsclient.cpp` | The state file and the command socket. No Bluetooth. |
 | `test.cpp`, `fixtures/` | Every control against a pretend daemon (`ctest`) |
 | `CMakeLists.txt` | The app, the daemon if it can, the install |

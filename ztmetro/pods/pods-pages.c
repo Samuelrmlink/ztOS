@@ -12,6 +12,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <json-c/json.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,7 @@
 
 #include "zrnmetrocore.h"
 #include "pods-pages.h"
+#include "pods-art.h"
 #include "pods-ui.h"
 #include "zmc-gesture.h"
 
@@ -182,48 +184,192 @@ static double section(cairo_t *cr, double y, const char *title) {
 	return y + 26;
 }
 
-/* One part: its name, its level large, a bar; and how old the reading is, if it is. */
-static double battery_row(cairo_t *cr, double y, const char *label, json_object *b, bool live) {
-	double w = zmc.width - 2 * MARGIN;
+static struct pods_battery reading(json_object *b) {
 	json_object *lv = jo(b, "level");
-	bool known = lv && json_object_is_type(lv, json_type_int);
-	int level = known ? json_object_get_int(lv) : 0;
-	bool charging = jb(b, "charging");
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, label, FONT_SEMILIGHT, 21, MARGIN, y, 0);
-	char text[48];
-	if (known) snprintf(text, sizeof(text), "%d%%%s", level, charging ? ", charging" : "");
-	else snprintf(text, sizeof(text), "not read yet");
-	if (known) {
-		zmc_set_rgb(cr, zmc.accent);
-		if (level <= 15 && !charging) cairo_set_source_rgb(cr, 0.9, 0.16, 0.16);
+	struct pods_battery r = { false, 0, jb(b, "charging") };
+	if (lv && json_object_is_type(lv, json_type_int)) {
+		r.known = true;
+		r.level = json_object_get_int(lv);
+		if (r.level < 0) r.level = 0;
+		if (r.level > 100) r.level = 100;
+	}
+	return r;
+}
+
+static void shape_path(cairo_t *cr, const struct pods_shape *s) {
+	double x = s->w < 0 ? s->x + s->w : s->x, w = s->w < 0 ? -s->w : s->w;
+	if (s->kind == PODS_S_ELLIPSE) {
+		cairo_save(cr);
+		cairo_translate(cr, x + w / 2, s->y + s->h / 2);
+		cairo_scale(cr, w / 2, s->h / 2);
+		cairo_new_path(cr);
+		cairo_arc(cr, 0, 0, 1, 0, 2 * M_PI);
+		cairo_restore(cr);
 	} else {
-		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		double r = s->r;
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, x + w - r, s->y + r, r, -M_PI / 2, 0);
+		cairo_arc(cr, x + w - r, s->y + s->h - r, r, 0, M_PI / 2);
+		cairo_arc(cr, x + r, s->y + s->h - r, r, M_PI / 2, M_PI);
+		cairo_arc(cr, x + r, s->y + r, r, M_PI, 3 * M_PI / 2);
+		cairo_close_path(cr);
 	}
-	double tw = zmc_text_width(text, FONT_REGULAR, 16);
-	zmc_text(cr, text, FONT_REGULAR, 16, MARGIN + w - tw, y + 5, 0);
-	double bar_y = y + 32;
-	cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
-	cairo_rectangle(cr, MARGIN, bar_y, w, 5);
-	cairo_fill(cr);
-	if (known) {
-		if (level <= 15 && !charging) cairo_set_source_rgb(cr, 0.9, 0.16, 0.16);
-		else zmc_set_rgb(cr, zmc.accent);
-		cairo_rectangle(cr, MARGIN, bar_y, w * level / 100.0, 5);
-		cairo_fill(cr);
+}
+
+static void draw_art(cairo_t *cr, const struct pods_shape *shapes, int count, float box_w, float box_h, float x, float y,
+		float s, bool mirror, bool pro, bool lit) {
+	cairo_pattern_t *body = cairo_pattern_create_linear(0, y, 0, y + box_h * s);
+	cairo_pattern_add_color_stop_rgb(body, 0, ((PODS_C_BODY_TOP >> 16) & 255) / 255.0, ((PODS_C_BODY_TOP >> 8) & 255) / 255.0,
+		(PODS_C_BODY_TOP & 255) / 255.0);
+	cairo_pattern_add_color_stop_rgb(body, 1, ((PODS_C_BODY_BOT >> 16) & 255) / 255.0, ((PODS_C_BODY_BOT >> 8) & 255) / 255.0,
+		(PODS_C_BODY_BOT & 255) / 255.0);
+	/* outlines first, all of them, so where two shapes meet is no line */
+	for (int pass = 0; pass < 2; pass++) {
+		for (int i = 0; i < count; i++) {
+			struct pods_shape sh = pods_place(&shapes[i], box_w, x, y, s, mirror);
+			if (sh.pro_only && !pro) continue;
+			if (pass == 0) {
+				if (sh.paint != PODS_P_BODY && sh.paint != PODS_P_TIP) continue;
+				shape_path(cr, &sh);
+				zmc_set_rgb(cr, PODS_C_EDGE);
+				cairo_set_line_width(cr, 2.0 * (s > 0.6f ? s : 0.6f));
+				cairo_stroke(cr);
+				continue;
+			}
+			if (sh.kind == PODS_S_LINE) {
+				zmc_set_rgb(cr, PODS_C_SEAM);
+				cairo_set_line_width(cr, sh.r);
+				cairo_move_to(cr, sh.x, sh.y);
+				cairo_line_to(cr, sh.x + sh.w, sh.y + sh.h);
+				cairo_stroke(cr);
+				continue;
+			}
+			shape_path(cr, &sh);
+			switch (sh.paint) {
+			case PODS_P_BODY: cairo_set_source(cr, body); break;
+			case PODS_P_TIP: zmc_set_rgb(cr, PODS_C_TIP); break;
+			case PODS_P_DARK: zmc_set_rgb(cr, PODS_C_DARK); break;
+			case PODS_P_METAL: zmc_set_rgb(cr, PODS_C_METAL); break;
+			case PODS_P_LED: zmc_set_rgb(cr, lit ? PODS_C_LED_ON : PODS_C_LED_OFF); break;
+			default: zmc_set_rgb(cr, PODS_C_SEAM); break;
+			}
+			cairo_fill(cr);
+		}
 	}
-	y = bar_y + 11;
-	if (known && !live) {
-		char age[32], line[64];
-		age_text(age, sizeof(age), jl(b, "seen", 0));
+	cairo_pattern_destroy(body);
+}
+
+/* The picture: the buds and the case, a ring for each battery (pods-art.h). */
+static double draw_hero(cairo_t *cr, double y, const struct pods_ring *rings, int n, bool pro, bool lit) {
+	struct pods_hero h;
+	pods_hero_layout(&h, rings, n, zmc.width - 2 * MARGIN, 1.0f);
+	cairo_save(cr);
+	cairo_translate(cr, MARGIN, y + 6);
+	for (int i = 0; i < h.n_art; i++) {
+		if (h.art[i].art == PODS_ART_CASE) {
+			draw_art(cr, PODS_CASE, PODS_N_CASE, PODS_CASE_W, PODS_CASE_H, h.art[i].x, h.art[i].y, h.art[i].s, false, pro, lit);
+		} else {
+			draw_art(cr, PODS_BUD, PODS_N_BUD, PODS_BUD_W, PODS_BUD_H, h.art[i].x, h.art[i].y, h.art[i].s,
+				h.art[i].art == PODS_ART_BUD_R, pro, lit);
+		}
+	}
+	double size = h.label_h * 0.8;
+	for (int i = 0; i < h.n_rings; i++) {
+		const struct pods_battery *b = &h.rings[i].ring.b;
+		double cx = h.rings[i].cx, cy = h.rings[i].cy, r = h.rings[i].r;
+		uint32_t colour = pods_battery_low(b) ? PODS_C_LOW : PODS_C_FULL;
+		cairo_set_line_width(cr, r * PODS_RING_WIDTH * 2);
+		cairo_set_source_rgb(cr, 0.2, 0.2, 0.2);
+		cairo_new_path(cr);
+		cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
+		cairo_stroke(cr);
+		if (b->known && b->level > 0) {
+			zmc_set_rgb(cr, colour);
+			cairo_set_line_cap(cr, b->level >= 100 ? CAIRO_LINE_CAP_BUTT : CAIRO_LINE_CAP_ROUND);
+			cairo_new_path(cr);
+			cairo_arc(cr, cx, cy, r, -M_PI / 2, -M_PI / 2 + 2 * M_PI * b->level / 100.0);
+			cairo_stroke(cr);
+			cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+		}
+		if (b->charging) {
+			zmc_set_rgb(cr, colour);
+			cairo_new_path(cr);
+			for (int k = 0; k < PODS_N_BOLT; k++) cairo_line_to(cr, cx + PODS_BOLT[k][0] * r, cy + PODS_BOLT[k][1] * r);
+			cairo_close_path(cr);
+			cairo_fill(cr);
+		}
+		/* the line under it: a badge, then the level */
+		int parts = h.rings[i].ring.parts;
+		char text[16];
+		pods_ring_text(text, sizeof(text), &h.rings[i].ring);
+		bool badge = parts == PODS_PART_LEFT || parts == PODS_PART_RIGHT || parts == PODS_PART_CASE;
+		double bw = h.label_h * 0.78, gap = h.label_h * 0.25, tw = zmc_text_width(text, FONT_SEMILIGHT, size);
+		double x = cx - (tw + (badge ? bw + gap : 0)) / 2, mid = h.rings[i].label_y + h.label_h / 2;
+		if (parts == PODS_PART_CASE) {
+			struct pods_shape c = { PODS_S_RRECT, 0, 0, (float)x, (float)(mid - bw * 0.36), (float)bw, (float)(bw * 0.72), (float)(bw * 0.22) };
+			shape_path(cr, &c);
+			zmc_set_rgb(cr, PODS_C_BADGE);
+			cairo_fill(cr);
+			cairo_set_source_rgb(cr, 0, 0, 0);
+			cairo_set_line_width(cr, bw * 0.08 > 1 ? bw * 0.08 : 1);
+			cairo_move_to(cr, x, c.y + c.h * 0.38);
+			cairo_line_to(cr, x + bw, c.y + c.h * 0.38);
+			cairo_stroke(cr);
+		} else if (badge) {
+			zmc_set_rgb(cr, PODS_C_BADGE);
+			cairo_new_path(cr);
+			cairo_arc(cr, x + bw / 2, mid, bw / 2, 0, 2 * M_PI);
+			cairo_fill(cr);
+			const char *letter = parts == PODS_PART_LEFT ? "L" : "R";
+			double ls = bw * 0.62, lw = zmc_text_width(letter, FONT_SEMIBOLD, ls);
+			cairo_set_source_rgb(cr, 0, 0, 0);
+			zmc_text(cr, letter, FONT_SEMIBOLD, ls, x + (bw - lw) / 2, mid - ls * 0.68, 0);
+		}
+		if (badge) x += bw + gap;
+		if (!b->known) cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		else if (pods_battery_low(b)) zmc_set_rgb(cr, colour);
+		else cairo_set_source_rgb(cr, 1, 1, 1);
+		zmc_text(cr, text, FONT_SEMILIGHT, size, x, mid - size * 0.68, 0);
+	}
+	cairo_restore(cr);
+	return y + 6 + h.h + 14;
+}
+
+/* the batteries: the picture, then how old a reading is that didn't come over a link */
+static double batteries(cairo_t *cr, double y, bool live) {
+	json_object *bat = jo(dev, "battery");
+	struct pods_ring rings[3];
+	int n;
+	if (jo(bat, "headset")) {
+		rings[0].parts = PODS_PART_HEADSET;
+		rings[0].b = reading(jo(bat, "headset"));
+		n = 1;
+	} else {
+		struct pods_battery lb = reading(jo(bat, "left")), rb = reading(jo(bat, "right")), cb = reading(jo(bat, "case"));
+		n = pods_rings(&lb, &rb, &cb, rings);
+	}
+	y = draw_hero(cr, y, rings, n, strstr(js(dev, "model_label", ""), "Pro") != NULL, !strcmp(js(dev, "lid", ""), "open"));
+	struct { int parts; char age[32]; const char *from; } heard[3];
+	int shown = 0;
+	for (int i = 0; i < n; i++) {
+		int p = rings[i].parts;
+		json_object *b = jo(bat, p == PODS_PART_HEADSET ? "headset" : p & PODS_PART_LEFT ? "left" : p & PODS_PART_RIGHT ? "right" : "case");
+		/* over a link too, the case says nothing when it is away: its reading has an age */
 		const char *from = js(b, "source", "");
-		snprintf(line, sizeof(line), "Last heard %s%s", age, !strcmp(from, "case") ? ", from the case" :
-			!strcmp(from, "ble-coarse") ? ", to the nearest 10%" : "");
-		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-		zmc_text(cr, line, FONT_REGULAR, 13, MARGIN, y, 0);
-		y += 20;
+		bool fresh = p == PODS_PART_CASE ? live && (!strcmp(from, "aap") || !strcmp(from, "case")) && now_s() - jl(b, "seen", 0) < 300 : live;
+		if (!rings[i].b.known || fresh) continue;
+		heard[shown].parts = p;
+		heard[shown].from = from;
+		age_text(heard[shown++].age, sizeof(heard[0].age), jl(b, "seen", 0));
 	}
-	return y + 10;
+	bool same = shown > 1;	/* all the same: said once */
+	for (int i = 1; i < shown; i++) same &= !strcmp(heard[i].age, heard[0].age) && !strcmp(heard[i].from, heard[0].from);
+	for (int i = 0; i < (same ? 1 : shown); i++) {
+		char line[192];
+		pods_heard_text(line, sizeof(line), same ? NULL : pods_ring_name(heard[i].parts), heard[i].age, heard[i].from);
+		y = note(cr, y, line);
+	}
+	return y;
 }
 
 static double draw_nearby(cairo_t *cr, double y) {
@@ -309,17 +455,7 @@ static double draw_status(cairo_t *cr) {
 	y = note(cr, y, line);
 	y = connect_row(cr, y);
 
-	json_object *bat = jo(dev, "battery");
-	if (jo(bat, "headset")) {
-		y = battery_row(cr, y, "Headphones", jo(bat, "headset"), live);
-	} else {
-		y = battery_row(cr, y, "Left", jo(bat, "left"), live);
-		y = battery_row(cr, y, "Right", jo(bat, "right"), live);
-		/* over a link too, the case says nothing when it is away: its reading has an age */
-		json_object *kase = jo(bat, "case");
-		y = battery_row(cr, y, "Case", kase, live && (!strcmp(js(kase, "source", ""), "aap") || !strcmp(js(kase, "source", ""), "case")) &&
-			now_s() - jl(kase, "seen", 0) < 300);
-	}
+	y = batteries(cr, y, live);
 
 	char where[96] = "";
 	const char *lp = pods_place_text(js(jo(dev, "ear"), "left", "")), *rp = pods_place_text(js(jo(dev, "ear"), "right", ""));

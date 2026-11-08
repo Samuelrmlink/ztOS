@@ -40,7 +40,7 @@ private:
 	QWidget *build_listening();
 	QWidget *build_controls();
 	QWidget *build_about();
-	void battery_row(QVBoxLayout *l, const QString &label, const QJsonObject &b, bool live);
+	void batteries(QVBoxLayout *l, bool live);
 	void connect_row(QVBoxLayout *l);
 	void settings_banner(QVBoxLayout *l);
 	void rows(QFormLayout *f, int page);
