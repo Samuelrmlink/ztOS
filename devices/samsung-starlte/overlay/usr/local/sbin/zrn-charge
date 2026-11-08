@@ -472,6 +472,8 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	[ $vhold = 1 ] && stop=1 why+=" at 4.15 V"
 	[ $((warm | hot_stop | cold_stop)) = 1 ] && hvok=0
 	[ $tknown = 1 ] || hvok=0
+	# held at 5 V by hand (a new driver on trial): touch /etc/zrn-charge/no-hv
+	[ -e "$R/etc/zrn-charge/no-hv" ] && [ $hvok = 1 ] && { hvok=0; why+=" 9 V off by hand"; }
 
 	if [ $src = wired ]; then
 		if [ $hvbus = 1 ] && screen_on; then min in 500; min chg 1000; why+=" screen on"; fi
