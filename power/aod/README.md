@@ -115,12 +115,63 @@ No kernel or boot image change. In `ztmetro/ztmetro.c` (search `aod_`):
   (rows 0-149, 1.1b).
 - The force press is reported at (753, 2899), inside the bottom self-mask
   band (rows 2810-2959). The mark sits just above the band, over the press's
-  column (lowest lit row 2789), dimmer than the text (0.30), 1 point thick,
-  and moves by up to 6 pixels on its own 7-place cycle (not in step with
-  the nine, so the two do not repeat together). Not drawn with the force
-  press switched off.
+  column (lowest lit row ~2780), at stock's size (19 x 18 points, measured
+  from a side-by-side photo), its brightest channel the grey text's (a grim
+  of the live AOD at the darkest level: mark 82,58,63, text 82), a
+  0.75-point line, tinted with the accent; it moves by up to 6 pixels on its
+  own 7-place cycle (not in step with the nine). Not drawn with the force
+  press or "Show where to press for Start" switched off.
 - A hung shell leaves a static picture lit until the battery ends. Stage 3
   (the panel's own self-move) is the only real fix.
+
+### Themes
+
+`ztmetro/clock-themes.h`: a theme is a draw function for the clock block (the
+time, AM/PM in 12-hour time, the date), the alignment of the shared rows the
+AOD adds under it (battery, waiting apps; the force mark is the AOD's), and a
+light budget: the frame's mean linear light at most (1 = the whole screen
+white). The AOD measures every frame (`aod_measure`) and dims a frame over
+its budget (`aod_budget_k`, in `aod_tint`), on top of the level's factor.
+Every theme goes through the nine places like the rest; the image's picture
+also shifts within its frame. To add one: a function and a line in
+`CLOCK_THEMES`, and its id in `clock-theme-ids.h` (Settings' list).
+
+| Theme | Where | Light (12 h, longest time, 5 apps) | Budget | Lit |
+|---|---|---|---|---|
+| Metro | AOD, lock | 0.0075 | 0.0080 | 1.5 % |
+| Compact (left, like stock's) | AOD | 0.0046 | 0.0060 | 1.1 % |
+| Digital (large) | AOD | 0.0142 | 0.0090: x0.63 | 2.3 % |
+| Analogue (thin hands, no seconds) | AOD | 0.0032 | 0.0060 | 1.1 % |
+| Stacked (hours over minutes) | AOD | 0.0115 | 0.0090: x0.78 | 2.0 % |
+| Calendar (the month) | AOD | 0.0059 | 0.0080 | 1.5 % |
+| Flip clock (static cards, outlines) | AOD, lock (turning) | 0.0064 | 0.0080 | 1.6 % |
+| Image (the user's picture) | AOD | by the picture: muted at most 0.34 of full light, faint 0.18, a quarter of its colour, faded to black at its edges | 0.0080 | |
+
+From `ztmetro --render` (`aod-themes.txt`); the current of each is the
+overnight item `ztbench-aod-themes.sh`.
+
+Settings > Display > **always-on display**: the mode (Off, Always, Only
+while charging), the themes with a preview of each (the shell writes them,
+`previews_write`, to `$XDG_RUNTIME_DIR/ztmetro-previews/`, at the fixed
+level and budget, the time 10:08), the picture (`ztgallery --pick`) and its
+strength, auto brightness, the 15 % switch and the force mark. Settings >
+Lock Screen: the clock (Metro or the flip clock) and, with the flip clock,
+"use the flip clock on the always-on display too".
+
+The lock screen's flip clock is an original cairo drawing after HTC's
+(lovelace-htc-flipclock-weather is MIT; nothing of it is used): two cards
+with a gradient, a hinge and pins, a shadow, the date under them, AM/PM
+small on the hour card in 12-hour time. On the minute the changed card
+turns: the old top half falls, the new bottom half lands (`FLIP_MS` 560 ms
+at `FLIP_FRAME_MS` 33, then nothing until the next minute).
+
+### The screenshot chord
+
+Power and volume down together: `grim` into `~/Pictures/Screenshots/
+Screenshot_YYYYmmdd_HHMMSS.png`, a white flash (after the capture), a heavy
+tick and a "Screenshot saved" notification. Volume down's own step waits
+`SHOT_CHORD_MS` (150 ms) for the power key; a chord cancels the power key's
+own action. With the screen off the power key wakes it, as before.
 
 ### What it costs
 
