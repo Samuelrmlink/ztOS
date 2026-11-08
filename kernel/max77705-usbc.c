@@ -320,6 +320,7 @@ struct usbc_pd {
 
 	/* since boot, never reset */
 	unsigned int hard_resets, hr_sent, hr_received;
+	unsigned int hr_no_pd;		/* ours, on a charger without PD: not counted above */
 	unsigned int err_recovery, srt_timeouts;
 	unsigned int caps_renegotiated;	/* new caps, no hard reset: normal */
 	unsigned int caps_changed_after_hr; /* different caps after a hard reset */
@@ -1200,6 +1201,7 @@ static DEVICE_ATTR_RO(name)
 PD_COUNTER_ATTR(pd_hard_resets, hard_resets);
 PD_COUNTER_ATTR(pd_hard_resets_received, hr_received);
 PD_COUNTER_ATTR(pd_hard_resets_sent, hr_sent);
+PD_COUNTER_ATTR(pd_hard_resets_no_pd, hr_no_pd);
 /* new caps with no hard reset: a normal renegotiation (thermal, multi-port) */
 PD_COUNTER_ATTR(pd_caps_renegotiated, caps_renegotiated);
 /* caps after a hard reset differ from before it: the anomaly (in practice
@@ -1266,6 +1268,7 @@ static struct attribute *usbc_psy_attrs[] = {
 	&dev_attr_pd_hard_resets.attr,
 	&dev_attr_pd_hard_resets_received.attr,
 	&dev_attr_pd_hard_resets_sent.attr,
+	&dev_attr_pd_hard_resets_no_pd.attr,
 	&dev_attr_pd_caps_renegotiated.attr,
 	&dev_attr_pd_caps_reduced_after_hard_reset.attr,
 	&dev_attr_pd_last_event.attr,
@@ -1567,6 +1570,20 @@ static void usbc_pd_hard_reset(struct max77705_usbc *u, u8 code)
 	int ilim = usbc_chg_ilim_ua();
 	long since = u->pd.req_jiffies ?
 		(long)jiffies_to_msecs(jiffies - u->pd.req_jiffies) : -1;
+
+	/*
+	 * Ours, with no PD seen on this attach at all: the firmware's own "no
+	 * Source_Capabilities came" reset (SinkWaitCap, then Hard Reset, as the
+	 * spec has a sink do), on every plain DCP/AFC/QC charger. Not a sign of
+	 * anything wrong: counted apart, and nothing is blocked or remembered.
+	 */
+	if (!theirs && !u->pd.pos && !u->pd.req_pos && !u->pd.have_first) {
+		mutex_lock(&u->pub_lock);
+		u->pd.hr_no_pd++;
+		mutex_unlock(&u->pub_lock);
+		dev_info(u->dev, "PD: no source caps from this charger: our firmware's hard reset (not PD)\n");
+		return;
+	}
 
 	mutex_lock(&u->pub_lock);
 	u->pd.hard_resets++;
