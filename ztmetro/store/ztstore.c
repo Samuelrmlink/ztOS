@@ -42,7 +42,7 @@ enum page { P_TOP, P_CATS, P_INSTALLED, P_SEARCH, P_LIST, P_DETAIL, P_PROGRESS, 
 enum action {
 	ACT_PKG = 1, ACT_SEARCHBOX, ACT_FILTER, ACT_SEE_ALL, ACT_CAT, ACT_GROUP, ACT_INSTALL, ACT_REMOVE,
 	ACT_OPEN, ACT_UPDATE, ACT_PROGRESS, ACT_CANCEL, ACT_DONE, ACT_CHECK_UPDATES, ACT_UPDATE_ALL,
-	ACT_RECIPE, ACT_FIND, ACT_RETRY,
+	ACT_RECIPE, ACT_FIND, ACT_RETRY, ACT_INSTALL_BUILT,
 };
 
 /* ---- what the pages show (touched only on the main loop) ------------------------- */
@@ -927,7 +927,16 @@ static double draw_detail(cairo_t *cr) {
 			y = button(cr, MARGIN, y, bw, "remove", ACT_REMOVE, 0);
 		}
 	} else {
-		y = button(cr, MARGIN, y, bw, "install", ACT_INSTALL, 0);
+		char built[4096];
+		if (pkg_is_aur(p) && inst_built(p->name, p->version, built, sizeof(built))) {
+			/* built here already, but it never went in: no need to build again */
+			y = button(cr, MARGIN, y, bw, "install it now", ACT_INSTALL_BUILT, 0);
+			grey(cr);
+			y += zmc_text(cr, "Built on this phone already. Installing asks your password.", FONT_REGULAR, 13,
+				MARGIN, y + 8, bw) + 8;
+		} else {
+			y = button(cr, MARGIN, y, bw, "install", ACT_INSTALL, 0);
+		}
 	}
 	y += 22;
 	white(cr);
@@ -1185,6 +1194,15 @@ static void activate(int action, int arg) {
 			zmc_every(500, tick);
 		}
 		break;
+	case ACT_INSTALL_BUILT: {
+		char built[4096];
+		if (shown && inst_built(shown->name, shown->version, built, sizeof(built)) &&
+				inst_start_built(shown->name, built)) {
+			go(P_PROGRESS);
+			zmc_every(500, tick);
+		}
+		break;
+	}
 	case ACT_REMOVE:
 		if (shown && inst_start(shown->name, false, true)) {
 			go(P_PROGRESS);

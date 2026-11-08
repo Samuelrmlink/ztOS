@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "install.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -423,6 +424,50 @@ bool inst_start(const char *name, bool aur, bool remove) {
 	}
 	tell();
 	return true;
+}
+
+bool inst_built(const char *name, const char *version, char *out, size_t size) {
+	out[0] = 0;
+	if (!name || !version) {
+		return false;
+	}
+	char dir[4096];
+	const char *cache = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+	if (cache && *cache) {
+		snprintf(dir, sizeof(dir), "%s/ztstore/build/%s", cache, name);
+	} else {
+		snprintf(dir, sizeof(dir), "%s/.cache/ztstore/build/%s", home ? home : "", name);
+	}
+	DIR *d = opendir(dir);
+	if (!d) {
+		return false;
+	}
+	/* NAME-VERSION-ARCH.pkg.tar.*, and not NAME-debug-... */
+	char prefix[512];
+	snprintf(prefix, sizeof(prefix), "%s-%s-", name, version);
+	struct dirent *e;
+	while ((e = readdir(d))) {
+		if (starts_with(e->d_name, prefix) && strstr(e->d_name, ".pkg.tar") && !strstr(e->d_name, ".part")) {
+			snprintf(out, size, "%s/%s", dir, e->d_name);
+			break;
+		}
+	}
+	closedir(d);
+	return out[0] != 0;
+}
+
+bool inst_start_built(const char *name, const char *path) {
+	if (inst.state == INST_RUNNING) {
+		return false;
+	}
+	memset(&inst, 0, sizeof(inst));
+	st.needs[0] = 0;
+	snprintf(st.built, sizeof(st.built), "%s", path);
+	snprintf(inst.name, sizeof(inst.name), "%s", name);
+	inst.aur = true;
+	inst.state = INST_FAILED;	/* (as if the password had been missed) */
+	inst.can_retry = true;
+	return inst_retry();
 }
 
 void inst_cancel(void) {

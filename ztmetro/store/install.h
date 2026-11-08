@@ -10,6 +10,7 @@
 #define ZTSTORE_INSTALL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #define INST_LOG_LINES	14
 
@@ -40,6 +41,11 @@ bool inst_start(const char *name, bool aur, bool remove);
 void inst_cancel(void);
 /* the built package again, when inst.can_retry */
 bool inst_retry(void);
+/* An AUR package built here before, of this version, that has not gone in
+ * (the password was not given, or the App Store was closed while it asked):
+ * its file, so it can go in without building it again. */
+bool inst_built(const char *name, const char *version, char *out, size_t size);
+bool inst_start_built(const char *name, const char *path);
 void inst_clear(void);	/* forget a finished one */
 /* call every half a second while something runs */
 void inst_tick(void);
