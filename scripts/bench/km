@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """km: the KM003C USB-C meter on the bench, over the km003c_rp2 board's WebSocket
-(ws://192.168.1.209/ws, line protocol: ~/Work/km003c_rp2_webapp/docs/api.md).
+(ws://$KM_HOST/ws, default km003c.local; the line protocol is the board's docs/api.md).
 
 The link is lossy Wi-Fi: every command reconnects on its own, and a sample gap shows
 up as SEQ jumps (counted), never as a hang. km only listens by default: it never
