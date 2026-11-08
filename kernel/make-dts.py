@@ -106,31 +106,113 @@ if args.power:
     # --- MAX77705 charger: the wireless input (charger agent's block) ---
     # kernel/patch-max77705-charger.py registers max77705-wireless (WCIN) on a
     # "wireless" child node of the charger, so the fuel gauge can list it as a
-    # supplier and read "Charging" on a pad. The charger also holds stock's
-    # pull-down on WPC_DET (gpa2-0): ztOS left the pin floating (it read 1 with
-    # no pad). Pull only, no function, so a receiver node that later claims the
-    # pin as its interrupt does not collide with this.
+    # supplier and read "Charging" on a pad. Stock's pull-down on WPC_DET
+    # (gpa2-0) is set by the P9320 receiver's wpc_det pins below (one owner).
     sub("""			monitored-battery = <&battery>;
 			interrupt-parent = <&max77705>;
 			interrupts = <0>;""", """			monitored-battery = <&battery>;
 			interrupt-parent = <&max77705>;
 			interrupts = <0>;
-			pinctrl-names = "default";
-			pinctrl-0 = <&wpc_det_pd>;
 
 			max77705_wireless: wireless {
 			};""")
     sub("""			power-supplies = <&max77705_charger>;""",
         """			power-supplies = <&max77705_charger>, <&max77705_wireless>;""")
+
+    # ---- wireless charging: the IDT P9320 receiver (kernel/p9320_wireless.c) ----
+    # Its own bus is hsi2c@14370000, the I2C-only half of USI_CMGP03 (stock
+    # hsi2c41; the USI half at 0x14360000 is the PMIC bus): GIC SPI 7, 100 kHz,
+    # pins gpm16-0/gpm17-0 function 3. Clocked from the same mux as the PMIC
+    # bus (MUX_CLK_I2C_CMGP = CMGP bus, DIV 1, read on the phone), so the
+    # 200 MHz stub holds. Its gates (cmucal-sfr, CMGP base 0x14200000) are
+    # forced on like the PMIC bus's, before its USI_CON reset is released
+    # (stock's "samsung,usi-i2c-v2" does that in the I2C driver).
+    # WPC_DET gpa2-0 gets stock's pull-down (it floats without one), WPC_INT
+    # gpa3-1 stock's no-pull. WPC_EN (PCAL6524 pin 8, high = receiver off)
+    # is not described: the expander is zrn-bt's, and the pin must stay an
+    # input reading low, as stock leaves it at boot.
+    sub("""				     <0x142020ac>,	/* USI_CMGP03 PCLK port */
+""", """				     <0x142020ac>,	/* USI_CMGP03 PCLK port */
+				     <0x14202004>,	/* GATE_CLK_I2C_CMGP */
+				     <0x14202044>,	/* I2C_CMGP03 IPCLK port */
+				     <0x14202048>,	/* I2C_CMGP03 PCLK port */
+""")
+    sub("""				    <0x143600c4 0x0>;	/* USI_CMGP03 USI_CON: reset off */""",
+        """				    <0x143600c4 0x0>,	/* USI_CMGP03 USI_CON: reset off */
+				    <0x143700c4 0x0>;	/* I2C_CMGP03 USI_CON: reset off */""")
+    sub("""				   <0x143600c8 0x2>;	/* USI_CMGP03 USI_OPTION: CLKREQ_ON */""",
+        """				   <0x143600c8 0x2>,	/* USI_CMGP03 USI_OPTION: CLKREQ_ON */
+				   <0x143700c8 0x2>;	/* I2C_CMGP03 USI_OPTION: CLKREQ_ON */""")
     s += '''
-/* charger agent: WPC_DET pull-down, as stock's wpc_det pinctrl (no function) */
+/* ---- wireless charging: IDT P9320 receiver (make-dts.py --power) ---- */
+/ {
+	/* the new bus must not take i2c-1 (the PMIC's) if a probe is deferred */
+	aliases {
+		i2c0 = &hsi2c_tsp;
+		i2c1 = &hsi2c_pmic;
+		i2c2 = &hsi2c_wpc;
+	};
+};
+
+&soc {
+	hsi2c_wpc: i2c@14370000 {
+		compatible = "samsung,exynosautov9-hsi2c";
+		reg = <0x14370000 0x1000>;
+		interrupts = <GIC_SPI 7 IRQ_TYPE_LEVEL_HIGH>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		clocks = <&hsi2c_clk_stub>, <&hsi2c_clk_stub>;
+		clock-names = "hsi2c", "hsi2c_pclk";
+		clock-frequency = <100000>;	/* stock */
+		pinctrl-names = "default";
+		pinctrl-0 = <&hsi2c41_bus>;
+		status = "okay";
+
+		/*
+		 * Powered from the coil: answers only on a pad. FOD tables
+		 * are stock rev 18-26 (fod_wpc_data, fod_wpc_data_cv,
+		 * fod_hero_5v_data); RPP is stock's wc_hv_rpp default.
+		 */
+		p9320: wireless-charger@3b {
+			compatible = "idt,p9320";
+			reg = <0x3b>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&wpc_int &wpc_det>;
+			det-gpios = <&gpa2 0 GPIO_ACTIVE_HIGH>;
+			int-gpios = <&gpa3 1 GPIO_ACTIVE_LOW>;
+			idt,fod-cc = /bits/ 8 <0x96 0x34 0x8e 0x2c 0x96 0x1e 0x96 0x1e 0xa5 0xf5 0x9c 0x13>;
+			idt,fod-cv = /bits/ 8 <0x96 0x52 0x8e 0x4a 0x96 0x3c 0x96 0x3c 0xa5 0xff 0x9c 0x31>;
+			idt,fod-stand-5v = /bits/ 8 <0x96 0xe4 0x8e 0xdc 0x96 0xce 0x96 0xce 0xa5 0xa5 0x9c 0xc3>;
+			idt,rpp-scale = <0x40>;
+		};
+	};
+};
+
+&pinctrl_cmgp {
+	hsi2c41_bus: hsi2c41-bus-pins {
+		samsung,pins = "gpm16-0", "gpm17-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_3>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV1>;
+	};
+};
+
 &pinctrl_alive {
-	wpc_det_pd: wpc-det-pd-pins {
+	wpc_int: wpc-int-pins {
+		samsung,pins = "gpa3-1";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV1>;
+	};
+
+	wpc_det: wpc-det-pins {
 		samsung,pins = "gpa2-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
 		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
 	};
 };
 '''
+    # ---- end of wireless charging ----
 
 if not args.touch:
     disable("			touchscreen-size-y = <4096>;")

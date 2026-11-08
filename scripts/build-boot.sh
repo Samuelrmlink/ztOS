@@ -7,7 +7,7 @@
 #     --fallback boot|recovery   where a watchdog reset / panic lands (default
 #                                boot: TWRP on BOOT, this image on RECOVERY)
 #     --no-ufs                   leave the UFS host disabled
-#     --power                    MAX77705 charger + fuel gauge
+#     --power                    MAX77705 charger + fuel gauge, P9320 wireless receiver
 #     --acpm                     ACPM mailbox to the S2MPS18 PMIC (rails)
 #     --cpufreq                  CPU frequency scaling, vendor PLL tables (implies --acpm)
 #     --touch                    S6SY761 touch controller (implies --acpm: its
@@ -118,6 +118,8 @@ python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
 # stock-like AICL back-off (300 mA floor) instead of mainline's ratchet that
 # wraps to 3.2 A, the battery's charge current, and max77705-wireless (WCIN)
 [ -n "$POWER" ] && python3 "$ROOT/kernel/patch-max77705-charger.py" "$SRC"
+# the wireless charging receiver (IDT P9320), built in with --power
+python3 "$ROOT/kernel/patch-p9320.py" "$SRC"
 
 echo "=== initramfs ==="
 LIST=$B/initramfs.list
@@ -231,6 +233,11 @@ if [ -n "$CPUFREQ" ]; then
 else
 	cfg --disable CPU_FREQ
 	cfg --disable ARM_S9P_CPUFREQ
+fi
+if [ -n "$POWER" ]; then
+	cfg --enable CHARGER_P9320
+else
+	cfg --disable CHARGER_P9320
 fi
 if [ -n "$GPU" ]; then
 	cfg --enable DRM_PANFROST
