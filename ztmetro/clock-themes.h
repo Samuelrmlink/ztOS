@@ -147,6 +147,7 @@ static double theme_analogue(struct clock_ctx *c, double y) {
 	cairo_save(cr);
 	ct_grey(c);
 	cairo_set_line_width(cr, 1.0);
+	cairo_new_path(cr);	/* (draw_text leaves a current point) */
 	cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
 	cairo_stroke(cr);
 	for (int i = 0; i < 12; i++) {
@@ -211,6 +212,7 @@ static double theme_calendar(struct clock_ctx *c, double y) {
 		if (d == c->tm.tm_mday) {
 			ct_white(c);
 			cairo_set_line_width(cr, 1.0);
+			cairo_new_path(cr);
 			cairo_arc(cr, x + cw / 2, ty + 9, 10, 0, 2 * M_PI);
 			cairo_stroke(cr);
 		} else {
@@ -388,17 +390,20 @@ static double theme_flip(struct clock_ctx *c, double y) {
 
 /* ---- the list ------------------------------------------------------------ */
 
-/* light budgets: about a third over each theme's own light with its longest
- * time and five waiting apps (ztmetro --render prints them, aod-themes.txt) */
+/* Light budgets, as the frame's mean linear light (1 would be the whole screen
+ * white): about Metro's own (0.0075 with its longest time, five waiting apps
+ * and the battery), a little more for the large digits, which are then dimmed
+ * to fit (ztmetro --render writes each theme's light and lit share to
+ * aod-themes.txt). The dim levels' factors apply on top. */
 static const struct clock_theme CLOCK_THEMES[] = {
-	{ "metro", "Metro", THEME_AOD | THEME_LOCK, ALIGN_CENTRE, 0.0060, theme_metro },
-	{ "compact", "Compact", THEME_AOD, ALIGN_LEFT, 0.0045, theme_compact },
+	{ "metro", "Metro", THEME_AOD | THEME_LOCK, ALIGN_CENTRE, 0.0080, theme_metro },
+	{ "compact", "Compact", THEME_AOD, ALIGN_LEFT, 0.0060, theme_compact },
 	{ "digital", "Digital", THEME_AOD, ALIGN_CENTRE, 0.0090, theme_digital },
-	{ "analogue", "Analogue", THEME_AOD, ALIGN_CENTRE, 0.0050, theme_analogue },
-	{ "stacked", "Stacked", THEME_AOD, ALIGN_LEFT, 0.0110, theme_stacked },
-	{ "calendar", "Calendar", THEME_AOD, ALIGN_CENTRE, 0.0070, theme_calendar },
+	{ "analogue", "Analogue", THEME_AOD, ALIGN_CENTRE, 0.0060, theme_analogue },
+	{ "stacked", "Stacked", THEME_AOD, ALIGN_LEFT, 0.0090, theme_stacked },
+	{ "calendar", "Calendar", THEME_AOD, ALIGN_CENTRE, 0.0080, theme_calendar },
 	{ "flip", "Flip clock", THEME_AOD | THEME_LOCK, ALIGN_CENTRE, 0.0080, theme_flip },
-	{ "image", "Image", THEME_AOD, ALIGN_CENTRE, 0.0120, theme_image },
+	{ "image", "Image", THEME_AOD, ALIGN_CENTRE, 0.0080, theme_image },
 };
 #define N_CLOCK_THEMES	(int)(sizeof(CLOCK_THEMES) / sizeof(CLOCK_THEMES[0]))
 

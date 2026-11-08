@@ -43,6 +43,7 @@
 #include "zrnmetrocore.h"
 #include "zrnboard.h"
 #include "zt-clock.h"
+#include "../clock-theme-ids.h"
 #include "../background-apps.h"
 #include "config-merge.h"
 #include "page-tree.h"
@@ -142,6 +143,12 @@ enum action {
 	ACT_DOUBLE_TAP_WAKE,	/* a double tap on the always-on display wakes it */
 	ACT_AOD_AUTO,		/* the always-on display's level from the room */
 	ACT_AOD_LOW_OFF,	/* and dark below 15 % on battery */
+	ACT_AOD_THEME,		/* a theme's preview tapped: its index in CLOCK_THEME_IDS */
+	ACT_LOCK_THEME,		/* the same for the lock screen */
+	ACT_AOD_MATCH,		/* the lock screen's flip clock on the AOD too */
+	ACT_AOD_IMAGE_PICK,	/* the image theme's picture, from the gallery */
+	ACT_AOD_IMAGE_STRENGTH,	/* a picker: muted, faint */
+	ACT_AOD_FORCE_MARK,	/* the force press's mark on the AOD */
 	ACT_DEV_DEMOLOOP,
 	ACT_DEV_DEMOLOOP_STOP,
 	ACT_HAPTIC_STRENGTH,
@@ -263,6 +270,10 @@ static struct {
 	bool clock_24h;		/* "clock_24h": on, or off for 12-hour time (core/zt-clock.h) */
 	bool aod_auto;		/* "aod_auto_brightness": the AOD's level from the room */
 	bool aod_low_off;	/* "aod_low_battery_off": dark below 15 % on battery */
+	char aod_theme[16], lock_theme[16];	/* "aod_theme", "lock_theme" */
+	char aod_image[512];	/* "aod_image" */
+	int aod_image_faint;	/* "aod_image_strength": 0 muted, 1 faint */
+	bool aod_force_mark;	/* "aod_force_mark" */
 	int lock_timeout_idx;	/* "lock_timeout": an index into LOCK_TIMEOUT_SECONDS */
 	bool double_tap_wake;	/* "double_tap_wake" */
 	bool about_show_repo;
@@ -383,6 +394,11 @@ static void config_load(void) {
 	app.lock_timeout_idx = LOCK_TIMEOUT_DEFAULT;
 	app.aod_auto = true;
 	app.aod_low_off = false;
+	snprintf(app.aod_theme, sizeof(app.aod_theme), "metro");
+	snprintf(app.lock_theme, sizeof(app.lock_theme), "metro");
+	app.aod_image[0] = 0;
+	app.aod_image_faint = 0;
+	app.aod_force_mark = true;
 	app.double_tap_wake = true;
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
@@ -501,6 +517,16 @@ static void config_load(void) {
 			app.aod_charging = app.aod ? strcmp(val, "charging") == 0 : AOD_DEFAULT_CHARGING;
 		} else if (strcmp(key, "clock_24h") == 0) {
 			app.clock_24h = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "aod_theme") == 0) {
+			snprintf(app.aod_theme, sizeof(app.aod_theme), "%s", val);
+		} else if (strcmp(key, "lock_theme") == 0) {
+			snprintf(app.lock_theme, sizeof(app.lock_theme), "%s", val);
+		} else if (strcmp(key, "aod_image") == 0) {
+			snprintf(app.aod_image, sizeof(app.aod_image), "%s", val);
+		} else if (strcmp(key, "aod_image_strength") == 0) {
+			app.aod_image_faint = strcmp(val, "faint") == 0;
+		} else if (strcmp(key, "aod_force_mark") == 0) {
+			app.aod_force_mark = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "aod_low_battery_off") == 0) {
 			app.aod_low_off = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
 		} else if (strcmp(key, "aod_auto_brightness") == 0) {
@@ -699,6 +725,11 @@ static void config_format(void) {
 	KEY("double_tap_wake", "%s", app.double_tap_wake ? "on" : "off");
 	KEY("aod_auto_brightness", "%s", app.aod_auto ? "on" : "off");
 	KEY("aod_low_battery_off", "%s", app.aod_low_off ? "on" : "off");
+	KEY("aod_theme", "%s", app.aod_theme);
+	KEY("lock_theme", "%s", app.lock_theme);
+	if (app.aod_image[0]) KEY("aod_image", "%s", app.aod_image);
+	KEY("aod_image_strength", "%s", app.aod_image_faint ? "faint" : "muted");
+	KEY("aod_force_mark", "%s", app.aod_force_mark ? "on" : "off");
 	KEY("key_height", "%d", app.key_height);
 	KEY("key_sound", "%s", app.key_sound ? "on" : "off");
 	KEY("ring_volume", "%d", app.ring_vol);
@@ -1957,10 +1988,150 @@ static double draw_tiles(cairo_t *cr) {
 
 /* What waking the phone shows. The separate list of its photos comes with the
  * home screen's switcher (ROADMAP 7.8, 7.12); this is the one photo it has. */
+/* ---- clock themes: previews the shell draws (ztmetro previews_write) ---- */
+
+static cairo_surface_t *preview_cache[2][16];
+static time_t preview_mtime[2][16];
+
+/* $XDG_RUNTIME_DIR/ztmetro-previews/KIND-ID.png, again when it changes */
+static cairo_surface_t *preview_get(bool lock, int i) {
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	char path[512];
+	struct stat st;
+	snprintf(path, sizeof(path), "%s/ztmetro-previews/%s-%s.png", runtime ? runtime : "/tmp",
+		lock ? "lock" : "aod", CLOCK_THEME_IDS[i].id);
+	if (stat(path, &st) != 0) return NULL;
+	if (preview_cache[lock][i] && preview_mtime[lock][i] == st.st_mtime) return preview_cache[lock][i];
+	if (preview_cache[lock][i]) cairo_surface_destroy(preview_cache[lock][i]);
+	cairo_surface_t *s = cairo_image_surface_create_from_png(path);
+	if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS) {
+		cairo_surface_destroy(s);
+		s = NULL;
+	}
+	preview_cache[lock][i] = s;
+	preview_mtime[lock][i] = st.st_mtime;
+	return s;
+}
+
+/* while a page with previews is open: draw again when the shell has made new ones */
+static void preview_tick(void) {
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	for (int lock = 0; lock < 2; lock++) {
+		for (int i = 0; i < N_CLOCK_THEME_IDS; i++) {
+			char path[512];
+			struct stat st;
+			snprintf(path, sizeof(path), "%s/ztmetro-previews/%s-%s.png", runtime ? runtime : "/tmp",
+				lock ? "lock" : "aod", CLOCK_THEME_IDS[i].id);
+			if (stat(path, &st) == 0 && st.st_mtime != preview_mtime[lock][i]) {
+				zmc_redraw();
+				return;
+			}
+		}
+	}
+}
+
+/* The themes that go `where`, as tiles with their previews, `cols` a row;
+ * the chosen one ringed in the accent colour. */
+static double theme_tiles(cairo_t *cr, double y, unsigned where, const char *chosen, int action, int cols) {
+	bool lock = where == CLOCK_THEME_LOCK;
+	double gap = 10, tw = (zmc.width - 2 * ZMC_MARGIN - (cols - 1) * gap) / cols;
+	int k = 0;
+	for (int i = 0; i < N_CLOCK_THEME_IDS; i++) {
+		if (!(CLOCK_THEME_IDS[i].where & where)) continue;
+		cairo_surface_t *pv = preview_get(lock, i);
+		double pw = pv ? cairo_image_surface_get_width(pv) : 540, ph = pv ? cairo_image_surface_get_height(pv) : 1110;
+		double th = tw * ph / pw;
+		double x = ZMC_MARGIN + (k % cols) * (tw + gap), ty = y + (k / cols) * (th + 34);
+		cairo_save(cr);
+		cairo_rectangle(cr, x, ty, tw, th);
+		cairo_clip(cr);
+		cairo_set_source_rgb(cr, 0, 0, 0);
+		cairo_paint(cr);
+		if (pv) {
+			cairo_translate(cr, x, ty);
+			cairo_scale(cr, tw / pw, th / ph);
+			cairo_set_source_surface(cr, pv, 0, 0);
+			cairo_paint(cr);
+		}
+		cairo_restore(cr);
+		bool on = strcmp(chosen, CLOCK_THEME_IDS[i].id) == 0;
+		if (on) zmc_set_rgb(cr, zmc.accent); else cairo_set_source_rgb(cr, 0.35, 0.35, 0.35);
+		cairo_set_line_width(cr, on ? 3 : 1);
+		cairo_rectangle(cr, x - (on ? 1.5 : 0.5), ty - (on ? 1.5 : 0.5), tw + (on ? 3 : 1), th + (on ? 3 : 1));
+		cairo_stroke(cr);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		zmc_text(cr, CLOCK_THEME_IDS[i].name, FONT_REGULAR, 13, x, ty + th + 6, tw);
+		zmc_add_hit(x, ty, tw, th + 30, action, i);
+		if (k % cols == cols - 1 || i == N_CLOCK_THEME_IDS - 1) {
+			/* (the row's end) */
+		}
+		k++;
+	}
+	if (k == 0) return y;
+	int rows = (k + cols - 1) / cols;
+	cairo_surface_t *any = NULL;
+	for (int i = 0; i < N_CLOCK_THEME_IDS && !any; i++) {
+		if (CLOCK_THEME_IDS[i].where & where) any = preview_get(lock, i);
+	}
+	double ratio = any ? (double)cairo_image_surface_get_height(any) / cairo_image_surface_get_width(any) :
+		1110.0 / 540;
+	return y + rows * (tw * ratio + 34) + 8;
+}
+
+static FILE *aod_pick_pipe;
+
+static void aod_pick_ready(int fd, void *data) {
+	char line[600] = "";
+	zmc_watch_fd(fd, NULL, NULL);
+	if (fgets(line, sizeof(line), aod_pick_pipe)) {
+		line[strcspn(line, "\r\n")] = 0;
+		if (line[0] == '/') {
+			snprintf(app.aod_image, sizeof(app.aod_image), "%s", line);
+			snprintf(app.aod_theme, sizeof(app.aod_theme), "image");
+			config_save();
+		}
+	}
+	pclose(aod_pick_pipe);
+	aod_pick_pipe = NULL;
+	zmc_redraw();
+}
+
+static double draw_aod(cairo_t *cr) {
+	double y = zmc_header(cr, "always-on");
+	static const char *const modes[] = { "Off", "Always", "Only while charging" };
+	y = picker(cr, y, "Always-on display", modes, 3, !app.aod ? 0 : app.aod_charging ? 2 : 1, ACT_AOD_MODE);
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "Theme", FONT_REGULAR, 16, ZMC_MARGIN, y + 4, 0);
+	y = theme_tiles(cr, y + 32, CLOCK_THEME_AOD, app.aod_theme, ACT_AOD_THEME, 4);
+	if (strcmp(app.aod_theme, "image") == 0) {
+		const char *base = strrchr(app.aod_image, '/');
+		y = zmc_entry(cr, y, aod_pick_pipe ? "choosing a picture..." : "choose a picture",
+			app.aod_image[0] ? (base ? base + 1 : app.aod_image) : "None yet: one from the gallery",
+			ACT_AOD_IMAGE_PICK, 0);
+		static const char *const strengths[] = { "Muted", "Faint" };
+		y = picker(cr, y, "Picture strength", strengths, 2, app.aod_image_faint, ACT_AOD_IMAGE_STRENGTH);
+	}
+	/* off: a fixed dim level */
+	y = zmc_switch(cr, y, "Adjust AOD brightness automatically", app.aod_auto, ACT_AOD_AUTO);
+	y = zmc_switch(cr, y, "Turn off AOD below 15 % battery", app.aod_low_off, ACT_AOD_LOW_OFF);
+	y = zmc_switch(cr, y, "Show where to press for Start", app.aod_force_mark, ACT_AOD_FORCE_MARK);
+	return y + 20;
+}
+
 static double draw_lock(cairo_t *cr) {
 	double y = zmc_header(cr, "Lock Screen");
 	y = draw_wall_row(cr, y, "background photo", app.lock_wall, WALL_TARGET_LOCK);
 	y = zmc_switch(cr, y + 6, "Lock screen on wake", app.dev_lock, ACT_DEV_LOCK);
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "Clock", FONT_REGULAR, 16, ZMC_MARGIN, y + 4, 0);
+	y = theme_tiles(cr, y + 32, CLOCK_THEME_LOCK, app.lock_theme, ACT_LOCK_THEME, 2);
+	if (strcmp(app.lock_theme, "metro") != 0 && strcmp(app.aod_theme, app.lock_theme) != 0) {
+		char title[80];
+		snprintf(title, sizeof(title), "use the %s on the always-on display too",
+			clock_theme_name(app.lock_theme));
+		for (char *t = title + 8; *t; t++) *t = (char)tolower((unsigned char)*t);
+		y = zmc_entry(cr, y, title, "its matching AOD theme: static cards, dim", ACT_AOD_MATCH, 0);
+	}
 	/* woken and left alone, the lock screen goes dark (or to the always-on
 	 * display) after this; unlocked, the display page's timeout counts */
 	static const char *const lock_timeouts[] = { "Same as the screen", "5 seconds", "10 seconds",
@@ -2036,13 +2207,11 @@ static double draw_display(cairo_t *cr) {
 	y = picker(cr, y, "Screen times out after", timeouts, 5, app.timeout_idx, ACT_TIMEOUT_CYCLE);
 	/* the time, the date, the battery and notifications, dim, while the
 	 * screen is off; it keeps the phone from sleeping (see the shell) */
-	y = zmc_switch(cr, y, "Always-on display", app.aod, ACT_AOD);
-	if (app.aod) {
-		static const char *const aod_modes[] = { "Always", "Only while charging" };
-		y = picker(cr, y, "Show it", aod_modes, 2, app.aod_charging ? 1 : 0, ACT_AOD_MODE);
-		/* off: the panel's lowest level always */
-		y = zmc_switch(cr, y, "Adjust AOD brightness automatically", app.aod_auto, ACT_AOD_AUTO);
-		y = zmc_switch(cr, y, "Turn off AOD below 15 % battery", app.aod_low_off, ACT_AOD_LOW_OFF);
+	{
+		char detail[64];
+		snprintf(detail, sizeof(detail), "%s, %s", !app.aod ? "Off" : app.aod_charging ?
+			"only while charging" : "always", clock_theme_name(app.aod_theme));
+		y = zmc_entry(cr, y, "always-on display", detail, ACT_OPEN_PAGE, PAGE_AOD);
 	}
 	/* the shell sizes itself to the panel (360 points across); this is a step either side */
 	static const char *const scales[] = { "Compact", "Standard", "Large" };
@@ -3601,6 +3770,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_STYLE: return draw_style(cr);
 	case PAGE_TILES: return draw_tiles(cr);
 	case PAGE_LOCK: return draw_lock(cr);
+	case PAGE_AOD: return draw_aod(cr);
 	case PAGE_ACCENTS: return draw_accents(cr);
 	case PAGE_WALLS: return draw_wallpapers(cr);
 	case PAGE_NAVIGATION: {
@@ -3654,7 +3824,7 @@ static bool is_picker(int action) {
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
 	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
-	case ACT_AOD_MODE: case ACT_LOCK_TIMEOUT:
+	case ACT_AOD_MODE: case ACT_LOCK_TIMEOUT: case ACT_AOD_IMAGE_STRENGTH:
 		return true;
 	}
 	return (action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST) ||
@@ -4152,8 +4322,35 @@ static void activate(int action, int arg) {
 		app.aod = !app.aod;
 		config_save();
 		break;
-	case ACT_AOD_MODE:
-		app.aod_charging = arg == 1;
+	case ACT_AOD_MODE:	/* off, always, only while charging */
+		app.aod = arg != 0;
+		app.aod_charging = arg == 2;
+		config_save();
+		break;
+	case ACT_AOD_THEME:
+	case ACT_LOCK_THEME:
+		if (arg >= 0 && arg < N_CLOCK_THEME_IDS) {
+			char *t = action == ACT_AOD_THEME ? app.aod_theme : app.lock_theme;
+			snprintf(t, sizeof(app.aod_theme), "%s", CLOCK_THEME_IDS[arg].id);
+			config_save();
+		}
+		break;
+	case ACT_AOD_MATCH:
+		snprintf(app.aod_theme, sizeof(app.aod_theme), "%s", app.lock_theme);
+		config_save();
+		break;
+	case ACT_AOD_IMAGE_PICK:
+		if (!aod_pick_pipe) {
+			aod_pick_pipe = popen("ztgallery --pick 2>/dev/null", "r");
+			if (aod_pick_pipe) zmc_watch_fd(fileno(aod_pick_pipe), aod_pick_ready, NULL);
+		}
+		break;
+	case ACT_AOD_IMAGE_STRENGTH:
+		app.aod_image_faint = arg == 1;
+		config_save();
+		break;
+	case ACT_AOD_FORCE_MARK:
+		app.aod_force_mark = !app.aod_force_mark;
 		config_save();
 		break;
 	case ACT_CLOCK_24H:
@@ -4641,6 +4838,7 @@ static void arrived(int page) {
 		}
 	}
     if (page == PAGE_DATE) { date_focus = -1; date_job(false); zmc_every(5000, date_clock_tick); }
+	if (page == PAGE_AOD || page == PAGE_LOCK) zmc_every(1000, preview_tick);
 	if (page == PAGE_MOBILE) {
 		cell_load();
 		zmc_every(3000, cell_tick);	/* "connecting" becomes "connected" by itself */

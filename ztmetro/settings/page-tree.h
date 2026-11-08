@@ -45,6 +45,7 @@ enum page {
 	PAGE_LOCK,	/* Lock Screen: its photo, and whether waking shows it */
 	PAGE_APP_SCALE,	/* app scaling: a size for each app */
 	PAGE_LED,	/* the front LED: what lights it, and in what colour */
+	PAGE_AOD,	/* the always-on display: shown when, its theme, its brightness */
 	/* Sound's pages (sound/sound-pages.h), in its order: two pivots of two tabs */
 	PAGE_SOUND_EQ, PAGE_SOUND_FX, PAGE_SOUND_OUT, PAGE_SOUND_APPS,
 	/* AirPods' (pods/pods-pages.h), in its order: four tabs */
@@ -90,6 +91,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_ACCENTS] = PAGE_THEME,
 	[PAGE_TILES] = PAGE_THEME,
 	[PAGE_LOCK] = PAGE_THEME,
+	[PAGE_AOD] = PAGE_DISPLAY,
 	[PAGE_WALLS] = PAGE_TILES,	/* or Lock Screen: see page_parent */
 	[PAGE_ANIMATION] = PAGE_THEME,
 	[PAGE_STYLE] = PAGE_THEME,
@@ -134,6 +136,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "navigation", PAGE_NAVIGATION },
 	{ "quick", PAGE_QUICK },
 	{ "display", PAGE_DISPLAY },
+	{ "aod", PAGE_AOD },
 	{ "connections", PAGE_CONNECTIONS },
 	{ "wifi", PAGE_WIFI },
 	{ "wifinet", PAGE_WIFI_NET },

@@ -896,6 +896,12 @@ struct zt_server {
 	time_t flip_from, flip_last;	/* the minute it turns from; the last drawn */
 	uint32_t flip_start_ms;
 	struct wl_event_source *flip_timer;
+	struct wl_event_source *previews_timer;	/* previews_write, a moment after a change */
+	/* the screenshot chord, power and volume down together (SHOT_CHORD_MS) */
+	bool voldown_held, voldown_pending;
+	struct wl_event_source *voldown_timer, *flash_timer;
+	float flash_a;			/* the screenshot's white flash, fading */
+	struct zt_layer flash_layer;
 	int aod_light_ms;		/* the rate sensord was told; 0 none */
 	uint32_t aod_fast_until;	/* read the room often until then */
 	struct wl_event_source *aod_light_timer;
@@ -12710,7 +12716,13 @@ static cairo_surface_t *aod_image_surface(struct zt_server *server, int pw, int 
 	if (!server->aod_image[0]) {
 		return NULL;
 	}
+	/* gdk-pixbuf's glycin decodes in a child it waits for: not with SIGCHLD
+	 * ignored, as the shell has it (its other children reap themselves) */
+	struct sigaction previous, wait_ok = { .sa_handler = SIG_DFL };
+	sigemptyset(&wait_ok.sa_mask);
+	sigaction(SIGCHLD, &wait_ok, &previous);
 	cairo_surface_t *img = image_cover(server->aod_image, pw, ph);
+	sigaction(SIGCHLD, &previous, NULL);
 	if (!img) {
 		return NULL;
 	}
@@ -12863,6 +12875,96 @@ static void aod_draw_place(struct zt_server *server, time_t now, int place) {
 	}
 	server->aod_budget_k = k;
 	zt_buffer_show(server, &server->aod_layer, buffer, cr, w, h);
+}
+
+/* Previews of the themes for Settings' pickers: $XDG_RUNTIME_DIR/ztmetro-previews/
+ * aod-ID.png (the whole screen) and lock-ID.png (the lock clock's band), at
+ * PREVIEW_SCALE pixels a point, the time 10:08, the AOD at its fixed level and
+ * its theme's budget. Made again only when something they show changes. */
+#define PREVIEW_SCALE	1.5
+static void previews_write(struct zt_server *server, const char *into) {
+	const char *runtime = into ? into : getenv("XDG_RUNTIME_DIR");
+	if (!runtime || (g_dump_dir && !into) || server->width <= 0) {
+		return;
+	}
+	static char made[700];
+	char key[700], dir[300], path[400];
+	snprintf(key, sizeof(key), "%d|%s|%d|%d|%d|%06x|%d", server->clock_24h, server->aod_image,
+		server->aod_image_faint, server->aod_force_mark_on, server->force_press, server->accent,
+		server->width);
+	if (strcmp(key, made) == 0) {
+		return;
+	}
+	snprintf(made, sizeof(made), "%s", key);
+	snprintf(dir, sizeof(dir), "%s/ztmetro-previews", runtime);
+	mkdir(dir, 0700);
+	struct tm tm;
+	time_t now = time(NULL);
+	localtime_r(&now, &tm);
+	tm.tm_hour = 10;
+	tm.tm_min = 8;
+	time_t at = mktime(&tm);
+	double scale = server->scale;
+	server->scale = PREVIEW_SCALE;	/* (aod_icon and the picture draw at it) */
+	double w = server->width, h = server->height;
+	for (int i = 0; i < N_CLOCK_THEMES; i++) {
+		const struct clock_theme *t = &CLOCK_THEMES[i];
+		if (t->where & THEME_AOD) {
+			int pw = (int)ceil(w * PREVIEW_SCALE), ph = (int)ceil(h * PREVIEW_SCALE);
+			cairo_surface_t *sf = cairo_image_surface_create(CAIRO_FORMAT_RGB24, pw, ph);
+			cairo_t *cr = cairo_create(sf);
+			cairo_scale(cr, PREVIEW_SCALE, PREVIEW_SCALE);
+			aod_compose(server, cr, w, h, at, 0, t);
+			cairo_destroy(cr);
+			double mean, lit;
+			aod_measure(sf, pw, ph, &mean, &lit);
+			/* as the panel would show it: the budget and the fixed level's
+			 * pixels (the panel's own level is not in a picture) */
+			double k = (mean > t->light_budget ? t->light_budget / mean : 1) *
+				AOD_LEVELS[AOD_FIXED_LEVEL].scale;
+			unsigned char *d = cairo_image_surface_get_data(sf);
+			int stride = cairo_image_surface_get_stride(sf);
+			for (int y = 0; y < ph; y++) {
+				uint32_t *row = (uint32_t *)(d + (size_t)y * stride);
+				for (int x = 0; x < pw; x++) {
+					uint32_t v = row[x];
+					if (!(v & 0xffffff)) continue;
+					row[x] = (uint32_t)(((v >> 16) & 0xff) * k) << 16 | (uint32_t)(((v >> 8) & 0xff) * k) << 8 |
+						(uint32_t)((v & 0xff) * k);
+				}
+			}
+			cairo_surface_mark_dirty(sf);
+			snprintf(path, sizeof(path), "%s/aod-%s.png", dir, t->id);
+			char tmp[410];
+			snprintf(tmp, sizeof(tmp), "%s.new", path);
+			if (cairo_surface_write_to_png(sf, tmp) == CAIRO_STATUS_SUCCESS) rename(tmp, path);
+			cairo_surface_destroy(sf);
+		}
+		if (t->where & THEME_LOCK) {
+			double bh = 240;	/* the lock clock's band */
+			int pw = (int)ceil(w * PREVIEW_SCALE), ph = (int)ceil(bh * PREVIEW_SCALE);
+			cairo_surface_t *sf = cairo_image_surface_create(CAIRO_FORMAT_RGB24, pw, ph);
+			cairo_t *cr = cairo_create(sf);
+			cairo_scale(cr, PREVIEW_SCALE, PREVIEW_SCALE);
+			cairo_set_source_rgb(cr, 0.11, 0.13, 0.19);	/* a photo's dark, under it */
+			cairo_paint(cr);
+			cairo_translate(cr, 0, -(h - 282));
+			lock_clock_paint(server, cr, t, at, at, 1);
+			cairo_destroy(cr);
+			snprintf(path, sizeof(path), "%s/lock-%s.png", dir, t->id);
+			char tmp[410];
+			snprintf(tmp, sizeof(tmp), "%s.new", path);
+			if (cairo_surface_write_to_png(sf, tmp) == CAIRO_STATUS_SUCCESS) rename(tmp, path);
+			cairo_surface_destroy(sf);
+		}
+	}
+	server->scale = scale;
+	wlr_log(WLR_INFO, "theme previews written");
+}
+
+static int previews_idle(void *data) {
+	previews_write(data, NULL);
+	return 0;
 }
 
 /* The picture for the time `now`, at its place. */
@@ -15746,12 +15848,84 @@ static void touches_cancel_all(struct zt_server *server) {
 	damage(server);
 }
 
+/* ---- the screenshot chord ----------------------------------------------------
+ * Power and volume down together, as on Android: a PNG in ~/Pictures/
+ * Screenshots (grim, through wlr-screencopy), a short white flash, a heavy
+ * tick, and "Screenshot saved" as a notification. Volume down's own step
+ * waits SHOT_CHORD_MS for the power key; the power key's own action (the
+ * screen off) happens on its release anyway, and a chord cancels it. With the
+ * screen off the power key wakes it, as ever: no chord. */
+#define SHOT_CHORD_MS	150
+#define SHOT_FLASH_MS	280
+#define SHOT_FLASH_DELAY_MS 300	/* after grim has its frame */
+
+static void screenshot_take(struct zt_server *server) {
+	char when[32], file[96], cmd[400];
+	time_t now = time(NULL);
+	struct tm tm;
+	localtime_r(&now, &tm);
+	strftime(when, sizeof(when), "%Y%m%d_%H%M%S", &tm);
+	snprintf(file, sizeof(file), "Screenshot_%s.png", when);
+	snprintf(cmd, sizeof(cmd), "d=\"$HOME/Pictures/Screenshots\"; mkdir -p \"$d\" && "
+		"grim \"$d/%s\" && notify-send -a Screenshots -i camera \"Screenshot saved\" \"%s\"", file, file);
+	run_detached("sh", "-c", cmd, NULL);
+	hap(server, HAP_HEAVY, HG_SYSTEM);
+	if (!server->flash_layer.tex && server->width > 0) {
+		cairo_t *cr;
+		struct zt_buffer *b = zt_buffer_create(server, 4, 4, &cr);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		cairo_paint(cr);
+		zt_buffer_show(server, &server->flash_layer, b, cr, 4, 4);
+	}
+	wl_event_source_timer_update(server->flash_timer, SHOT_FLASH_DELAY_MS);
+	wlr_log(WLR_INFO, "screenshot: %s", file);
+}
+
+/* the flash: on at once, fading out */
+static int flash_start(void *data) {
+	struct zt_server *server = data;
+	server->flash_a = 0.85f;
+	animate(server, &server->flash_a, 0.0f, SHOT_FLASH_MS, 0, false);
+	damage(server);
+	return 0;
+}
+
+static void volume_step(struct zt_server *server, int by);
+
+/* volume down's own step, once it is not a chord */
+static void voldown_apply(struct zt_server *server) {
+	server->voldown_pending = false;
+	server->volume_repeat_by = 0;
+	volume_step(server, -1);
+	if (server->voldown_held) {
+		server->volume_repeat_by = -1;
+		wl_event_source_timer_update(server->volume_repeat_timer, 400);
+	}
+}
+
+static int voldown_later(void *data) {
+	struct zt_server *server = data;
+	if (server->voldown_pending) {
+		voldown_apply(server);
+	}
+	return 0;
+}
+
 /* A key, from a keyboard or (keyboard NULL) from the control pipe. */
 static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, struct wlr_keyboard_key_event *event) {
 	if (event->keycode == KEY_POWER) {
 		/* the power key is the shell's alone: see power/power-key.h */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+			bool on = server->screen_on;
 			power_key_apply(server, power_key_pressed(&server->power_key, server->screen_on));
+			if (on && server->voldown_held) {
+				/* the chord: volume down is down already */
+				server->voldown_pending = false;
+				wl_event_source_timer_update(server->voldown_timer, 0);
+				server->power_key.held_long = true;	/* no screen off, no menu */
+				screenshot_take(server);
+				return;
+			}
 			wl_event_source_timer_update(server->power_key_timer, POWER_HOLD_MS);
 		} else {
 			wl_event_source_timer_update(server->power_key_timer, 0);
@@ -15831,13 +16005,33 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 			if (demoloop_active()) {
 				/* Volume down is handled above; volume up is suppressed too. */
+			} else if (event->keycode == KEY_VOLUMEDOWN) {
+				server->voldown_held = true;
+				if (server->power_key.held && !server->power_key.held_long && !server->power_key.woke) {
+					/* the chord: power is down already (the screen on) */
+					server->power_key.held_long = true;
+					wl_event_source_timer_update(server->power_key_timer, 0);
+					screenshot_take(server);
+				} else {
+					/* its step waits a moment for the power key */
+					server->voldown_pending = true;
+					wl_event_source_timer_update(server->voldown_timer, SHOT_CHORD_MS);
+				}
 			} else {
 				server->volume_repeat_by = 0;
-				volume_step(server, event->keycode == KEY_VOLUMEUP ? 1 : -1);
-				server->volume_repeat_by = event->keycode == KEY_VOLUMEUP ? 1 : -1;
+				volume_step(server, 1);
+				server->volume_repeat_by = 1;
 				wl_event_source_timer_update(server->volume_repeat_timer, 400);
 			}
 		} else {
+			if (event->keycode == KEY_VOLUMEDOWN) {
+				server->voldown_held = false;
+				if (server->voldown_pending) {
+					/* a quick tap, before the chord's wait ran out */
+					wl_event_source_timer_update(server->voldown_timer, 0);
+					voldown_apply(server);
+				}
+			}
 			server->volume_repeat_by = 0;
 			wl_event_source_timer_update(server->volume_repeat_timer, 0);
 		}
@@ -17149,6 +17343,15 @@ static void render_frame(struct zt_server *server) {
 			damage(server);
 		}
 	}
+	if (server->flash_a > 0.002f && server->flash_layer.tex) {
+		/* the screenshot's flash, the whole screen */
+		float m[16];
+		mat_identity(m);
+		mat_scale(m, (float)server->width, (float)server->height);
+		quad(server, GL_TEXTURE_2D, server->flash_layer.tex, m, server->flash_a, true, false,
+			(float)server->flash_layer.pw / server->flash_layer.tw,
+			(float)server->flash_layer.ph / server->flash_layer.th);
+	}
 	/* the colour temperature and the software brightness are not drawn here:
 	 * every quad is multiplied by them as it is drawn (frame_tint) */
 
@@ -17677,6 +17880,9 @@ static int reload(int signal_number, void *data) {
 	}
 	aod_sync(server);	/* switched on or off in Settings while dark */
 	aod_refresh(server);	/* the clock's format, say */
+	if (server->previews_timer) {
+		wl_event_source_timer_update(server->previews_timer, 1500);	/* Settings' pickers */
+	}
 	if (server->aod && !server->screen_on) {
 		/* the brightness switch changed while it shows */
 		if (server->aod_auto && !server->aod_light_ms) {
@@ -17855,6 +18061,54 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	server->clock_24h = true;
 	g_dump_name = "lock-clock-24h";
 	draw_lock_clock_at(server, longest);
+	/* every AOD theme with the longest 12-hour time and in 24-hour time, and
+	 * its light against its budget (aod-themes.txt) */
+	char themes_txt[512];
+	snprintf(themes_txt, sizeof(themes_txt), "%s/aod-themes.txt", dir);
+	FILE *tf = fopen(themes_txt, "w");
+	char saved_theme[16];
+	snprintf(saved_theme, sizeof(saved_theme), "%s", server->aod_theme);
+	if (!server->aod_image[0] && getenv("ZTMETRO_AOD_IMAGE")) {
+		snprintf(server->aod_image, sizeof(server->aod_image), "%s", getenv("ZTMETRO_AOD_IMAGE"));
+	}
+	for (int i = 0; i < N_CLOCK_THEMES; i++) {
+		if (!(CLOCK_THEMES[i].where & THEME_AOD)) continue;
+		snprintf(server->aod_theme, sizeof(server->aod_theme), "%s", CLOCK_THEMES[i].id);
+		for (int h = 0; h < 2; h++) {
+			char name[48];
+			server->clock_24h = h;
+			snprintf(name, sizeof(name), "aod-theme-%s-%s", CLOCK_THEMES[i].id, h ? "24h" : "12h");
+			g_dump_name = name;
+			aod_draw_place(server, longest, 0);
+			if (tf) {
+				fprintf(tf, "%-9s %s  light %.4f (budget %.4f, x%.2f)  lit %.1f %%\n", CLOCK_THEMES[i].id,
+					h ? "24h" : "12h", server->aod_mean, CLOCK_THEMES[i].light_budget,
+					server->aod_budget_k, server->aod_lit * 100);
+			}
+		}
+	}
+	if (tf) fclose(tf);
+	snprintf(server->aod_theme, sizeof(server->aod_theme), "%s", saved_theme);
+	/* the lock screen's flip clock, still and turning */
+	char saved_lock[16];
+	snprintf(saved_lock, sizeof(saved_lock), "%s", server->lock_theme);
+	snprintf(server->lock_theme, sizeof(server->lock_theme), "flip");
+	for (int h = 0; h < 2; h++) {
+		server->clock_24h = h;
+		g_dump_name = h ? "lock-flip-24h" : "lock-flip-12h";
+		draw_lock_clock_at(server, longest);
+	}
+	server->flip_from = longest - 60;
+	server->flip_last = longest;
+	static const double FLIP_AT[] = { 0.25, 0.7 };
+	for (int i = 0; i < 2; i++) {
+		server->flip_t = FLIP_AT[i];
+		g_dump_name = i ? "lock-flip-mid-2" : "lock-flip-mid-1";
+		draw_lock_clock_at(server, longest);
+	}
+	server->flip_t = 1;
+	snprintf(server->lock_theme, sizeof(server->lock_theme), "%s", saved_lock);
+	previews_write(server, dir);
 	server->clock_24h = h24;
 	server->n_notes = 0;
 	server->note_swipe_uid = 0;
@@ -18098,6 +18352,10 @@ int main(int argc, char *argv[]) {
 	server.repeat_index = -1;
 	server.aod_light_timer = wl_event_loop_add_timer(server.loop, aod_light_tick, &server);
 	server.flip_timer = wl_event_loop_add_timer(server.loop, flip_frame, &server);
+	server.previews_timer = wl_event_loop_add_timer(server.loop, previews_idle, &server);
+	server.voldown_timer = wl_event_loop_add_timer(server.loop, voldown_later, &server);
+	server.flash_timer = wl_event_loop_add_timer(server.loop, flash_start, &server);
+	wl_event_source_timer_update(server.previews_timer, 20000);	/* once the session has settled */
 	server.idle_timer = wl_event_loop_add_timer(server.loop, idle_fired, &server);
 	uevent_init(&server);
 	wl_event_loop_add_signal(server.loop, SIGHUP, reload, &server);
