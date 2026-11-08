@@ -102,6 +102,7 @@ static bool dirty, readings_dirty;
 static uint64_t readings_saved;
 static long hint_until;
 static bool scan_wanted, scan_started, scan_pending;
+static uint64_t objects_retry_at;	/* the device list wasn't had: asked again then */
 static bool desktop;		/* ZTOS_PODSD_DESKTOP=1: no ztmetro.state is a screen that is on */
 static uint64_t scan_next, scan_end;
 static char transports[8][128];
@@ -474,8 +475,17 @@ static sd_bus_message *adapter_call(const char *method) {
 
 static int read_objects(sd_bus_message *m);
 
+/* A slow bluetoothd (busy connecting something) can time this out. Without it, a pair
+ * that is already connected is never seen as connected: so it is asked for again. */
 static int on_objects(sd_bus_message *m, void *data, sd_bus_error *ret) {
-	if (sd_bus_message_is_method_error(m, NULL)) return 0;
+	if (sd_bus_message_is_method_error(m, NULL)) {
+		const sd_bus_error *e = sd_bus_message_get_error(m);
+		say("device list: %s, asking again", e && e->name ? e->name : "failed");
+		objects_retry_at = now_ms() + 3000;
+		kick();
+		return 0;
+	}
+	objects_retry_at = 0;
 	read_objects(m);
 	kick();
 	return 0;
@@ -491,13 +501,21 @@ static void get_objects(void) {
 
 static void discovery_stop(void);
 
-/* InProgress is not "started": BlueZ also says it when the kernel refused, and drops us. */
+/* InProgress is not "started": BlueZ also says it when the kernel refused, and drops us.
+ * But a call that timed out (NoReply) may have started it all the same, and after that
+ * every start says InProgress for as long as it runs: for both, a stop is sent at the
+ * burst's end (to a discovery that isn't ours, BlueZ just says no), or it never ends. */
 static int on_started(sd_bus_message *m, void *data, sd_bus_error *ret) {
 	scan_pending = false;
 	if (sd_bus_message_is_method_error(m, NULL)) {
 		const sd_bus_error *e = sd_bus_message_get_error(m);
 		say("discovery: %s", e && e->name ? e->name : "refused");
-		scan_wanted = false;
+		bool maybe = e && e->name && (!strcmp(e->name, "org.freedesktop.DBus.Error.NoReply") ||
+			!strcmp(e->name, "org.bluez.Error.InProgress"));
+		if (maybe) scan_started = true;
+		else scan_wanted = false;
+		if (maybe && !scan_wanted) discovery_stop();
+		kick();
 		return 0;
 	}
 	scan_started = true;
@@ -596,6 +614,8 @@ static void apply_connected(struct pod_io *i, struct pods_device *d, bool connec
 	dirty = true;
 }
 
+static void get_device(const char *path);
+
 static void apply_device(const char *path, const struct dev_props *p, bool snapshot) {
 	char mac[18];
 	if (!pods_path_mac(path, mac)) return;
@@ -608,6 +628,9 @@ static void apply_device(const char *path, const struct dev_props *p, bool snaps
 	if (d) {
 		struct pod_io *i = io_find(mac, true);
 		if (i) {
+			/* first heard of in a change that has only some properties (UUIDs, as
+			 * services resolve): the rest, Connected and the name, asked for */
+			if (!i->path[0] && !snapshot) get_device(path);
 			snprintf(i->path, sizeof(i->path), "%s", path);
 			if (p->alias) snprintf(i->bluez_name, sizeof(i->bluez_name), "%s", p->alias);
 			else if (p->name && !i->bluez_name[0]) snprintf(i->bluez_name, sizeof(i->bluez_name), "%s", p->name);
@@ -805,6 +828,28 @@ static int on_removed(sd_bus_message *m, void *data, sd_bus_error *ret) {
 	return 0;
 }
 
+static int on_device(sd_bus_message *m, void *data, sd_bus_error *ret) {
+	char *path = data;
+	if (!sd_bus_message_is_method_error(m, NULL)) read_props(path, DEVICE1, m, true);
+	free(path);
+	kick();
+	return 0;
+}
+
+static void get_device(const char *path) {
+	sd_bus_message *m = NULL;
+	char *copy = strdup(path);
+	if (!copy || sd_bus_message_new_method_call(bus, &m, BLUEZ, path, "org.freedesktop.DBus.Properties", "GetAll") < 0 ||
+			sd_bus_message_append(m, "s", DEVICE1) < 0) {
+		free(copy);
+		sd_bus_message_unref(m);
+		return;
+	}
+	sd_bus_message_set_auto_start(m, 0);
+	if (sd_bus_call_async(bus, NULL, m, on_device, copy, 10000000) < 0) free(copy);
+	sd_bus_message_unref(m);
+}
+
 static int on_changed(sd_bus_message *m, void *data, sd_bus_error *ret) {
 	const char *iface;
 	if (sd_bus_message_read(m, "s", &iface) >= 0) read_props(sd_bus_message_get_path(m), iface, m, false);
@@ -816,6 +861,7 @@ static int on_changed(sd_bus_message *m, void *data, sd_bus_error *ret) {
 static void bluez_gone(void) {
 	bluez_up = powered = discovering = scan_started = scan_wanted = scan_pending = false;
 	adapter[0] = 0;
+	objects_retry_at = 0;
 	memset(transports, 0, sizeof(transports));
 	for (int k = 0; k < PODS_MAX; k++) {
 		if (!io[k].used) continue;
@@ -963,6 +1009,15 @@ static int on_tick(sd_event_source *s, uint64_t usec, void *data) {
 		if (i->state == IO_IDLE && i->connected && d && bluez_up) {
 			if (now >= i->retry_at) channel_ask(i);
 			else next = earlier(next, i->retry_at);
+		}
+	}
+
+	if (objects_retry_at && bluez_up) {
+		if (now >= objects_retry_at) {
+			objects_retry_at = 0;
+			get_objects();
+		} else {
+			next = earlier(next, objects_retry_at);
 		}
 	}
 

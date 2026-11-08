@@ -6,7 +6,7 @@
 
 Name:           ztpods-qt
 Version:        0.1.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        AirPods batteries, listening modes and settings for a Qt desktop
 License:        GPL-3.0-or-later
 URL:            https://github.com/Samuelrmlink/ztOS
@@ -78,5 +78,10 @@ export QT_QPA_PLATFORM=offscreen
 %{_datadir}/icons/hicolor/scalable/apps/ztpods-qt.svg
 
 %changelog
+* Sat Nov 07 2026 Samuel Hedrick <choptec@gmail.com> - 0.1.0-2
+- ztos-podsd: ask for the device list again when a busy bluetoothd times it out,
+  and for a pair's properties when it is first heard of in a partial change, so
+  a pair connected at start is seen as connected; a discovery start that timed
+  out or said InProgress is still stopped at the end of its burst
 * Sat Nov 07 2026 Samuel Hedrick <choptec@gmail.com> - 0.1.0-1
 - First package: ztpods-qt and ztos-podsd from ztOS

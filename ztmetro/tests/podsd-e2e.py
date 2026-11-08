@@ -42,7 +42,7 @@ ENC = bytes.fromhex("102132435465768798a9bacbdcedfe0f")
 ADVERT = bytes.fromhex("071901242021784f110000e6d281bd9ac710bf53fc1bfc3e18f136")
 ADAPTER1, DEVICE1 = "org.bluez.Adapter1", "org.bluez.Device1"
 PROPS, OM = "org.freedesktop.DBus.Properties", "org.freedesktop.DBus.ObjectManager"
-ALLOWED = {"GetManagedObjects", "SetDiscoveryFilter", "StartDiscovery", "StopDiscovery", "Get", "Connect"}
+ALLOWED = {"GetManagedObjects", "SetDiscoveryFilter", "StartDiscovery", "StopDiscovery", "Get", "GetAll", "Connect"}
 
 
 def hdr(op, *payload):
@@ -59,6 +59,8 @@ class Bluez(dbus.service.Object):
         self.bus = bus
         self.calls = []
         self.connect_fails = False
+        self.objects_fail = 0		# GetManagedObjects fails this many times, as a busy bluetoothd's does
+        self.objects_hide_device = False
         self.adapter = {"Powered": dbus.Boolean(True), "Discovering": dbus.Boolean(False)}
         self.device = {"Address": MAC, "Alias": "Sam's AirPods", "Paired": dbus.Boolean(True),
                        "Connected": dbus.Boolean(False), "Modalias": "bluetooth:v004Cp2024d0100",
@@ -69,6 +71,11 @@ class Bluez(dbus.service.Object):
     @dbus.service.method(OM, out_signature="a{oa{sa{sv}}}")
     def GetManagedObjects(self):
         self.calls.append(("GetManagedObjects",))
+        if self.objects_fail:
+            self.objects_fail -= 1
+            raise dbus.DBusException("busy", name="org.freedesktop.DBus.Error.NoReply")
+        if self.objects_hide_device:
+            return {HCI: {ADAPTER1: self.adapter}}
         return {HCI: {ADAPTER1: self.adapter}, DEV: {DEVICE1: self.device}}
 
     @dbus.service.signal(OM, signature="oa{sa{sv}}")
@@ -123,6 +130,11 @@ class Device(dbus.service.Object):
     def Get(self, iface, name):
         self.world.calls.append(("Get", name))
         return self.world.device[name]
+
+    @dbus.service.method(PROPS, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, iface):
+        self.world.calls.append(("GetAll",))
+        return self.world.device
 
     @dbus.service.method(PROPS, in_signature="ssv")
     def Set(self, iface, name, value):
@@ -560,6 +572,47 @@ def run(t):
             assert len(t.calls("StartDiscovery")) == n
         t.tell("scan-hint off")
         t.stop()
+
+    # a busy bluetoothd at the start: the device list times out, and is asked for again.
+    # Without it a pair already connected was never seen as connected (seen on a PC).
+    log = os.path.join(t.tmp, "daemon.log")
+    open(log, "w").close()
+    t.bz.device["Connected"] = dbus.Boolean(True)
+    t.bz.objects_fail = 1
+    os.unlink(os.path.join(t.run, "ztos-pods-state.json"))
+    t.start(True)
+    wait("the list asked for again", lambda: len(t.calls("GetManagedObjects")) >= 2)
+    wait("connected, from the second list", lambda: b"BlueZ says connected" in open(log, "rb").read())
+    assert b"device list: org.freedesktop.DBus.Error.NoReply" in open(log, "rb").read()
+    t.stop()
+
+    # first heard of in a change with only its UUIDs (services resolving): the rest is asked for
+    t.bz.objects_hide_device = True
+    open(log, "w").close()
+    os.unlink(os.path.join(t.run, "ztos-pods-state.json"))
+    t.start(True)
+    wait("BlueZ, once more", lambda: t.state() and t.state()["bluetooth"])
+    t.set_device(UUIDs=dbus.Array([SERVICE], signature="s"))
+    wait("its properties asked for", lambda: t.calls("GetAll"))
+    wait("connected and named", lambda: b"BlueZ says connected" in open(log, "rb").read() and
+         t.device() and t.device()["name"] == "Sam's AirPods")
+    t.stop()
+    t.bz.objects_hide_device = False
+    t.bz.device["Connected"] = dbus.Boolean(False)
+
+    # discovery answered InProgress (a start that timed out may have started it after all):
+    # the burst still ends with a stop, or it runs for as long as the daemon does
+    t.bz.hci.fail_with = "org.bluez.Error.InProgress"
+    os.unlink(os.path.join(t.run, "ztos-pods-state.json"))
+    t.start(True)
+    wait("BlueZ, last time", lambda: t.state() and t.state()["bluetooth"])
+    n_start, n_stop = len(t.calls("StartDiscovery")), len(t.calls("StopDiscovery"))
+    assert t.tell("scan-hint on") == "ok"
+    wait("a start refused", lambda: len(t.calls("StartDiscovery")) > n_start)
+    wait("and stopped at the burst's end", lambda: len(t.calls("StopDiscovery")) > n_stop, 15)
+    t.tell("scan-hint off")
+    t.bz.hci.fail_with = None
+    t.stop()
 
 
 if __name__ == "__main__":
