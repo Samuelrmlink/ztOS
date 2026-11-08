@@ -136,6 +136,7 @@ enum action {
 	ACT_AOD,		/* the always-on display: on or off */
 	ACT_AOD_MODE,		/* a picker: always, or only on a charger */
 	ACT_CLOCK_24H,		/* "21:41" or "9:41 PM", for every clock */
+	ACT_LOCK_TIMEOUT,	/* a picker: how long the lock screen stays lit */
 	ACT_DEV_DEMOLOOP,
 	ACT_DEV_DEMOLOOP_STOP,
 	ACT_HAPTIC_STRENGTH,
@@ -255,6 +256,7 @@ static struct {
 	bool dev_demo_tiles, dev_slow, dev_touches, dev_lock;
 	bool aod, aod_charging;	/* the always-on display ("aod": off, on, charging) */
 	bool clock_24h;		/* "clock_24h": on, or off for 12-hour time (core/zt-clock.h) */
+	int lock_timeout_idx;	/* "lock_timeout": an index into LOCK_TIMEOUT_SECONDS */
 	bool about_show_repo;
 	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
 	int haptic_strength;	/* percent */
@@ -326,6 +328,9 @@ static void read_sys_file(const char *path, char *out, size_t size) {
 
 /* The picker's screen timeouts: seconds, the last one never. */
 static const int TIMEOUT_SECONDS[] = { 30, 60, 180, 300, 0 };
+/* the lock screen, woken and left: 0 is the screen's own timeout (as before) */
+static const int LOCK_TIMEOUT_SECONDS[] = { 0, 5, 10, 15, 30, 60 };
+#define N_LOCK_TIMEOUTS	(int)(sizeof(LOCK_TIMEOUT_SECONDS) / sizeof(LOCK_TIMEOUT_SECONDS[0]))
 
 /* The timeout the shell is really using, however the file came to say it. */
 static const char *timeout_text(char *out, size_t size, int seconds) {
@@ -362,6 +367,7 @@ static void config_load(void) {
 	app.aod = false;			/* off until switched on */
 	app.aod_charging = AOD_DEFAULT_CHARGING;
 	app.clock_24h = true;			/* as ZT_CLOCK_24H_DEFAULT */
+	app.lock_timeout_idx = 0;		/* the screen's own timeout */
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
@@ -473,6 +479,12 @@ static void config_load(void) {
 			app.aod_charging = app.aod ? strcmp(val, "charging") == 0 : AOD_DEFAULT_CHARGING;
 		} else if (strcmp(key, "clock_24h") == 0) {
 			app.clock_24h = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "lock_timeout") == 0) {
+			int t = atoi(val), best = 0;	/* the nearest choice */
+			for (int i = 0; i < N_LOCK_TIMEOUTS; i++) {
+				if (abs(LOCK_TIMEOUT_SECONDS[i] - t) < abs(LOCK_TIMEOUT_SECONDS[best] - t)) best = i;
+			}
+			app.lock_timeout_idx = best;
 		}
 	}
 	if (f) fclose(f);
@@ -604,7 +616,7 @@ static void auto_load(void) {
 }
 
 /* Every key Settings can write, as it would write it now. */
-enum { N_CONFIG_KEYS = 29 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };
+enum { N_CONFIG_KEYS = 32 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };	/* 32: the KEY("...") lines below */
 static struct config_key config_keys[N_CONFIG_KEYS];
 static int config_n;	/* how many config_format filled in: N_CONFIG_KEYS is only the room */
 
@@ -651,6 +663,7 @@ static void config_format(void) {
 	KEY("wifi_suspend", "%s", app.wifi_suspend ? "on" : "off");
 	KEY("aod", "%s", !app.aod ? "off" : app.aod_charging ? "charging" : "on");
 	KEY("clock_24h", "%s", app.clock_24h ? "on" : "off");
+	KEY("lock_timeout", "%d", LOCK_TIMEOUT_SECONDS[app.lock_timeout_idx]);
 	KEY("key_height", "%d", app.key_height);
 	KEY("key_sound", "%s", app.key_sound ? "on" : "off");
 	KEY("ring_volume", "%d", app.ring_vol);
@@ -1913,6 +1926,12 @@ static double draw_lock(cairo_t *cr) {
 	double y = zmc_header(cr, "Lock Screen");
 	y = draw_wall_row(cr, y, "background photo", app.lock_wall, WALL_TARGET_LOCK);
 	y = zmc_switch(cr, y + 6, "Lock screen on wake", app.dev_lock, ACT_DEV_LOCK);
+	/* woken and left alone, the lock screen goes dark (or to the always-on
+	 * display) after this; unlocked, the display page's timeout counts */
+	static const char *const lock_timeouts[] = { "Same as the screen", "5 seconds", "10 seconds",
+		"15 seconds", "30 seconds", "1 minute" };
+	y = picker(cr, y, "Screen timeout on the lock screen", lock_timeouts, N_LOCK_TIMEOUTS,
+		app.lock_timeout_idx, ACT_LOCK_TIMEOUT);
 	return y + 20;
 }
 
@@ -3583,7 +3602,7 @@ static bool is_picker(int action) {
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
 	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
-	case ACT_AOD_MODE:
+	case ACT_AOD_MODE: case ACT_LOCK_TIMEOUT:
 		return true;
 	}
 	return (action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST) ||
@@ -4087,6 +4106,10 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_CLOCK_24H:
 		app.clock_24h = !app.clock_24h;
+		config_save();
+		break;
+	case ACT_LOCK_TIMEOUT:
+		app.lock_timeout_idx = arg < 0 || arg >= N_LOCK_TIMEOUTS ? 0 : arg;
 		config_save();
 		break;
 	case ACT_DEV_DEMOLOOP: {

@@ -871,6 +871,7 @@ struct zt_server {
 	unsigned aod_frames;		/* frames sent to the panel, for the state file */
 	int aod_place_shown;		/* the place last drawn, to log each move */
 	int screen_timeout;		/* seconds of no input before the screen sleeps; 0: never */
+	int lock_timeout;		/* the same on the lock screen; 0: screen_timeout */
 	uint32_t idle_armed_ms;
 	struct wl_event_source *idle_timer;
 	int uevent_fd;
@@ -3297,6 +3298,7 @@ static void load_config(struct zt_server *server) {
 	server->key_sound = true;
 	server->ring_volume = 21;
 	server->screen_timeout = SCREEN_TIMEOUT_S;
+	server->lock_timeout = 0;	/* as the screen */
 	server->aod_mode = AOD_OFF;
 	server->clock_24h = ZT_CLOCK_24H_DEFAULT;
 	if (server->shade_brightness <= 0) {
@@ -3407,6 +3409,10 @@ static void load_config(struct zt_server *server) {
 		} else if (strcmp(key, "timeout") == 0) {
 			/* seconds without input before the screen sleeps; 0: never */
 			server->screen_timeout = atoi(value);
+		} else if (strcmp(key, "lock_timeout") == 0) {
+			/* the same while the lock screen shows; 0: the screen's */
+			int t = atoi(value);
+			server->lock_timeout = t < 0 ? 0 : t;
 		} else if (strcmp(key, "demo_tiles") == 0) {
 			server->demo_tiles = strcmp(value, "on") == 0;
 		} else if (strcmp(key, "slow_motion") == 0) {
@@ -12349,6 +12355,62 @@ static void aod_tint(struct zt_server *server) {
 #define AOD_WHITE	0.92	/* the time */
 #define AOD_GREY	0.62	/* the rest */
 #define AOD_ICON	16	/* points: a waiting app's glyph */
+/*
+ * Where to press for Start (the force press): a squircle's outline over the
+ * place, very dim, while the force press is switched on. The controller
+ * reports the press at (753, 2899) of the 1440 x 2960 panel; that is inside
+ * the panel's bottom self-mask band (rows 2810-2959, ROADMAP 1.1b), so the
+ * mark sits just above the band, over the press's column. It moves by its
+ * own few pixels on AOD_SHIFT_S's clock (AOD_FORCE_SPOTS, seven of them: not
+ * in step with the nine places), always above the band.
+ */
+#define AOD_FORCE_X_PX		753	/* the press, in panel pixels */
+#define AOD_FORCE_BAND_PX	2810	/* the bottom self-mask band's first row */
+#define AOD_FORCE_PANEL_W	1440
+#define AOD_FORCE_PANEL_H	2960
+#define AOD_FORCE_W		34	/* points */
+#define AOD_FORCE_H		26
+#define AOD_FORCE_GAP		4	/* points between it (at its lowest) and the band */
+#define AOD_FORCE_GREY		0.30	/* dimmer than AOD_GREY */
+#define AOD_FORCE_LINE		1.0	/* points */
+static const signed char AOD_FORCE_SPOTS[][2] = {	/* pixels: dx, dy (dy <= 0) */
+	{ 0, 0 }, { 4, -2 }, { -4, -4 }, { 2, -6 }, { -2, -2 }, { 6, -4 }, { -6, -6 },
+};
+#define AOD_FORCE_N_SPOTS	(int)(sizeof(AOD_FORCE_SPOTS) / sizeof(AOD_FORCE_SPOTS[0]))
+
+/* A squircle (|x|^4 + |y|^4 = 1, stretched to w x h) about (cx, cy). */
+static void squircle_path(cairo_t *cr, double cx, double cy, double w, double h) {
+	const int n = 96;
+	for (int i = 0; i < n; i++) {
+		double t = 2 * M_PI * i / n, c = cos(t), s = sin(t);
+		double x = copysign(sqrt(fabs(c)), c) * w / 2, y = copysign(sqrt(fabs(s)), s) * h / 2;
+		if (i == 0) {
+			cairo_move_to(cr, cx + x, cy + y);
+		} else {
+			cairo_line_to(cr, cx + x, cy + y);
+		}
+	}
+	cairo_close_path(cr);
+}
+
+/* The force press's mark, for the time `now` (its place on its own cycle). */
+static void aod_force_mark(struct zt_server *server, cairo_t *cr, time_t now) {
+	if (!server->force_press) {
+		return;
+	}
+	double kx = server->width / (double)AOD_FORCE_PANEL_W;	/* points per panel pixel */
+	double ky = server->height / (double)AOD_FORCE_PANEL_H;
+	int i = (int)((long)(now / AOD_SHIFT_S) % AOD_FORCE_N_SPOTS);
+	double cx = AOD_FORCE_X_PX * kx + AOD_FORCE_SPOTS[i][0] * kx;
+	double bottom = AOD_FORCE_BAND_PX * ky - AOD_FORCE_GAP;	/* its lowest edge, at dy 0 */
+	double cy = bottom - AOD_FORCE_H / 2.0 - AOD_FORCE_LINE / 2 + AOD_FORCE_SPOTS[i][1] * ky;
+	cairo_save(cr);
+	cairo_set_source_rgb(cr, AOD_FORCE_GREY, AOD_FORCE_GREY, AOD_FORCE_GREY);
+	cairo_set_line_width(cr, AOD_FORCE_LINE);
+	squircle_path(cr, cx, cy, AOD_FORCE_W, AOD_FORCE_H);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+}
 
 /* What draw_glyph or draw_icon would draw for a waiting app, as an outline
  * only: the shape drawn into a mask, less the same shape shrunk by about a
@@ -12508,6 +12570,7 @@ static void aod_draw_place(struct zt_server *server, time_t now, int place) {
 			x += widths[i] + space;
 		}
 	}
+	aod_force_mark(server, cr, now);
 	zt_buffer_show(server, &server->aod_layer, buffer, cr, w, h);
 }
 
@@ -12816,6 +12879,16 @@ static void screen_set(struct zt_server *server, bool on) {
 	}
 }
 
+/* Seconds without input before the screen sleeps now: the lock screen's own
+ * (Settings > Lock Screen) while it shows, else the screen's; 0: never. The
+ * demo loop's 0 (screen_timeout) holds for both. */
+static int idle_timeout_s(struct zt_server *server) {
+	if (server->locked && server->lock_timeout > 0 && !demoloop_active()) {
+		return server->lock_timeout;
+	}
+	return server->screen_timeout;
+}
+
 /* Something was touched or pressed: put the sleep timer back to the start.
  * Re-armed at most once a second, however many events a drag produces. */
 static void activity(struct zt_server *server) {
@@ -12824,7 +12897,7 @@ static void activity(struct zt_server *server) {
 		return;
 	}
 	server->idle_armed_ms = now ? now : 1;
-	wl_event_source_timer_update(server->idle_timer, server->screen_timeout * 1000);
+	wl_event_source_timer_update(server->idle_timer, idle_timeout_s(server) * 1000);
 	if (server->idle_notifier) {
 		wlr_idle_notifier_v1_notify_activity(server->idle_notifier, server->seat);
 	}
@@ -12865,7 +12938,15 @@ static bool app_keeps_screen_on(struct zt_server *server) {
 
 static int idle_fired(void *data) {
 	struct zt_server *server = data;
-	if (server->screen_timeout > 0) {
+	int timeout = idle_timeout_s(server);
+	if (timeout > 0) {
+		/* armed for the lock screen's (shorter) time and unlocked since:
+		 * the rest of the screen's own */
+		uint32_t idle = now_ms() - server->idle_armed_ms;
+		if (server->idle_armed_ms && idle + 100 < (uint32_t)timeout * 1000) {
+			wl_event_source_timer_update(server->idle_timer, (uint32_t)timeout * 1000 - idle);
+			return 0;
+		}
 		/* the pairing sheet: someone is reading the other device. The agent
 		 * ends the request within a minute. */
 		if (server->screen_on && server->bt_pair.shown) {
@@ -17318,6 +17399,13 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 		snprintf(name, sizeof(name), "aod-12h-place-%d", i);
 		server->clock_24h = false;
 		aod_draw_place(server, longest, i);
+	}
+	for (int i = 0; i < AOD_FORCE_N_SPOTS; i++) {
+		char name[32];
+		snprintf(name, sizeof(name), "aod-force-%d", i);
+		g_dump_name = name;
+		aod_draw_place(server, now_t - now_t % (AOD_SHIFT_S * AOD_FORCE_N_SPOTS) + (time_t)i * AOD_SHIFT_S,
+			aod_place(now_t));
 	}
 	g_dump_name = "lock-clock-12h";
 	draw_lock_clock_at(server, longest);
