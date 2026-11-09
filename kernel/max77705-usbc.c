@@ -381,6 +381,14 @@ struct usbc_otg {
 	bool dr_seen;			/* a DataRole interrupt in this attach */
 	u8 ccstat;			/* last seen, for the log */
 	bool autovbus_sent;		/* 0x54 since probe / MCU reboot */
+	/* PD events that take VBUS away while we are the source (stock
+	 * max77705_pd.c:455-553): held off until the CC state changes, or
+	 * until hold_until (hard reset, SenderResponse timeout) */
+	bool vbus_held;
+	unsigned long hold_until;	/* jiffies; 0 = none */
+	bool path_due;			/* write CONTROL1 = USB on this run */
+	bool off;			/* shutdown/remove: nothing turns back on */
+	struct delayed_work recheck;	/* a later look: hold end, path again */
 };
 
 /* USB-PD as a sink, one CC attach */
@@ -2000,8 +2008,11 @@ static void usbc_pd_hard_reset(struct max77705_usbc *u, u8 code)
 }
 
 /* one PD event code (PD_STATUS0), in the order they came */
+static void usbc_otg_pd_event(struct max77705_usbc *u, u8 code);
+
 static void usbc_pd_event(struct max77705_usbc *u, u8 code)
 {
+	usbc_otg_pd_event(u, code);
 	switch (code) {
 	case 0x16:	/* HARDRESET_RECEIVED */
 	case 0x19:	/* HARDRESET_SENT */
@@ -3265,7 +3276,89 @@ static void usbc_otg_set_role(struct max77705_usbc *u, enum usb_role role)
 	dev_info(u->dev, "OTG: USB role %s\n", usb_role_string(role));
 }
 
-static void usbc_otg_update(struct max77705_usbc *u, u8 pd_int)
+/*
+ * PD events that move VBUS while we source (stock max77705_pd.c:455-553,
+ * max77705_usbc.c:240-248): PR_Swap source-to-sink (0x1a, 0x1b) and
+ * Get_Vbus_turn_off (0x18) turn it off until the CC state changes (the
+ * swap ends as CCStat = SINK); a hard reset (0x16, 0x19) turns it off for
+ * 760 ms and a source SenderResponse timeout (0x06) for 800 ms, then back
+ * on if we are still the source; PR_Swap sink-to-source (0x1d) lets it on.
+ */
+#define OTG_HR_OFF_MS		760	/* stock vbus_hard_reset_work delay */
+#define OTG_SRT_OFF_MS		800
+#define OTG_PATH_AGAIN_MS	1000	/* CONTROL1 once more after host starts */
+
+static void usbc_otg_hold(struct max77705_usbc *u, unsigned int ms)
+{
+	struct usbc_otg *o = &u->otg;
+
+	o->hold_until = jiffies + msecs_to_jiffies(ms) ?: 1;
+	mod_delayed_work(u->wq, &o->recheck, msecs_to_jiffies(ms) + 1);
+}
+
+static void usbc_otg_pd_event(struct max77705_usbc *u, u8 code)
+{
+	struct usbc_otg *o = &u->otg;
+
+	if (!o->vbus_on && !o->vbus_held && !o->hold_until && code != 0x1d)
+		return;
+	switch (code) {
+	case 0x18:	/* Get_Vbus_turn_off */
+	case 0x1a:	/* PRSWAP_SRCTOSWAP */
+	case 0x1b:	/* PRSWAP_SWAPTOSNK */
+		dev_info(u->dev, "OTG: PD %s: VBUS out off\n", pdmsg_name(code));
+		o->vbus_held = true;
+		break;
+	case 0x1d:	/* PRSWAP_SWAPTOSRC */
+		o->vbus_held = false;
+		break;
+	case 0x16:	/* HARDRESET_RECEIVED */
+	case 0x19:	/* HARDRESET_SENT */
+		if (o->vbus_on)
+			usbc_otg_hold(u, OTG_HR_OFF_MS);
+		break;
+	case 0x06:	/* SRC SenderResponseTimer timeout */
+		if (o->vbus_on)
+			usbc_otg_hold(u, OTG_SRT_OFF_MS);
+		break;
+	default:
+		break;
+	}
+}
+
+static void usbc_otg_recheck(struct work_struct *work)
+{
+	struct usbc_otg *o = container_of(to_delayed_work(work), struct usbc_otg, recheck);
+	struct max77705_usbc *u = container_of(o, struct max77705_usbc, otg);
+
+	o->path_due = o->role == USB_ROLE_HOST;
+	if (!READ_ONCE(u->stopping))
+		queue_work(u->wq, &u->event_work);
+}
+
+/*
+ * D+/D- to the AP for the host, as stock's MUIC does for an OTG attach
+ * (com_to_usb_ap) and again on every duplicate OTG event ("W/A for setting
+ * usb path", drivers/muic/max77705-muic.c:1357-1362): the MCU's own BC1.2
+ * run on VBUS (ours too) moves the switch, so the value we wrote before is
+ * no proof. Written on entering host, after each BC/VBUS event while host,
+ * and once more a second later; read back (0x05) when it differs.
+ */
+static void usbc_otg_path(struct max77705_usbc *u, const char *why)
+{
+	u8 v = 0;
+
+	if (usbc_set_path(u, COM_USB))
+		return;
+	u->path_tried = COM_USB;
+	if (!usbc_cmd(u, OP_CONTROL1_R, NULL, 0, &v, 1) && v != COM_USB)
+		dev_warn(u->dev, "OTG: CONTROL1 reads %02x after writing %02x (%s)\n",
+			 v, COM_USB, why);
+	else
+		dev_dbg(u->dev, "OTG: CONTROL1 %02x (%s)\n", v, why);
+}
+
+static void usbc_otg_update(struct max77705_usbc *u, u8 pd_int, u8 uic_int)
 {
 	struct usbc_otg *o = &u->otg;
 	u8 cc0 = u->st[ST(REG_CC_STATUS0)], pd1 = u->st[ST(REG_PD_STATUS1)];
@@ -3284,6 +3377,12 @@ static void usbc_otg_update(struct max77705_usbc *u, u8 pd_int)
 			 "error/disabled", cc0, pd1, u->st[ST(REG_BC_STATUS)]);
 		o->ccstat = ccstat;
 	}
+	if (ccstat != CCSTAT_SOURCE) {
+		o->vbus_held = false;
+		o->hold_until = 0;
+	}
+	if (o->hold_until && time_after_eq(jiffies, o->hold_until))
+		o->hold_until = 0;
 	if (!attached) {
 		o->dr_seen = false;
 		o->vbus_fault = false;
@@ -3299,7 +3398,7 @@ static void usbc_otg_update(struct max77705_usbc *u, u8 pd_int)
 	else
 		role = dfp && (o->dr_seen || (pd1 & PD1_PSRDY)) ? USB_ROLE_HOST : USB_ROLE_DEVICE;
 	o->want = role;
-	if (!otg && role == USB_ROLE_HOST)
+	if ((!otg && role == USB_ROLE_HOST) || READ_ONCE(o->off))
 		role = USB_ROLE_NONE;
 
 	if (otg && (attached || o->vbus_on || o->role != USB_ROLE_NONE))
@@ -3319,7 +3418,8 @@ static void usbc_otg_update(struct max77705_usbc *u, u8 pd_int)
 	}
 
 	want_vbus = otg && ccstat == CCSTAT_SOURCE && !o->vbus_fault && o->autovbus_sent &&
-		    u->mbox_allowed && !READ_ONCE(u->stopping);
+		    !o->vbus_held && !o->hold_until && !o->off && u->mbox_allowed &&
+		    !READ_ONCE(u->stopping);
 	if (want_vbus && !o->vbus_on && (u->st[ST(REG_BC_STATUS)] & BC_VBUSDET)) {
 		/* someone else's VBUS on the connector: never boost into it */
 		if (!o->vbus_ext_warned)
@@ -3331,8 +3431,18 @@ static void usbc_otg_update(struct max77705_usbc *u, u8 pd_int)
 
 	if (!want_vbus)
 		usbc_otg_set_vbus(u, false);
-	if (role == USB_ROLE_HOST && u->path != COM_USB)
-		usbc_set_path(u, COM_USB);	/* stock MUIC: an OTG attach is USB */
+	if (role == USB_ROLE_HOST) {
+		if (o->role != USB_ROLE_HOST) {
+			usbc_otg_path(u, "host attach");
+			mod_delayed_work(u->wq, &o->recheck,
+					 msecs_to_jiffies(OTG_PATH_AGAIN_MS));
+		} else if (uic_int & (UIC_CHGTYP | UIC_DCDTMO | UIC_VBUSDET)) {
+			usbc_otg_path(u, "BC/VBUS event");
+		} else if (o->path_due || u->path != COM_USB) {
+			usbc_otg_path(u, "recheck");
+		}
+	}
+	o->path_due = false;
 	usbc_otg_set_role(u, role);
 	if (want_vbus)
 		usbc_otg_set_vbus(u, true);
@@ -3343,6 +3453,8 @@ static void usbc_otg_stop(struct max77705_usbc *u, bool put)
 {
 	struct usbc_otg *o = &u->otg;
 
+	WRITE_ONCE(o->off, true);	/* no event turns anything back on */
+	cancel_delayed_work_sync(&o->recheck);
 	usbc_otg_set_vbus(u, false);
 	usbc_otg_set_role(u, USB_ROLE_NONE);
 	if (!put)
@@ -3476,7 +3588,7 @@ static void usbc_event_work(struct work_struct *work)
 	if (pend[2] & PD_PSRDY)
 		psrdy = true;
 
-	usbc_otg_update(u, pend[2]);
+	usbc_otg_update(u, pend[2], pend[0]);
 	usbc_route(u);
 	if (!vbus)
 		u->path_tried = 0;	/* the next attach writes it again */
@@ -3973,6 +4085,7 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	INIT_WORK(&u->event_work, usbc_event_work);
 	INIT_DELAYED_WORK(&u->poll_work, usbc_poll_work);
 	INIT_DELAYED_WORK(&u->hv_work, usbc_hv_work);
+	INIT_DELAYED_WORK(&u->otg.recheck, usbc_otg_recheck);
 	INIT_DELAYED_WORK(&u->dp_work, usbc_dp_work);
 	INIT_DELAYED_WORK(&u->dp_gate_work, usbc_dp_gate_work);
 	spin_lock_init(&u->dp_lock);
