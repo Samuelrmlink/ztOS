@@ -40,7 +40,7 @@ app at a time. That stays as it is. The desktop is drawn by
 Panfrost), only on the desktop's outputs. This is GPU compositing. The pixman
 renderer is not used.
 
-- `desktop/desktop.c` holds all of it, about 2,800 lines. It is included at the
+- `desktop/desktop.c` holds all of it, about 3,100 lines. It is included at the
   end of `ztmetro.c` (as `auth/prompt.c` is) so it can use the shell's helpers.
   `desktop/desktop.h` lists the calls `ztmetro.c` makes into it. The changes
   to `ztmetro.c` itself are about 40 lines of hooks, each one line.
@@ -161,8 +161,8 @@ works against the same desktop.
 
 ## Session start
 
-`ztos-desktop-session` (in this directory) runs `xfsettingsd`, `xfdesktop` and
-`xfce4-panel`. Each one is started again if it dies, at most 5 times a
+`ztos-desktop-session` (in this directory) runs `xfsettingsd`, Thunar's daemon,
+`xfdesktop` and `xfce4-panel`. Each one is started again if it dies, at most 5 times a
 minute. The script also runs anything listed in
 `~/.config/ztmetro/desktop-autostart`. The shell starts it with these set:
 
@@ -211,6 +211,26 @@ whenever a monitor output comes or goes. The stub is in this directory.
 
 The download is about 27 MB, about 110 MB installed. RAM is measured in
 `README.md`.
+
+## The GPU
+
+Everything on the desktop is GPU-drawn where the toolkit draws with the GPU.
+Measured on the S9 (Mali-G72 MC18, Mesa 26.2.6 Panfrost):
+
+- The compositor draws the desktop output (headless or a monitor) with wlroots'
+  GLES2 renderer on Panfrost, and the shell's log names the renderer. Nothing
+  falls back to llvmpipe or softpipe.
+- Panfrost gives desktop OpenGL 3.1 (core and compatibility) and GLES 3.1 on
+  this Bifrost GPU. No `MESA_GL_VERSION_OVERRIDE` is needed or set.
+- Xwayland uses glamor. GLX is direct rendering on Panfrost (`glxinfo -B`).
+- Vulkan through panvk refuses Bifrost (v6) unless the variable
+  `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1` is set. With it, it reports Vulkan
+  1.0, non-conformant, and vkcube runs. Nothing we ship sets it.
+- GTK 3 (XFCE, Thunar) draws its widgets with cairo on the CPU, as it does
+  everywhere. The compositor shows its buffers as GPU textures. GTK 4 apps
+  would use GL.
+- ztdesk's view is a DMA-BUF that the compositor copies into on the GPU. It is
+  drawn as a texture, and shared memory is the fallback.
 
 ## Files
 

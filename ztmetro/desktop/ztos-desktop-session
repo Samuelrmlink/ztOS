@@ -65,6 +65,9 @@ keep() {
 }
 
 keep xfsettingsd xfsettingsd --no-daemon --replace
+# Thunar's daemon, ours: otherwise D-Bus starts it (for xfdesktop's icons)
+# without ZT_DESKTOP, and the folders it opens land on the phone
+keep thunar thunar --daemon
 keep xfdesktop xfdesktop
 keep xfce4-panel xfce4-panel
 # anything the user wants with it (one command per line)
