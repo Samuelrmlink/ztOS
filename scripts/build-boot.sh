@@ -428,6 +428,11 @@ if [ -n "$WAYDROID" ]; then
 	[ -z "$missing" ] || { echo "--waydroid: not enabled:$missing" >&2; exit 1; }
 	echo "waydroid: kernel/waydroid.config applied"
 fi
+# Bluetooth as a module in the core config: the stack itself is in the module
+# set (scripts/build-bt-modules.sh), but built-in code asks IS_ENABLED(CONFIG_BT),
+# e.g. sk_may_scm_recv() allows SO_PASSCRED on AF_BLUETOOTH sockets only then
+# (btmon needs it). No built-in Bluetooth code; it changes the module ABI.
+cfg --module BT
 # The release names the module ABI (see the top): 32-bit compat changes
 # structures modules use, so a COMPAT kernel gets its own /lib/modules.
 LV=-zboot
