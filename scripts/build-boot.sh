@@ -179,6 +179,8 @@ python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
 # usb-otg-vbus, --power only), and the USB 2.0 PHY's host mode for dwc3
 [ -n "$POWER" ] && python3 "$ROOT/kernel/patch-max77705-otg.py" "$SRC"
 python3 "$ROOT/kernel/patch-usbphy-host.py" "$SRC"
+# dwc3 programs GUSB2PHYCFG again after phy_init: the 9810 PHY init resets the link
+python3 "$ROOT/kernel/patch-dwc3-phy-setup.py" "$SRC"
 # the wireless charging receiver (IDT P9320), built in with --power
 python3 "$ROOT/kernel/patch-p9320.py" "$SRC"
 # the MAX77705 USB-C controller driver (replaces s9p-max77705-muic with --power)

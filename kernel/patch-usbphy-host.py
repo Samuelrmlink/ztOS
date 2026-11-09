@@ -18,6 +18,10 @@ phy_set(SET_DPDM_PULLDOWN) -> phy_exynos_usb_v3p1_config_host_mode() (Samsung
           USBCON_HSP   &= ~(VBUSVLDEXTSEL | VBUSVLDEXT)
   device: init's values back: pull-downs off, VBUS/BVALID forced valid.
 
+HSP_TUNE follows the mode too (vendor exynos_usbdrd_utmi_tune()): the host
+column of the stock hs_tune node in host mode (compdis 7: the HS disconnect
+threshold only a host uses), the device column back in device mode.
+
 The 15 kOhm D+/D- pull-downs are what a host must present; without them a
 device's pull-up is never seen as a connect. Only PHY registers of the SoC are
 touched here; VBUS itself comes from the MAX77705 charger. Idempotent; every
@@ -54,7 +58,18 @@ sub('''static int s9p_usbphy_init(struct phy *phy)
 {''', '''/*
  * zboot: host mode. phy_exynos_usb_v3p1_config_host_mode() for host; the
  * forced VBUS/BVALID of init (no VBUS pad on this board) for device.
+ *
+ * The HS tuning follows the mode, as the vendor's exynos_usbdrd_utmi_tune()
+ * does when the host starts: the host column of the stock hs_tune node
+ * (tune_value = <dev host>, exynos9810-starlte DT): tx_pre_emp 3, tx_vref 7,
+ * rx_sqrx 6, compdis 7, tx_res 1, tx_rise 1. compdis is the HS disconnect
+ * threshold, which only a host uses; with the device value 3 the port drops
+ * right after the chirp ("Cannot enable").
  */
+#define S9P_HSP_TUNE_HOST	(HSP_TUNE_TXVREF(7) | HSP_TUNE_TXRISE(1) | \\
+				 HSP_TUNE_TXRES(1) | HSP_TUNE_TXPREEMPA(3) | \\
+				 HSP_TUNE_SQRX(6) | HSP_TUNE_COMPDIS(7))
+
 static void s9p_usbphy_apply_mode(struct s9p_usbphy *p)
 {
 	void __iomem *r = p->regs;
@@ -63,11 +78,18 @@ static void s9p_usbphy_apply_mode(struct s9p_usbphy *p)
 		rmw(r + USBCON_UTMI, UTMI_FORCE_BVALID | UTMI_FORCE_VBUSVALID,
 		    UTMI_DP_PULLDOWN | UTMI_DM_PULLDOWN);
 		rmw(r + USBCON_HSP, HSP_VBUSVLDEXTSEL | HSP_VBUSVLDEXT, 0);
+		if (s9p_phy_tune)
+			rmw(r + USBCON_HSP_TUNE, S9P_HSP_TUNE_MASK, S9P_HSP_TUNE_HOST);
 	} else {
 		rmw(r + USBCON_UTMI, UTMI_DP_PULLDOWN | UTMI_DM_PULLDOWN,
 		    UTMI_FORCE_BVALID | UTMI_FORCE_VBUSVALID);
 		rmw(r + USBCON_HSP, 0, HSP_VBUSVLDEXTSEL | HSP_VBUSVLDEXT);
+		if (s9p_phy_tune)
+			rmw(r + USBCON_HSP_TUNE, S9P_HSP_TUNE_MASK, S9P_HSP_TUNE_VAL);
 	}
+	dev_dbg(p->dev, "%s: utmi=%08x hsp=%08x hsp_tune=%08x\\n",
+		p->host ? "host" : "device", readl(r + USBCON_UTMI),
+		readl(r + USBCON_HSP), readl(r + USBCON_HSP_TUNE));
 }
 
 static int s9p_usbphy_set_mode(struct phy *phy, enum phy_mode mode, int submode)
