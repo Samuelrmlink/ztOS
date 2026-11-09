@@ -625,6 +625,47 @@ encryption mandatory for RFCOMM anyway.
   fake SPP printer by UUID, the signal read as Java reads it, a job written
   and answered, the AirPods refused (end of stream), L2CAP refused.
 
+### LE advertising (stage 2, first half)
+
+`BluetoothLeAdvertiser.startAdvertisingSet` reaches the shim's
+`BleAdvertiserInterface::StartAdvertisingSet`. The shim sends `ADV_START`
+(connectable, scannable, intervals, tx power, the AD bytes, scan response,
+duration). The bridge reads Android's AD structures back into the properties
+of an `org.bluez.LEAdvertisement1` that it exports and registers with
+`LEAdvertisingManager1`:
+
+- Type: `peripheral` for a connectable set, `broadcast` otherwise.
+- Fields: `ServiceUUIDs` (16, 32 and 128 bit), `ManufacturerData`,
+  `ServiceData`, `LocalName`, `Appearance`, `Includes: tx-power`.
+- Other AD types go into `Data`.
+- `Discoverable` comes from the flags, but only for a connectable set: BlueZ
+  refuses flags on a broadcast ("Broadcast cannot set flags", found on the
+  phone).
+- `Timeout` comes from the duration.
+- Advertising data and scan response are merged, and BlueZ lays them out.
+
+New data (`SetData`) and `Enable` register the set again. When a duration
+runs out, BlueZ calls `Release`, and the shim calls the set's timeout
+callback.
+
+Policy:
+
+- Android gets at most 4 of BlueZ's 5 instances; the shim reports 4 as
+  `max_adv_instance`.
+- A freeze, the adapter going off, Android's Bluetooth going off, or the
+  shim going away stops Android's sets.
+- Legacy advertising only. Periodic advertising and the old single
+  `StartAdvertising` path are refused (unsupported). `SetParameters` is
+  accepted, but BlueZ keeps choosing intervals and power.
+- Sets advertise with BlueZ's address, not one Android picks.
+
+On the phone, `ztbt-cli SOCKET adv` registered a "ztOS-btbridge-test"
+broadcast through BlueZ 5.87 (`ActiveInstances` 0 → 1 → 0). The shim's path
+is covered by `test_shim_host.py`. Not tested inside Android yet: the image
+on the phone still has the RFCOMM build of the wrapper.
+
+Next: the GATT server (`GattManager1.RegisterApplication`).
+
 ### Stages
 
 1. **BLE central**: adapter state, bonded list, LE scan with filters, GATT

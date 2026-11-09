@@ -92,6 +92,13 @@ class AutoBackend(FakeBackend):
         GLib.io_add_watch(printer.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, echo)
         GLib.idle_add(lambda: (ok(ours.detach(), 1), False)[-1])
 
+    def advertise(self, adv_id, props, ok, err):
+        self.calls.append(("advertise", adv_id, props))
+        GLib.idle_add(lambda: (ok(None), False)[-1])
+
+    def unadvertise(self, adv_id):
+        self.calls.append(("unadvertise", adv_id))
+
     def relay(self, a, b, prefix, on_close):
         self.calls.append(("relay",))
         return Relay(a, b, prefix, on_close)
@@ -149,6 +156,13 @@ class ShimHostTest(unittest.TestCase):
         self.assertIn(("remove", SENSOR), be.calls)
         self.assertNotIn(("remove", LOCK), be.calls)
         self.assertFalse([c for c in be.calls if c[0] == "connect" and c[1] != SENSOR])
+        # advertising: one set, its fields read back from Android's AD, then stopped
+        advs = [c for c in be.calls if c[0] == "advertise"]
+        self.assertEqual(len(advs), 2)                     # started, and again after enable off/on
+        self.assertEqual(advs[0][2]["LocalName"], "zt-test")
+        self.assertEqual(advs[0][2]["ServiceUUIDs"], ["0000180d-0000-1000-8000-00805f9b34fb"])
+        self.assertEqual(advs[0][2]["Type"], "peripheral")
+        self.assertEqual(bridge.advs, {})
         # RFCOMM: the printer by its SPP UUID, through a relay; never the AirPods
         self.assertIn(("rfcomm", PRINTER, SPP, -1, True), be.calls)
         self.assertFalse([c for c in be.calls if c[0] == "rfcomm" and c[1] != PRINTER])

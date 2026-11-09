@@ -94,6 +94,12 @@ class FakeBackend:
     def mtu(self, addr):
         return 247
 
+    def advertise(self, adv_id, props, ok, err):
+        self._later("advertise", [adv_id, props], ok, err)
+
+    def unadvertise(self, adv_id):
+        self.calls.append(("unadvertise", adv_id))
+
     def rfcomm_connect(self, addr, uuid, channel, secure, ok, err):
         self._later("rfcomm", [addr, uuid, channel, secure], ok, err)
 

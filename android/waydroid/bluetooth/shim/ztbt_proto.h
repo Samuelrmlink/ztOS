@@ -31,6 +31,10 @@ enum Op : uint16_t {
   ZTBT_OP_BOND_CANCEL = 0x0041,
   ZTBT_OP_BOND_REMOVE = 0x0042,
   ZTBT_OP_RFCOMM_CONNECT = 0x0050,   // carries one fd (kFlagFd): the bridge's end of the stream
+  ZTBT_OP_ADV_START = 0x0060,
+  ZTBT_OP_ADV_SET_DATA = 0x0061,
+  ZTBT_OP_ADV_ENABLE = 0x0062,
+  ZTBT_OP_ADV_STOP = 0x0063,
   ZTBT_OP_EV_ADAPTER = 0x8001,
   ZTBT_OP_EV_DEVICE_FOUND = 0x8010,
   ZTBT_OP_EV_BOND_STATE = 0x8012,
@@ -38,6 +42,7 @@ enum Op : uint16_t {
   ZTBT_OP_EV_SCAN_STOPPED = 0x8020,
   ZTBT_OP_EV_LINK = 0x8030,
   ZTBT_OP_EV_GATT_VALUE = 0x8031,
+  ZTBT_OP_EV_ADV_STOPPED = 0x8040,
 };
 
 // argument signatures (requests and events), and the replies' after the status
@@ -75,6 +80,15 @@ enum Op : uint16_t {
 #define ZTBT_SIG_BOND_REMOVE_REPLY ""
 #define ZTBT_SIG_RFCOMM_CONNECT "aUiu"
 #define ZTBT_SIG_RFCOMM_CONNECT_REPLY "u"
+#define ZTBT_SIG_ADV_START "BBuuibbq"
+#define ZTBT_SIG_ADV_START_REPLY "yi"
+#define ZTBT_SIG_ADV_SET_DATA "yBb"
+#define ZTBT_SIG_ADV_SET_DATA_REPLY ""
+#define ZTBT_SIG_ADV_ENABLE "yBq"
+#define ZTBT_SIG_ADV_ENABLE_REPLY ""
+#define ZTBT_SIG_ADV_STOP "y"
+#define ZTBT_SIG_ADV_STOP_REPLY ""
+#define ZTBT_SIG_EV_ADV_STOPPED "yu"
 #define ZTBT_SIG_EV_ADAPTER "Bs"
 #define ZTBT_SIG_EV_DEVICE_FOUND "T(aysuyyBLU)iib"
 #define ZTBT_SIG_EV_BOND_STATE "ayu"

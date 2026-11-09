@@ -115,6 +115,18 @@ class Scanning(unittest.TestCase):
                                                  "RSSI": -70, "Connected": False}, added=True)
         self.assertEqual([e[0][0] for e in c.events("EV_DEVICE_FOUND")], ["F0:00:00:00:00:09"])
 
+    def test_a_client_dropped_while_events_go_out(self):
+        be, store, br, c = make()
+        c.request("SCAN_START", P.T_LE)
+        other = FakeClient(br)
+        other.request("HELLO", P.VERSION, "x")
+        other.request("ENABLE", True)
+        other.request("SCAN_START", P.T_LE)
+        c.send = lambda packet, droppable=False: c.close()     # its socket breaks on this send
+        br.device_changed(SENSOR, {"RSSI": -61})                # no RuntimeError
+        self.assertTrue(c.closed)
+        self.assertEqual(len(other.events("EV_DEVICE_FOUND")), 1)
+
     def test_nothing_reported_when_not_scanning(self):
         be, store, br, c = make()
         br.device_changed(SENSOR, {"RSSI": -61})

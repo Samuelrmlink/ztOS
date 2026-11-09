@@ -97,6 +97,7 @@ class Bridge:
         self.releasing = {}       # addr -> timer: we called Disconnect(), BlueZ not done yet
         self.streams = {}         # stream id -> Stream (RFCOMM)
         self.next_stream = 1
+        self.advs = {}            # advertiser id -> Adv (Android's advertising sets)
 
     # ---- state from the backend -------------------------------------------
 
@@ -168,6 +169,7 @@ class Bridge:
             self.discovering = None
             for addr in list(self.holds):
                 self._drop_hold(addr, P.ST_NOT_READY)
+            self._stop_advs()
 
     def value_changed(self, addr, handle, value):
         for link in list(self.links.values()):
@@ -183,6 +185,7 @@ class Bridge:
         if frozen:
             for addr in list(self.holds):
                 self._drop_hold(addr, P.ST_NOT_READY, keep_pair=True)
+            self._stop_advs()
         self._update_discovery()
 
     # ---- clients ----------------------------------------------------------
@@ -194,6 +197,7 @@ class Bridge:
         if client not in self.clients:
             return
         del self.clients[client]
+        self._stop_advs(client, forget=True)
         for link in [l for l in self.links.values() if l.client is client]:
             self._close_link(link)
         for addr, c in list(self.pairing.items()):
@@ -208,7 +212,7 @@ class Bridge:
             self.log("event", op, "not sent:", e)
 
     def _event_all(self, op, values, droppable=False):
-        for c, st in self.clients.items():
+        for c, st in list(self.clients.items()):   # a send may drop a client
             if st["enabled"]:
                 self._event(c, op, values, droppable)
 
@@ -283,6 +287,7 @@ class Bridge:
             st["scans"].clear()
             for link in [l for l in self.links.values() if l.client is client]:
                 self._close_link(link)
+            self._stop_advs(client, forget=True)
             self._update_discovery()
         answer(P.ST_OK)
 
@@ -379,7 +384,7 @@ class Bridge:
             self.le_seen.add(addr)
         tx = int(d["TxPower"]) if "TxPower" in d else 127
         values = [self.dev_tuple(addr), int(d["RSSI"]), tx, build_ad(d)]
-        for c, st in self.clients.items():
+        for c, st in list(self.clients.items()):   # a send may drop a client
             if st["enabled"] and st["scans"]:
                 self._event(c, "EV_DEVICE_FOUND", values, droppable=True)
 
@@ -809,6 +814,222 @@ class Bridge:
             return
         self._end_stream(sid)
         self._release(stream.addr, (RFCOMM, sid))
+
+
+    # ---- ops: LE advertising (stage 2) -------------------------------------
+
+    def _adv(self, client, answer, adv_id):
+        adv = self.advs.get(adv_id)
+        if adv is None or adv.client is not client:
+            answer(P.ST_NOT_FOUND)
+            return None
+        return adv
+
+    def op_adv_start(self, client, answer, connectable, scannable, min_int, max_int, tx_power, ad, scan_rsp,
+                     duration):
+        if not self._ready(client, answer):
+            return
+        if len(self.advs) >= MAX_ANDROID_ADVS:
+            answer(P.ST_BUSY)          # leave BlueZ's other instances to Linux
+            return
+        adv_id = next(i for i in range(1, 256) if i not in self.advs)
+        adv = Adv(adv_id, client, connectable, scannable, min_int, max_int, tx_power, ad, scan_rsp, duration)
+        self.advs[adv_id] = adv
+        try:
+            self.log("advertise", adv_id, "for Android:", adv_summary(adv))
+        except ValueError:
+            pass                       # _advertise refuses it
+
+        def ok(tx):
+            answer(P.ST_OK, [adv_id, tx])
+
+        def err(status):
+            self.advs.pop(adv_id, None)
+            answer(status)
+        self._advertise(adv, ok, err)
+
+    def _advertise(self, adv, ok, err):
+        try:
+            props = adv_props(adv)
+        except ValueError as e:
+            self.log("advertise", adv.id, "refused:", e)
+            err(P.ST_INVALID)
+            return
+
+        def done(tx):
+            adv.active = True
+            ok(adv.tx_power if tx is None else tx)
+
+        def failed(name, msg):
+            self.log("advertise", adv.id, "failed:", name, msg)
+            err(adv_status(name, msg))
+        self.be.advertise(adv.id, props, done, failed)
+
+    def _unadvertise(self, adv):
+        if adv.active:
+            adv.active = False
+            self.be.unadvertise(adv.id)
+
+    def op_adv_set_data(self, client, answer, adv_id, scan_rsp, data):
+        adv = self._adv(client, answer, adv_id)
+        if adv is None:
+            return
+        if scan_rsp:
+            adv.scan_rsp = data
+        else:
+            adv.ad = data
+        if not adv.active:
+            answer(P.ST_OK)
+            return
+        self._unadvertise(adv)                   # BlueZ takes new data by registering again
+        self._advertise(adv, lambda tx: answer(P.ST_OK), answer)
+
+    def op_adv_enable(self, client, answer, adv_id, on, duration):
+        adv = self._adv(client, answer, adv_id)
+        if adv is None:
+            return
+        if not on:
+            self._unadvertise(adv)
+            answer(P.ST_OK)
+            return
+        if not self._ready(client, answer):
+            return
+        adv.duration = duration
+        if adv.active:
+            self._unadvertise(adv)
+        self._advertise(adv, lambda tx: answer(P.ST_OK), answer)
+
+    def op_adv_stop(self, client, answer, adv_id):
+        adv = self._adv(client, answer, adv_id)
+        if adv is None:
+            return
+        self._unadvertise(adv)
+        del self.advs[adv_id]
+        answer(P.ST_OK)
+
+    def adv_released(self, adv_id):
+        """BlueZ let an advertisement go (its Timeout, or it gave up)."""
+        adv = self.advs.get(adv_id)
+        if adv is None or not adv.active:
+            return
+        adv.active = False
+        if adv.client in self.clients:
+            self._event(adv.client, "EV_ADV_STOPPED", [adv_id, P.ST_TIMEOUT])
+
+    def _stop_advs(self, client=None, forget=False):
+        """End Android's advertisements (all, or one client's). forget: the
+        client is gone or Android's Bluetooth is off, drop them; otherwise
+        (freeze, adapter off) keep the sets and tell Android they stopped."""
+        for adv_id, adv in list(self.advs.items()):
+            if client is not None and adv.client is not client:
+                continue
+            was = adv.active
+            self._unadvertise(adv)
+            if forget:
+                del self.advs[adv_id]
+            elif was and adv.client in self.clients:
+                self._event(adv.client, "EV_ADV_STOPPED", [adv_id, P.ST_NOT_READY])
+
+
+MAX_ANDROID_ADVS = 4    # of BlueZ's 5 instances on the S9
+
+
+class Adv:
+    def __init__(self, adv_id, client, connectable, scannable, min_int, max_int, tx_power, ad, scan_rsp, duration):
+        self.id = adv_id
+        self.client = client
+        self.connectable = connectable
+        self.scannable = scannable
+        self.min_int = min_int
+        self.max_int = max_int
+        self.tx_power = tx_power
+        self.ad = ad
+        self.scan_rsp = scan_rsp
+        self.duration = duration
+        self.active = False
+
+
+def parse_ad(data):
+    """AD structures -> [(type, bytes)]; ValueError on a malformed one."""
+    out, i = [], 0
+    data = bytes(data)
+    while i < len(data):
+        n = data[i]
+        if n == 0:
+            break                      # padding
+        if i + 1 + n > len(data):
+            raise ValueError("AD structure runs past the end")
+        out.append((data[i + 1], data[i + 2:i + 1 + n]))
+        i += 1 + n
+    return out
+
+
+def _uuid_from(raw):
+    if len(raw) == 2:
+        return P.full_uuid("%04x" % int.from_bytes(raw, "little"))
+    if len(raw) == 4:
+        return P.full_uuid("%08x" % int.from_bytes(raw, "little"))
+    return str(uuid.UUID(bytes=bytes(raw[::-1])))
+
+
+def adv_props(adv):
+    """An Android advertisement (AD bytes and parameters) as the properties of
+    a BlueZ org.bluez.LEAdvertisement1, in plain Python values. BlueZ builds the
+    AD itself (and the flags), so the Android bytes are read back into fields:
+    service UUIDs, manufacturer and service data, name, appearance, tx power;
+    other AD types go into Data. Advertising data and scan response are merged:
+    BlueZ decides what goes where."""
+    props = {"Type": "peripheral" if adv.connectable else "broadcast",
+             "ServiceUUIDs": [], "ManufacturerData": {}, "ServiceData": {}, "Data": {}}
+    includes = []
+    for t, v in parse_ad(adv.ad) + parse_ad(adv.scan_rsp):
+        if t == 0x01:                                  # flags: BlueZ sets them
+            # ... and refuses any for a broadcast ("Broadcast cannot set flags")
+            if v and v[0] & 0x03 and adv.connectable:
+                props["Discoverable"] = True
+        elif t in (0x02, 0x03):
+            props["ServiceUUIDs"] += [_uuid_from(v[i:i + 2]) for i in range(0, len(v) - 1, 2)]
+        elif t in (0x04, 0x05):
+            props["ServiceUUIDs"] += [_uuid_from(v[i:i + 4]) for i in range(0, len(v) - 3, 4)]
+        elif t in (0x06, 0x07):
+            props["ServiceUUIDs"] += [_uuid_from(v[i:i + 16]) for i in range(0, len(v) - 15, 16)]
+        elif t in (0x08, 0x09):
+            props["LocalName"] = v.decode("utf-8", "replace")
+        elif t == 0x0a:
+            includes.append("tx-power")
+        elif t == 0x19 and len(v) == 2:
+            props["Appearance"] = int.from_bytes(v, "little")
+        elif t == 0x16 and len(v) >= 2:
+            props["ServiceData"][_uuid_from(v[:2])] = bytes(v[2:])
+        elif t == 0x20 and len(v) >= 4:
+            props["ServiceData"][_uuid_from(v[:4])] = bytes(v[4:])
+        elif t == 0x21 and len(v) >= 16:
+            props["ServiceData"][_uuid_from(v[:16])] = bytes(v[16:])
+        elif t == 0xff and len(v) >= 2:
+            props["ManufacturerData"][int.from_bytes(v[:2], "little")] = bytes(v[2:])
+        else:
+            props["Data"][t] = bytes(v)
+    if includes:
+        props["Includes"] = includes
+    if adv.duration:
+        props["Timeout"] = max(1, (adv.duration + 99) // 100)   # 10 ms units -> s
+    for k in ("ServiceUUIDs", "ManufacturerData", "ServiceData", "Data"):
+        if not props[k]:
+            del props[k]
+    return props
+
+
+def adv_summary(adv):
+    p = adv_props(adv)
+    return ", ".join("%s=%s" % (k, v) for k, v in sorted(p.items()))
+
+
+def adv_status(name, msg):
+    if name.endswith("InvalidLength"):
+        return P.ST_INVALID            # too much data for a legacy advertisement
+    if name.endswith("NotPermitted") or "Maximum" in msg:
+        return P.ST_BUSY               # no instance left
+    return P.ST_FAIL
 
 
 def pair_status(name):

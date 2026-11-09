@@ -187,6 +187,19 @@ class BlueZTests(unittest.TestCase):
             os.fstat(fd)
         a.close()
 
+    def test_advertisement_props_typed_for_bluez(self):
+        v = B.dbus_adv_props({"Type": "peripheral", "LocalName": "zt", "ServiceUUIDs": ["180d"],
+                              "ManufacturerData": {0x59: b"\x01"}, "ServiceData": {"feaa": b"\x10"},
+                              "Data": {0x2a: b"\x02"}, "Includes": ["tx-power"], "Appearance": 0x341,
+                              "Timeout": 3, "Discoverable": True})
+        self.assertEqual(v["ManufacturerData"].signature, "qv")
+        self.assertIsInstance(list(v["ManufacturerData"].keys())[0], dbus.UInt16)
+        self.assertEqual(v["ServiceData"].signature, "sv")
+        self.assertEqual(v["Data"].signature, "yv")
+        self.assertIsInstance(v["Timeout"], dbus.UInt16)
+        self.assertIsInstance(v["Discoverable"], dbus.Boolean)
+        self.assertEqual(v["ServiceUUIDs"].signature, "s")
+
     def test_other_adapters_devices_ignored(self):
         b = backend()
         b._on_added(dbus.ObjectPath("/org/bluez/hci1/dev_11_22_33_44_55_66"),

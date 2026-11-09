@@ -86,6 +86,12 @@ OPS = {
     # a stream socketpair whose other end the shim gave Android as the socket.
     # address, UUID (all zero: none), channel (-1: by SDP), Android's SEC_FLAG_*
     "RFCOMM_CONNECT":  (0x0050, "aUiu", "u"),      # -> stream id; the outcome goes down the stream
+    # LE advertising (stage 2). Intervals in 0.625 ms, duration in 10 ms (0: none)
+    # connectable, scannable, min interval, max interval, tx power, AD, scan response, duration
+    "ADV_START":       (0x0060, "BBuuibbq", "yi"), # -> advertiser id, tx power
+    "ADV_SET_DATA":    (0x0061, "yBb", ""),        # id, scan response?, AD
+    "ADV_ENABLE":      (0x0062, "yBq", ""),        # id, on, duration
+    "ADV_STOP":        (0x0063, "y", ""),
     # events, bridge -> shim
     "EV_ADAPTER":      (0x8001, "Bs", None),       # powered, name
     "EV_DEVICE_FOUND": (0x8010, "T(aysuyyBLU)iib", None),  # device, rssi, tx power (127: unknown), AD structures
@@ -94,6 +100,7 @@ OPS = {
     "EV_SCAN_STOPPED": (0x8020, "yu", None),       # transport, why (status)
     "EV_LINK":         (0x8030, "uuBq", None),     # link, status, connected, mtu
     "EV_GATT_VALUE":   (0x8031, "uqb", None),      # link, handle, value (notification or indication)
+    "EV_ADV_STOPPED":  (0x8040, "yu", None),       # advertiser id, why (ST_TIMEOUT: its duration ran out)
 }
 BY_NUMBER = {v[0]: k for k, v in OPS.items()}
 REPLY = OPS["REPLY"][0]

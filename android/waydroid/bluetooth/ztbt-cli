@@ -7,6 +7,7 @@
     ztbt-cli SOCKET scan [SECONDS] [le|bredr|auto]
     ztbt-cli SOCKET gatt ADDRESS              connect, list the database, disconnect
     ztbt-cli SOCKET read ADDRESS HANDLE
+    ztbt-cli SOCKET adv [SECONDS]              a non-connectable "ztOS-btbridge-test" advertisement
 
 Start the bridge for it with --socket SOCKET --allow-uid $(id -u)
 --no-container-check. "gatt" and "read" connect to a device: never point them
@@ -105,6 +106,18 @@ def main():
                 c.events.append(packet)
         c.request("SCAN_STOP", t)
         print(len(seen), "devices")
+        return
+    if cmd == "adv":
+        # a clearly named test advertisement, for SECONDS (default 8), then stopped
+        secs = float(rest[0]) if rest else 8
+        name = b"ztOS-btbridge-test"
+        ad = bytes([2, 1, 6, len(name) + 1, 9]) + name
+        st, vals = c.request("ADV_START", False, True, 160, 160, 0, ad, b"", 0)
+        print("adv start:", status(st), vals)
+        if st != P.ST_OK:
+            return
+        time.sleep(secs)
+        print("adv stop:", status(c.request("ADV_STOP", vals[0])[0]))
         return
     if cmd in ("gatt", "read"):
         addr = rest[0].upper()

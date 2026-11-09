@@ -3,8 +3,9 @@
 // BleScannerInterface, BleAdvertiserInterface), answered by ztos-btbridge on
 // the host, which uses BlueZ. See docs/waydroid.md, "Bluetooth for Android
 // apps". Stage 1: adapter, bonded devices, LE scan and discovery, GATT client,
-// pairing through BlueZ; Classic RFCOMM client sockets (stage 3). The
-// advertiser and GATT server refuse (stage 2); no listening sockets yet.
+// pairing through BlueZ; Classic RFCOMM client sockets (stage 3); LE
+// advertising sets (stage 2). The GATT server still refuses; no listening
+// sockets yet.
 //
 // What this never does: talk HCI (dut_mode_send, le_test_mode refuse), hold
 // or pass link keys, or ask Android for a PIN or a confirmation (pin_request
@@ -170,6 +171,11 @@ struct State {
   RawAddress address;
   std::string name = "ztOS";
   uint32_t cls = 0;
+  uint8_t adv_instances = 0;   // what the bridge offers Android (BlueZ's, less one for Linux)
+
+  // advertising sets: what to call when one ends by itself
+  std::map<uint8_t, BleAdvertiserInterface::IdStatusCallback> adv_set_timeout;
+  std::map<uint8_t, BleAdvertiserInterface::StatusCallback> adv_enable_timeout;
 
   // discovery and scanning
   bool le_scan = false;
@@ -222,7 +228,7 @@ void ReportAdapter(int which = 0) {
     memset(&f, 0, sizeof f);
     f.version_supported = 0x0060;
     f.local_privacy_enabled = 1;
-    f.max_adv_instance = 0;          // stage 2 brings advertising
+    f.max_adv_instance = g->adv_instances;   // legacy advertising sets through BlueZ
     f.max_adv_filter_supported = 0;  // Android filters scan results in software
     f.scan_result_storage_size = 0;  // no batch scans
     f.le_maximum_advertising_data_length = 31;
@@ -300,6 +306,9 @@ void Connected() {
     v[1].addr(g->address.address);
     g->name = v[2].s;
     g->cls = v[3].num();
+    // BlueZ's instances, less one left to Linux, at most the bridge's limit (4)
+    uint32_t inst = v[5].num();
+    g->adv_instances = (uint8_t)(inst > 1 ? std::min<uint32_t>(inst - 1, 4) : 0);
     LOGI("bridge: adapter %s \"%s\" powered %d", AddrText(g->address.address).c_str(), g->name.c_str(),
          (int)v[4].flag());
     BridgeEnable();
@@ -402,6 +411,25 @@ void OnLink(const Values& v) {
   }
 }
 
+void OnAdvStopped(const Values& v) {
+  uint8_t id = (uint8_t)v[0].num();
+  // its duration ran out: a normal end (0); taken away (freeze, adapter off): an error
+  uint8_t status = v[1].num() == ZTBT_ST_TIMEOUT ? 0 : 4;
+  auto e = g->adv_enable_timeout.find(id);
+  if (e != g->adv_enable_timeout.end()) {
+    auto cb = e->second;
+    g->adv_enable_timeout.erase(e);
+    if (!cb.is_null()) cb.Run(status);
+    return;
+  }
+  auto s = g->adv_set_timeout.find(id);
+  if (s != g->adv_set_timeout.end()) {
+    auto cb = s->second;
+    g->adv_set_timeout.erase(s);
+    if (!cb.is_null()) cb.Run(id, status);
+  }
+}
+
 void OnValue(const Values& v) {
   uint32_t id = v[0].num();
   auto it = g->links.find(id);
@@ -435,6 +463,7 @@ int Init(bt_callbacks_t* callbacks, bool, bool, int, const char**, bool, const c
   c->OnEvent(ZTBT_OP_EV_SCAN_STOPPED, ZTBT_SIG_EV_SCAN_STOPPED, OnScanStopped);
   c->OnEvent(ZTBT_OP_EV_LINK, ZTBT_SIG_EV_LINK, OnLink);
   c->OnEvent(ZTBT_OP_EV_GATT_VALUE, ZTBT_SIG_EV_GATT_VALUE, OnValue);
+  c->OnEvent(ZTBT_OP_EV_ADV_STOPPED, ZTBT_SIG_EV_ADV_STOPPED, OnAdvStopped);
   c->Start([] { if (g->cb->thread_evt_cb) g->cb->thread_evt_cb(ASSOCIATE_JVM); },
            [] { if (g->cb->thread_evt_cb) g->cb->thread_evt_cb(DISASSOCIATE_JVM); });
   LOGI("ztOS Bluetooth shim: Android's stack through ztos-btbridge (BlueZ)");
@@ -1033,37 +1062,100 @@ class Scanner : public BleScannerInterface {
   int next_ = 1;
 };
 
-// ---- LE advertiser (stage 2: refuses) ------------------------------------------
+// ---- LE advertiser: Android's advertising sets as BlueZ advertisements ---------
+//
+// The bridge registers each set with LEAdvertisingManager1 (legacy
+// advertising, BlueZ's identity or private address). Status codes are
+// AdvertisingSetCallback's: Android 13 passes them through to the app.
 
-constexpr uint8_t kAdvUnsupported = 0x0c;   // "command disallowed": Android reports a failure
+constexpr uint8_t kAdvOk = 0, kAdvTooLarge = 1, kAdvTooMany = 2, kAdvInternal = 4, kAdvUnsupported = 5;
+
+uint8_t AdvStatus(uint32_t st) {
+  switch (st) {
+    case ZTBT_ST_OK: return kAdvOk;
+    case ZTBT_ST_INVALID: return kAdvTooLarge;
+    case ZTBT_ST_BUSY: return kAdvTooMany;
+    case ZTBT_ST_UNSUPPORTED: return kAdvUnsupported;
+    default: return kAdvInternal;
+  }
+}
 
 class Advertiser : public BleAdvertiserInterface {
  public:
+  // the older single-advertisement path: Android 13's AdvertiseManager uses sets
   void RegisterAdvertiser(IdStatusCallback cb) override {
     g->conn->Post([cb] { cb.Run(0, kAdvUnsupported); });
   }
-  void GetOwnAddress(uint8_t, GetAddressCallback cb) override {
-    g->conn->Post([cb] { cb.Run(0, g->address); });
-  }
-  void SetParameters(uint8_t, AdvertiseParameters, ParametersCallback cb) override {
-    g->conn->Post([cb] { cb.Run(kAdvUnsupported, 0); });
-  }
-  void SetData(int, bool, std::vector<uint8_t>, StatusCallback cb) override {
-    g->conn->Post([cb] { cb.Run(kAdvUnsupported); });
-  }
-  void Enable(uint8_t, bool, StatusCallback cb, uint16_t, uint8_t, StatusCallback) override {
-    g->conn->Post([cb] { cb.Run(kAdvUnsupported); });
-  }
-  void Unregister(uint8_t) override {}
   void StartAdvertising(uint8_t, StatusCallback cb, AdvertiseParameters, std::vector<uint8_t>,
                         std::vector<uint8_t>, int, StatusCallback) override {
     g->conn->Post([cb] { cb.Run(kAdvUnsupported); });
   }
-  void StartAdvertisingSet(int, IdTxPowerStatusCallback register_cb, AdvertiseParameters, std::vector<uint8_t>,
-                           std::vector<uint8_t>, PeriodicAdvertisingParameters, std::vector<uint8_t>, uint16_t,
-                           uint8_t, IdStatusCallback) override {
-    g->conn->Post([register_cb] { register_cb.Run(0, 0, kAdvUnsupported); });
+
+  void StartAdvertisingSet(int, IdTxPowerStatusCallback register_cb, AdvertiseParameters params,
+                           std::vector<uint8_t> advertise_data, std::vector<uint8_t> scan_response_data,
+                           PeriodicAdvertisingParameters periodic, std::vector<uint8_t>, uint16_t duration,
+                           uint8_t, IdStatusCallback timeout_cb) override {
+    if (periodic.enable) {   // no periodic advertising through BlueZ's D-Bus API
+      g->conn->Post([register_cb] { register_cb.Run(0, 0, kAdvUnsupported); });
+      return;
+    }
+    bool connectable = params.advertising_event_properties & 0x01;
+    bool scannable = params.advertising_event_properties & 0x02;
+    int8_t tx = params.tx_power;
+    g->conn->Request(ZTBT_OP_ADV_START,
+                     {Value::Bool(connectable), Value::Bool(scannable), Value::U32(params.min_interval),
+                      Value::U32(params.max_interval), Value::I32(tx),
+                      Value::Bytes(advertise_data.data(), advertise_data.size()),
+                      Value::Bytes(scan_response_data.data(), scan_response_data.size()), Value::Q(duration)},
+                     ZTBT_SIG_ADV_START_REPLY, [register_cb, timeout_cb](uint32_t st, const Values& v) {
+      if (st != ZTBT_ST_OK) {
+        LOGW("advertising set: bridge said %u", st);
+        register_cb.Run(0, 0, AdvStatus(st));
+        return;
+      }
+      uint8_t id = (uint8_t)v[0].num();
+      g->adv_set_timeout[id] = timeout_cb;
+      register_cb.Run(id, (int8_t)v[1].sint(), kAdvOk);
+    });
   }
+
+  void SetParameters(uint8_t, AdvertiseParameters params, ParametersCallback cb) override {
+    int8_t tx = params.tx_power;   // BlueZ chooses intervals and power; the set carries on
+    g->conn->Post([cb, tx] { cb.Run(kAdvOk, tx); });
+  }
+
+  void SetData(int advertiser_id, bool set_scan_rsp, std::vector<uint8_t> data, StatusCallback cb) override {
+    g->conn->Request(ZTBT_OP_ADV_SET_DATA,
+                     {Value::Y((uint8_t)advertiser_id), Value::Bool(set_scan_rsp),
+                      Value::Bytes(data.data(), data.size())},
+                     ZTBT_SIG_ADV_SET_DATA_REPLY, [cb](uint32_t st, const Values&) { cb.Run(AdvStatus(st)); });
+  }
+
+  void Enable(uint8_t advertiser_id, bool enable, StatusCallback cb, uint16_t duration, uint8_t,
+              StatusCallback timeout_cb) override {
+    g->conn->Request(ZTBT_OP_ADV_ENABLE, {Value::Y(advertiser_id), Value::Bool(enable), Value::Q(duration)},
+                     ZTBT_SIG_ADV_ENABLE_REPLY,
+                     [cb, timeout_cb, advertiser_id, enable](uint32_t st, const Values&) {
+      if (st == ZTBT_ST_OK && enable) g->adv_enable_timeout[advertiser_id] = timeout_cb;
+      if (!enable) g->adv_enable_timeout.erase(advertiser_id);
+      cb.Run(AdvStatus(st));
+    });
+  }
+
+  void Unregister(uint8_t advertiser_id) override {
+    g->conn->Post([advertiser_id] {
+      g->adv_set_timeout.erase(advertiser_id);
+      g->adv_enable_timeout.erase(advertiser_id);
+    });
+    g->conn->Request(ZTBT_OP_ADV_STOP, {Value::Y(advertiser_id)}, ZTBT_SIG_ADV_STOP_REPLY,
+                     [](uint32_t, const Values&) {});
+  }
+
+  void GetOwnAddress(uint8_t, GetAddressCallback cb) override {
+    // BlueZ advertises with its own (possibly private) address: report the public one
+    g->conn->Post([cb] { cb.Run(0, g->address); });
+  }
+
   void SetPeriodicAdvertisingParameters(int, PeriodicAdvertisingParameters, StatusCallback cb) override {
     g->conn->Post([cb] { cb.Run(kAdvUnsupported); });
   }

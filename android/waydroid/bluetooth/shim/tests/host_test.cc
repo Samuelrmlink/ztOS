@@ -202,7 +202,11 @@ class ScanCbs : public ScanningCallbacks {
 ScanCbs scan_cbs;
 
 void ScannerRegistered(uint8_t id, uint8_t status) { Log("scanner " + std::to_string(id) + " " + std::to_string(status)); }
-void AdvRegistered(uint8_t id, int8_t tx, uint8_t status) { Log("advertiser status " + std::to_string(status)); }
+void AdvRegistered(uint8_t id, int8_t tx, uint8_t status) {
+  Log("advertiser " + std::to_string(id) + " tx " + std::to_string(tx) + " status " + std::to_string(status));
+}
+void AdvStatusCb(uint8_t status) { Log("adv status " + std::to_string(status)); }
+void AdvTimeout(uint8_t id, uint8_t status) { Log("adv timeout " + std::to_string(id)); }
 void PhyRead(uint8_t tx, uint8_t rx, uint8_t status) { Log("phy " + std::to_string(tx)); }
 
 }  // namespace
@@ -233,7 +237,7 @@ int main() {
   Expect(bt->enable() == BT_STATUS_SUCCESS, "enable");
   Wait("state 1");
   Wait("name ztos");
-  Wait("le_features filters 0 adv 0");
+  Wait("le_features filters 0 adv 4");   // BlueZ's 5, less one left to Linux
   std::string bonded = Wait("bonded");
   Expect(bonded.find(LOCK) != std::string::npos && bonded.find(SPEAKER) != std::string::npos, "bonded list");
   Expect(bonded.find(AIRPODS) == std::string::npos, "AirPods hidden");
@@ -266,9 +270,27 @@ int main() {
   gatt->scanner->Scan(true);
   Wait(std::string("scan ") + SENSOR + " type 1");    // the harness advertises the sensor
   gatt->scanner->Scan(false);
-  gatt->advertiser->StartAdvertisingSet(1, base::Bind(&AdvRegistered), {}, {}, {}, {}, {}, 0, 0,
-                                        BleAdvertiserInterface::IdStatusCallback());
-  Wait("advertiser status 12");   // stage 2
+  // an advertising set: connectable, a name, the heart-rate service; BlueZ gets it
+  AdvertiseParameters ap{};
+  ap.advertising_event_properties = 0x13;   // legacy, connectable, scannable
+  ap.min_interval = ap.max_interval = 160;
+  ap.tx_power = -7;
+  std::vector<uint8_t> ad = {0x02, 0x01, 0x06, 0x03, 0x03, 0x0d, 0x18, 0x08, 0x09, 'z', 't', '-', 't', 'e', 's', 't'};
+  gatt->advertiser->StartAdvertisingSet(1, base::Bind(&AdvRegistered), ap, ad, {}, {}, {}, 0, 0,
+                                        base::Bind(&AdvTimeout));
+  std::string adv = Wait("advertiser ");
+  Expect(adv == "advertiser 1 tx -7 status 0", "advertising set started");
+  gatt->advertiser->Enable(1, false, base::Bind(&AdvStatusCb), 0, 0, BleAdvertiserInterface::StatusCallback());
+  Wait("adv status 0");
+  gatt->advertiser->Enable(1, true, base::Bind(&AdvStatusCb), 0, 0, BleAdvertiserInterface::StatusCallback());
+  Wait("adv status 0");
+  gatt->advertiser->Unregister(1);
+  // periodic advertising: not through BlueZ's D-Bus API
+  PeriodicAdvertisingParameters pp{};
+  pp.enable = 1;
+  gatt->advertiser->StartAdvertisingSet(2, base::Bind(&AdvRegistered), ap, ad, {}, pp, {}, 0, 0,
+                                        base::Bind(&AdvTimeout));
+  Wait("advertiser 0 tx 0 status 5");
 
   gatt->client->register_client(bluetooth::Uuid::From128BitBE(bluetooth::Uuid::UUID128Bit{}), false);
   std::string reg = Wait("registered ");

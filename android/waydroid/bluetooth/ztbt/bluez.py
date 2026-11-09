@@ -37,6 +37,67 @@ BT_SECURITY = 4
 BT_SECURITY_LOW, BT_SECURITY_MEDIUM = 1, 2
 
 
+ADVERTISEMENT = "org.bluez.LEAdvertisement1"
+DBUS_PROPS = "org.freedesktop.DBus.Properties"
+ADV_ROOT = "/org/ztos/btbridge/adv"
+
+
+def dbus_adv_props(props):
+    """core.adv_props' plain values -> dbus-python values for LEAdvertisement1."""
+    out = {}
+    for k, v in props.items():
+        if k in ("Type", "LocalName"):
+            out[k] = dbus.String(v)
+        elif k in ("ServiceUUIDs", "Includes"):
+            out[k] = dbus.Array(v, signature="s")
+        elif k == "ManufacturerData":
+            out[k] = dbus.Dictionary({dbus.UInt16(c): dbus.Array(d, signature="y") for c, d in v.items()},
+                                     signature="qv")
+        elif k == "ServiceData":
+            out[k] = dbus.Dictionary({dbus.String(u): dbus.Array(d, signature="y") for u, d in v.items()},
+                                     signature="sv")
+        elif k == "Data":
+            out[k] = dbus.Dictionary({dbus.Byte(t): dbus.Array(d, signature="y") for t, d in v.items()},
+                                     signature="yv")
+        elif k in ("Appearance", "Timeout"):
+            out[k] = dbus.UInt16(v)
+        elif k == "Discoverable":
+            out[k] = dbus.Boolean(v)
+    return out
+
+
+class _Advertisement(dbus.service.Object):
+    """One Android advertising set, as BlueZ reads it."""
+
+    def __init__(self, backend, adv_id, props):
+        self.path = "%s%d" % (ADV_ROOT, adv_id)
+        super().__init__(backend.bus, self.path)
+        self.backend = backend
+        self.adv_id = adv_id
+        self.props = dbus_adv_props(props)
+
+    @dbus.service.method(DBUS_PROPS, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        if interface != ADVERTISEMENT:
+            raise dbus.DBusException("no such interface", name="org.freedesktop.DBus.Error.InvalidArgs")
+        return dbus.Dictionary(self.props, signature="sv")
+
+    @dbus.service.method(DBUS_PROPS, in_signature="ss", out_signature="v")
+    def Get(self, interface, name):
+        if interface != ADVERTISEMENT or name not in self.props:
+            raise dbus.DBusException("no such property", name="org.freedesktop.DBus.Error.InvalidArgs")
+        return self.props[name]
+
+    @dbus.service.method(ADVERTISEMENT, in_signature="", out_signature="", sender_keyword="sender")
+    def Release(self, sender=None):
+        try:
+            if sender != self.backend.bus.get_name_owner("org.bluez"):
+                return
+        except dbus.DBusException:
+            return
+        self.backend._adv_released(self.adv_id)
+
+
 class _Profile(dbus.service.Object):
     """Profile1 for one UUID, client role: BlueZ calls it with the connected socket."""
 
@@ -138,6 +199,7 @@ class BlueZ:
         self.our_discovery = False
         self.profiles = {}        # uuid -> _Profile (registered with BlueZ)
         self.rfcomm_pending = {}  # (device path, uuid) -> {"ok", "err", "fd", "replied", "timer"}
+        self.advs = {}            # advertiser id -> _Advertisement (registered with BlueZ)
 
     # ---- objects ----------------------------------------------------------
 
@@ -568,6 +630,49 @@ class BlueZ:
                                            GLib.IOCondition(int(GLib.IO_OUT) | int(GLib.IO_ERR) | int(GLib.IO_HUP)),
                                            writable)
         state["timer"] = GLib.timeout_add_seconds(RFCOMM_TIMEOUT, timeout)
+
+    # ---- LE advertising ----------------------------------------------------
+
+    def advertise(self, adv_id, props, ok, err):
+        """Register Android's set adv_id with LEAdvertisingManager1. ok(None):
+        BlueZ picks the tx power and doesn't say which (core reports Android's)."""
+        if self.adapter_path is None:
+            err("org.bluez.Error.NotReady", "no adapter")
+            return
+        self._drop_adv(adv_id)
+        obj = _Advertisement(self, adv_id, props)
+        self.advs[adv_id] = obj
+
+        def failed(name, msg):
+            if self.advs.get(adv_id) is obj:
+                del self.advs[adv_id]
+                obj.remove_from_connection()
+            err(name, msg)
+        self._call(self.adapter_path, ADV_MANAGER, "RegisterAdvertisement",
+                   [dbus.ObjectPath(obj.path), dbus.Dictionary({}, signature="sv")],
+                   lambda: ok(None), failed)
+
+    def unadvertise(self, adv_id):
+        obj = self.advs.get(adv_id)
+        if obj is None:
+            return
+        if self.adapter_path:
+            self._call(self.adapter_path, ADV_MANAGER, "UnregisterAdvertisement", [dbus.ObjectPath(obj.path)],
+                       lambda: None, lambda n, m: None)
+        self._drop_adv(adv_id)
+
+    def _drop_adv(self, adv_id):
+        obj = self.advs.pop(adv_id, None)
+        if obj is not None:
+            try:
+                obj.remove_from_connection()
+            except LookupError:
+                pass
+
+    def _adv_released(self, adv_id):
+        self._drop_adv(adv_id)
+        if self.core:
+            self.core.adv_released(adv_id)
 
     def relay(self, a, b, prefix, on_close):
         return Relay(a, b, prefix, on_close)
