@@ -77,6 +77,34 @@ mirror/ztmirror: mirror/ztmirror.c mirror/wlr-screencopy.c mirror/wlr-screencopy
 	$(CC) $(CFLAGS) $(WARN) -Imirror $(shell pkg-config --cflags wayland-client libturbojpeg) -o $@ mirror/ztmirror.c mirror/wlr-screencopy.c \
 		$(shell pkg-config --libs wayland-client libturbojpeg) -lpthread
 
+# ztdesk: the desktop (desktop mode) seen and driven from the phone. Not in
+# `all`: it goes with the optional ztos-desktop package (install-desktop).
+DESK_PROTO = desktop/wlr-screencopy-unstable-v1 desktop/wlr-virtual-pointer-unstable-v1 \
+	desktop/virtual-keyboard-unstable-v1 desktop/linux-dmabuf-v1
+desktop/linux-dmabuf-v1.xml:
+	cp $(WP)/stable/linux-dmabuf/linux-dmabuf-v1.xml $@
+desktop/wlr-screencopy-unstable-v1.xml: mirror/wlr-screencopy-unstable-v1.xml
+	cp $< $@
+desktop/%.xml: desktop/protocols/%.xml
+	cp $< $@
+desktop/%-client-protocol.h: desktop/%.xml
+	wayland-scanner client-header $< $@
+desktop/%-protocol.c: desktop/%.xml
+	wayland-scanner private-code $< $@
+DESK_CLIENT = $(addsuffix -protocol.c,$(DESK_PROTO))
+DESK_CLIENT_H = $(addsuffix -client-protocol.h,$(DESK_PROTO))
+desktop/ztdesk: desktop/ztdesk.c $(DESK_CLIENT) $(DESK_CLIENT_H) $(CORE_DEPS)
+	$(APP_BUILD) -Idesktop $(shell pkg-config --cflags gbm) -o $@ desktop/ztdesk.c $(DESK_CLIENT) $(CORE) $(APP_LIBS) \
+		$(shell pkg-config --libs gbm)
+
+.PHONY: install-desktop
+install-desktop: desktop/ztdesk
+	install -Dm755 desktop/ztdesk /usr/local/bin/ztdesk
+	install -Dm644 desktop/ztdesk.desktop /usr/local/share/applications/ztdesk.desktop
+	install -Dm644 desktop/ztdesk.svg /usr/local/share/icons/hicolor/scalable/apps/ztdesk.svg
+	install -Dm755 desktop/ztos-desktop-session /usr/local/bin/ztos-desktop-session
+	install -Dm755 desktop/ztos-desktop-hotplug /usr/local/bin/ztos-desktop-hotplug
+
 # ztCamera: the camera, in the Lumia Camera look (see camera/CAMERA-DRIVERS.md
 # for why its viewfinder runs against a source that is not a sensor)
 camera/ztcamera: camera/ztcamera.c $(CORE_DEPS)

@@ -103,6 +103,7 @@ struct desk_layer {
 };
 
 struct desk_popup {
+	struct wl_list link;		/* zt_desk.popups */
 	struct zt_desk *desk;
 	struct wlr_xdg_popup *popup;
 	struct wlr_scene_tree *wrap;	/* a layer surface's popup: a tree of its own, above the windows */
@@ -134,6 +135,7 @@ struct zt_desk {
 	struct wlr_box usable;		/* the output less the panels' exclusive zones, layout points */
 	struct wl_list views;		/* desk_view, front first */
 	struct wl_list layers;		/* desk_layer */
+	struct wl_list popups;		/* desk_popup */
 	struct desk_view *focused;
 	struct wlr_layer_surface_v1 *focused_layer;
 	int cascade;
@@ -1550,6 +1552,7 @@ static void desk_layer_new_popup(struct wl_listener *l, void *data) {
 	wl_signal_add(&popup->base->surface->events.commit, &p->commit);
 	p->destroy.notify = desk_popup_destroy;
 	wl_signal_add(&popup->events.destroy, &p->destroy);
+	wl_list_insert(&desk->popups, &p->link);
 }
 
 static void desk_layer_destroy(struct wl_listener *l, void *data) {
@@ -1645,6 +1648,7 @@ static void desk_popup_destroy(struct wl_listener *l, void *data) {
 	struct desk_popup *p = wl_container_of(l, p, destroy);
 	wl_list_remove(&p->commit.link);
 	wl_list_remove(&p->destroy.link);
+	wl_list_remove(&p->link);
 	if (p->wrap) {
 		wlr_scene_node_destroy(&p->wrap->node);
 	}
@@ -1684,6 +1688,7 @@ static bool desk_new_popup(struct zt_server *server, struct wlr_xdg_popup *popup
 	wl_signal_add(&popup->base->surface->events.commit, &p->commit);
 	p->destroy.notify = desk_popup_destroy;
 	wl_signal_add(&popup->events.destroy, &p->destroy);
+	wl_list_insert(&desk->popups, &p->link);
 	return true;
 }
 
@@ -2161,6 +2166,15 @@ static void desk_phone_touched(struct zt_server *server) {
 	struct zt_desk *desk = server->desk;
 	if (desk) {
 		desk->phone_touch_ms = now_ms();
+		/* A desktop menu that grabbed the seat (xdg_popup.grab) takes its
+		 * touches as well as the pointer: the phone's are not the desktop's. */
+		struct desk_popup *p;
+		wl_list_for_each(p, &desk->popups, link) {
+			if (p->popup->seat && server->seat->touch_state.grab != server->seat->touch_state.default_grab) {
+				wlr_seat_touch_end_grab(server->seat);
+				break;
+			}
+		}
 	}
 	if (!desk || !desk_has_keyboard(desk) || !server->shown || !server->shown->mapped) {
 		return;
@@ -2979,6 +2993,7 @@ static void desk_init(struct zt_server *server, struct wlr_compositor *composito
 	wl_list_init(&desk->outputs);
 	wl_list_init(&desk->views);
 	wl_list_init(&desk->layers);
+	wl_list_init(&desk->popups);
 	desk_config_load(desk);
 
 	/* the virtual output's backend, beside the panel's (DRM, or a window) */
