@@ -78,7 +78,7 @@ while [ $# -gt 0 ]; do
 	--lockup) LOCKUP=1 ;;
 	--waydroid) WAYDROID=1 ;;
 	--config-only) CONFIG_ONLY=1 ;;
-	--modules) MODULES=$(realpath "$2"); shift ;;
+	--modules) MODULES=$(realpath -m "$2"); shift ;;
 	--no-module-check) MODCHECK= ;;
 	--acpm) ACPM=1 ;;
 	--cpufreq) CPUFREQ=1; ACPM=1 ;;
