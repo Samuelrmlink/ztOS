@@ -34,6 +34,12 @@
  * auto=1 runs pma..edid itself when the class enters a DP pin state, and
  * off when it leaves; default 0.
  *
+ * hpd_read=1 (default 0, writable at run time): when the partner's DP Status
+ * says HPD high (typec_displayport's data in the mux state, from an
+ * Attention), the phases not yet done (id, pma, phy, ctrl), then dpcd and
+ * edid, logged. HPD low changes nothing (the sink may raise it again; stock
+ * would stop the link, which this driver does not start yet).
+ *
  * pma_early=1 (default 0, writable at run time) runs only the pma phase when
  * the class enters a DP state, and off when it leaves. max77705-usbc sets a
  * DP state at Discover SVIDs, before Enter Mode, so this is stock's order:
@@ -168,6 +174,10 @@ static bool auto_bringup;
 module_param_named(auto, auto_bringup, bool, 0644);
 MODULE_PARM_DESC(auto, "run the bring-up phases on a DP pin state, off on leaving it (default 0: debugfs only)");
 
+static bool hpd_read;
+module_param(hpd_read, bool, 0644);
+MODULE_PARM_DESC(hpd_read, "on HPD high: bring-up phases as needed, then read DPCD and EDID (default 0)");
+
 static bool pma_early;
 module_param(pma_early, bool, 0644);
 MODULE_PARM_DESC(pma_early, "power the combo PMA up when a DP state is set (before Enter Mode), down when it ends (default 0)");
@@ -194,6 +204,8 @@ struct x9dp {
 	bool pma_on, phy_on, ctrl_on;
 	u32 pma_saved;			/* COMBO_PMA_CTRL as the USB driver left it */
 	struct work_struct auto_work;
+	struct work_struct hpd_work;
+	bool id_done;
 	struct dentry *dbg;
 	char last[160];
 	u8 dpcd[16];
@@ -266,6 +278,7 @@ static int x9dp_id(struct x9dp *d)
 {
 	u32 v = readl(d->link + SYSTEM_DEVICE_VERSION);
 
+	d->id_done = true;
 	scnprintf(d->last, sizeof(d->last), "id: SYSTEM_DEVICE_VERSION %08x", v);
 	return 0;
 }
@@ -613,6 +626,28 @@ static void x9dp_auto_work(struct work_struct *work)
 	mutex_unlock(&d->lock);
 }
 
+static void x9dp_hpd_work(struct work_struct *work)
+{
+	struct x9dp *d = container_of(work, struct x9dp, hpd_work);
+	int i;
+
+	mutex_lock(&d->lock);
+	if (!(d->dp_status & DP_STATUS_HPD_STATE) || !x9dp_lanes(d))
+		goto out;
+	if ((!d->id_done && x9dp_run(d, "id")) ||
+	    (!d->pma_on && x9dp_run(d, "pma")) ||
+	    (!d->phy_on && x9dp_run(d, "phy")) ||
+	    (!d->ctrl_on && x9dp_run(d, "ctrl")))
+		goto out;
+	if (x9dp_run(d, "dpcd") == 0)
+		dev_info(d->dev, "DPCD %16ph\n", d->dpcd);
+	if (x9dp_run(d, "edid") == 0)
+		for (i = 0; i < EDID_LENGTH; i += 16)
+			dev_info(d->dev, "EDID %02x: %16ph\n", i, d->edid + i);
+out:
+	mutex_unlock(&d->lock);
+}
+
 /* ---- typec: orientation and DP state ---------------------------------------- */
 
 static int x9dp_sw_set(struct typec_switch_dev *sw, enum typec_orientation orientation)
@@ -629,7 +664,7 @@ static int x9dp_sw_set(struct typec_switch_dev *sw, enum typec_orientation orien
 static int x9dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state)
 {
 	struct x9dp *d = typec_mux_get_drvdata(mux);
-	bool was, now;
+	bool was, now, hpd_up = false;
 
 	/*
 	 * The USB Safe State is what typec_displayport sets around Enter Mode
@@ -650,6 +685,8 @@ static int x9dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state
 		if (dp->status != d->dp_status)
 			dev_info(d->dev, "DP status %08x: HPD %s\n", dp->status,
 				 dp->status & DP_STATUS_HPD_STATE ? "high" : "low");
+		hpd_up = (dp->status & DP_STATUS_HPD_STATE) &&
+			 !(d->dp_status & DP_STATUS_HPD_STATE);
 		d->dp_status = dp->status;
 		d->dp_conf = dp->conf;
 	}
@@ -659,6 +696,8 @@ static int x9dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state
 	mutex_unlock(&d->lock);
 	if ((auto_bringup || pma_early) && was != now)
 		schedule_work(&d->auto_work);
+	if (hpd_read && hpd_up)
+		schedule_work(&d->hpd_work);
 	return 0;
 }
 
@@ -731,6 +770,7 @@ static void x9dp_unregister(void *data)
 	struct x9dp *d = data;
 
 	cancel_work_sync(&d->auto_work);
+	cancel_work_sync(&d->hpd_work);
 	debugfs_remove_recursive(d->dbg);
 	mutex_lock(&d->lock);
 	x9dp_off(d);
@@ -760,6 +800,7 @@ static int x9dp_probe(struct platform_device *pdev)
 	d->dev = dev;
 	mutex_init(&d->lock);
 	INIT_WORK(&d->auto_work, x9dp_auto_work);
+	INIT_WORK(&d->hpd_work, x9dp_hpd_work);
 	d->orient = TYPEC_ORIENTATION_NORMAL;
 	d->mode = TYPEC_STATE_SAFE;
 

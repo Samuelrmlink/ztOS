@@ -530,7 +530,7 @@ struct max77705_usbc {
 	u16 dp_svid0;			/* first SVID of Discover SVIDs, this attach */
 	bool dp_mode_found;		/* Discover Modes ACK for 0xff01 */
 	u32 dp_mode_vdo;
-	bool dp_id_sent;		/* our Discover Identity as sink + DFP */
+	bool dp_was_dfp;		/* data role at the last look: DFP edges */
 	bool dp_entered;		/* Enter Mode ACKed, this attach */
 	u32 dp_status;			/* the partner's last DP Status VDO */
 	bool dp_status_valid;
@@ -2430,7 +2430,7 @@ static void usbc_dp_forget(struct max77705_usbc *u)
 	u->dp_svid0 = 0;
 	u->dp_mode_found = false;
 	u->dp_mode_vdo = 0;
-	u->dp_id_sent = false;
+	u->dp_was_dfp = false;
 	u->dp_entered = false;
 	u->dp_status = 0;
 	u->dp_status_valid = false;
@@ -2517,20 +2517,23 @@ static void usbc_dp_events(struct max77705_usbc *u, u8 pd_int, u8 vdm_int)
 	if (!u->dp_on || !u->mbox_allowed || u->mbox_dead)
 		return;
 
-	/* sink, and the partner swapped us to DFP: stock's Discover Identity */
+	/*
+	 * A sink that the partner has just made DFP (DR_Swap): stock's Discover
+	 * Identity, sent when the data role changes to DFP while we sink
+	 * (max77705_pd.c:756-775). Only on that edge: a PR_Swap that leaves us
+	 * DFP and makes us the sink is not one (the mode stays entered).
+	 */
 	if (FIELD_GET(CC0_CCSTAT, cc0) == CCSTAT_SINK && (pd1 & PD1_DATAROLE) &&
-	    u->altmode_sent && !u->dp_id_sent) {
+	    !u->dp_was_dfp && u->altmode_sent) {
 		u8 w[5] = { 1 | 1 << 3 };
 		u8 rep[10];
 
-		u->dp_id_sent = true;
 		put_unaligned_le32(DP_VDM_DISC_ID, &w[1]);
 		if (!usbc_cmd(u, OP_SET_VDM_REQ, w, sizeof(w), rep, sizeof(rep)))
 			dev_info(u->dev, "DP: sink and DFP: Discover Identity sent, reply %*phN\n",
 				 (int)sizeof(rep), rep);
 	}
-	if (!(pd1 & PD1_DATAROLE))
-		u->dp_id_sent = false;
+	u->dp_was_dfp = pd1 & PD1_DATAROLE;
 
 	if ((vdm_int & BIT(3)) && !usbc_vdm_get(u, VDM_SUB_ENTER, r, 7, &hdr)) {
 		bool ack = VDM_HDR_CMDTYPE(hdr) == CMDT_RSP_ACK;
@@ -2558,6 +2561,23 @@ static void usbc_dp_events(struct max77705_usbc *u, u8 pd_int, u8 vdm_int)
 	}
 	if ((pd_int & PD_DP_ATTENTION) && !usbc_vdm_get(u, VDM_SUB_ATTENTION, r, 11, &hdr))
 		usbc_dp_status(u, "Attention", get_unaligned_le32(&r[7]));
+}
+
+/*
+ * A PD hard reset exits every alternate mode (USB PD 3.x 6.8.3): the partner
+ * is no longer in DP mode, whatever typec_displayport believes. Drop its
+ * altmode and the per-attach DP state; the firmware's discovery after the
+ * new contract (and our Discover Identity on the DFP edge) start over, and
+ * the partner altmode is registered and entered again. A PR_Swap is not a
+ * reset: the mode stays.
+ */
+static void usbc_dp_hard_reset(struct max77705_usbc *u)
+{
+	if (!u->dp_on || (!u->dp_partner && !u->dp_mode_found && !u->dp_sbu_early))
+		return;
+	dev_info(u->dev, "DP: PD hard reset: the partner left DP mode; discovery again\n");
+	usbc_dp_unregister_partner(u);
+	usbc_dp_forget(u);
 }
 
 /* Discover SVIDs / Modes results (usbc_vdm_read): is DP there? */
@@ -3062,6 +3082,7 @@ static void usbc_typec_init(struct max77705_usbc *u) { }
 static void usbc_typec_identity(struct max77705_usbc *u) { }
 static void usbc_dp_forget(struct max77705_usbc *u) { }
 static void usbc_dp_events(struct max77705_usbc *u, u8 pd_int, u8 vdm_int) { }
+static void usbc_dp_hard_reset(struct max77705_usbc *u) { }
 static void usbc_dp_discovered(struct max77705_usbc *u, u8 sub, const u8 *r) { }
 static void usbc_dp_update(struct max77705_usbc *u) { }
 static void usbc_dp_work(struct work_struct *work) { }
@@ -3584,6 +3605,8 @@ static void usbc_event_work(struct work_struct *work)
 		usbc_pd_event(u, pdq[i]);
 		if (pdq[i] == 0x01)	/* SNK_PSRDY_RECEIVED */
 			psrdy = true;
+		if (pdq[i] == 0x16 || pdq[i] == 0x19)	/* HARDRESET_RECEIVED/_SENT */
+			usbc_dp_hard_reset(u);
 	}
 	if (pend[2] & PD_PSRDY)
 		psrdy = true;

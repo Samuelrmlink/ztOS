@@ -64,6 +64,26 @@ access behind the PMU isolation check) is built with `--dp-tx` only. With it
 come its DT node and the connector's SuperSpeed port (port@1). That port
 would otherwise wait for a switch that never comes.
 
+**HPD (dp6, Belkin 6-in-1, unpowered).** With the stock order and USB
+enumerating, the dock raises HPD by Attention (status 0x9a). It drops HPD
+again about 9 s later, presumably because no link training follows.
+
+`exynos9810_dp.hpd_read=1` (a `--dp-tx` image; writable at run time; default
+0) acts on HPD high:
+
+- it runs whatever bring-up phases have not run yet (id, pma, phy, ctrl);
+- it reads DPCD and EDID;
+- it logs both (`DPCD …`, `EDID xx: …`).
+
+That EDID read is the M2 milestone.
+
+**Power-role swap, hard reset.** A PR_Swap (powering the dock) leaves the
+mode entered, as the DP Alt Mode spec says, and our DP state with it. The AP
+sends stock's Discover Identity only when the data role changes to DFP
+while we sink, not at a PR_Swap. A PD hard reset exits every mode, so
+max77705-usbc then drops the partner's DP altmode and its DP state; after
+the new contract the discovery and Enter Mode run again.
+
 **Fallback: the PMA up before Enter Mode.** Stock's USB3 bring-up powers the
 combo PHY's PMA before the dock is asked to enter DP. If HPD stays low even
 with USB enumerating, `exynos9810_dp.pma_early=1` (a `--dp-tx` image;
