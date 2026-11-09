@@ -539,6 +539,11 @@ struct max77705_usbc {
 	unsigned int dp_id_tries;
 	unsigned long dp_id_next;	/* jiffies: not before (retry backoff) */
 	struct delayed_work dp_id_work;
+	u32 dp_tx_hdr;			/* Enter Mode / Configure due, 0: none */
+	u32 dp_tx_conf;
+	unsigned int dp_tx_tries;
+	unsigned long dp_tx_next;
+	struct delayed_work dp_tx_work;
 	bool dp_entered;		/* Enter Mode ACKed, this attach */
 	u32 dp_status;			/* the partner's last DP Status VDO */
 	bool dp_status_valid;
@@ -2441,6 +2446,8 @@ static void usbc_dp_forget(struct max77705_usbc *u)
 	u->dp_was_dfp = false;
 	u->dp_id_pending = false;
 	u->dp_id_tries = 0;
+	u->dp_tx_hdr = 0;
+	u->dp_tx_tries = 0;
 	u->dp_entered = false;
 	u->dp_status = 0;
 	u->dp_status_valid = false;
@@ -2514,6 +2521,23 @@ static void usbc_dp_status(struct max77705_usbc *u, const char *what, u32 vdo)
 		usbc_dp_queue(u, 0, vdo, 1, true);
 }
 
+/*
+ * Our VDMs go out only while no PD Request of ours is outstanding and, as a
+ * sink, once PS_RDY is in: on the powered Belkin dock both our Discover
+ * Identity (dp8) and our Enter Mode (dp11) got no reply when they crossed
+ * our own 9 V Request. As a source we send no Requests, and PS_RDY there is
+ * the partner's, so only the first condition.
+ */
+static bool usbc_dp_contract_settled(struct max77705_usbc *u)
+{
+	if (u->pd.req_pos)
+		return false;
+	if (FIELD_GET(CC0_CCSTAT, u->st[ST(REG_CC_STATUS0)]) == CCSTAT_SINK &&
+	    !(u->st[ST(REG_PD_STATUS1)] & PD1_PSRDY))
+		return false;
+	return true;
+}
+
 #define DP_ID_TRIES		4		/* the first and three retries */
 static const unsigned int dp_id_backoff_ms[DP_ID_TRIES - 1] = { 300, 700, 1000 };
 
@@ -2539,8 +2563,7 @@ static void usbc_dp_disc_id(struct max77705_usbc *u)
 		u->dp_id_pending = false;	/* discovery is under way, or cannot be */
 		return;
 	}
-	if (u->pd.req_pos || !(u->st[ST(REG_PD_STATUS1)] & PD1_PSRDY) ||
-	    time_before(jiffies, u->dp_id_next)) {
+	if (!usbc_dp_contract_settled(u) || time_before(jiffies, u->dp_id_next)) {
 		unsigned long wait = time_before(jiffies, u->dp_id_next) ?
 				     u->dp_id_next - jiffies : msecs_to_jiffies(200);
 
@@ -2681,38 +2704,98 @@ static void usbc_dp_discovered(struct max77705_usbc *u, u8 sub, const u8 *r)
 	}
 }
 
-static void usbc_dp_send_enter(struct max77705_usbc *u)
-{
-	u8 w[5] = { 1 | 1 << 3 }, r[10];
-	int ret;
+#define DP_TX_TRIES		4
 
-	put_unaligned_le32(DP_VDM_ENTER, &w[1]);
-	ret = usbc_cmd(u, OP_SET_VDM_REQ, w, sizeof(w), r, sizeof(r));
-	if (ret) {
-		dev_warn(u->dev, "DP: Enter Mode not sent: %d\n", ret);
-		usbc_dp_queue(u, usbc_dp_hdr(CMD_ENTER_MODE, CMDT_RSP_NAK), 0, 1, false);
+/*
+ * Enter Mode and DP Configure, as stock sends them (0x48), one at a time,
+ * when usbc_dp_contract_settled(). The mailbox answer carries the partner's
+ * reply header: ACK or NAK means the partner answered, and its result
+ * reaches typec_displayport as before (VDM_INT b3 / PD_INT b3, 0x4b). No
+ * reply (all-ff), BUSY or a mailbox error: again after 300 ms, 700 ms, 1 s.
+ * Four times nothing: typec_displayport gets a NAK, so it is not left
+ * waiting. On u->wq; dp_tx_work drives the waits.
+ */
+static void usbc_dp_tx(struct max77705_usbc *u)
+{
+	bool cfg = u->dp_tx_hdr == DP_VDM_CONFIGURE;
+	u8 w[9] = { (cfg ? 2 : 1) | 1 << 3 }, r[14] = {};
+	int wlen = cfg ? 9 : 5, rlen = cfg ? 14 : 10, ret, type;
+	const char *what = cfg ? "Configure" : "Enter Mode";
+	u32 hdr;
+
+	if (!u->dp_tx_hdr)
+		return;
+	if (!u->dp_partner) {
+		u->dp_tx_hdr = 0;	/* detached, or the altmode went with a reset */
 		return;
 	}
-	/* the result comes as VDM_INT b3, as on stock; this is for the log */
-	dev_info(u->dev, "DP: Enter Mode sent, 0x48 reply %*phN\n", (int)sizeof(r), r);
+	if (!usbc_dp_contract_settled(u) || time_before(jiffies, u->dp_tx_next)) {
+		mod_delayed_work(u->wq, &u->dp_tx_work, time_before(jiffies, u->dp_tx_next) ?
+				 u->dp_tx_next - jiffies : msecs_to_jiffies(200));
+		return;
+	}
+	put_unaligned_le32(u->dp_tx_hdr, &w[1]);
+	if (cfg)
+		put_unaligned_le32(u->dp_tx_conf, &w[5]);
+	ret = usbc_cmd(u, OP_SET_VDM_REQ, w, wlen, r, rlen);
+	hdr = get_unaligned_le32(&r[1]);
+	type = ret || r[0] == 0xff ? -1 : VDM_HDR_CMDTYPE(hdr);
+	u->dp_tx_tries++;
+	if (cfg)
+		dev_info(u->dev, "DP: Configure %08x (pin %c, try %u) sent, 0x48 reply %*phN\n",
+			 u->dp_tx_conf, 'A' + __ffs(DP_CONF_GET_PIN_ASSIGN(u->dp_tx_conf)),
+			 u->dp_tx_tries, rlen, r);
+	else
+		dev_info(u->dev, "DP: Enter Mode (try %u) sent, 0x48 reply %*phN\n",
+			 u->dp_tx_tries, rlen, r);
+	if (type == CMDT_RSP_ACK || type == CMDT_RSP_NAK) {
+		u->dp_tx_hdr = 0;	/* answered: the result comes by interrupt */
+		return;
+	}
+	if (u->dp_tx_tries >= DP_TX_TRIES) {
+		dev_warn(u->dev, "DP: %s not answered after %u tries; replug to retry\n", what,
+			 u->dp_tx_tries);
+		usbc_dp_queue(u, usbc_dp_hdr(cfg ? DP_CMD_CONFIGURE : CMD_ENTER_MODE, CMDT_RSP_NAK),
+			      0, 1, false);
+		u->dp_tx_hdr = 0;
+		return;
+	}
+	u->dp_tx_next = jiffies + msecs_to_jiffies(dp_id_backoff_ms[u->dp_tx_tries - 1]);
+	mod_delayed_work(u->wq, &u->dp_tx_work, u->dp_tx_next - jiffies);
+}
+
+static void usbc_dp_tx_start(struct max77705_usbc *u, u32 hdr, u32 conf)
+{
+	u->dp_tx_hdr = hdr;
+	u->dp_tx_conf = conf;
+	u->dp_tx_tries = 0;
+	u->dp_tx_next = jiffies;
+	usbc_dp_tx(u);
+}
+
+static void usbc_dp_tx_work(struct work_struct *work)
+{
+	struct max77705_usbc *u = container_of(to_delayed_work(work),
+					       struct max77705_usbc, dp_tx_work);
+
+	if (READ_ONCE(u->stopping) || usbc_read_status(u))
+		return;
+	usbc_dp_tx(u);
+}
+
+static void usbc_dp_send_enter(struct max77705_usbc *u)
+{
+	usbc_dp_tx_start(u, DP_VDM_ENTER, 0);
 }
 
 static void usbc_dp_send_configure(struct max77705_usbc *u, u32 conf)
 {
-	u8 w[9] = { 2 | 1 << 3 }, r[14];
-	int ret = -EPERM;
-
-	put_unaligned_le32(DP_VDM_CONFIGURE, &w[1]);
-	put_unaligned_le32(conf, &w[5]);
-	if (usbc_dp_conf_ok(u, conf))
-		ret = usbc_cmd(u, OP_SET_VDM_REQ, w, sizeof(w), r, sizeof(r));
-	if (ret) {
-		dev_warn(u->dev, "DP: Configure %08x not sent: %d\n", conf, ret);
+	if (!usbc_dp_conf_ok(u, conf)) {
+		dev_warn(u->dev, "DP: Configure %08x refused\n", conf);
 		usbc_dp_queue(u, usbc_dp_hdr(DP_CMD_CONFIGURE, CMDT_RSP_NAK), 0, 1, false);
 		return;
 	}
-	dev_info(u->dev, "DP: Configure %08x (pin %c) sent, 0x48 reply %*phN\n", conf,
-		 'A' + __ffs(DP_CONF_GET_PIN_ASSIGN(conf)), (int)sizeof(r), r);
+	usbc_dp_tx_start(u, DP_VDM_CONFIGURE, conf);
 }
 
 /* hand the queued replies to the DP driver, oldest first */
@@ -3163,6 +3246,7 @@ static void usbc_dp_update(struct max77705_usbc *u) { }
 static void usbc_dp_work(struct work_struct *work) { }
 static void usbc_dp_gate_work(struct work_struct *work) { }
 static void usbc_dp_id_work(struct work_struct *work) { }
+static void usbc_dp_tx_work(struct work_struct *work) { }
 #endif
 
 /* ---- VDM results (vdm_discovery) ------------------------------------------ */
@@ -4164,6 +4248,7 @@ static void usbc_stop_work(void *data)
 	cancel_delayed_work_sync(&u->dp_work);
 	cancel_delayed_work_sync(&u->dp_gate_work);
 	cancel_delayed_work_sync(&u->dp_id_work);
+	cancel_delayed_work_sync(&u->dp_tx_work);
 	if (IS_ENABLED(CONFIG_TYPEC))
 		cancel_delayed_work_sync(&u->typec_work);
 	usbc_otg_stop(u, true);
@@ -4204,6 +4289,7 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	INIT_DELAYED_WORK(&u->dp_work, usbc_dp_work);
 	INIT_DELAYED_WORK(&u->dp_gate_work, usbc_dp_gate_work);
 	INIT_DELAYED_WORK(&u->dp_id_work, usbc_dp_id_work);
+	INIT_DELAYED_WORK(&u->dp_tx_work, usbc_dp_tx_work);
 	spin_lock_init(&u->dp_lock);
 	i2c_set_clientdata(client, u);
 	u->log = devm_kcalloc(dev, LOG_N, sizeof(*u->log), GFP_KERNEL);
