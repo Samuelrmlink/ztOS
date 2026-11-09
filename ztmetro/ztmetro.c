@@ -5627,7 +5627,7 @@ static bool cell_searching(struct zt_server *server) {
  * draws the row again, and that arms the next. Stops by itself on service or
  * with the screen off. */
 static void signal_sweep_kick(struct zt_server *server) {
-	if (!server->signal_sweep_armed && server->screen_on && cell_searching(server)) {
+	if (!server->signal_sweep_armed && server->screen_on && cell_searching(server) && server->signal_sweep_timer) {
 		server->signal_sweep_armed = true;
 		wl_event_source_timer_update(server->signal_sweep_timer, SIGNAL_SWEEP_MS);
 	}
@@ -5938,7 +5938,7 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	g_object_unref(probe);
 	double clock_w = clock_px_w;
 
-	int battery = read_battery();
+	int battery = g_dump_dir && server->aod_test_battery >= 0 ? server->aod_test_battery : read_battery();
 	/* Windows Phone battery & charger: crisp outline (aspect ~ 1.95),
 	 * terminal nub centered on the right, inner charge bar (warning red below 15%).
 	 * When charging, the plug sits centered with pins rising above the top line
@@ -17951,6 +17951,70 @@ static void uevent_init(struct zt_server *server) {
 }
 
 /* --render DIR: draw what the shell draws into PNG files and leave. */
+/* The status row in each state worth looking at, status-STATE.png, for a
+ * contact sheet (the row's own drawing, with the states set by hand). */
+static void render_status_states(struct zt_server *server) {
+	static const struct {
+		const char *name;
+		bool airplane, registered;
+		int bars;		/* the mobile network's, 0..5 */
+		const char *tech;	/* "" none */
+		int wifi;		/* -1 off, 0..3 */
+		int bt;			/* 0 off, 1 on, 2 connected */
+		int battery;
+		bool charging, h24;
+	} STATES[] = {
+		{ "wifi3-bt-on", true, false, 0, "", 3, 1, 48, true, false },
+		{ "airplane-only", true, false, 0, "", -1, 0, 80, false, true },
+		{ "wifi0", false, true, 3, "", 0, 0, 62, false, true },
+		{ "wifi1", false, true, 3, "", 1, 0, 62, false, true },
+		{ "wifi2", false, true, 3, "", 2, 0, 62, false, true },
+		{ "wifi3", false, true, 3, "", 3, 0, 62, false, true },
+		{ "wifi3-bt-off", false, true, 5, "", 3, 0, 62, false, false },
+		{ "wifi3-bt-on-12h", false, true, 5, "", 3, 1, 62, false, false },
+		{ "wifi3-bt-connected", false, true, 5, "", 3, 2, 62, false, true },
+		{ "mobile-4g", false, true, 4, "4G", -1, 0, 35, false, true },
+		{ "mobile-h+-bt", false, true, 2, "H+", -1, 2, 35, false, false },
+		{ "no-service", false, false, 0, "", -1, 1, 20, false, true },
+		{ "battery-10", false, true, 3, "", 3, 0, 10, false, true },
+		{ "battery-100-charging", false, true, 3, "", 3, 0, 100, true, true },
+		{ "battery-50-charging-12h", true, false, 0, "", 2, 2, 50, true, false },
+	};
+	bool h24 = server->clock_24h;
+	for (size_t i = 0; i < sizeof(STATES) / sizeof(STATES[0]); i++) {
+		server->cell_airplane = STATES[i].airplane;
+		server->cell_known = true;
+		snprintf(server->cell_reg, sizeof(server->cell_reg), "%s", STATES[i].registered ? "home" : "searching");
+		server->cell_bars = STATES[i].bars;
+		server->signal_sweep = 2;
+		snprintf(server->st_tech_text, sizeof(server->st_tech_text), "%s", STATES[i].tech);
+		server->st_tech = STATES[i].tech[0] ? 1 : 0;
+		server->st_wifi = STATES[i].wifi >= 0 ? 1 : 0;
+		server->st_wifi_bars = STATES[i].wifi < 0 ? 0 : STATES[i].wifi;
+		server->st_arrow = 0;
+		server->bt_on = STATES[i].bt > 0;
+		snprintf(server->bt_name, sizeof(server->bt_name), "%s", STATES[i].bt == 2 ? "Headphones" : "");
+		server->bt_streaming = false;
+		server->bt_battery = -1;
+		server->pods_bar.link = 0;
+		server->aod_test_battery = STATES[i].battery;
+		server->charging = STATES[i].charging;
+		server->clock_24h = STATES[i].h24;
+		cairo_t *cr;
+		struct zt_buffer *buffer = zt_buffer_create(server, server->width, STATUS_H, &cr);
+		cairo_set_source_rgb(cr, 0, 0, 0);
+		cairo_paint(cr);
+		status_row(server, cr, false, false);
+		char name[64];
+		snprintf(name, sizeof(name), "status-%02d-%s", (int)i, STATES[i].name);
+		g_dump_name = name;
+		zt_buffer_show(server, &server->status_layer, buffer, cr, server->width, STATUS_H);
+	}
+	server->clock_24h = h24;
+	server->aod_test_battery = -1;
+	server->charging = false;
+}
+
 static int render_to_files(struct zt_server *server, const char *dir) {
 	g_dump_dir = dir;
 	server->width = 360;
@@ -17965,6 +18029,7 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	bt_state_read(server);
 	pods_bar_read(&server->pods_bar);
 	draw_status(server);
+	render_status_states(server);
 	/* ZTMETRO_WALL=photo: the lock screen and Start's photo with it */
 	const char *wall = getenv("ZTMETRO_WALL");
 	if (wall) {
