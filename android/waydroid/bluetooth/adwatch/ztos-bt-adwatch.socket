@@ -1,0 +1,13 @@
+[Unit]
+Description=ztOS: advertisements as received, for Android apps' Bluetooth scans
+
+[Socket]
+ListenSequentialPacket=/run/ztos-bt-adwatch.sock
+# anyone may connect; ztos-bt-adwatch keeps only root and users with a session
+# (/run/user/UID): what it passes on is radio anyone nearby receives, and
+# BlueZ's D-Bus API already gives any local user the same, parsed
+SocketMode=0666
+Accept=no
+
+[Install]
+WantedBy=sockets.target

@@ -7,6 +7,8 @@
  *     bt-pair-close ID
  * Back over $XDG_RUNTIME_DIR/ztos-bt-agent.sock, on a connection of its own:
  *     ID\tOK\tVALUE\n   or   ID\tCANCEL\n
+ * or, for a PIN or passkey with "Use this ... for similar devices" ticked:
+ *     ID\tOK\tVALUE\tremember\n
  *
  * A device's name comes over the air and its owner chooses it: it is cleaned
  * here too, even though the agent has already cleaned it. */
@@ -194,8 +196,9 @@ static inline bool bt_pair_entry_done(enum bt_pair_mode mode, size_t len) {
 }
 
 /* The line back: its length, or -1 if it does not fit. */
-static inline int bt_pair_reply_line(char *out, size_t size, const char *id, bool ok, const char *value) {
-	int n = ok ? snprintf(out, size, "%s\tOK\t%s\n", id, value ? value : "") :
+static inline int bt_pair_reply_line(char *out, size_t size, const char *id, bool ok, const char *value,
+		bool remember) {
+	int n = ok ? snprintf(out, size, "%s\tOK\t%s%s\n", id, value ? value : "", remember ? "\tremember" : "") :
 		snprintf(out, size, "%s\tCANCEL\n", id);
 	return n < 0 || (size_t)n >= size ? -1 : n;
 }

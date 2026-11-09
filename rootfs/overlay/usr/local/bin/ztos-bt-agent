@@ -16,14 +16,45 @@ and again whenever bluetoothd restarts. It asks through a sheet in the shell:
 
 ztmetro/auth/btpair-proto.h reads these, and ztmetro/auth/README.md says more.
 
-WHAT IT WILL ASK: only while the phone is discoverable, which Settings keeps on
-for as long as its Bluetooth page is open. BlueZ doesn't say which side started
-a pairing, so outside that it refuses everything, without a sheet: a stranger
-can't make a phone that isn't looking put questions on its screen. (Pairing with
+WHAT IT WILL ASK: while the phone is discoverable, which Settings keeps on for
+as long as its Bluetooth page is open, about any device; otherwise only about a
+device this phone is itself dealing with. BlueZ doesn't say which side started a
+pairing, so the agent refuses everything else, without a sheet: a stranger can't
+make a phone that isn't looking put questions on its screen. (Pairing with
 bluetoothctl from a terminal therefore needs "discoverable on".)
+
+"A device this phone is dealing with": an Android app in Waydroid connected to
+it, or pairs it, through ztos-btbridge. The bridge lists those devices in
+$XDG_RUNTIME_DIR/ztos-btbridge/expected, one "ADDRESS EXPIRY" line each (EXPIRY
+in Unix seconds, about a minute ahead, refreshed while the app holds the
+device). Devices often ask for pairing themselves when an app reads something
+encrypted (a security request: a passkey device, RM_2685, on 8 Nov), so a
+connection counts, not just the bridge's own Pair(). The file counts only if it
+is a regular file of this agent's own user that nobody else can write
+(expected()). For those devices the agent asks as if the phone were
+discoverable. It still only asks.
 
 It never says yes by itself. The one thing that goes through without a sheet is
 AuthorizeService for a device someone trusted: see Broker._service_look.
+
+REMEMBERED CODES: the PIN and passkey sheets have "Use this PIN (passkey) for
+similar devices for 3 hours". Ticked, the agent keeps {the device's advertised
+service UUIDs -> the code} for 3 hours, in this process's memory only: never on
+disk, never in a log, gone when it restarts. It answers a later PIN or passkey
+request with it by itself only if all of these hold:
+  - it is a PIN or passkey request (never a confirmation or an authorization);
+  - the phone started it: an Android app is using the device (the bridge's
+    expected file) or Settings is pairing it (`bluetoothctl pair ADDRESS`, a
+    process of this user);
+  - the device advertises exactly the same set of service UUIDs (what it
+    advertised, AD types 0x02-0x07, as BlueZ shows them before it resolves the
+    services: not the GATT database, which differs before and after);
+  - this device hasn't already failed with that code.
+Each time, a notification says so. If the pairing doesn't end up Paired (a
+wrong code: AuthenticationFailed, the link dropped, nothing within
+REMEMBER_WAIT_SECONDS), the device is marked as failed for that code and the
+next request shows the sheet; a code that failed for the device it was typed
+for is forgotten.
 
 Neither PINs nor passkeys are logged. Python can't wipe its strings: a PIN stays
 in this process's memory until the garbage collector reuses it.
@@ -35,6 +66,7 @@ import socket
 import stat
 import struct
 import sys
+import time
 import unicodedata
 
 BUS_NAME = "org.bluez"
@@ -51,6 +83,9 @@ ANSWER_SECONDS = 55
 SHOW_SECONDS = 60       # a number on the screen: nothing tells us about a failure for sure
 TRUST_WAIT_SECONDS = 1.5
 NAME_BYTES = 96
+EXPECT_MAX_SECONDS = 300    # an expiry further ahead than this is not believed
+REMEMBER_SECONDS = 3 * 3600     # how long a ticked code is used for similar devices
+REMEMBER_WAIT_SECONDS = 30      # a code answered: Paired by then, or it failed
 
 SERVICES = {
     "1101": "a serial port",
@@ -123,13 +158,31 @@ def answer_value(mode, text):
 
 
 def parse_reply(line):
-    """An answer from the shell: (id, ok, value), or None."""
+    """An answer from the shell: (id, ok, value, remember), or None."""
     parts = line.rstrip("\n").split("\t")
     if len(parts) == 2 and parts[1] == "CANCEL":
-        return parts[0], False, ""
+        return parts[0], False, "", False
     if len(parts) == 3 and parts[1] == "OK":
-        return parts[0], True, parts[2]
+        return parts[0], True, parts[2], False
+    if len(parts) == 4 and parts[1] == "OK" and parts[3] == "remember":
+        return parts[0], True, parts[2], True
     return None
+
+
+def uuid_set(uuids):
+    return frozenset(str(u).lower() for u in uuids or ())
+
+
+class Remembered:
+    """A code ticked on the sheet: for devices advertising exactly `uuids`."""
+
+    def __init__(self, mode, uuids, value, until, taught_by):
+        self.mode = mode
+        self.uuids = uuids
+        self.value = value
+        self.until = until
+        self.taught_by = taught_by     # the address it was typed for
+        self.failed = set()            # addresses it didn't work for
 
 
 class Request:
@@ -157,8 +210,11 @@ class Broker:
     io.show(line) -> bool       a line for the shell: False if it isn't there
     io.device(path, cb)         cb(dict of Device1's properties, or None)
     io.discoverable(path, cb)   cb(bool) for that adapter
+    io.expected(address)        True while ztos-btbridge deals with this device for Android
     io.after(seconds, fn)       -> a handle for io.stop(handle)
     io.abort(device)            end the pairing in progress with this device
+    io.local_pair(address)      True while this user's `bluetoothctl pair ADDRESS` runs (Settings)
+    io.now()                    the time, in seconds
 
     `ok` and `err` are BlueZ's reply: ok(value) or err("Rejected"|"Canceled", why).
     One request at a time, as BlueZ asks them.
@@ -168,6 +224,10 @@ class Broker:
         self.io = io
         self.cur = None
         self.count = 0
+        self.remembered = []    # Remembered, newest first
+        self.advertised = {}    # device path -> its advertised UUIDs (uuid_set)
+        self.resolved = {}      # device path -> ServicesResolved, as last seen
+        self.trying = {}        # device path -> (Remembered, timer, name): a code given, Paired awaited
 
     # ---- BlueZ's calls
 
@@ -210,9 +270,20 @@ class Broker:
 
     def device_changed(self, path, changed):
         """A number shown has no reply to wait for and BlueZ needn't send Cancel
-        when the pairing ends, so watch the device for that."""
+        when the pairing ends, so watch the device for that. Also: what each
+        device advertises, and how a remembered code worked out."""
+        path = str(path)
+        if "ServicesResolved" in changed:
+            self.resolved[path] = bool(changed["ServicesResolved"])
+        if "UUIDs" in changed and not self.resolved.get(path) and changed["UUIDs"]:
+            self.advertised[path] = uuid_set(changed["UUIDs"])
+        if path in self.trying:
+            if changed.get("Paired"):
+                self._tried(path, True)
+            elif "Connected" in changed and not changed["Connected"]:
+                self._tried(path, False)
         cur = self.cur
-        if not cur or not cur.display or cur.device != str(path):
+        if not cur or not cur.display or cur.device != path:
             return
         if changed.get("Paired") or ("Connected" in changed and not changed["Connected"]):
             log(cur.mode, address_of(cur.device), "over:", "paired" if changed.get("Paired") else "disconnected")
@@ -252,6 +323,13 @@ class Broker:
             self.io.device(req.device, lambda props: self._device_known(req, props))
 
     def _gate(self, req):
+        address = req.props.get("Address") or address_of(req.device)
+        if req.mode in ("pin", "passkey") and self._use_remembered(req, address):
+            return
+        if self.io.expected(address):
+            log(req.mode, address, "asking: an Android app is using it")
+            self._gated(req, True)
+            return
         self.io.discoverable(adapter_of(req.device), lambda on: self._gated(req, on))
 
     def _gated(self, req, on):
@@ -288,9 +366,78 @@ class Broker:
         if not req.display:
             req.err("Canceled", "no answer in time")
 
+    # ---- remembered codes
+
+    def _advertised_uuids(self, req):
+        """What the device advertises: BlueZ's UUIDs before it resolves the
+        services; after that, the last seen before."""
+        if not req.props.get("ServicesResolved") and req.props.get("UUIDs"):
+            self.advertised[req.device] = uuid_set(req.props["UUIDs"])
+        return self.advertised.get(req.device, frozenset())
+
+    def _use_remembered(self, req, address):
+        now = self.io.now()
+        self.remembered = [r for r in self.remembered if r.until > now]
+        uuids = self._advertised_uuids(req)
+        if not uuids or not self.remembered:
+            return False
+        if req.device in self.trying:       # asked again: the code given didn't work
+            self._tried(req.device, False)
+        entry = next((r for r in self.remembered
+                      if r.mode == req.mode and r.uuids == uuids and address.upper() not in r.failed), None)
+        if entry is None:
+            return False
+        if not (self.io.expected(address) or self.io.local_pair(address)):
+            log(req.mode, address, "a remembered code fits, but the phone didn't start this: asking")
+            return False
+        name = clean_name(req.props.get("Alias") or req.props.get("Name") or address).replace("|", "/")
+        log(req.mode, address, "answered with a remembered code")
+        self._drop(req)
+        self._trying(req.device, entry, name)
+        req.ok(entry.value)
+        return True
+
+    def _trying(self, path, entry, name):
+        old = self.trying.pop(path, None)
+        if old and old[1] is not None:
+            self.io.stop(old[1])
+        timer = self.io.after(REMEMBER_WAIT_SECONDS, lambda: self._tried(path, False))
+        self.trying[path] = (entry, timer, name)
+
+    def _tried(self, path, worked):
+        entry, timer, name = self.trying.pop(path)
+        if timer is not None:
+            self.io.stop(timer)
+        address = address_of(path)
+        if worked:
+            if address.upper() != entry.taught_by:
+                log(entry.mode, address, "paired with a remembered code")
+                self.io.show("notify Bluetooth|Paired|Paired %s with the remembered %s\n"
+                             % (name, "PIN" if entry.mode == "pin" else "passkey"))
+            return
+        if address.upper() == entry.taught_by:
+            log(entry.mode, address, "the code typed didn't pair: not remembered")
+            if entry in self.remembered:
+                self.remembered.remove(entry)
+            return
+        log(entry.mode, address, "a remembered code didn't pair: asking next time")
+        entry.failed.add(address.upper())
+
+    def _remember(self, req, value):
+        uuids = self._advertised_uuids(req)
+        address = (req.props.get("Address") or address_of(req.device)).upper()
+        if not uuids:
+            log(req.mode, address, "not remembered: it advertises no services to know it by")
+            return
+        self.remembered = [r for r in self.remembered if not (r.mode == req.mode and r.uuids == uuids)]
+        entry = Remembered(req.mode, uuids, value, self.io.now() + REMEMBER_SECONDS, address)
+        self.remembered.insert(0, entry)
+        log(req.mode, address, "remembered for 3 hours, for devices advertising the same %d services" % len(uuids))
+        self._trying(req.device, entry, "")
+
     # ---- the person's answer
 
-    def answered(self, req_id, accepted, text):
+    def answered(self, req_id, accepted, text, remember=False):
         req = self.cur
         if not req or req.id != req_id or not req.shown:
             return      # too late for this one
@@ -316,6 +463,8 @@ class Broker:
             return
         log(req.mode, address_of(req.device), "answered")
         self._end(req)
+        if remember and req.mode in ("pin", "passkey"):
+            self._remember(req, value)
         req.ok(value)
 
     # ---- ending
@@ -332,6 +481,59 @@ class Broker:
         self._drop(req)
         if was_shown:
             self.io.show("bt-pair-close %s\n" % req.id)
+
+
+def expected(path, address, now=None):
+    """Is `address` in ztos-btbridge's list of devices it deals with for
+    Android, and not expired? The list counts only if it is a regular file
+    (no symlink) of our own user that nobody else can write."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+            return False
+        text = os.read(fd, 4096).decode("ascii", "replace")
+    finally:
+        os.close(fd)
+    now = time.time() if now is None else now
+    want = str(address).upper()
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or parts[0].upper() != want:
+            continue
+        try:
+            until = int(parts[1])
+        except ValueError:
+            continue
+        if now <= until <= now + EXPECT_MAX_SECONDS:
+            return True
+    return False
+
+
+def local_pair(address, proc="/proc"):
+    """Is Settings pairing this device: a `bluetoothctl pair ADDRESS` of this
+    user running? (Settings pairs with exactly that.)"""
+    want = str(address).upper()
+    try:
+        pids = [p for p in os.listdir(proc) if p.isdigit()]
+    except OSError:
+        return False
+    for pid in pids:
+        try:
+            if os.stat(os.path.join(proc, pid)).st_uid != os.getuid():
+                continue
+            with open(os.path.join(proc, pid, "cmdline"), "rb") as f:
+                argv = f.read(512).split(b"\0")
+        except OSError:
+            continue
+        words = [w.decode("ascii", "replace") for w in argv if w]
+        if (len(words) >= 3 and os.path.basename(words[0]) == "bluetoothctl"
+                and "pair" in words[1:] and want in (w.upper() for w in words[1:])):
+            return True
+    return False
 
 
 def write_ctl(path, line):
@@ -420,6 +622,15 @@ def main():
 
         def stop(self, handle):
             GLib.source_remove(handle)
+
+        def expected(self, address):
+            return expected(os.path.join(run, "ztos-btbridge", "expected"), address)
+
+        def local_pair(self, address):
+            return local_pair(address)
+
+        def now(self):
+            return time.time()
 
         def abort(self, device):
             # on a pairing started from there, there's nothing of ours to cancel:
@@ -571,6 +782,16 @@ def main():
     bus.add_signal_receiver(
         lambda iface, changed, _inv, path=None: broker.device_changed(path, changed) if iface == DEVICE_IFACE else None,
         dbus_interface=PROPS_IFACE, signal_name="PropertiesChanged", bus_name=BUS_NAME, path_keyword="path")
+    bus.add_signal_receiver(
+        lambda path, ifaces: broker.device_changed(path, dict(ifaces[DEVICE_IFACE])) if DEVICE_IFACE in ifaces else None,
+        dbus_interface="org.freedesktop.DBus.ObjectManager", signal_name="InterfacesAdded", bus_name=BUS_NAME)
+
+    def seed(objects):
+        for path, ifaces in objects.items():
+            if DEVICE_IFACE in ifaces:
+                broker.device_changed(path, dict(ifaces[DEVICE_IFACE]))
+    bus.call_async(BUS_NAME, "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", "", (),
+                   seed, lambda _e: None)
     bus.watch_name_owner(BUS_NAME, owner_changed)
 
     sock = listen(sock_path)

@@ -1,0 +1,925 @@
+"""ztos-btbridge's policy and its BLE central ops, against a fake BlueZ."""
+import unittest
+
+from fakes import AIRPODS, CCCD, HR, HRM, LOCK, SENSOR, SPEAKER, FakeClient, P, make
+from ztbt.core import att_code, build_ad
+
+
+class Basics(unittest.TestCase):
+    def test_requests_before_hello_are_refused(self):
+        be, store, br, c = make()
+        other = FakeClient(br)
+        rid = other.request("BONDED_LIST")
+        self.assertEqual(other.reply(rid, "BONDED_LIST")[0], P.ST_NOT_READY)
+
+    def test_wrong_version(self):
+        be, store, br, c = make()
+        other = FakeClient(br)
+        rid = other.request("HELLO", 99, "x")
+        self.assertEqual(other.reply(rid, "HELLO")[0], P.ST_UNSUPPORTED)
+
+    def test_bad_packet_closes(self):
+        be, store, br, c = make()
+        br.handle(c, b"\x02\x00")
+        self.assertTrue(c.closed)
+
+    def test_hello_reports_adapter(self):
+        be, store, br, c = make()
+        st, vals = c.reply(1, "HELLO")
+        self.assertEqual(vals, [1, "00:B5:D0:3D:D8:44", "ztos", 0x6c0110, True, 5])
+
+
+class Hidden(unittest.TestCase):
+    """Devices Linux is connected to are not Android's."""
+
+    def test_bonded_list_leaves_out_linux_connected(self):
+        be, store, br, c = make()
+        st, (devs,) = c.reply(c.request("BONDED_LIST"), "BONDED_LIST")
+        self.assertEqual(st, P.ST_OK)
+        self.assertEqual([d[0] for d in devs], [LOCK, SPEAKER])
+        speaker = devs[1]
+        self.assertEqual(speaker[4], P.DEV_BREDR)
+        self.assertEqual(speaker[5], P.BOND_BONDED)
+        self.assertFalse(speaker[6])
+
+    def test_scan_never_reports_them(self):
+        be, store, br, c = make()
+        c.request("SCAN_START", P.T_LE)
+        br.device_changed(AIRPODS, {"RSSI": -50, "ManufacturerData": {76: b"\x07\x19"}})
+        br.device_changed(SENSOR, {"RSSI": -60})
+        found = [e[0][0] for e in c.events("EV_DEVICE_FOUND")]
+        self.assertEqual(found, [SENSOR])
+
+    def test_connect_bond_get_rssi_busy(self):
+        be, store, br, c = make()
+        br.device_changed(AIRPODS, {"RSSI": -40})
+        for op, args in (("GATT_OPEN", (AIRPODS, 0, P.T_LE)), ("BOND_CREATE", (AIRPODS, P.T_AUTO)),
+                         ("DEVICE_GET", (AIRPODS,)), ("RSSI", (AIRPODS,))):
+            self.assertEqual(c.reply(c.request(op, *args), op)[0], P.ST_BUSY, op)
+        self.assertEqual(be.called("connect"), [])
+        self.assertEqual(be.called("pair"), [])
+
+    def test_shows_again_when_linux_lets_go(self):
+        be, store, br, c = make()
+        br.device_changed(AIRPODS, {"Connected": False})
+        st, (devs,) = c.reply(c.request("BONDED_LIST"), "BONDED_LIST")
+        self.assertIn(AIRPODS, [d[0] for d in devs])
+        rid = c.request("GATT_OPEN", AIRPODS, 0, P.T_LE)
+        self.assertEqual(c.reply(rid, "GATT_OPEN")[0], P.ST_OK)
+
+    def test_linux_connecting_later_blocks_new_links(self):
+        be, store, br, c = make()
+        be.ifaces[LOCK] = {"org.bluez.Input1"}             # a BLE keyboard: Linux's input
+        br.device_changed(LOCK, {"Connected": True})
+        rid = c.request("GATT_OPEN", LOCK, 0, P.T_LE)
+        self.assertEqual(c.reply(rid, "GATT_OPEN")[0], P.ST_BUSY)
+        self.assertEqual(c.events("EV_BOND_STATE"), [])   # no fake "unpaired"
+
+    def test_blocked_devices_hidden(self):
+        be, store, br, c = make()
+        br.device_changed(LOCK, {"Blocked": True})
+        st, (devs,) = c.reply(c.request("BONDED_LIST"), "BONDED_LIST")
+        self.assertNotIn(LOCK, [d[0] for d in devs])
+
+
+class Handoff(unittest.TestCase):
+    """An LE device Linux is connected to but not using (RM_2685, 8 Nov:
+    paired in Settings, left connected, GATT only) is Android's to use."""
+
+    def test_paired_in_settings_then_an_app_connects(self):
+        be, store, br, c = make()
+        br.device_changed(LOCK, {"Connected": True})        # Settings paired it; nothing uses it
+        st, (devs,) = c.reply(c.request("BONDED_LIST"), "BONDED_LIST")
+        self.assertIn(LOCK, [x[0] for x in devs])
+        st, (link,) = c.reply(c.request("GATT_OPEN", LOCK, 0, P.T_LE), "GATT_OPEN")
+        self.assertEqual(st, P.ST_OK)
+        self.assertFalse(br.holds[LOCK].made)              # not our connection
+        be.answer("connect", error=("org.bluez.Error.AlreadyConnected", ""))
+        self.assertEqual(c.events("EV_LINK"), [[link, P.ST_OK, True, 247]])
+        c.request("GATT_CLOSE", link)
+        be.linger()
+        self.assertEqual(be.called("disconnect"), [])      # Linux's link stays as it was
+        self.assertNotIn(LOCK, br.holds)
+
+    def test_a_linux_profile_keeps_it_linux_s(self):
+        be, store, br, c = make()
+        for iface in ("org.bluez.Input1", "org.bluez.MediaTransport1", "org.bluez.Network1"):
+            be.ifaces[LOCK] = {iface}
+            br.device_changed(LOCK, {"Connected": True})
+            rid = c.request("GATT_OPEN", LOCK, 0, P.T_LE)
+            self.assertEqual(c.reply(rid, "GATT_OPEN")[0], P.ST_BUSY, iface)
+        self.assertEqual(be.called("connect"), [])
+
+    def test_classic_devices_stay_linux_s(self):
+        be, store, br, c = make()
+        br.device_changed(SPEAKER, {"Connected": True})     # BR/EDR, no profile seen: still Linux's
+        rid = c.request("RSSI", SPEAKER)
+        self.assertEqual(c.reply(rid, "RSSI")[0], P.ST_BUSY)
+
+    def test_shown_in_scans(self):
+        be, store, br, c = make()
+        c.request("SCAN_START", P.T_LE)
+        br.device_changed(LOCK, {"Connected": True, "RSSI": -55})
+        self.assertEqual([e[0][0] for e in c.events("EV_DEVICE_FOUND")], [LOCK])
+
+
+class Scanning(unittest.TestCase):
+    def test_needs_enable(self):
+        be, store, br, c = make()
+        c.request("ENABLE", False)
+        rid = c.request("SCAN_START", P.T_LE)
+        self.assertEqual(c.reply(rid, "SCAN_START")[0], P.ST_NOT_READY)
+        self.assertEqual(be.called("discover"), [])
+
+    def test_transports_merge_and_stop(self):
+        be, store, br, c = make()
+        c.request("SCAN_START", P.T_LE)
+        c.request("SCAN_START", P.T_BREDR)
+        c.request("SCAN_STOP", P.T_LE)
+        c.request("SCAN_STOP", P.T_BREDR)
+        self.assertEqual(be.called("discover"),
+                         [("discover", P.T_LE), ("discover", P.T_AUTO), ("discover", P.T_BREDR), ("discover", None)])
+
+    def test_results_are_droppable_and_carry_ad(self):
+        be, store, br, c = make()
+        c.request("SCAN_START", P.T_LE)
+        br.device_changed(SENSOR, {"RSSI": -61, "ManufacturerData": {0x59: b"\x01\x02"},
+                                   "AdvertisingFlags": b"\x06"})
+        (dev, rssi, tx, ad), = c.events("EV_DEVICE_FOUND")
+        self.assertEqual((dev[0], dev[1], dev[4], rssi, tx), (SENSOR, P.ADDR_RANDOM, P.DEV_BLE, -61, 127))
+        self.assertEqual(ad, b"\x02\x01\x06" + b"\x03\x03\x0d\x18" + b"\x05\xff\x59\x00\x01\x02")
+        self.assertEqual(c.droppable("EV_DEVICE_FOUND"), [True])
+
+    def test_new_device_reported(self):
+        be, store, br, c = make()
+        c.request("SCAN_START", P.T_LE)
+        br.device_changed("F0:00:00:00:00:09", {"Address": "F0:00:00:00:00:09", "AddressType": "random",
+                                                 "RSSI": -70, "Connected": False}, added=True)
+        self.assertEqual([e[0][0] for e in c.events("EV_DEVICE_FOUND")], ["F0:00:00:00:00:09"])
+
+    def test_a_client_dropped_while_events_go_out(self):
+        be, store, br, c = make()
+        c.request("SCAN_START", P.T_LE)
+        other = FakeClient(br)
+        other.request("HELLO", P.VERSION, "x")
+        other.request("ENABLE", True)
+        other.request("SCAN_START", P.T_LE)
+        c.send = lambda packet, droppable=False: c.close()     # its socket breaks on this send
+        br.device_changed(SENSOR, {"RSSI": -61})                # no RuntimeError
+        self.assertTrue(c.closed)
+        self.assertEqual(len(other.events("EV_DEVICE_FOUND2")), 1)
+
+    def test_nothing_reported_when_not_scanning(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -61})
+        self.assertEqual(c.events("EV_DEVICE_FOUND"), [])
+
+    def test_freeze_pauses_and_thaw_resumes(self):
+        be, store, br, c = make()
+        c.request("SCAN_START", P.T_LE)
+        br.set_frozen(True)
+        br.device_changed(SENSOR, {"RSSI": -61})
+        br.set_frozen(False)
+        self.assertEqual(be.called("discover"), [("discover", P.T_LE), ("discover", None), ("discover", P.T_LE)])
+
+    def test_client_gone_stops_discovery(self):
+        be, store, br, c = make()
+        c.request("SCAN_START", P.T_LE)
+        c.close()
+        self.assertEqual(be.called("discover")[-1], ("discover", None))
+
+
+class Gatt(unittest.TestCase):
+    def open(self, addr=SENSOR):
+        be, store, br, c = make()
+        br.device_changed(addr, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", addr, 1, P.T_LE), "GATT_OPEN")
+        self.assertEqual(st, P.ST_OK)
+        return be, store, br, c, link
+
+    def connected(self, addr=SENSOR):
+        be, store, br, c, link = self.open(addr)
+        be.answer("connect")
+        br.device_changed(addr, {"Connected": True})
+        return be, store, br, c, link
+
+    def test_connect_then_link_event_and_acl(self):
+        be, store, br, c, link = self.connected()
+        self.assertEqual(c.events("EV_LINK"), [[link, P.ST_OK, True, 247]])
+        self.assertEqual(c.events("EV_ACL"), [[SENSOR, True, P.T_LE]])
+        # the device Android uses is connected on Linux too, and stays Android's
+        st, (dev,) = c.reply(c.request("DEVICE_GET", SENSOR), "DEVICE_GET")
+        self.assertTrue(dev[6])
+
+    def test_connect_failure(self):
+        be, store, br, c, link = self.open()
+        be.answer("connect", error=("org.bluez.Error.Failed", "le-connection-abort-by-local"))
+        self.assertEqual(c.events("EV_LINK"), [[link, P.ST_FAIL, False, 0]])
+        self.assertNotIn(SENSOR, br.holds)
+
+    def test_connect_timeout_disconnects(self):
+        be, store, br, c, link = self.open()
+        from ztbt.core import CONNECT_SECONDS
+        self.assertEqual(be.fire(CONNECT_SECONDS), 1)
+        self.assertEqual(c.events("EV_LINK"), [[link, P.ST_TIMEOUT, False, 0]])
+        self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])
+
+    def test_unknown_device(self):
+        be, store, br, c = make()
+        rid = c.request("GATT_OPEN", "F1:F1:F1:F1:F1:F1", 1, P.T_LE)
+        self.assertEqual(c.reply(rid, "GATT_OPEN")[0], P.ST_NOT_FOUND)
+
+    def test_second_link_shares_and_last_close_disconnects(self):
+        be, store, br, c, link = self.connected()
+        st, (link2,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        self.assertEqual(len(be.called("connect")), 1)
+        self.assertIn([link2, P.ST_OK, True, 247], c.events("EV_LINK"))
+        c.request("GATT_CLOSE", link)
+        self.assertEqual(be.called("disconnect"), [])
+        c.request("GATT_CLOSE", link2)
+        self.assertEqual(be.called("disconnect"), [])
+        be.linger()
+        self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])
+
+    def test_never_disconnects_what_it_did_not_connect(self):
+        # Android's pairing made the connection ours; Linux's own connections are hidden anyway.
+        # Here: the device was connected through a hold that Linux took over? No: a hold made
+        # on an already connected device (only possible through our own Pair) is made=False.
+        be, store, br, c = make()
+        br.device_changed(LOCK, {"RSSI": -50})
+        c.request("BOND_CREATE", LOCK, P.T_LE)    # already bonded: no hold
+        self.assertEqual(br.holds, {})
+
+    def test_a_device_being_let_go_is_not_linux_s(self):
+        be, store, br, c, link = self.connected()
+        c.request("GATT_CLOSE", link)
+        be.linger()
+        self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])
+        # BlueZ still says Connected for a moment: not hidden, not busy
+        rid = c.request("BOND_CREATE", SENSOR, P.T_LE)
+        self.assertEqual(c.reply(rid, "BOND_CREATE")[0], P.ST_OK)
+        self.assertTrue(br.holds[SENSOR].made)
+
+    def test_reopened_while_lingering(self):
+        # nRF Connect closes and opens again around a bond: nothing goes down
+        be, store, br, c, link = self.connected()
+        c.request("GATT_CLOSE", link)
+        st, (link2,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        self.assertEqual(c.events("EV_LINK")[-1], [link2, P.ST_OK, True, 247])
+        self.assertEqual(len(be.called("connect")), 1)
+        self.assertEqual(be.linger(), 0)                      # the pending disconnect is gone
+        self.assertEqual(be.called("disconnect"), [])
+
+    def test_taken_back_while_letting_go(self):
+        be, store, br, c, link = self.connected()
+        c.request("GATT_CLOSE", link)
+        be.linger()
+        st, (link2,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect", error=("org.bluez.Error.AlreadyConnected", ""))
+        self.assertEqual(c.events("EV_LINK")[-1], [link2, P.ST_OK, True, 247])
+        self.assertTrue(br.holds[SENSOR].made)       # still ours to disconnect later
+
+    def test_release_window_ends(self):
+        be, store, br, c, link = self.connected()
+        be.ifaces[SENSOR] = {"org.bluez.Input1"}           # Linux took it up meanwhile
+        c.request("GATT_CLOSE", link)
+        be.linger()
+        be.timers[-1][1]()                     # BlueZ never said Disconnected: after 10 s
+        rid = c.request("GATT_OPEN", SENSOR, 1, P.T_LE)
+        self.assertEqual(c.reply(rid, "GATT_OPEN")[0], P.ST_BUSY)
+
+    def test_release_window_closes_on_disconnected(self):
+        be, store, br, c, link = self.connected()
+        c.request("GATT_CLOSE", link)
+        be.linger()
+        br.device_changed(SENSOR, {"Connected": False})
+        self.assertEqual(br.releasing, {})
+
+    def test_remote_disconnect_ends_links(self):
+        be, store, br, c, link = self.connected()
+        br.device_changed(SENSOR, {"Connected": False})
+        self.assertEqual(c.events("EV_LINK")[-1], [link, P.ST_OK, False, 0])
+        self.assertEqual(be.called("disconnect"), [])
+        self.assertEqual(br.links, {})
+
+    def test_freeze_releases(self):
+        be, store, br, c, link = self.connected()
+        br.set_frozen(True)
+        self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])
+        self.assertEqual(c.events("EV_LINK")[-1], [link, P.ST_NOT_READY, False, 0])
+        rid = c.request("GATT_OPEN", SENSOR, 1, P.T_LE)
+        self.assertEqual(c.reply(rid, "GATT_OPEN")[0], P.ST_NOT_READY)
+
+    def test_client_gone_releases(self):
+        be, store, br, c, link = self.connected()
+        c.close()
+        self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])
+
+    def test_discover_waits_for_services_resolved(self):
+        be, store, br, c, link = self.connected()
+        rid = c.request("GATT_DISCOVER", link)
+        self.assertIsNone(c.reply(rid, "GATT_DISCOVER"))
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        st, (db,) = c.reply(rid, "GATT_DISCOVER")
+        self.assertEqual(db[0], (P.DB_PRIMARY, 1, 1, 5, HR, 0))
+        self.assertEqual(db[2][4], CCCD)
+
+    def test_discover_timeout(self):
+        be, store, br, c, link = self.connected()
+        rid = c.request("GATT_DISCOVER", link)
+        be.timers[-1][1]()
+        self.assertEqual(c.reply(rid, "GATT_DISCOVER")[0], P.ST_TIMEOUT)
+
+    def test_discover_ends_when_the_link_drops(self):
+        # RM_2685, 9 Nov: dropped 1 s after connecting; discovery waited the full 30 s
+        be, store, br, c, link = self.connected()
+        rid = c.request("GATT_DISCOVER", link)
+        br.device_changed(SENSOR, {"Connected": False})
+        self.assertEqual(c.reply(rid, "GATT_DISCOVER")[0], P.ST_NOT_READY)
+        for _s, fn in list(be.timers):
+            fn()                                    # the timeout later: nothing more
+        self.assertEqual(len([p for p, _ in c.out if P.decode_raw(p)[2] == rid]), 1)
+
+    def test_read_value_and_att_error(self):
+        be, store, br, c, link = self.connected()
+        rid = c.request("GATT_READ", link, 3, 0)
+        be.answer("read", value=b"\x00\x48")
+        self.assertEqual(c.reply(rid, "GATT_READ"), (P.ST_OK, [b"\x00\x48"]))
+        rid = c.request("GATT_READ", link, 3, 0)
+        be.answer("read", error=("org.bluez.Error.Failed", "Operation failed with ATT error: 0x05"))
+        self.assertEqual(c.reply(rid, "GATT_READ"), (P.ST_ATT, [5]))
+        rid = c.request("GATT_READ", link, 99, 0)
+        self.assertEqual(c.reply(rid, "GATT_READ"), (P.ST_ATT, [1]))
+
+    def test_cccd_write_starts_and_stops_notify(self):
+        be, store, br, c, link = self.connected()
+        rid = c.request("GATT_WRITE", link, 4, P.W_DEFAULT, 0, b"\x01\x00")
+        self.assertEqual(c.reply(rid, "GATT_WRITE")[0], P.ST_OK)
+        self.assertEqual(be.called("notify"), [("notify", SENSOR, 3, True)])
+        self.assertEqual(be.called("write"), [])
+        rid = c.request("GATT_READ", link, 4, 0)
+        self.assertEqual(c.reply(rid, "GATT_READ"), (P.ST_OK, [b"\x01\x00"]))
+        br.value_changed(SENSOR, 3, b"\x00\x50")
+        self.assertEqual(c.events("EV_GATT_VALUE"), [[link, 3, b"\x00\x50"]])
+        c.request("GATT_WRITE", link, 4, P.W_DEFAULT, 0, b"\x00\x00")
+        self.assertEqual(be.called("notify")[-1], ("notify", SENSOR, 3, False))
+        br.value_changed(SENSOR, 3, b"\x00\x51")
+        self.assertEqual(len(c.events("EV_GATT_VALUE")), 1)
+
+    def test_notify_shared_between_links(self):
+        be, store, br, c, link = self.connected()
+        st, (link2,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        c.request("GATT_WRITE", link, 4, P.W_DEFAULT, 0, b"\x01\x00")
+        c.request("GATT_WRITE", link2, 4, P.W_DEFAULT, 0, b"\x01\x00")
+        self.assertEqual(len(be.called("notify")), 1)
+        br.value_changed(SENSOR, 3, b"\x07")
+        self.assertEqual(sorted(e[0] for e in c.events("EV_GATT_VALUE")), sorted([link, link2]))
+        c.request("GATT_CLOSE", link)
+        self.assertEqual(len(be.called("notify")), 1)
+        c.request("GATT_CLOSE", link2)
+
+    def test_write_types(self):
+        be, store, br, c, link = self.connected()
+        rid = c.request("GATT_WRITE", link, 3, P.W_NO_RSP, 0, b"\x01")
+        be.answer("write")
+        self.assertEqual(c.reply(rid, "GATT_WRITE")[0], P.ST_OK)
+        self.assertEqual(be.called("write")[0], ("write", SENSOR, 3, b"\x01", P.W_NO_RSP, 0))
+        rid = c.request("GATT_WRITE", link, 3, P.W_PREPARE, 0, b"\x01")
+        self.assertEqual(c.reply(rid, "GATT_WRITE")[0], P.ST_UNSUPPORTED)
+        rid = c.request("GATT_WRITE", link, 4, P.W_DEFAULT, 0, b"\x01")
+        self.assertEqual(c.reply(rid, "GATT_WRITE"), (P.ST_ATT, [0x0d]))
+
+    def test_other_clients_links_are_not_yours(self):
+        be, store, br, c, link = self.connected()
+        other = FakeClient(br)
+        other.request("HELLO", P.VERSION, "x")
+        other.request("ENABLE", True)
+        for op, args in (("GATT_READ", (link, 3, 0)), ("GATT_CLOSE", (link,))):
+            self.assertEqual(other.reply(other.request(op, *args), op)[0], P.ST_NOT_FOUND)
+
+    def test_ops_on_a_connecting_link(self):
+        be, store, br, c, link = self.open()
+        rid = c.request("GATT_READ", link, 3, 0)
+        self.assertEqual(c.reply(rid, "GATT_READ")[0], P.ST_NOT_READY)
+
+    def test_mtu(self):
+        be, store, br, c, link = self.connected()
+        self.assertEqual(c.reply(c.request("GATT_MTU", link), "GATT_MTU"), (P.ST_OK, [247]))
+
+    def test_adapter_off_drops_links(self):
+        be, store, br, c, link = self.connected()
+        be.powered = False
+        br.adapter_changed({"Powered": False})
+        self.assertEqual(c.events("EV_ADAPTER"), [[False, "ztos"]])
+        self.assertEqual(c.events("EV_LINK")[-1], [link, P.ST_NOT_READY, False, 0])
+
+
+class Expected(unittest.TestCase):
+    """Which devices ztos-bt-agent may ask the person about (RM_2685, 8 Nov:
+    a passkey device that asks for pairing when an app reads it)."""
+
+    def test_a_device_connected_for_android_is_expected(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        self.assertEqual(store.expect, {SENSOR})
+        self.assertEqual(store.writes[-1][1], 60)
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        c.request("GATT_CLOSE", link)
+        be.linger()
+        self.assertEqual(store.expect, set())
+
+    def test_refreshed_while_held(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        c.request("GATT_OPEN", SENSOR, 1, P.T_LE)
+        n = len(store.writes)
+        self.assertEqual(be.fire(30), 1)
+        self.assertEqual(len(store.writes), n + 1)
+        self.assertEqual(store.expect, {SENSOR})
+
+    def test_linux_s_devices_never_expected(self):
+        be, store, br, c = make()
+        c.request("GATT_OPEN", AIRPODS, 0, P.T_LE)          # busy: refused
+        self.assertEqual(store.expect, set())
+
+    def test_freeze_and_client_gone_clear_it(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        c.request("GATT_OPEN", SENSOR, 1, P.T_LE)
+        br.set_frozen(True)
+        self.assertEqual(store.expect, set())
+        br.set_frozen(False)
+        c.request("GATT_OPEN", SENSOR, 1, P.T_LE)
+        c.close()
+        self.assertEqual(store.expect, set())
+        self.assertEqual(be.timers, [t for t in be.timers if t[0] != 30])   # no refresh left
+
+
+class Bonds(unittest.TestCase):
+    def test_pair_goes_through_bluez_with_the_agent_hint(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        rid = c.request("BOND_CREATE", SENSOR, P.T_LE)
+        self.assertEqual(c.reply(rid, "BOND_CREATE")[0], P.ST_OK)
+        self.assertEqual(store.expect, {SENSOR})            # the agent may ask about it
+        self.assertEqual(c.events("EV_BOND_STATE"), [[SENSOR, P.BOND_BONDING, P.ST_OK]])
+        br.device_changed(SENSOR, {"Connected": True})      # Pair() connects: ours
+        br.device_changed(SENSOR, {"Paired": True, "Bonded": True})
+        be.answer("pair")
+        self.assertEqual(store.expect, {SENSOR})            # still held (lingers)
+        self.assertEqual(c.events("EV_BOND_STATE")[-1], [SENSOR, P.BOND_BONDED, P.ST_OK])
+        self.assertEqual(len(c.events("EV_BOND_STATE")), 2)
+        self.assertIn(SENSOR, store.android)
+        self.assertEqual(be.called("disconnect"), [])       # the app may connect now: it lingers
+        be.linger()
+        self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])  # we connected it for Pair()
+        self.assertEqual(store.expect, set())
+
+    def test_pair_kept_connected_for_a_link(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        c.request("BOND_CREATE", SENSOR, P.T_LE)
+        br.device_changed(SENSOR, {"Connected": True})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        self.assertEqual(c.events("EV_LINK"), [[link, P.ST_OK, True, 247]])
+        be.answer("pair")
+        self.assertEqual(be.called("disconnect"), [])
+        self.assertEqual(be.called("connect"), [])
+
+    def test_pair_refused(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        c.request("BOND_CREATE", SENSOR, P.T_LE)
+        be.answer("pair", error=("org.bluez.Error.AuthenticationRejected", ""))
+        self.assertEqual(c.events("EV_BOND_STATE")[-1], [SENSOR, P.BOND_NONE, P.ST_AUTH_FAILED])
+        self.assertNotIn(SENSOR, store.android)
+        self.assertEqual(store.expect, set())
+
+    def test_pair_twice(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        c.request("BOND_CREATE", SENSOR, P.T_LE)
+        rid = c.request("BOND_CREATE", SENSOR, P.T_LE)
+        self.assertEqual(c.reply(rid, "BOND_CREATE")[0], P.ST_IN_PROGRESS)
+
+    def test_pair_survives_freeze(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        c.request("BOND_CREATE", SENSOR, P.T_LE)
+        br.device_changed(SENSOR, {"Connected": True})
+        br.set_frozen(True)
+        self.assertEqual(be.called("disconnect"), [])   # the person may be answering the sheet
+
+    def test_remove_any_bond_when_settings_allow(self):
+        be, store, br, c = make()
+        rid = c.request("BOND_REMOVE", LOCK)            # paired in Settings
+        self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_OK)
+        self.assertEqual(be.called("remove"), [("remove", LOCK)])
+        self.assertEqual(c.events("EV_BOND_STATE"), [[LOCK, P.BOND_NONE, P.ST_OK]])
+        store.android.add(SPEAKER)
+        rid = c.request("BOND_REMOVE", SPEAKER)
+        self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_OK)
+        self.assertNotIn(SPEAKER, store.android)
+
+    def test_switched_off_refuses_all(self):
+        be, store, br, c = make()
+        store.may_remove = False
+        store.android.add(LOCK)
+        rid = c.request("BOND_REMOVE", LOCK)
+        self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_NOT_PERMITTED)
+        self.assertEqual(be.called("remove"), [])
+        self.assertEqual(c.events("EV_BOND_STATE"), [[LOCK, P.BOND_BONDED, P.ST_NOT_PERMITTED]])
+        store.may_remove = True                         # read again at the next request
+        rid = c.request("BOND_REMOVE", LOCK)
+        self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_OK)
+
+    def test_never_removes_a_linux_connected_bond(self):
+        be, store, br, c = make()
+        store.android.add(AIRPODS)
+        rid = c.request("BOND_REMOVE", AIRPODS)
+        self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_NOT_PERMITTED)
+        self.assertEqual(be.called("remove"), [])
+        self.assertEqual(c.events("EV_BOND_STATE"), [[AIRPODS, P.BOND_BONDED, P.ST_NOT_PERMITTED]])
+        be.ifaces[LOCK] = {"org.bluez.Input1"}          # an LE keyboard Linux is using
+        br.device_changed(LOCK, {"Connected": True})
+        rid = c.request("BOND_REMOVE", LOCK)
+        self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_NOT_PERMITTED)
+
+    def test_bonds_made_by_linux_are_reported(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"Paired": True, "Bonded": True})
+        # BONDING first: Android drops a BONDED it didn't see coming (iTi, 9 Nov)
+        self.assertEqual(c.events("EV_BOND_STATE"), [[SENSOR, P.BOND_BONDING, P.ST_OK],
+                                                      [SENSOR, P.BOND_BONDED, P.ST_OK]])
+
+    def test_device_initiated_pairing_while_android_uses_it(self):
+        # RM_2685: connected for iTi, it asks for a passkey itself; the agent's
+        # sheet answers; BlueZ says Paired, then Bonded
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        br.device_changed(SENSOR, {"Paired": True})
+        br.device_changed(SENSOR, {"Bonded": True})
+        self.assertEqual(c.events("EV_BOND_STATE"), [[SENSOR, P.BOND_BONDING, P.ST_OK],
+                                                      [SENSOR, P.BOND_BONDED, P.ST_OK]])
+        st, (devs,) = c.reply(c.request("BONDED_LIST"), "BONDED_LIST")
+        self.assertIn(SENSOR, [x[0] for x in devs])
+
+    def test_a_pairing_without_a_bond_says_nothing(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"Paired": True, "Bonded": False})
+        self.assertEqual(c.events("EV_BOND_STATE"), [])
+
+
+class Helpers(unittest.TestCase):
+    def test_att_codes(self):
+        self.assertEqual(att_code("org.bluez.Error.Failed", "Operation failed with ATT error: 0x0e"), 0x0e)
+        self.assertEqual(att_code("org.bluez.Error.NotPermitted", "Read not permitted"), 0x02)
+        self.assertEqual(att_code("org.bluez.Error.NotAuthorized", ""), 0x08)
+        self.assertIsNone(att_code("org.bluez.Error.Failed", "Not connected"))
+        # BlueZ 5.87's names for the others (src/gatt-client.c)
+        self.assertEqual(att_code("org.bluez.Error.NotPermitted", "Write not permitted"), 0x03)
+        self.assertEqual(att_code("org.bluez.Error.NotPermitted", "Not paired"), 0x05)
+        self.assertEqual(att_code("org.bluez.Error.InvalidArguments", "Invalid offset"), 0x07)
+        self.assertEqual(att_code("org.bluez.Error.InvalidArguments", "Invalid Length"), 0x0d)
+        self.assertIsNone(att_code("org.bluez.Error.InvalidArguments", "something else"))
+
+    def test_ad_rebuild(self):
+        d = {"Name": "nRF", "TxPower": -4, "UUIDs": ["6e400001-b5a3-f393-e0a9-e50e24dcca9e"],
+             "ServiceData": {"0000feaa-0000-1000-8000-00805f9b34fb": b"\x10"},
+             "AdvertisingData": {0x2a: b"\x01"}}
+        ad = build_ad(d)
+        self.assertIn(b"\x11\x07" + bytes.fromhex("9ecadc240ee5a9e093f3a3b50100406e"), ad)
+        self.assertIn(b"\x04\x09nRF", ad)
+        self.assertIn(b"\x02\x0a\xfc", ad)
+        self.assertIn(b"\x04\x16\xaa\xfe\x10", ad)
+        self.assertTrue(ad.endswith(b"\x02\x2a\x01"))
+
+
+
+def logged():
+    """make(), with the bridge's log kept as lines."""
+    be, store, br, c = make()
+    lines = []
+    br.log = lambda *a: lines.append(" ".join(str(x) for x in a))
+    return be, store, br, c, lines
+
+
+def up(be, br, c, addr=SENSOR):
+    br.device_changed(addr, {"RSSI": -60})
+    st, (link,) = c.reply(c.request("GATT_OPEN", addr, 1, P.T_LE), "GATT_OPEN")
+    be.answer("connect")
+    br.device_changed(addr, {"Connected": True})
+    return link
+
+
+class BondGoneOnLinux(unittest.TestCase):
+    """A device removed in Settings: BlueZ drops the object, Paired never
+    goes false; Android must hear BOND_NONE (RM_2685, 9 Nov)."""
+
+    def test_removed_in_settings_tells_android(self):
+        be, store, br, c = make()
+        store.android.add(LOCK)
+        br.device_removed(LOCK)
+        self.assertEqual(c.events("EV_BOND_STATE"), [[LOCK, P.BOND_NONE, P.ST_OK]])
+        st, (devs,) = c.reply(c.request("BONDED_LIST"), "BONDED_LIST")
+        self.assertNotIn(LOCK, [x[0] for x in devs])
+        self.assertNotIn(LOCK, store.android)
+
+    def test_unbonded_device_gone_says_nothing(self):
+        be, store, br, c = make()
+        br.device_removed(SENSOR)
+        self.assertEqual(c.events("EV_BOND_STATE"), [])
+
+    def test_android_s_own_removal_tells_once(self):
+        be, store, br, c = make()
+        store.android.add(LOCK)
+        c.request("BOND_REMOVE", LOCK)
+        br.device_removed(LOCK)          # InterfacesRemoved after the reply
+        self.assertEqual(c.events("EV_BOND_STATE"), [[LOCK, P.BOND_NONE, P.ST_OK]])
+
+
+class PluginSequence(unittest.TestCase):
+    """What the iTi plugin does (9 Nov): connect, discover, MTU, enable
+    notify through the CCCD, write with response, get a notification; every
+    GATT op logged with its result and time."""
+
+    def test_sequence(self):
+        be, store, br, c, lines = logged()
+        be.notify_later = True
+        link = up(be, br, c)
+        self.assertEqual(c.events("EV_LINK"), [[link, P.ST_OK, True, 247]])
+        rid = c.request("GATT_DISCOVER", link)
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        self.assertEqual(c.reply(rid, "GATT_DISCOVER")[0], P.ST_OK)
+        self.assertEqual(c.reply(c.request("GATT_MTU", link), "GATT_MTU"), (P.ST_OK, [247]))
+        # the CCCD write is answered only when StartNotify is
+        rid = c.request("GATT_WRITE", link, 4, P.W_DEFAULT, 0, b"\x01\x00")
+        self.assertIsNone(c.reply(rid, "GATT_WRITE"))
+        be.answer("notify")
+        self.assertEqual(c.reply(rid, "GATT_WRITE")[0], P.ST_OK)
+        rid = c.request("GATT_WRITE", link, 3, P.W_DEFAULT, 0, b"\xa5\x01")
+        be.answer("write")
+        self.assertEqual(c.reply(rid, "GATT_WRITE")[0], P.ST_OK)
+        br.value_changed(SENSOR, 3, b"\x5a")
+        br.value_changed(SENSOR, 3, b"\x5b")
+        self.assertEqual(c.events("EV_GATT_VALUE"), [[link, 3, b"\x5a"], [link, 3, b"\x5b"]])
+        text = "\n".join(lines)
+        for want in ("database: 3 entries", "MTU 247", "CCCD 0x0004 (characteristic 0x0003 " + HRM + ") = 0100 ok",
+                     "write char 0x0003 " + HRM + " 2 bytes with response ok", "first notification from 0x0003 (1 bytes)"):
+            self.assertIn(want, text)
+        self.assertEqual(text.count("first notification"), 1)
+
+    def test_a_hanging_start_notify_is_logged(self):
+        from ztbt.core import SLOW_SECONDS
+        be, store, br, c, lines = logged()
+        be.notify_later = True
+        link = up(be, br, c)
+        rid = c.request("GATT_WRITE", link, 4, P.W_DEFAULT, 0, b"\x01\x00")
+        self.assertEqual(be.fire(SLOW_SECONDS), 1)
+        self.assertTrue(any("CCCD 0x0004" in x and "still waiting for BlueZ" in x for x in lines))
+        be.answer("notify", error=("org.bluez.Error.Failed", "Operation failed with ATT error: 0x05"))
+        self.assertEqual(c.reply(rid, "GATT_WRITE"), (P.ST_ATT, [5]))
+        self.assertTrue(any("ATT error 0x05" in x for x in lines))
+
+    def test_read_logged(self):
+        from ztbt.core import SLOW_SECONDS
+        be, store, br, c, lines = logged()
+        link = up(be, br, c)
+        c.request("GATT_READ", link, 3, 0)
+        be.answer("read", value=b"\x01\x02\x03")
+        self.assertTrue(any("read char 0x0003 " + HRM + " ok 3 bytes" in x for x in lines))
+        self.assertEqual(be.fire(SLOW_SECONDS), 0)      # the slow timer went with the answer
+
+
+class LateConnectError(unittest.TestCase):
+    """Connect() failing after Connected went true (le-connection-abort-by-
+    local, 8 Nov): the link is up and stays up."""
+
+    def test_kept(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        br.device_changed(SENSOR, {"Connected": True})
+        be.answer("connect", error=("org.bluez.Error.Failed", "le-connection-abort-by-local"))
+        self.assertEqual(c.events("EV_LINK"), [[link, P.ST_OK, True, 247]])
+        self.assertIn(SENSOR, br.holds)
+        self.assertEqual(be.called("disconnect"), [])
+        rid = c.request("GATT_DISCOVER", link)
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        self.assertEqual(c.reply(rid, "GATT_DISCOVER")[0], P.ST_OK)
+
+
+class SilentDevices(unittest.TestCase):
+    """A connected LE device Linux doesn't use doesn't advertise; an LE scan
+    still finds it (iTi after a Settings pairing)."""
+
+    def test_reported_while_scanning_le(self):
+        from ztbt.core import SILENT_SECONDS
+        be, store, br, c = make()
+        br.device_changed(LOCK, {"RSSI": -50})
+        br.device_changed(LOCK, {"Connected": True})
+        del br.devs[LOCK]["RSSI"]                          # discovery over: BlueZ dropped it
+        c.request("SCAN_START", P.T_LE)
+        found = [e for e in c.events("EV_DEVICE_FOUND") if e[0][0] == LOCK]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0][1], -50)                 # the last strength heard
+        self.assertEqual(be.fire(SILENT_SECONDS), 1)
+        self.assertEqual(len([e for e in c.events("EV_DEVICE_FOUND") if e[0][0] == LOCK]), 2)
+        c.request("SCAN_STOP", P.T_LE)
+        self.assertEqual(be.fire(SILENT_SECONDS), 0)
+
+    def test_not_linux_s_or_classic(self):
+        be, store, br, c = make()
+        be.ifaces[LOCK] = {"org.bluez.Input1"}
+        br.device_changed(LOCK, {"Connected": True})
+        br.device_changed(SPEAKER, {"Connected": True})
+        c.request("SCAN_START", P.T_LE)
+        self.assertEqual([e for e in c.events("EV_DEVICE_FOUND") if e[0][0] in (LOCK, SPEAKER)], [])
+
+
+class ScanRecord(unittest.TestCase):
+    """RM_2685, 9 Nov: connected, BlueZ's UUIDs held every resolved service; the
+    record rebuilt from them ran to 125 bytes and Android, which keeps 62,
+    cut the UUID list: iTi's filtered scan found nothing."""
+
+    ADV = ["49646561-7346-6c6f-6174-40882af10000"]
+    GATT = ["%08x-0000-1000-8000-00805f9b34fb" % (0x43882bf00000 & 0xffffffff | i) for i in range(6)] + \
+        ["0000180a-0000-1000-8000-00805f9b34fb"]
+
+    def test_advertised_uuids_not_the_resolved_ones(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"UUIDs": self.ADV, "Name": "RM_2685"})
+        br.device_changed(SENSOR, {"Connected": True})
+        br.device_changed(SENSOR, {"ServicesResolved": True, "UUIDs": self.ADV + self.GATT})
+        ad = build_ad(br.devs[SENSOR])
+        import uuid
+        self.assertIn(b"\x11\x07" + uuid.UUID(self.ADV[0]).bytes[::-1], ad)
+        self.assertEqual(ad.count(b"\x11\x07"), 1)             # one 128-bit UUID: the advertised one
+        self.assertNotIn(b"\x03\x03\x0a\x18", ad)
+        self.assertLessEqual(len(ad), 62)
+
+    def test_capped_at_62_bytes_dropping_128_bit_uuids(self):
+        many = ["%08x-1111-2222-3333-444455556666" % i for i in range(5)]
+        ad = build_ad({"Name": "A long device name here", "UUIDs": many})
+        self.assertLessEqual(len(ad), 62)
+        self.assertIn(b"A long device name here", ad)
+        # whole UUIDs only: the list's length is a multiple of 16
+        i = ad.index(b"\x07")
+        self.assertEqual((ad[i - 1] - 1) % 16, 0)
+
+
+class ConnPriority(unittest.TestCase):
+    """requestConnectionPriority (iTi's firmware update, 9 Nov: 2.3 KB/s at
+    BlueZ's 48.75 ms interval)."""
+
+    HIGH = (9, 12, 0, 500)
+
+    def up(self, version=3, made=True):
+        be, store, br, c = make(version)
+        if not made:
+            br.device_changed(LOCK, {"Connected": True})
+        addr = SENSOR if made else LOCK
+        br.device_changed(addr, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", addr, 1, P.T_LE), "GATT_OPEN")
+        if made:
+            be.answer("connect")
+            br.device_changed(addr, {"Connected": True})
+            be.answer("conn_update", values=(6, 0, 500))         # the bridge's own 7.5 ms for discovery
+            be.calls = [x for x in be.calls if x[0] != "conn_update"]
+        else:
+            be.answer("connect", error=("org.bluez.Error.AlreadyConnected", ""))
+        return be, store, br, c, link, addr
+
+    def test_high_then_the_result(self):
+        be, store, br, c, link, addr = self.up()
+        rid = c.request("CONN_UPDATE", addr, *self.HIGH)
+        self.assertEqual(c.reply(rid, "CONN_UPDATE")[0], P.ST_OK)
+        self.assertEqual(be.called("conn_update"), [("conn_update", addr) + self.HIGH])
+        be.answer("conn_update", values=(12, 0, 500))
+        self.assertEqual(c.events("EV_CONN_UPDATED"), [[addr, 12, 0, 500, 0]])
+
+    def test_a_refusal_is_reported(self):
+        be, store, br, c, link, addr = self.up()
+        c.request("CONN_UPDATE", addr, *self.HIGH)
+        be.answer("conn_update", error=(0x0c,))
+        self.assertEqual(c.events("EV_CONN_UPDATED"), [[addr, 0, 0, 0, 0x0c]])
+
+    def test_only_for_links_of_this_client_and_sane_values(self):
+        be, store, br, c, link, addr = self.up()
+        for bad in ((6, 12, 0, 500), (12, 9, 0, 500), (80, 100, 2, 70), (9, 12, 500, 500)):
+            self.assertEqual(c.reply(c.request("CONN_UPDATE", addr, *bad), "CONN_UPDATE")[0], P.ST_INVALID, bad)
+        rid = c.request("CONN_UPDATE", LOCK, *self.HIGH)                 # not one of its links
+        self.assertEqual(c.reply(rid, "CONN_UPDATE")[0], P.ST_NOT_FOUND)
+        other = FakeClient(br)
+        other.request("HELLO", 3, "x")
+        other.request("ENABLE", True)
+        self.assertEqual(other.reply(other.request("CONN_UPDATE", addr, *self.HIGH), "CONN_UPDATE")[0],
+                         P.ST_NOT_FOUND)
+        self.assertEqual(be.called("conn_update"), [])
+
+    def test_older_shims_get_no_event(self):
+        be, store, br, c, link, addr = self.up(version=2)
+        c.request("CONN_UPDATE", addr, *self.HIGH)
+        be.answer("conn_update", values=(12, 0, 500))
+        self.assertEqual([p for p, _ in c.out if P.HEADER.unpack_from(p)[0] == P.OPS["EV_CONN_UPDATED"][0]], [])
+
+    def test_back_to_balanced_when_linux_keeps_the_link(self):
+        be, store, br, c, link, addr = self.up(made=False)
+        c.request("CONN_UPDATE", addr, *self.HIGH)
+        be.answer("conn_update", values=(12, 0, 500))
+        c.request("GATT_CLOSE", link)
+        self.assertEqual(be.called("conn_update")[-1], ("conn_update", addr, 24, 40, 0, 500))
+
+    def test_nothing_to_put_back_when_the_bridge_disconnects(self):
+        be, store, br, c, link, addr = self.up()
+        c.request("CONN_UPDATE", addr, *self.HIGH)
+        be.answer("conn_update", values=(12, 0, 500))
+        c.request("GATT_CLOSE", link)
+        be.linger()
+        self.assertEqual(len(be.called("conn_update")), 1)
+        self.assertEqual(be.called("disconnect"), [("disconnect", addr)])
+
+    def test_balanced_asked_clears_it(self):
+        be, store, br, c, link, addr = self.up(made=False)
+        c.request("CONN_UPDATE", addr, *self.HIGH)
+        c.request("CONN_UPDATE", addr, 24, 40, 0, 500)
+        c.request("GATT_CLOSE", link)
+        self.assertEqual(len(be.called("conn_update")), 2)
+
+
+class BridgeIntervals(unittest.TestCase):
+    """As Fluoride: 7.5 ms while services are discovered, then 30 ms; only
+    on links the bridge made (an S10e's snoop, 9 Nov)."""
+
+    def test_discovery_then_settled(self):
+        be, store, br, c = make(3)
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        self.assertEqual(be.called("conn_update"), [("conn_update", SENSOR, 6, 6, 0, 500)])
+        be.answer("conn_update", values=(6, 0, 500))
+        rid = c.request("GATT_DISCOVER", link)
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        self.assertEqual(c.reply(rid, "GATT_DISCOVER")[0], P.ST_OK)
+        self.assertEqual(be.called("conn_update")[-1], ("conn_update", SENSOR, 24, 24, 0, 500))
+        br.device_changed(SENSOR, {"ServicesResolved": False})
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        self.assertEqual(len(be.called("conn_update")), 2)       # once
+        self.assertEqual(c.events("EV_CONN_UPDATED"), [])           # the bridge's own: Android not told
+
+    def test_a_refusal_changes_nothing_else(self):
+        be, store, br, c = make(3)
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        be.answer("conn_update", error=(0x3b,))                    # unacceptable connection parameters
+        self.assertIn(SENSOR, br.holds)
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        self.assertEqual(be.called("conn_update")[-1], ("conn_update", SENSOR, 24, 24, 0, 500))
+
+    def test_android_s_priority_wins(self):
+        be, store, br, c = make(3)
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        c.request("CONN_UPDATE", SENSOR, 9, 12, 0, 500)
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        self.assertEqual([x[2:] for x in be.called("conn_update")], [(6, 6, 0, 500), (9, 12, 0, 500)])
+
+    def test_not_on_links_linux_had(self):
+        be, store, br, c = make(3)
+        br.device_changed(LOCK, {"Connected": True})
+        st, (link,) = c.reply(c.request("GATT_OPEN", LOCK, 0, P.T_LE), "GATT_OPEN")
+        be.answer("connect", error=("org.bluez.Error.AlreadyConnected", ""))
+        br.device_changed(LOCK, {"ServicesResolved": True})
+        self.assertEqual(be.called("conn_update"), [])
+
+    def test_not_on_classic(self):
+        be, store, br, c = make(3)
+        import socket
+        a, b = socket.socketpair()
+        rid = c.request("RFCOMM_CONNECT", "E8:00:00:00:00:05", "00001101-0000-1000-8000-00805f9b34fb", -1, 1,
+                        fds=[a.fileno()])
+        a.close()
+        b.close()
+        self.assertEqual(be.called("conn_update"), [])
+
+    def test_already_resolved_goes_straight_to_30(self):
+        be, store, br, c = make(3)
+        br.device_changed(SENSOR, {"RSSI": -60, "ServicesResolved": True})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        self.assertEqual(be.called("conn_update"), [("conn_update", SENSOR, 24, 24, 0, 500)])
+
+
+if __name__ == "__main__":
+    unittest.main()

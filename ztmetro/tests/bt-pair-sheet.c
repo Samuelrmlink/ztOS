@@ -68,8 +68,26 @@ int main(void) {
 	for (int i = 0; i < 5; i++) tap_key(&s, KEY_4, "4");
 	dialog_handle_action(&s, "bt_pair_ok"); assert(s.bt_pair.active);
 	tap_key(&s, KEY_0, "0"); tap_key(&s, KEY_0, "0"); assert(s.bt_pair.entry_len == 6);
+	/* the tick box: off each time, a tap on its row turns it on and off; the
+	 * answer carries it. BT_SHEET_DUMP=DIR saves the sheet, for a look. */
+	g_dump_dir = getenv("BT_SHEET_DUMP");
+	g_dump_name = "bt-pair-passkey";
+	draw_dialog(&s);
+	g_dump_name = NULL;
+	assert(!s.bt_pair.remember && s.bt_pair.check_y > 0);
+	assert(!bt_pair_touch(&s, 40, s.bt_pair.check_y - 20));	/* the field, not the box */
+	assert(bt_pair_touch(&s, 40, s.bt_pair.check_y + 10) && s.bt_pair.remember);
+	assert(bt_pair_touch(&s, 300, s.bt_pair.check_y + 30) && !s.bt_pair.remember);
+	assert(bt_pair_touch(&s, 40, s.bt_pair.check_y + 10) && s.bt_pair.remember);
+	g_dump_name = "bt-pair-passkey-ticked";
+	draw_dialog(&s);
+	g_dump_dir = g_dump_name = NULL;
 	dialog_handle_action(&s, "bt_pair_ok");
-	expect(&s, "2\tOK\t444440\n");
+	expect(&s, "2\tOK\t444440\tremember\n");
+	ctl(&s, "bt-pair 2a|pin|55|||Phone");
+	assert(s.bt_pair.shown && !s.bt_pair.remember);
+	dialog_handle_action(&s, "bt_pair_cancel");
+	expect(&s, "2a\tCANCEL\n");
 	assert(!s.bt_pair.active && s.osk_shell_mode == OSK_MODE_FULL);
 
 	/* a number to compare: yes and no are the buttons, no key is a yes */

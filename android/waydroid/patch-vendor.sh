@@ -22,9 +22,18 @@ cleanup() {
 }
 trap cleanup EXIT
 cp --reflink=auto --sparse=always --preserve=all "$images/vendor.img.stock" "$work/vendor.img"
+# The stock image has no free block, and the kernel keeps about 2% (at most
+# 16 MiB) of an ext4 to itself: 16 MiB of room for the Bluetooth features.
+rc=0
+e2fsck -fy "$work/vendor.img" || rc=$?
+(( rc <= 1 ))
+blocks=$(tune2fs -l "$work/vendor.img" | awk '/^Block count:/ {print $3}')
+block_size=$(tune2fs -l "$work/vendor.img" | awk '/^Block size:/ {print $3}')
+resize2fs "$work/vendor.img" "$((blocks + 16 * 1024 * 1024 / block_size))"
 mkdir "$work/root"
 mount -o loop,rw "$work/vendor.img" "$work/root"
 python3 "$here/patch-composer.py" "$work/root/lib64/hw/hwcomposer.waydroid.so"
+python3 "$here/patch-bluetooth.py" vendor "$work/root"
 umount "$work/root"
 rc=0
 e2fsck -fy "$work/vendor.img" || rc=$?
