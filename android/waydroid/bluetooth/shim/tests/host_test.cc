@@ -151,8 +151,12 @@ void CloseCb(int conn, int status, int, const RawAddress& a) {
 }
 void SearchCb(int conn, int status) { Log("searched " + std::to_string(status)); }
 void DbCb(int conn, const btgatt_db_element_t* db, int n) {
+  // the handle Android uses is el.id (GattService.onGetGattDb): print that
   std::string s = "db " + std::to_string(n);
-  for (int i = 0; i < n; i++) s += " " + std::to_string(db[i].type) + ":" + std::to_string(db[i].attribute_handle);
+  for (int i = 0; i < n; i++) {
+    s += " " + std::to_string(db[i].type) + ":" + std::to_string(db[i].id);
+    if (db[i].id != db[i].attribute_handle) s += "!";
+  }
   Log(s);
 }
 void ReadCharCb(int conn, int status, btgatt_read_params_t* p) {

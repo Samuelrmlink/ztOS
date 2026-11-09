@@ -20,7 +20,7 @@ Bluetooth.apk  sha256 9c19c7d494699b64fa20fea16029efaf11a7c67b37b4a01bd44f814378
   libbluetooth_jni.so registers the same methods and looks up the same Java
   callbacks (names and signatures) as the Waydroid image's.
 
-libbluetooth_jni.so  sha256 cc3300cdacaeb72d6a4d70d236f5daa485b7ba497bb1a5c5b1800dfd17027f12
+libbluetooth_jni.so  sha256 a176455109f10414b5b8b58b5c9d7d112dbe01e3d5ba5da8fedf8fc3f915db5a
   The shim's wrapper, built by android/waydroid/bluetooth/shim/build.sh
   (sources pinned in shim/sources.conf; NDK r25c sha256
   769ee342ea75f80619d985c2da990c48b3d8eaf45f48783a2d48870d04b46108).

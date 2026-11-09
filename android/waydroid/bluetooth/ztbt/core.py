@@ -31,6 +31,7 @@ adapter_changed(props), value_changed(addr, char_handle, value).
 """
 import os
 import re
+import time
 import uuid
 
 from . import proto as P
@@ -38,6 +39,7 @@ from .gatts import GattServerMixin
 
 CONNECT_SECONDS = 35
 RELEASE_SECONDS = 10    # how long a device we let go may still show Connected
+LINGER_SECONDS = 4      # a device we connected stays up this long after Android's last use
 DISCOVER_SECONDS = 30
 CCCD = "00002902-0000-1000-8000-00805f9b34fb"
 AD_FIELDS = ("RSSI", "ManufacturerData", "ServiceData", "AdvertisingData",
@@ -68,6 +70,7 @@ class Hold:
         self.tokens = set()       # link ids, and PAIR
         self.state = "connecting"
         self.timer = None
+        self.linger = None        # the delayed disconnect after Android's last use
 
 
 class Link:
@@ -209,6 +212,7 @@ class Bridge(GattServerMixin):
         self._servers_forget(client)
         for link in [l for l in self.links.values() if l.client is client]:
             self._close_link(link)
+        self._flush_lingers()               # Android is gone: no reason to wait
         for addr, c in list(self.pairing.items()):
             if c is client:
                 self.pairing[addr] = None   # Pair() goes on: the person may be answering
@@ -296,6 +300,7 @@ class Bridge(GattServerMixin):
             st["scans"].clear()
             for link in [l for l in self.links.values() if l.client is client]:
                 self._close_link(link)
+            self._flush_lingers()           # Android's Bluetooth is off: let go now
             self._stop_advs(client, forget=True)
             self._servers_forget(client)
             self._update_discovery()
@@ -419,6 +424,7 @@ class Bridge(GattServerMixin):
             hold.tokens.add(link.id)
             self._connect(addr, hold)
         else:
+            self._use(hold)
             hold.tokens.add(link.id)
             if hold.state == "connected":
                 self._event(client, "EV_LINK", [link.id, P.ST_OK, True, self.be.mtu(addr)])
@@ -445,6 +451,7 @@ class Bridge(GattServerMixin):
                 self._drop_hold(addr, P.ST_TIMEOUT)
         hold.timer = self.be.after(CONNECT_SECONDS, timeout)
         self.log("connect", addr, "for Android")
+        hold.started = time.monotonic()
         self.be.connect(addr, ok, err)
 
     def _connected(self, addr, hold):
@@ -454,6 +461,8 @@ class Bridge(GattServerMixin):
         if hold.state == "connected":
             return
         hold.state = "connected"
+        if getattr(hold, "started", None):
+            self.log("connected", addr, "after %.1f s" % (time.monotonic() - hold.started))
         mtu = self.be.mtu(addr)
         for token in hold.tokens:
             link = self.links.get(token)
@@ -490,6 +499,7 @@ class Bridge(GattServerMixin):
         del self.holds[addr]
         if hold.timer is not None:
             self.be.cancel(hold.timer)
+        self._use(hold)
         for token in list(hold.tokens):
             self._end_link(token, status)
         if disconnect and hold.made:
@@ -528,12 +538,39 @@ class Bridge(GattServerMixin):
         self._release(link.addr, link.id)
 
     def _release(self, addr, token):
+        """Android is done with one use of addr. The last use of a device the
+        bridge connected lets it go after LINGER_SECONDS, not at once: apps
+        close and open again (nRF Connect around a bond), and a pairing is
+        followed by the app's own connection (Nelko's RFCOMM: disconnecting
+        right after Pair() tore down its first connect, 8 Nov)."""
         hold = self.holds.get(addr)
         if hold is None:
             return
         hold.tokens.discard(token)
-        if not hold.tokens:
+        if hold.tokens:
+            return
+        if not (hold.made and hold.state == "connected") or self.frozen:
             self._drop_hold(addr, P.ST_OK)
+            return
+
+        def linger_over():
+            if self.holds.get(addr) is hold and not hold.tokens:
+                hold.linger = None
+                self._drop_hold(addr, P.ST_OK)
+        if hold.linger is not None:
+            self.be.cancel(hold.linger)
+        hold.linger = self.be.after(LINGER_SECONDS, linger_over)
+
+    def _flush_lingers(self):
+        for addr, hold in list(self.holds.items()):
+            if hold.linger is not None and not hold.tokens:
+                self._drop_hold(addr, P.ST_OK)
+
+    def _use(self, hold):
+        """Android uses a held device again: no disconnect pending."""
+        if hold.linger is not None:
+            self.be.cancel(hold.linger)
+            hold.linger = None
 
     def _unnotify(self, link):
         for h in list(link.notify):
@@ -694,6 +731,7 @@ class Bridge(GattServerMixin):
             hold = self.holds[addr] = Hold(made=self._taken_back(addr) or not d.get("Connected"))
             if d.get("Connected"):
                 hold.state = "connected"
+        self._use(hold)
         hold.tokens.add(PAIR)
         self._event(client, "EV_BOND_STATE", [addr, P.BOND_BONDING, P.ST_OK])
         self.store.pairing_hint(addr)
@@ -709,12 +747,17 @@ class Bridge(GattServerMixin):
             self._release(addr, PAIR)
 
         def err(name, msg):
-            self.log("pair", addr, "failed:", name, msg)
+            self.log("pair", addr, "failed after %.1f s:" % (time.monotonic() - started), name, msg)
             if name.endswith("AlreadyExists"):
                 finish(P.BOND_BONDED, P.ST_OK)
             else:
                 finish(P.BOND_NONE, pair_status(name))
-        self.be.pair(addr, lambda: finish(P.BOND_BONDED, P.ST_OK), err)
+        started = time.monotonic()
+
+        def paired():
+            self.log("pair", addr, "done after %.1f s" % (time.monotonic() - started))
+            finish(P.BOND_BONDED, P.ST_OK)
+        self.be.pair(addr, paired, err)
 
     def op_bond_cancel(self, client, answer, addr):
         if addr not in self.pairing:
@@ -775,6 +818,7 @@ class Bridge(GattServerMixin):
             if connected:
                 hold.state = "connected"
         token = (RFCOMM, stream.id)
+        self._use(hold)
         hold.tokens.add(token)
         if not (d and self.bonded(d)):
             # BlueZ may pair on the way (SSP): its agent asks, for this device
@@ -784,7 +828,11 @@ class Bridge(GattServerMixin):
         self.log("rfcomm", stream.id, addr, "uuid" if by_uuid else "channel",
                  uuid_ if by_uuid else channel, "for Android")
 
+        started = time.monotonic()
+
         def ok(rfd, chan):
+            self.log("rfcomm", stream.id, addr, "up on channel", chan,
+                     "after %.1f s" % (time.monotonic() - started))
             if self.streams.get(stream.id) is not stream:
                 os.close(rfd)
                 return
@@ -797,7 +845,7 @@ class Bridge(GattServerMixin):
             stream.fd = None
 
         def err(name, msg):
-            self.log("rfcomm", stream.id, addr, "failed:", name, msg)
+            self.log("rfcomm", stream.id, addr, "failed after %.1f s:" % (time.monotonic() - started), name, msg)
             self._unhint(stream)
             self._stream_gone(stream.id)
         self.be.rfcomm_connect(addr, P.full_uuid(uuid_) if by_uuid else None, channel, secure, ok, err)
@@ -1054,22 +1102,42 @@ def pair_status(name):
 
 
 _ATT_RE = re.compile(r"ATT error: 0x([0-9a-fA-F]{2})")
-_ATT_BY_NAME = {"NotPermitted": 0x03, "NotAuthorized": 0x08, "InvalidOffset": 0x07,
-                "InvalidValueLength": 0x0d}
 
 
 def att_code(name, msg):
-    """An ATT error code from a BlueZ GATT error, or None."""
-    m = _ATT_RE.search(msg or "")
+    """An ATT error code from a BlueZ GATT error, or None. BlueZ 5.87
+    (src/gatt-client.c create_gatt_dbus_error) names some ATT errors and
+    passes the others as "Operation failed with ATT error: 0x..":
+
+        NotPermitted "Read not permitted"     0x02
+        NotPermitted "Write not permitted"    0x03
+        NotPermitted "Not paired"             0x05 (also 0x0f, 0x0c: Android's
+                                                    answer to all three is to bond)
+        InvalidArguments "Invalid offset"     0x07
+        InvalidArguments "Invalid Length"     0x0d
+        NotAuthorized                         0x08
+        NotSupported                          0x06 (handled by the caller)
+    """
+    msg = msg or ""
+    m = _ATT_RE.search(msg)
     if m:
         return int(m.group(1), 16)
-    for key, code in _ATT_BY_NAME.items():
-        if name.endswith(key):
-            if key == "NotPermitted" and "ead" in (msg or ""):
-                return 0x02           # read not permitted
-            if key == "NotPermitted" and "uthentication" in (msg or ""):
-                return 0x05
-            return code
+    if name.endswith("NotPermitted"):
+        if "paired" in msg or "uthentication" in msg:
+            return 0x05
+        return 0x02 if "ead" in msg else 0x03
+    if name.endswith("InvalidArguments"):
+        if "offset" in msg.lower():
+            return 0x07
+        if "length" in msg.lower():
+            return 0x0d
+        return None
+    if name.endswith("NotAuthorized"):
+        return 0x08
+    if name.endswith("InvalidOffset"):
+        return 0x07
+    if name.endswith("InvalidValueLength"):
+        return 0x0d
     return None
 
 

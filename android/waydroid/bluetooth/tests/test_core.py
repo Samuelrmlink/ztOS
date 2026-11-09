@@ -195,6 +195,8 @@ class Gatt(unittest.TestCase):
         c.request("GATT_CLOSE", link)
         self.assertEqual(be.called("disconnect"), [])
         c.request("GATT_CLOSE", link2)
+        self.assertEqual(be.called("disconnect"), [])
+        be.linger()
         self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])
 
     def test_never_disconnects_what_it_did_not_connect(self):
@@ -209,15 +211,27 @@ class Gatt(unittest.TestCase):
     def test_a_device_being_let_go_is_not_linux_s(self):
         be, store, br, c, link = self.connected()
         c.request("GATT_CLOSE", link)
+        be.linger()
         self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])
         # BlueZ still says Connected for a moment: not hidden, not busy
         rid = c.request("BOND_CREATE", SENSOR, P.T_LE)
         self.assertEqual(c.reply(rid, "BOND_CREATE")[0], P.ST_OK)
         self.assertTrue(br.holds[SENSOR].made)
 
+    def test_reopened_while_lingering(self):
+        # nRF Connect closes and opens again around a bond: nothing goes down
+        be, store, br, c, link = self.connected()
+        c.request("GATT_CLOSE", link)
+        st, (link2,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        self.assertEqual(c.events("EV_LINK")[-1], [link2, P.ST_OK, True, 247])
+        self.assertEqual(len(be.called("connect")), 1)
+        self.assertEqual(be.linger(), 0)                      # the pending disconnect is gone
+        self.assertEqual(be.called("disconnect"), [])
+
     def test_taken_back_while_letting_go(self):
         be, store, br, c, link = self.connected()
         c.request("GATT_CLOSE", link)
+        be.linger()
         st, (link2,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
         be.answer("connect", error=("org.bluez.Error.AlreadyConnected", ""))
         self.assertEqual(c.events("EV_LINK")[-1], [link2, P.ST_OK, True, 247])
@@ -226,6 +240,7 @@ class Gatt(unittest.TestCase):
     def test_release_window_ends(self):
         be, store, br, c, link = self.connected()
         c.request("GATT_CLOSE", link)
+        be.linger()
         be.timers[-1][1]()                     # BlueZ never said Disconnected: after 10 s
         rid = c.request("GATT_OPEN", SENSOR, 1, P.T_LE)
         self.assertEqual(c.reply(rid, "GATT_OPEN")[0], P.ST_BUSY)
@@ -233,6 +248,7 @@ class Gatt(unittest.TestCase):
     def test_release_window_closes_on_disconnected(self):
         be, store, br, c, link = self.connected()
         c.request("GATT_CLOSE", link)
+        be.linger()
         br.device_changed(SENSOR, {"Connected": False})
         self.assertEqual(br.releasing, {})
 
@@ -360,6 +376,8 @@ class Bonds(unittest.TestCase):
         self.assertEqual(c.events("EV_BOND_STATE")[-1], [SENSOR, P.BOND_BONDED, P.ST_OK])
         self.assertEqual(len(c.events("EV_BOND_STATE")), 2)
         self.assertIn(SENSOR, store.android)
+        self.assertEqual(be.called("disconnect"), [])       # the app may connect now: it lingers
+        be.linger()
         self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])  # we connected it for Pair()
 
     def test_pair_kept_connected_for_a_link(self):
@@ -426,6 +444,12 @@ class Helpers(unittest.TestCase):
         self.assertEqual(att_code("org.bluez.Error.NotPermitted", "Read not permitted"), 0x02)
         self.assertEqual(att_code("org.bluez.Error.NotAuthorized", ""), 0x08)
         self.assertIsNone(att_code("org.bluez.Error.Failed", "Not connected"))
+        # BlueZ 5.87's names for the others (src/gatt-client.c)
+        self.assertEqual(att_code("org.bluez.Error.NotPermitted", "Write not permitted"), 0x03)
+        self.assertEqual(att_code("org.bluez.Error.NotPermitted", "Not paired"), 0x05)
+        self.assertEqual(att_code("org.bluez.Error.InvalidArguments", "Invalid offset"), 0x07)
+        self.assertEqual(att_code("org.bluez.Error.InvalidArguments", "Invalid Length"), 0x0d)
+        self.assertIsNone(att_code("org.bluez.Error.InvalidArguments", "something else"))
 
     def test_ad_rebuild(self):
         d = {"Name": "nRF", "TxPower": -4, "UUIDs": ["6e400001-b5a3-f393-e0a9-e50e24dcca9e"],

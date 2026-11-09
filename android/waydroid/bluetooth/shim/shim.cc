@@ -807,13 +807,17 @@ bt_status_t SearchService(int conn_id, const Uuid*) {
         return;
       }
       l->db.clear();
-      uint16_t n = 0;
       for (auto& e : v[0].items) {
         btgatt_db_element_t el;
         memset(&el, 0, sizeof el);
-        el.id = n++;
         el.type = (bt_gatt_db_attribute_type_t)e.items[0].num();
         el.attribute_handle = (uint16_t)e.items[1].num();
+        // Android 13's GattService makes every service, characteristic and
+        // descriptor with el.id as its handle (instance id), and reads and
+        // writes come back with it: id must be the handle, as Fluoride sets
+        // it. (An index here sent the apps' reads to wrong or no attributes:
+        // GATT INVALID HANDLE, found with a real printer on 8 Nov.)
+        el.id = el.attribute_handle;
         el.start_handle = (uint16_t)e.items[2].num();
         el.end_handle = (uint16_t)e.items[3].num();
         el.uuid = UuidFrom(e.items[4].uuid());

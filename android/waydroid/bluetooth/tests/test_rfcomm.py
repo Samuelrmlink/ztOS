@@ -42,7 +42,35 @@ class Rfcomm(unittest.TestCase):
         # Android closes: the relay says so, the device is let go
         be.relays[0]["on_close"]()
         self.assertEqual(br.streams, {})
+        be.linger()
         self.assertNotIn(PRINTER, br.holds)
+        self.assertEqual(be.called("disconnect"), [("disconnect", PRINTER)])
+        android.close()
+        printer.close()
+
+    def test_pair_then_connect_at_once(self):
+        # the PM220 on 8 Nov: Nelko pairs, then opens its RFCOMM socket 1.3 s
+        # later. The device Pair() connected must not be disconnected under it.
+        be, store, br, c = make()
+        rid = c.request("BOND_CREATE", PRINTER, P.T_BREDR)
+        self.assertEqual(c.reply(rid, "BOND_CREATE")[0], P.ST_OK)
+        br.device_changed(PRINTER, {"Connected": True})
+        br.device_changed(PRINTER, {"Paired": True, "Bonded": True})
+        be.answer("pair")
+        android, fd = pair()
+        rid = c.request("RFCOMM_CONNECT", PRINTER, SPP, -1, 0x03, fds=[fd])
+        self.assertEqual(c.reply(rid, "RFCOMM_CONNECT")[0], P.ST_OK)
+        self.assertEqual(be.linger(), 0)                  # cancelled by the new use
+        self.assertEqual(be.called("disconnect"), [])
+        self.assertEqual(be.called("rfcomm"), [("rfcomm", PRINTER, SPP, -1, True)])
+        android.close()
+
+    def test_client_gone_lets_go_at_once(self):
+        be, store, br, c, android, rid = self.connect()
+        printer, rfd = pair()
+        be.answer("rfcomm", values=(rfd, 1))
+        be.relays[0]["on_close"]()
+        c.close()                                         # Android's Bluetooth is gone
         self.assertEqual(be.called("disconnect"), [("disconnect", PRINTER)])
         android.close()
         printer.close()

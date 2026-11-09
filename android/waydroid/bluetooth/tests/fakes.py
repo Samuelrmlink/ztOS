@@ -137,6 +137,18 @@ class FakeBackend:
     def cancel(self, handle):
         self.timers = [t for t in self.timers if t[1] is not handle]
 
+    def fire(self, seconds):
+        """Run (and drop) the pending timers of this duration; how many ran."""
+        due = [t for t in self.timers if t[0] == seconds]
+        self.timers = [t for t in self.timers if t[0] != seconds]
+        for _, fn in due:
+            fn()
+        return len(due)
+
+    def linger(self):
+        from ztbt.core import LINGER_SECONDS
+        return self.fire(LINGER_SECONDS)
+
     # test helpers
     def answer(self, name, error=None, value=None, values=None):
         for i, (n, args, ok, err) in enumerate(self.pending):

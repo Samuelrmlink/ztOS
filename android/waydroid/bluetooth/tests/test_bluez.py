@@ -200,6 +200,56 @@ class BlueZTests(unittest.TestCase):
         self.assertIsInstance(v["Discoverable"], dbus.Boolean)
         self.assertEqual(v["ServiceUUIDs"].signature, "s")
 
+    def test_p21_like_layout_through_core(self):
+        """A layout like the P21 printer's (8 Nov): services ff00 and ae30,
+        notifying characteristics with CCCDs, the way BlueZ 5.87 exports
+        them (Handle = the declaration handle). Every handle in the database
+        Android gets must find its object again for reads and CCCD writes."""
+        b = backend()
+        b.profiles, b.rfcomm_pending, b.advs, b.apps = {}, {}, {}, {}
+        dev = "/org/bluez/hci0/dev_8C_D0_0D_AB_11_9A"
+        addr = "8C:D0:0D:AB:11:9A"
+        b._added(dev, {B.DEVICE: {"Address": addr, "AddressType": "public", "Connected": True,
+                                  "ServicesResolved": True}}, quiet=True)
+        u = "0000%s-0000-1000-8000-00805f9b34fb".__mod__
+        layout = [("0001", "ff00", [("0002", "ff01", ["notify", "read"], ["0004"]),
+                                     ("0005", "ff02", ["write-without-response", "write"], []),
+                                     ("0007", "ff03", ["notify"], ["0009"]),
+                                     ("000a", "ff05", ["notify", "write"], ["000c"])]),
+                  ("000d", "ae30", [("000e", "ae01", ["write-without-response"], []),
+                                     ("0010", "ae02", ["notify"], ["0012"]),
+                                     ("0013", "ae3c", ["notify", "write-without-response"], ["0015"])])]
+        for sh, suuid, chars in layout:
+            sp = "%s/service%s" % (dev, sh)
+            b._added(sp, {B.SERVICE: {"UUID": u(suuid), "Primary": True, "Handle": dbus.UInt16(int(sh, 16))}})
+            for ch, cuuid, flags, descs in chars:
+                cp = "%s/char%s" % (sp, ch)
+                b._added(cp, {B.CHAR: {"UUID": u(cuuid), "Service": dbus.ObjectPath(sp), "Flags": flags,
+                                       "Handle": dbus.UInt16(int(ch, 16))}})
+                for dh in descs:
+                    b._added("%s/desc%s" % (cp, dh),
+                             {B.DESC: {"UUID": u("2902"), "Characteristic": dbus.ObjectPath(cp),
+                                       "Handle": dbus.UInt16(int(dh, 16))}})
+        db = b.gatt_db(addr)
+        handles = [e[1] for e in db]
+        self.assertEqual(len(handles), len(set(handles)))              # unique
+        self.assertEqual(len(db), 2 + 7 + 5)
+        calls = []
+        b._call = lambda path, iface, method, args, ok, err, timeout=None, convert=None: calls.append((path, method))
+        for kind, h, start, end, uuid, props in db:
+            attr = b.attribute(addr, h)
+            self.assertIsNotNone(attr, hex(h))
+            if kind == P.DB_CHARACTERISTIC:
+                b.read(addr, h, 0, lambda v: None, lambda n, m: None)
+                self.assertTrue(calls[-1][0].endswith("/char%04x" % h), (hex(h), calls[-1]))
+            if kind == P.DB_DESCRIPTOR:
+                self.assertEqual(attr[0], "desc")
+                b.notify(addr, attr[2], True, lambda: None, lambda n, m: None)   # the CCCD write's parent
+                self.assertEqual(calls[-1], ("%s/char%04x" % (calls[-1][0].rsplit("/char", 1)[0], attr[2]),
+                                             "StartNotify"))
+        ae3c = next(e for e in db if e[4] == u("ae3c"))
+        self.assertEqual(ae3c[1], 0x13)
+
     def test_other_adapters_devices_ignored(self):
         b = backend()
         b._on_added(dbus.ObjectPath("/org/bluez/hci1/dev_11_22_33_44_55_66"),

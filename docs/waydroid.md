@@ -722,6 +722,44 @@ Android's Bluetooth going off or the shim going away removes them.
 
 Not on the phone yet.
 
+### Found with real devices (8 Nov)
+
+The user tested Nelko with two Classic printers (PL70e-BT, PM220) and
+nRF Connect with a BLE printer (P21, 8C:D0:0D:AB:11:9A). Classic printed.
+BLE failed.
+
+- **GATT INVALID HANDLE, and nothing working the first time** (fixed). Android
+  13's `GattService.onGetGattDb` gives every service, characteristic and
+  descriptor `el.id` as its handle (instance id), and the app's reads and
+  writes come back with it. Fluoride sets `id` to the attribute handle. The
+  shim set it to a running index, so reads and the CCCD writes went to index
+  numbers: no attribute (INVALID HANDLE), or a wrong one. The shim now sets
+  `id` to the handle, and the host test checks it. The bridge's own mapping
+  was right: BlueZ's `Handle` on a remote characteristic is its declaration
+  handle (`chrc->handle`), used the same way for the database, reads and
+  CCCD writes (`test_bluez.py` replays a P21-like layout).
+- **Slow first RFCOMM connect** (fixed). After Nelko's pairing, the bridge
+  disconnected the printer that `Pair()` had connected, just as Nelko opened
+  its RFCOMM socket (1.3 s later): bluetoothd logged "Transport endpoint is
+  not connected" and Nelko retried 8 s later. A device the bridge connected
+  now stays up `LINGER_SECONDS` (4 s) after Android's last use. A new use
+  cancels the disconnect. A freeze, Android's Bluetooth going off or the
+  shim going away still lets go at once. The same helps nRF Connect's
+  close-and-reconnect around a bond.
+- **The BLE bond failed** (the device, not the bridge, as far as the logs
+  show). `Pair()` from the bridge uses ztOS's default agent: BlueZ's
+  `agent_get(sender)` falls back to it, so the bridge needs no agent of its
+  own. The P21 has no input or output, so LE pairing is Just Works. Started
+  from the phone, Just Works never asks user space, so no sheet and no PIN
+  is expected. The agent logged no request. `Pair()` ended after 33 s with
+  `AuthenticationFailed`, the kernel's 30 s SMP timeout: the printer never
+  answered the pairing request. Android's "Failed to remove device" after it
+  is Android's own bookkeeping; the bridge's `removeBond` wasn't called.
+- **Error mapping** (fixed): BlueZ's "Not paired" (`NotPermitted`) is now
+  ATT 0x05, so Android asks to bond. `InvalidArguments` "Invalid offset" and
+  "Invalid Length" are now 0x07 and 0x0d.
+- The bridge logs how long connects, pairings and RFCOMM connects take.
+
 ### Stages
 
 1. **BLE central**: adapter state, bonded list, LE scan with filters, GATT
