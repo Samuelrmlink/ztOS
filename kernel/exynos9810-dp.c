@@ -41,6 +41,11 @@
  *          logged and kept for debugfs state
  *   lh     the SST1 LH power channel towards the DPU (stock powers it as
  *          DECON2 starts); by hand only, never in the automatic path
+ *   m4dump read only: DECON2, DMA and DPP channel 1, the DMA common block
+ *          (M4, the DECON2 framebuffer), after checking the DPU power domain,
+ *          DECON2's APB clock and the DPU/DMA/DPP Q-channels read on;
+ *          debugfs m4regs shows it. Ranges from the DT (optional: without
+ *          them the step says so and touches nothing)
  *   off    AUX/PCS off, PHY reset, PMA back to low power and reset
  *
  * auto=1 runs pma..edid itself when the class enters a DP pin state, and
@@ -302,6 +307,12 @@ struct x9dp {
 	u8 rate, nlanes;		/* trained link, 0: none */
 	bool video_on;
 	char vstat[320];		/* the last status step */
+	/* M4 (DT, optional; mapped, not requested: DECON0's and the DMA's
+	 * owners are other drivers) */
+	void __iomem *decon2, *dma1, *dpp1, *dma_com, *dpu_cmu;
+	u32 decon2_sz, dma1_sz, dpp1_sz, dma_com_sz;
+	char *m4buf;
+	size_t m4len;
 };
 
 /* ---- register access ----------------------------------------------------------- */
@@ -1092,6 +1103,111 @@ static int x9dp_lh(struct x9dp *d)
 	return ret;
 }
 
+/* ---- M4: read-only look at DECON2 and DMA/DPP channel 1 ------------------------------ */
+
+/*
+ * CMU_DPU (vendor cmucal-sfr.c): the DECON2 APB clock gate
+ * (GOUT_BLK_DPU_UID_AD_APB_DECON2_IPCLKPORT_PCLKS, +0x201c: CG_VAL b21,
+ * auto gating b28) and the Q-channels of the DPU (+0x3020), DPU_DMA
+ * (+0x3024) and DPP (+0x3028): ENABLE b0 (clock on request) or CLOCK_REQ b1.
+ */
+#define CMU_DPU_GATE_APB_DECON2		0x201c
+#define CMU_DPU_QCH_DPU			0x3020
+#define CMU_DPU_QCH_DPU_DMA		0x3024
+#define CMU_DPU_QCH_DPU_DPP		0x3028
+
+static bool x9dp_dpu_ok(struct x9dp *d)
+{
+	static const u32 qch[] = { CMU_DPU_QCH_DPU, CMU_DPU_QCH_DPU_DMA, CMU_DPU_QCH_DPU_DPP };
+	u32 v = 0, i;
+
+	if (regmap_read(d->pmu, d->pd_off, &v) || (v & d->pd_mask) != d->pd_mask) {
+		dev_warn(d->dev, "DPU power domain off (PMU %#x = %08x)\n", d->pd_off, v);
+		return false;
+	}
+	v = readl(d->dpu_cmu + CMU_DPU_GATE_APB_DECON2);
+	if (!(v & (BIT(21) | BIT(28)))) {
+		dev_warn(d->dev, "DECON2 APB clock gated (%08x)\n", v);
+		return false;
+	}
+	for (i = 0; i < ARRAY_SIZE(qch); i++) {
+		v = readl(d->dpu_cmu + qch[i]);
+		if (!(v & (BIT(0) | BIT(1)))) {
+			dev_warn(d->dev, "DPU Q-channel %#x off (%08x)\n", qch[i], v);
+			return false;
+		}
+	}
+	return true;
+}
+
+static size_t x9dp_m4_range(struct x9dp *d, size_t n, const char *name, void __iomem *base,
+			    u32 from, u32 to)
+{
+	u32 off;
+
+	n += scnprintf(d->m4buf + n, PAGE_SIZE * 4 - n, "%s:\n", name);
+	for (off = from; off < to && n < PAGE_SIZE * 4 - 64; off += 16)
+		n += scnprintf(d->m4buf + n, PAGE_SIZE * 4 - n, "  %04x: %08x %08x %08x %08x\n",
+			       off, readl(base + off), readl(base + off + 4),
+			       readl(base + off + 8), readl(base + off + 12));
+	return n;
+}
+
+static int x9dp_m4dump(struct x9dp *d)
+{
+	size_t n = 0;
+
+	if (!d->decon2 || !d->dma1 || !d->dpp1 || !d->dma_com || !d->dpu_cmu)
+		return -ENODEV;		/* the DT does not describe them */
+	if (!x9dp_dpu_ok(d))
+		return -EIO;
+	if (!d->m4buf) {
+		d->m4buf = devm_kzalloc(d->dev, PAGE_SIZE * 4, GFP_KERNEL);
+		if (!d->m4buf)
+			return -ENOMEM;
+	}
+	n += scnprintf(d->m4buf + n, PAGE_SIZE * 4 - n,
+		       "cmu_dpu: apb_decon2 %08x qch dpu %08x dma %08x dpp %08x\n",
+		       readl(d->dpu_cmu + CMU_DPU_GATE_APB_DECON2),
+		       readl(d->dpu_cmu + CMU_DPU_QCH_DPU),
+		       readl(d->dpu_cmu + CMU_DPU_QCH_DPU_DMA),
+		       readl(d->dpu_cmu + CMU_DPU_QCH_DPU_DPP));
+	n = x9dp_m4_range(d, n, "DECON2", d->decon2, 0, min_t(u32, 0x400, d->decon2_sz));
+	n = x9dp_m4_range(d, n, "DMA ch1", d->dma1, 0, min_t(u32, 0x70, d->dma1_sz));
+	if (d->dma1_sz >= 0x880)
+		n = x9dp_m4_range(d, n, "DMA ch1 err", d->dma1, 0x870, 0x880);
+	n = x9dp_m4_range(d, n, "DPP ch1", d->dpp1, 0, min_t(u32, 0x50, d->dpp1_sz));
+	n = x9dp_m4_range(d, n, "DMA common", d->dma_com, 0, min_t(u32, 0x110, d->dma_com_sz));
+	d->m4len = n;
+	scnprintf(d->last, sizeof(d->last), "m4dump: %zu bytes, see m4regs", n);
+	return 0;
+}
+
+static int x9dp_m4regs_show(struct seq_file *s, void *unused)
+{
+	struct x9dp *d = s->private;
+
+	mutex_lock(&d->lock);
+	if (d->m4buf && d->m4len)
+		seq_write(s, d->m4buf, d->m4len);
+	else
+		seq_puts(s, "no dump yet: echo m4dump > step\n");
+	mutex_unlock(&d->lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(x9dp_m4regs);
+
+static void __iomem *x9dp_map_opt(struct platform_device *pdev, const char *name, u32 *sz)
+{
+	struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
+
+	if (!res)
+		return NULL;
+	if (sz)
+		*sz = resource_size(res);
+	return devm_ioremap(&pdev->dev, res->start, resource_size(res));
+}
+
 static const struct {
 	const char *name;
 	int (*fn)(struct x9dp *d);
@@ -1099,7 +1215,7 @@ static const struct {
 	{ "id", x9dp_id }, { "pma", x9dp_pma }, { "phy", x9dp_phy }, { "ctrl", x9dp_ctrl },
 	{ "dpcd", x9dp_dpcd }, { "edid", x9dp_edid }, { "train", x9dp_train },
 	{ "bist", x9dp_bist }, { "video_off", x9dp_video_off }, { "status", x9dp_status },
-	{ "lh", x9dp_lh }, { "off", x9dp_off },
+	{ "lh", x9dp_lh }, { "m4dump", x9dp_m4dump }, { "off", x9dp_off },
 };
 
 static int x9dp_run(struct x9dp *d, const char *name)
@@ -1272,7 +1388,19 @@ static ssize_t x9dp_step_write(struct file *file, const char __user *ubuf, size_
 	buf[len] = 0;
 	strim(buf);
 	mutex_lock(&d->lock);
-	ret = x9dp_run(d, buf);
+	/*
+	 * By hand, the bring-up steps would re-program the PHY and the link
+	 * under a running video stream: the sink loses the link and drops HPD
+	 * (dp12: train under the bars, -EIO, HPD low). Not while video is on;
+	 * video_off or off first.
+	 */
+	if (d->video_on && (!strcmp(buf, "id") || !strcmp(buf, "pma") || !strcmp(buf, "phy") ||
+			    !strcmp(buf, "ctrl") || !strcmp(buf, "train"))) {
+		dev_info(d->dev, "%s refused: video is on (video_off or off first)\n", buf);
+		ret = -EBUSY;
+	} else {
+		ret = x9dp_run(d, buf);
+	}
 	mutex_unlock(&d->lock);
 	return ret ? ret : len;
 }
@@ -1364,6 +1492,12 @@ static int x9dp_probe(struct platform_device *pdev)
 			return -ENOMEM;
 		d->qch_n = resource_size(res) / 4;
 	}
+	/* M4, optional */
+	d->decon2 = x9dp_map_opt(pdev, "decon2", &d->decon2_sz);
+	d->dma1 = x9dp_map_opt(pdev, "dma1", &d->dma1_sz);
+	d->dpp1 = x9dp_map_opt(pdev, "dpp1", &d->dpp1_sz);
+	d->dma_com = x9dp_map_opt(pdev, "dma-common", &d->dma_com_sz);
+	d->dpu_cmu = x9dp_map_opt(pdev, "dpu-cmu", NULL);
 	ret = x9dp_read_pairs(dev, "samsung,link-power-status", iso, 2);
 	if (ret)
 		return ret;
@@ -1405,6 +1539,7 @@ static int x9dp_probe(struct platform_device *pdev)
 	d->dbg = debugfs_create_dir("exynos9810-dp", NULL);
 	debugfs_create_file("state", 0400, d->dbg, d, &x9dp_state_fops);
 	debugfs_create_file("step", 0200, d->dbg, d, &x9dp_step_fops);
+	debugfs_create_file("m4regs", 0400, d->dbg, d, &x9dp_m4regs_fops);
 	ret = devm_add_action_or_reset(dev, x9dp_unregister, d);
 	if (ret)
 		return ret;
