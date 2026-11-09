@@ -18,6 +18,8 @@ images=${IMAGES:-/usr/share/waydroid-extra/images}
 patcher=${PATCHER:-$here/../patch-bluetooth.py}
 [[ -f $patcher ]] || patcher=/usr/share/ztos-waydroid/patch-bluetooth.py
 prebuilts=${PREBUILTS:-}
+# the layout of /usr/local/lib/ztos-btbridge: prebuilts/ next to bluetooth/
+[[ -n $prebuilts || ! -f $here/../prebuilts/Bluetooth.apk ]] || prebuilts=$here/../prebuilts
 
 stopped() {
 	[[ $(lxc-info -P /var/lib/waydroid/lxc -n waydroid -sH 2>/dev/null || echo STOPPED) == STOPPED ]] ||

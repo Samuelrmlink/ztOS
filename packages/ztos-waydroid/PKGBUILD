@@ -54,6 +54,7 @@ package() {
 	local bt=$w/bluetooth
 	install -Dm755 "$bt/ztos-btbridge" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztos-btbridge"
 	install -Dm755 "$bt/ztbt-cli" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztbt-cli"
+	install -Dm755 "$bt/bt-images.sh" "$pkgdir/usr/lib/ztos-waydroid/btbridge/bt-images.sh"
 	for f in "$bt"/ztbt/*.py; do
 		install -Dm644 "$f" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztbt/${f##*/}"
 	done
