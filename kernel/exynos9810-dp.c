@@ -343,7 +343,8 @@ struct x9dp {
 	void __iomem *d0win;		/* DECON0-space blender window 4 (approved), 0x1c */
 	void __iomem *dma2, *dpp2;	/* DMA/DPP channel 2 (IDMA_VG0), optional */
 	bool vsrc_decon;		/* video_on with DECON2's pixels, not BIST */
-	bool link_fresh;		/* HPD rose: the next m4up trains the link first */
+	bool link_fresh;
+	bool qos_changed;		/* the DMA common QoS LUT is not 0x44444444 (experiment) */		/* HPD rose: the next m4up trains the link first */
 	bool decon2_on;
 	void *fb_cpu;			/* the dma step's test image */
 	dma_addr_t fb_dma;
@@ -746,10 +747,13 @@ static int x9dp_edid(struct x9dp *d)
 static int x9dp_video_off(struct x9dp *d);
 static int x9dp_decon2_stop(struct x9dp *d);
 
+static void x9dp_qos_restore(struct x9dp *d);
+
 static int x9dp_off(struct x9dp *d)
 {
 	if (d->decon2_on)
 		x9dp_decon2_stop(d);
+	x9dp_qos_restore(d);
 	if (d->video_on)
 		x9dp_video_off(d);
 	d->rate = 0;
@@ -1518,6 +1522,32 @@ static int x9dp_decon2(struct x9dp *d)
  * so its first fetch falls in the vertical blanking (41 lines, ~0.6 ms at
  * 1080p60). vsync_start=0 starts at once, as before.
  */
+/*
+ * Temporary experiment (coordinator-approved, not a default): the DPU_DMA
+ * common QoS LUTs (DPU_DMA_IN_QOS_LUT07_00/15_08, +0x70/+0x74, shared by
+ * every channel, DECON0's included). Stock writes 0x44444444 to both
+ * (dpp_reg.c:1213-1217). qos_lut != 0 writes it to both in the dma step;
+ * decon2_stop and off put 0x44444444 back.
+ */
+static uint qos_lut;
+module_param(qos_lut, uint, 0644);
+MODULE_PARM_DESC(qos_lut, "experiment: DMA common QoS LUT value for the dma step, 0 leaves it (default 0); restored to 0x44444444 at decon2_stop/off");
+
+#define DMA_COM_QOS_LUT07_00		0x0070
+#define DMA_COM_QOS_LUT15_08		0x0074
+#define DMA_COM_QOS_STOCK		0x44444444
+
+static void x9dp_qos_restore(struct x9dp *d)
+{
+	if (!d->qos_changed || !d->dma_com)
+		return;
+	writel(DMA_COM_QOS_STOCK, d->dma_com + DMA_COM_QOS_LUT07_00);
+	writel(DMA_COM_QOS_STOCK, d->dma_com + DMA_COM_QOS_LUT15_08);
+	d->qos_changed = false;
+	dev_info(d->dev, "qos: LUT restored, %08x %08x\n",
+		 readl(d->dma_com + DMA_COM_QOS_LUT07_00), readl(d->dma_com + DMA_COM_QOS_LUT15_08));
+}
+
 static bool vsync_start = true;
 module_param(vsync_start, bool, 0644);
 MODULE_PARM_DESC(vsync_start, "decon2_start waits for the link's VSYNC first (default 1)");
@@ -1566,6 +1596,12 @@ static int x9dp_decon2_start(struct x9dp *d)
  * channel released, RUN_STATUS off, then the soft reset (:50-67), all in
  * DECON2's block and the link's.
  */
+static bool clean_stop = true;
+module_param(clean_stop, bool, 0644);
+MODULE_PARM_DESC(clean_stop, "decon2_stop switches the windows off and waits for the DMA to go idle first (default 1)");
+
+static int x9dp_ch(struct x9dp *d, void __iomem **dma, void __iomem **dpp, u32 *blend);
+
 static int x9dp_decon2_stop(struct x9dp *d)
 {
 	u32 v;
@@ -1573,6 +1609,25 @@ static int x9dp_decon2_stop(struct x9dp *d)
 
 	if (!d->decon2 || !x9dp_dpu_ok(d))
 		return -EIO;
+	/*
+	 * dp25-28: starts alternated bad/good. A DMA window stopped mid-frame
+	 * by the instant stop may leave its channel mid-frame. With clean_stop
+	 * the window is switched off first (DECON2's own enable, at the next
+	 * frame through the shadow update) and the channel's OP_STATUS is
+	 * awaited before DECON2 stops.
+	 */
+	if (clean_stop && (readl(d->decon2 + DECON_DATA_PATH_CONTROL_0) & 0xffffff)) {
+		void __iomem *dma, *dpp;
+		u32 blend, st = 0;
+		int r = -ENODEV;
+
+		x9dp_d2_rmw(d, DECON_DATA_PATH_CONTROL_0, 0xffffff, 0);
+		x9dp_d2_rmw(d, DECON_SHADOW_REG_UPDATE_REQ, DECON_SHADOW_GLOBAL | 0x3f, ~0);
+		if (!x9dp_ch(d, &dma, &dpp, &blend))
+			r = readl_poll_timeout(dma + IDMA_ENABLE, st, !(st & BIT(2)), 100, 60000);
+		dev_info(d->dev, "decon2_stop: window off, DMA %s (%08x)\n",
+			 r ? "still busy" : "idle", st);
+	}
 	x9dp_d2_rmw(d, DECON_GLOBAL_CONTROL, DECON_EN | DECON_EN_F, 0);
 	x9dp_d2_rmw(d, DECON_SHADOW_REG_UPDATE_REQ, DECON_SHADOW_GLOBAL, ~0);
 	if (d->ctrl_on)
@@ -1585,6 +1640,7 @@ static int x9dp_decon2_stop(struct x9dp *d)
 					 10, 20000);
 	}
 	d->decon2_on = false;
+	x9dp_qos_restore(d);
 	scnprintf(d->last, sizeof(d->last), "decon2_stop: %s, global %08x, sst1_func %08x",
 		  ret ? "timed out" : "stopped and reset", v,
 		  d->ctrl_on ? readl(d->link + SYSTEM_SST1_FUNCTION_ENABLE) : 0);
@@ -1634,6 +1690,20 @@ MODULE_PARM_DESC(dma_icmax, "DMA channel 1 IC_MAX, outstanding reads 1-255 (defa
 static bool dma_reset;
 module_param(dma_reset, bool, 0644);
 MODULE_PARM_DESC(dma_reset, "the dma step software-resets the DMA/DPP channel before programming it (default 0: dp26, a cold channel underflows its first frame far more often)");
+
+/*
+ * dp29: 1080p30 failed as often as 1080p60 (4/10), so the start failure is
+ * not bandwidth; a just-reset channel failed most (1/10), a warm one less.
+ * The channel's registers are shadowed and latch at a frame start; if the
+ * window comes on in a frame before the channel has latched its new setup,
+ * that frame has no pixels. sfr_force latches the DMA's and DPP's setup at
+ * once (IDMA_SFR_UPDATE_FORCE, DPP_SFR_UPDATE_FORCE, bit 4 of each ENABLE:
+ * dma_reg_set_sfr_update_force, dpp_reg_set_sfr_update_force,
+ * dpp_reg.c:168-171, :561-564), before the window is switched to it.
+ */
+static bool sfr_force = true;
+module_param(sfr_force, bool, 0644);
+MODULE_PARM_DESC(sfr_force, "the dma step latches the channel's shadow registers at once (default 1)");
 
 static uint dma_ch = 2;
 module_param(dma_ch, uint, 0644);
@@ -1712,6 +1782,14 @@ static int x9dp_dma(struct x9dp *d)
 		if (r1 || r2)
 			dev_warn(d->dev, "dma: channel reset timed out (dma %08x dpp %08x)\n", v1, v2);
 	}
+	if (qos_lut && d->dma_com) {
+		dev_info(d->dev, "qos: LUT was %08x %08x, now %08x (experiment)\n",
+			 readl(d->dma_com + DMA_COM_QOS_LUT07_00),
+			 readl(d->dma_com + DMA_COM_QOS_LUT15_08), qos_lut);
+		writel(qos_lut, d->dma_com + DMA_COM_QOS_LUT07_00);
+		writel(qos_lut, d->dma_com + DMA_COM_QOS_LUT15_08);
+		d->qos_changed = true;
+	}
 	writel(readl(dma + IDMA_ENABLE) & ~IDMA_SRAM_CLOCK_GATE_EN, dma + IDMA_ENABLE);
 	writel((readl(dma + IDMA_OUT_CON) & ~IDMA_OUT_FRAME_ALPHA) |
 	       FIELD_PREP(IDMA_OUT_FRAME_ALPHA, 0xff), dma + IDMA_OUT_CON);
@@ -1737,6 +1815,10 @@ static int x9dp_dma(struct x9dp *d)
 	       dpp + DPP_MAIN_H_RATIO);
 	writel((readl(dpp + DPP_MAIN_V_RATIO) & ~GENMASK(23, 0)) | DPP_RATIO_1,
 	       dpp + DPP_MAIN_V_RATIO);
+	if (sfr_force) {
+		writel(readl(dma + IDMA_ENABLE) | BIT(4), dma + IDMA_ENABLE);
+		writel(readl(dpp + 0x0) | BIT(4), dpp + 0x0);
+	}
 	scnprintf(d->last, sizeof(d->last),
 		  "dma: ch %u fb %pad; en %08x in_con %08x out_con %08x src %08x img %08x base %08x err %08x; dpp en %08x in_con %08x img %08x",
 		  dma_ch, &d->fb_dma, readl(dma + IDMA_ENABLE), readl(dma + IDMA_IN_CON),
@@ -1883,13 +1965,17 @@ static uint m4_order;
 module_param(m4_order, uint, 0644);
 MODULE_PARM_DESC(m4_order, "m4up order: 0 stock (link video on, LH, DECON2 start), 1 DECON2 first (LH, DECON2 start, then link video on)");
 
-static uint m4_tries = 5;
+static uint m4_tries = 8;
 module_param(m4_tries, uint, 0644);
-MODULE_PARM_DESC(m4_tries, "m4up attempts while the link's MAPI FIFO underflows in the first 100 ms of video (default 3)");
+MODULE_PARM_DESC(m4_tries, "m4up attempts while the link's MAPI FIFO underflows in the first 100 ms of video (default 8)");
 
 static bool m4_switch = true;
 module_param(m4_switch, bool, 0644);
 MODULE_PARM_DESC(m4_switch, "m4up with m4_src 1: start on the colour map and switch to the DMA (default 1), or start on the DMA");
+
+static uint m4_retry_ms = 200;
+module_param(m4_retry_ms, uint, 0644);
+MODULE_PARM_DESC(m4_retry_ms, "m4up: pause before each retry, ms (default 200)");
 
 static bool m4_retrain;
 module_param(m4_retrain, bool, 0644);
@@ -2036,6 +2122,9 @@ static int x9dp_m4up(struct x9dp *d)
 	int ret = 0;
 
 	for (i = 1; i <= tries; i++) {
+		/* a pause between attempts (dp27-31 never retried: the vreset block broke out of the loop) */
+		if (i > 1)
+			msleep(clamp_t(u32, m4_retry_ms, 0, 3000));
 		/*
 		 * A new training only after HPD rose (or with no trained link):
 		 * dp24 showed the dock failing HBR training when retrained under
@@ -2053,9 +2142,10 @@ static int x9dp_m4up(struct x9dp *d)
 			 readl(d->decon2 + DECON_FRAME_COUNT));
 		if (!(st & BIT(8)))		/* MAPI_FIFO_UNDER_FLOW */
 			break;
-		{
+		if (m4_vresets) {
 			u32 k;
 
+			ret = -EIO;
 			for (k = 0; k < min_t(u32, m4_vresets, 20); k++) {
 				ret = x9dp_vreset(d);
 				dev_info(d->dev, "m4up: %s\n", d->last);
