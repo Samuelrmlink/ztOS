@@ -864,6 +864,47 @@ capped at 62 bytes, as a stopgap; it stays as the fallback).
 - Without the helper (not installed, or not running) the bridge logs it
   once per scan and falls back to rebuilt records.
 
+### Connection priority (9 Nov)
+
+iTi's firmware update ran at 2.3 KB/s: 146-byte Write Commands, about one
+per connection event at BlueZ's 48.75 ms interval. On a phone an updater
+calls `BluetoothGatt.requestConnectionPriority(CONNECTION_PRIORITY_HIGH)`,
+and Android 13 asks its stack for 11.25-15 ms, latency 0 (BALANCED 30-50 ms,
+LOW_POWER 100-125 ms with latency 2; a 5 s supervision timeout each). The
+shim ignored the HAL's `conn_parameter_update`.
+
+- **Shim:** `conn_parameter_update` sends `CONN_UPDATE` (protocol version 3);
+  `EV_CONN_UPDATED` comes back with what the link now has, or the HCI status,
+  and the shim gives it to every open link to that device
+  (`conn_updated_cb`).
+- **Bridge:** only for a device one of the asking client's own links holds,
+  and no faster than HIGH (min interval 9); within the spec otherwise. When
+  Android is done and Linux keeps the link (it was connected before), the
+  bridge puts BALANCED back. A link the bridge made is disconnected anyway.
+- **`ztos-bt-connparam`** (`bluetooth/connparam/`, a sibling of adwatch):
+  BlueZ has no D-Bus call for a central's connection update. The kernel's
+  route, mgmt Load Connection Parameters with one entry, would also store the
+  parameters for every later connection to the device, drops the other
+  devices' stored ones when it has none for this one, and doesn't say what
+  the peripheral settled on. So the helper sends the HCI command itself:
+  - socket-activated (`/run/ztos-bt-connparam.sock`), a `DynamicUser` with
+    **only CAP_NET_RAW** (a raw HCI socket that may send commands), the same
+    sandbox as adwatch; clients: root or session users;
+  - one request at a time: an address and the four values, checked against
+    the Core spec; it finds the LE connection to that address
+    (HCIGETCONNINFO) and refuses unless this side is the central;
+  - it sends **one command, LE Connection Update (0x2013)**, for that
+    handle, and nothing else ever; it reads only that command's Command
+    Status and its LE Connection Update Complete (5 s at most), and answers
+    with the status and the interval, latency and timeout now in use. The
+    kernel sees the same event and keeps its own record right.
+- **Supervision timeout** (the iTi drop before, 9 Nov): BlueZ's
+  `[LE] ConnectionSupervisionTimeout` and the debugfs value only reach
+  connection parameters the kernel creates afterwards. The ones made at boot
+  for known devices (hci_conn_params) kept 420 ms until the phone restarted,
+  so a change there needs a restart of Bluetooth or the phone to apply to
+  every device.
+
 ### Stages
 
 1. **BLE central**: adapter state, bonded list, LE scan with filters, GATT

@@ -9,7 +9,7 @@ post_install() {
 	systemctl daemon-reload
 	systemctl --global enable $_user_units > /dev/null 2>&1
 	systemctl enable ztos-waydroid-images.service > /dev/null 2>&1
-	systemctl enable --now ztos-bt-adwatch.socket > /dev/null 2>&1
+	systemctl enable --now ztos-bt-adwatch.socket ztos-bt-connparam.socket > /dev/null 2>&1
 	# fetch the images now, in the background (about 1 GB; then set-up, once
 	# the kernel has binder): journalctl -u ztos-waydroid-images
 	systemctl start --no-block ztos-waydroid-images.service
@@ -23,7 +23,7 @@ post_upgrade() {
 	ztos-user-dropins > /dev/null || true
 	systemctl daemon-reload
 	systemctl --global enable ztos-btbridge.socket > /dev/null 2>&1 || true
-	systemctl enable --now ztos-bt-adwatch.socket > /dev/null 2>&1 || true
+	systemctl enable --now ztos-bt-adwatch.socket ztos-bt-connparam.socket > /dev/null 2>&1 || true
 }
 
 pre_remove() {
@@ -33,7 +33,7 @@ pre_remove() {
 		ztos_as_user timeout 25 waydroid session stop > /dev/null 2>&1 || true
 	fi
 	systemctl --global disable $_user_units > /dev/null 2>&1 || true
-	systemctl disable --now ztos-waydroid-images.service ztos-waydroid-network.service ztos-bt-adwatch.socket ztos-bt-adwatch.service \
+	systemctl disable --now ztos-waydroid-images.service ztos-waydroid-network.service ztos-bt-adwatch.socket ztos-bt-adwatch.service ztos-bt-connparam.socket ztos-bt-connparam.service \
 		waydroid-container.service > /dev/null 2>&1 || true
 	# the network: ztos-waydroid-network's NAT table, and waydroid-net.sh's
 	# bridge and tables if the container left them

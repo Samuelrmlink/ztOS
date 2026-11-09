@@ -45,6 +45,15 @@ EXPECT_SECONDS = 60     # how long ztos-bt-agent takes an expected address on tr
 SILENT_SECONDS = 2      # how often a connected, unused LE device is reported to a scan
 SLOW_SECONDS = 5        # a GATT op BlueZ hasn't answered by then is logged
 RAW_MAX = 256           # advertisements as received, kept for this many devices
+BALANCED = (24, 40, 0, 500)     # Android's CONNECTION_PRIORITY_BALANCED: 30-50 ms, latency 0, 5 s
+
+
+def conn_params_ok(min_interval, max_interval, latency, timeout):
+    """LE connection parameters within the Core spec (Vol 4 Part E 7.8.18),
+    and no faster than Android's HIGH (11.25 ms): what the bridge will ask
+    for. ztos-bt-connparam checks the spec's part again."""
+    return (9 <= min_interval <= max_interval <= 3200 and latency <= 499 and 10 <= timeout <= 3200
+            and timeout * 8 > (1 + latency) * max_interval * 2)
 # BlueZ interfaces that mean a Linux profile uses a device (on it or its children)
 LINUX_USE = {"org.bluez.Input1", "org.bluez.MediaControl1", "org.bluez.MediaTransport1",
              "org.bluez.MediaPlayer1", "org.bluez.Network1"}
@@ -78,6 +87,7 @@ class Hold:
         self.state = "connecting"
         self.timer = None
         self.linger = None        # the delayed disconnect after Android's last use
+        self.fast = False         # Android changed the link's parameters (put back when it's done)
 
 
 class Link:
@@ -641,6 +651,11 @@ class Bridge(GattServerMixin):
         self._update_expected()
         for token in list(hold.tokens):
             self._end_link(token, status)
+        if hold.fast and not (disconnect and hold.made) and self.devs.get(addr, {}).get("Connected"):
+            # Linux keeps the link: back to BlueZ's usual parameters
+            self.log("connection", addr, "back to balanced")
+            self.be.conn_update(addr, *BALANCED, lambda *a: None,
+                                lambda st: self.log("connection", addr, "back to balanced failed: 0x%02x" % st))
         if disconnect and hold.made:
             self._release_timer(addr)
             self.be.disconnect(addr, lambda: None, lambda n, m: self.log("disconnect", addr, n, m))
@@ -922,6 +937,45 @@ class Bridge(GattServerMixin):
             mtu = self.be.mtu(link.addr)
             self.log("gatt", link.addr, "MTU", mtu)
             answer(P.ST_OK, [mtu])
+
+    # ---- ops: connection parameters --------------------------------------
+
+    def op_conn_update(self, client, answer, addr, min_interval, max_interval, latency, timeout):
+        """requestConnectionPriority, on an LE link one of this client's links
+        uses. The result goes to the client as EV_CONN_UPDATED."""
+        if not self._ready(client, answer):
+            return
+        hold = self.holds.get(addr)
+        mine = hold is not None and any(
+            isinstance(t, int) and self.links.get(t) is not None and self.links[t].client is client
+            for t in hold.tokens)
+        if not mine or hold.state != "connected":
+            answer(P.ST_NOT_FOUND if not mine else P.ST_NOT_READY)
+            return
+        params = (min_interval, max_interval, latency, timeout)
+        if not conn_params_ok(*params):
+            self.log("connection", addr, "parameters refused:", params)
+            answer(P.ST_INVALID)
+            return
+        answer(P.ST_OK)
+        hold.fast = params != BALANCED
+        started = time.monotonic()
+        self.log("connection", addr, "update asked: interval %.2f-%.2f ms, latency %d, timeout %d ms" % (
+            min_interval * 1.25, max_interval * 1.25, latency, timeout * 10))
+
+        def done(interval, lat, to):
+            self.log("connection", addr, "now: interval %.2f ms, latency %d, timeout %d ms (%.0f ms)" % (
+                interval * 1.25, lat, to * 10, (time.monotonic() - started) * 1000))
+            self._conn_updated(client, addr, interval, lat, to, 0)
+
+        def failed(st):
+            self.log("connection", addr, "update failed: 0x%02x" % st)
+            self._conn_updated(client, addr, 0, 0, 0, st)
+        self.be.conn_update(addr, *params, done, failed)
+
+    def _conn_updated(self, client, addr, interval, latency, timeout, status):
+        if client in self.clients and self.clients[client].get("version", 1) >= 3:
+            self._event(client, "EV_CONN_UPDATED", [addr, interval, latency, timeout, status & 0xff])
 
     # ---- ops: bonds -------------------------------------------------------
 

@@ -28,6 +28,9 @@ build() {
 	# the one compiled piece: ztos-bt-adwatch (advertisements as received)
 	cc $CFLAGS -std=c11 -Wall -Wextra -o "$srcdir/ztos-bt-adwatch" \
 		"$(_src)/android/waydroid/bluetooth/adwatch/ztos-bt-adwatch.c" $LDFLAGS
+	# and ztos-bt-connparam (requestConnectionPriority's LE Connection Update)
+	cc $CFLAGS -std=c11 -Wall -Wextra -o "$srcdir/ztos-bt-connparam" \
+		"$(_src)/android/waydroid/bluetooth/connparam/ztos-bt-connparam.c" $LDFLAGS
 }
 
 package() {
@@ -71,6 +74,9 @@ package() {
 	install -Dm755 "$srcdir/ztos-bt-adwatch" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztos-bt-adwatch"
 	install -Dm644 "$bt/adwatch/ztos-bt-adwatch.socket" "$pkgdir/usr/lib/systemd/system/ztos-bt-adwatch.socket"
 	install -Dm644 "$bt/adwatch/ztos-bt-adwatch.service" "$pkgdir/usr/lib/systemd/system/ztos-bt-adwatch.service"
+	install -Dm755 "$srcdir/ztos-bt-connparam" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztos-bt-connparam"
+	install -Dm644 "$bt/connparam/ztos-bt-connparam.socket" "$pkgdir/usr/lib/systemd/system/ztos-bt-connparam.socket"
+	install -Dm644 "$bt/connparam/ztos-bt-connparam.service" "$pkgdir/usr/lib/systemd/system/ztos-bt-connparam.service"
 	# what patch-bluetooth.py puts into the images (pinned there by sha256)
 	for f in Bluetooth.apk libbluetooth_jni.so SOURCES; do
 		install -Dm644 "$src/prebuilts/waydroid-bt/$f" "$pkgdir/usr/share/ztos-waydroid/bt/$f"

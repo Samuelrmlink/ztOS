@@ -57,6 +57,9 @@ class FakeBackend:
         self.calls.append((name,) + tuple(args))
         self.pending.append((name, args, ok, err))
 
+    def conn_update(self, addr, min_interval, max_interval, latency, timeout, ok, err):
+        self._later("conn_update", [addr, min_interval, max_interval, latency, timeout], ok, err)
+
     def watch_ads(self, on):
         self.calls.append(("watch_ads", on))
 

@@ -26,7 +26,8 @@ the numbers; tests/test_proto.py checks the two agree.
 import struct
 import uuid as _uuid
 
-VERSION = 2            # 2: EV_DEVICE_FOUND2 (the event type); a version 1 shim still gets EV_DEVICE_FOUND
+VERSION = 3            # 2: EV_DEVICE_FOUND2 (the event type); a version 1 shim still gets EV_DEVICE_FOUND
+                       # 3: CONN_UPDATE and EV_CONN_UPDATED (requestConnectionPriority)
 MIN_VERSION = 1
 MAX_PACKET = 65536
 HEADER = struct.Struct("<HHI")
@@ -80,6 +81,9 @@ OPS = {
     "GATT_WRITE":      (0x0034, "uqyqb", ""),      # link, handle, write type, offset, value
     "GATT_MTU":        (0x0035, "u", "q"),
     "RSSI":            (0x0036, "a", "i"),
+    # an LE connection's parameters (requestConnectionPriority): address, min and max
+    # interval (1.25 ms), latency, supervision timeout (10 ms); the result comes as EV_CONN_UPDATED
+    "CONN_UPDATE":     (0x0037, "aqqqq", ""),
     "BOND_CREATE":     (0x0040, "ay", ""),         # address, transport; the result comes as BOND_STATE
     "BOND_CANCEL":     (0x0041, "a", ""),
     "BOND_REMOVE":     (0x0042, "a", ""),
@@ -110,6 +114,7 @@ OPS = {
     "EV_SCAN_STOPPED": (0x8020, "yu", None),       # transport, why (status)
     "EV_LINK":         (0x8030, "uuBq", None),     # link, status, connected, mtu
     "EV_GATT_VALUE":   (0x8031, "uqb", None),      # link, handle, value (notification or indication)
+    "EV_CONN_UPDATED": (0x8032, "aqqqy", None),    # address, interval, latency, timeout, HCI status (0: done)
     "EV_ADV_STOPPED":  (0x8040, "yu", None),       # advertiser id, why (ST_TIMEOUT: its duration ran out)
     # a remote central as Android's GATT server sees it: conn, address, connected
     "EV_SERVER_CONN":  (0x8050, "uaB", None),

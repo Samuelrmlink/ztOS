@@ -142,6 +142,7 @@ GATT_MANAGER = "org.bluez.GattManager1"
 
 CONNECT_TIMEOUT = 40
 CALL_TIMEOUT = 30
+CONNPARAM_SOCKET = "/run/ztos-bt-connparam.sock"   # connparam/ztos-bt-connparam
 
 # Android's characteristic property bits, from BlueZ's Flags
 FLAG_BITS = {"broadcast": 0x01, "read": 0x02, "write-without-response": 0x04, "write": 0x08,
@@ -334,6 +335,55 @@ class BlueZ:
 
     def devices(self):
         return {addr: dict(self.objs[p][DEVICE]) for addr, p in self.dev_path.items()}
+
+    def conn_update(self, addr, min_interval, max_interval, latency, timeout, ok, err):
+        """An LE Connection Update through ztos-bt-connparam (connparam/):
+        ok(interval, latency, timeout) as the link now is, or err(status)."""
+        from gi.repository import GLib
+        import socket as _s
+        import struct as _st
+        packet = (bytes(int(x, 16) for x in reversed(addr.split(":")))
+                  + _st.pack("<HHHHH", min_interval, max_interval, latency, timeout, 0))
+        s = _s.socket(_s.AF_UNIX, _s.SOCK_SEQPACKET | _s.SOCK_CLOEXEC)
+        try:
+            if os.stat(CONNPARAM_SOCKET).st_uid != 0:
+                raise OSError("not root's")
+            s.connect(CONNPARAM_SOCKET)
+            s.send(packet)
+        except OSError as e:
+            s.close()
+            self.log("connection update: no ztos-bt-connparam (%s)" % e)
+            err(0xf4)
+            return
+        state = {"timer": None, "watch": None}
+
+        def finish(reply):
+            if state["timer"] is not None:
+                GLib.source_remove(state["timer"])
+            if state["watch"] is not None:
+                GLib.source_remove(state["watch"])
+            s.close()
+            if len(reply) == 7 and reply[0] == 0:
+                ok(*_st.unpack("<HHH", reply[1:]))
+            else:
+                err(reply[0] if reply else 0xf3)
+
+        def readable(_fd, _cond):
+            state["watch"] = None
+            try:
+                reply = s.recv(16)
+            except OSError:
+                reply = b""
+            finish(reply)
+            return False
+
+        def timed_out():
+            state["timer"] = None
+            finish(b"")
+            return False
+        state["watch"] = GLib.io_add_watch(s.fileno(), GLib.PRIORITY_DEFAULT,
+                                           GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, readable)
+        state["timer"] = GLib.timeout_add_seconds(8, timed_out)
 
     def watch_ads(self, on):
         """The advertisements as received (ztos-bt-adwatch), while Android scans LE."""

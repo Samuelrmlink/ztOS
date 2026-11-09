@@ -7,7 +7,7 @@
 
 namespace ztbt {
 
-constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersion = 3;
 constexpr size_t kMaxPacket = 65536;
 constexpr uint16_t kFlagFd = 0x0001;   // header flag: one fd comes with the packet (SCM_RIGHTS)
 constexpr const char* kSocketPath = "/data/misc/ztos-btbridge/bridge.sock";
@@ -27,6 +27,7 @@ enum Op : uint16_t {
   ZTBT_OP_GATT_WRITE = 0x0034,
   ZTBT_OP_GATT_MTU = 0x0035,
   ZTBT_OP_RSSI = 0x0036,
+  ZTBT_OP_CONN_UPDATE = 0x0037,
   ZTBT_OP_BOND_CREATE = 0x0040,
   ZTBT_OP_BOND_CANCEL = 0x0041,
   ZTBT_OP_BOND_REMOVE = 0x0042,
@@ -47,6 +48,7 @@ enum Op : uint16_t {
   ZTBT_OP_EV_SCAN_STOPPED = 0x8020,
   ZTBT_OP_EV_LINK = 0x8030,
   ZTBT_OP_EV_GATT_VALUE = 0x8031,
+  ZTBT_OP_EV_CONN_UPDATED = 0x8032,
   ZTBT_OP_EV_ADV_STOPPED = 0x8040,
   ZTBT_OP_EV_SERVER_CONN = 0x8050,
   ZTBT_OP_EV_SERVER_READ = 0x8051,
@@ -118,6 +120,9 @@ enum Op : uint16_t {
 #define ZTBT_SIG_EV_SCAN_STOPPED "yu"
 #define ZTBT_SIG_EV_LINK "uuBq"
 #define ZTBT_SIG_EV_GATT_VALUE "uqb"
+#define ZTBT_SIG_CONN_UPDATE "aqqqq"
+#define ZTBT_SIG_CONN_UPDATE_REPLY ""
+#define ZTBT_SIG_EV_CONN_UPDATED "aqqqy"
 
 enum Status : uint32_t {
   ZTBT_ST_OK = 0,

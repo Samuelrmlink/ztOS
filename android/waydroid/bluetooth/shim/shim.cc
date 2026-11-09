@@ -454,6 +454,16 @@ void OnAdvStopped(const Values& v) {
   }
 }
 
+void OnConnUpdated(const Values& v) {
+  RawAddress a = AddrFrom(v[0]);
+  if (!g->gcb) return;
+  for (auto& [id, l] : g->links) {
+    if (l.open && l.addr == a)
+      g->gcb->client->conn_updated_cb((int)id, (uint16_t)v[1].num(), (uint16_t)v[2].num(), (uint16_t)v[3].num(),
+                                      (uint8_t)v[4].num());
+  }
+}
+
 void OnValue(const Values& v) {
   uint32_t id = v[0].num();
   auto it = g->links.find(id);
@@ -496,6 +506,7 @@ int Init(bt_callbacks_t* callbacks, bool, bool, int, const char**, bool, const c
   c->OnEvent(ZTBT_OP_EV_SCAN_STOPPED, ZTBT_SIG_EV_SCAN_STOPPED, OnScanStopped);
   c->OnEvent(ZTBT_OP_EV_LINK, ZTBT_SIG_EV_LINK, OnLink);
   c->OnEvent(ZTBT_OP_EV_GATT_VALUE, ZTBT_SIG_EV_GATT_VALUE, OnValue);
+  c->OnEvent(ZTBT_OP_EV_CONN_UPDATED, ZTBT_SIG_EV_CONN_UPDATED, OnConnUpdated);
   c->OnEvent(ZTBT_OP_EV_ADV_STOPPED, ZTBT_SIG_EV_ADV_STOPPED, OnAdvStopped);
   c->OnEvent(ZTBT_OP_EV_SERVER_CONN, ZTBT_SIG_EV_SERVER_CONN, OnServerConn);
   c->OnEvent(ZTBT_OP_EV_SERVER_READ, ZTBT_SIG_EV_SERVER_READ, OnServerRead);
@@ -986,8 +997,19 @@ bt_status_t ConfigureMtu(int conn_id, int) {
   return BT_STATUS_SUCCESS;
 }
 
-bt_status_t ConnParameterUpdate(const RawAddress&, int, int, int, int, uint16_t, uint16_t) {
-  return BT_STATUS_SUCCESS;   // BlueZ and the peer decide the parameters
+// requestConnectionPriority: the bridge asks for an LE Connection Update
+// (ztos-bt-connparam) and says how it went with EV_CONN_UPDATED.
+bt_status_t ConnParameterUpdate(const RawAddress& addr, int min_interval, int max_interval, int latency,
+                                int timeout, uint16_t, uint16_t) {
+  if (!g) return BT_STATUS_NOT_READY;
+  if (min_interval < 0 || max_interval < 0 || latency < 0 || timeout < 0 || min_interval > 0xffff ||
+      max_interval > 0xffff || latency > 0xffff || timeout > 0xffff)
+    return BT_STATUS_PARM_INVALID;
+  g->conn->Request(ZTBT_OP_CONN_UPDATE,
+                   {Value::Addr(addr.address), Value::Q((uint16_t)min_interval), Value::Q((uint16_t)max_interval),
+                    Value::Q((uint16_t)latency), Value::Q((uint16_t)timeout)},
+                   "", [](uint32_t, const Values&) {});
+  return BT_STATUS_SUCCESS;
 }
 
 bt_status_t SetPreferredPhy(const RawAddress&, uint8_t, uint8_t, uint16_t) { return BT_STATUS_SUCCESS; }

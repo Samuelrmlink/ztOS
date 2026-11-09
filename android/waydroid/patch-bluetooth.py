@@ -30,7 +30,7 @@ import shutil
 import sys
 
 STOCK_JNI = "9b6dc6ff611abe505356e588b2641483d2237738ec166268751f82e8a90e9e3f"
-WRAPPER = "99b1107b21a181f8e7d5ce34672224da4bccb505c8704fd4a5a5aece64a2af76"
+WRAPPER = "9261051a146bb252041e1c2cd80a9457bf8271a6e6610ed640d86d85fa41cb29"
 APP = "9c19c7d494699b64fa20fea16029efaf11a7c67b37b4a01bd44f8143780bdfbf"
 OLD_WRAPPERS = {   # earlier builds of the wrapper, replaced in place
     "c32ddd2f473a19c56413e08dc6766e4ee16957e99ca2477f370a8ba631583557",   # stage 1 (no sockets)
@@ -39,6 +39,7 @@ OLD_WRAPPERS = {   # earlier builds of the wrapper, replaced in place
     "cc3300cdacaeb72d6a4d70d236f5daa485b7ba497bb1a5c5b1800dfd17027f12",   # + GATT server (the phone, 8 Nov)
     "a176455109f10414b5b8b58b5c9d7d112dbe01e3d5ba5da8fedf8fc3f915db5a",   # + GATT ids, linger (the phone, 8 Nov)
     "9126a25f836ca5d218b000422cf32294dcb45c2868ce16452d581e4fb7bfcc3a",   # + protocol 2: scan event types (the phone, 9 Nov)
+    "99b1107b21a181f8e7d5ce34672224da4bccb505c8704fd4a5a5aece64a2af76",   # + is_notify for indications (not deployed)
 }
 APEX = "system/apex/com.android.btservices"
 FEATURES = {

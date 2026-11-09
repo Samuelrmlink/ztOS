@@ -773,5 +773,82 @@ class ScanRecord(unittest.TestCase):
         self.assertEqual((ad[i - 1] - 1) % 16, 0)
 
 
+class ConnPriority(unittest.TestCase):
+    """requestConnectionPriority (iTi's firmware update, 9 Nov: 2.3 KB/s at
+    BlueZ's 48.75 ms interval)."""
+
+    HIGH = (9, 12, 0, 500)
+
+    def up(self, version=3, made=True):
+        be, store, br, c = make(version)
+        if not made:
+            br.device_changed(LOCK, {"Connected": True})
+        addr = SENSOR if made else LOCK
+        br.device_changed(addr, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", addr, 1, P.T_LE), "GATT_OPEN")
+        if made:
+            be.answer("connect")
+            br.device_changed(addr, {"Connected": True})
+        else:
+            be.answer("connect", error=("org.bluez.Error.AlreadyConnected", ""))
+        return be, store, br, c, link, addr
+
+    def test_high_then_the_result(self):
+        be, store, br, c, link, addr = self.up()
+        rid = c.request("CONN_UPDATE", addr, *self.HIGH)
+        self.assertEqual(c.reply(rid, "CONN_UPDATE")[0], P.ST_OK)
+        self.assertEqual(be.called("conn_update"), [("conn_update", addr) + self.HIGH])
+        be.answer("conn_update", values=(12, 0, 500))
+        self.assertEqual(c.events("EV_CONN_UPDATED"), [[addr, 12, 0, 500, 0]])
+
+    def test_a_refusal_is_reported(self):
+        be, store, br, c, link, addr = self.up()
+        c.request("CONN_UPDATE", addr, *self.HIGH)
+        be.answer("conn_update", error=(0x0c,))
+        self.assertEqual(c.events("EV_CONN_UPDATED"), [[addr, 0, 0, 0, 0x0c]])
+
+    def test_only_for_links_of_this_client_and_sane_values(self):
+        be, store, br, c, link, addr = self.up()
+        for bad in ((6, 12, 0, 500), (12, 9, 0, 500), (80, 100, 2, 70), (9, 12, 500, 500)):
+            self.assertEqual(c.reply(c.request("CONN_UPDATE", addr, *bad), "CONN_UPDATE")[0], P.ST_INVALID, bad)
+        rid = c.request("CONN_UPDATE", LOCK, *self.HIGH)                 # not one of its links
+        self.assertEqual(c.reply(rid, "CONN_UPDATE")[0], P.ST_NOT_FOUND)
+        other = FakeClient(br)
+        other.request("HELLO", 3, "x")
+        other.request("ENABLE", True)
+        self.assertEqual(other.reply(other.request("CONN_UPDATE", addr, *self.HIGH), "CONN_UPDATE")[0],
+                         P.ST_NOT_FOUND)
+        self.assertEqual(be.called("conn_update"), [])
+
+    def test_older_shims_get_no_event(self):
+        be, store, br, c, link, addr = self.up(version=2)
+        c.request("CONN_UPDATE", addr, *self.HIGH)
+        be.answer("conn_update", values=(12, 0, 500))
+        self.assertEqual([p for p, _ in c.out if P.HEADER.unpack_from(p)[0] == P.OPS["EV_CONN_UPDATED"][0]], [])
+
+    def test_back_to_balanced_when_linux_keeps_the_link(self):
+        be, store, br, c, link, addr = self.up(made=False)
+        c.request("CONN_UPDATE", addr, *self.HIGH)
+        be.answer("conn_update", values=(12, 0, 500))
+        c.request("GATT_CLOSE", link)
+        self.assertEqual(be.called("conn_update")[-1], ("conn_update", addr, 24, 40, 0, 500))
+
+    def test_nothing_to_put_back_when_the_bridge_disconnects(self):
+        be, store, br, c, link, addr = self.up()
+        c.request("CONN_UPDATE", addr, *self.HIGH)
+        be.answer("conn_update", values=(12, 0, 500))
+        c.request("GATT_CLOSE", link)
+        be.linger()
+        self.assertEqual(len(be.called("conn_update")), 1)
+        self.assertEqual(be.called("disconnect"), [("disconnect", addr)])
+
+    def test_balanced_asked_clears_it(self):
+        be, store, br, c, link, addr = self.up(made=False)
+        c.request("CONN_UPDATE", addr, *self.HIGH)
+        c.request("CONN_UPDATE", addr, 24, 40, 0, 500)
+        c.request("GATT_CLOSE", link)
+        self.assertEqual(len(be.called("conn_update")), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
