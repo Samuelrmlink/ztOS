@@ -158,6 +158,10 @@
 #define PCS_TEST_PATTERN_CONTROL	0x3008
 #define  LINK_QUALITY_PATTERN_SET	GENMASK(2, 0)
 #define SST1_MAIN_CONTROL		0x5000
+#define SST1_MAIN_FIFO_CONTROL		0x5004
+#define  CLEAR_PIXEL_MAPPING_FIFO	BIT(2)
+#define  CLEAR_MAPI_FIFO		BIT(1)
+#define  CLEAR_GL_DATA_FIFO		BIT(0)
 #define  MVID_MODE			BIT(11)
 #define  VIDEO_MODE			BIT(6)
 #define  ENHANCED_MODE			BIT(5)
@@ -185,6 +189,9 @@
 #define SST1_VIDEO_ENABLE		0x5404
 #define  VIDEO_EN			BIT(0)
 #define SST1_VIDEO_MASTER_TIMING_GEN	0x5408
+#define SST1_VIDEO_FIFO_THRESHOLD_CONTROL	0x5410
+#define  GL_FIFO_TH_CTRL		BIT(5)	/* 1: GL_FIFO_TH_VALUE, 0: the hardware's own */
+#define  GL_FIFO_TH_VALUE		GENMASK(4, 0)
 #define SST1_VIDEO_HORIZONTAL_TOTAL_PIXELS	0x5414
 #define SST1_VIDEO_VERTICAL_TOTAL_PIXELS	0x5418
 #define SST1_VIDEO_HORIZONTAL_FRONT_PORCH	0x541c
@@ -333,9 +340,10 @@ struct x9dp {
 	/* M4 writes: DECON0's DP_CONNECTION_CONTROL (and its shadow, read
 	 * only), the disp sysreg's TE_QACTIVE_PLL_EN; mapped, not requested */
 	void __iomem *d0conn, *d0conn_shd, *dsys;
-	void __iomem *d0win;
-	void __iomem *dma2, *dpp2;	/* DMA/DPP channel 2 (IDMA_VG0), optional */		/* DECON0-space blender window 4 (approved), 0x1c */
+	void __iomem *d0win;		/* DECON0-space blender window 4 (approved), 0x1c */
+	void __iomem *dma2, *dpp2;	/* DMA/DPP channel 2 (IDMA_VG0), optional */
 	bool vsrc_decon;		/* video_on with DECON2's pixels, not BIST */
+	bool link_fresh;		/* HPD rose: the next m4up trains the link first */
 	bool decon2_on;
 	void *fb_cpu;			/* the dma step's test image */
 	dma_addr_t fb_dma;
@@ -1008,6 +1016,17 @@ static const struct {
  * Diagnostic: refresh 30 gives CEA VIC 34, 1080p30 (the same 2200x1125
  * totals at 74.25 MHz), half the fetch rate of 1080p60.
  */
+/*
+ * The link's video FIFO (GL data FIFO) start threshold: 0 leaves the
+ * hardware's own (stock never sets it, regs-displayport.h:722-724), 1-31
+ * sets GL_FIFO_TH_VALUE by hand. Experiment: does a fuller FIFO before the
+ * link starts reading absorb a DMA window's first-frame latency (dp22/23:
+ * about half the starts underflow, steady state never)?
+ */
+static uint fifo_th;
+module_param(fifo_th, uint, 0644);
+MODULE_PARM_DESC(fifo_th, "SST1 GL FIFO threshold 1-31 by hand, 0 the hardware's own (default 0)");
+
 static uint refresh = 60;
 module_param(refresh, uint, 0644);
 MODULE_PARM_DESC(refresh, "1080p refresh: 60 (default) or 30 (diagnostic, VIC 34)");
@@ -1078,6 +1097,8 @@ static int x9dp_video_cfg(struct x9dp *d, u32 *ipp, u32 *fpp)
 	link_rmw(d, SST1_ACTIVE_SYMBOL_THRESHOLD_FEC_ON, GENMASK(3, 0),
 		 ip <= 2 ? 7 : ip <= 5 ? 8 : 9);
 
+	link_rmw(d, SST1_VIDEO_FIFO_THRESHOLD_CONTROL, GL_FIFO_TH_CTRL | GL_FIFO_TH_VALUE,
+		 fifo_th ? GL_FIFO_TH_CTRL | min_t(u32, fifo_th, 31) : 0);
 	link_rmw(d, SST1_VIDEO_MASTER_TIMING_GEN, BIT(0), BIT(0));
 	link_rmw(d, SST1_MAIN_CONTROL, VIDEO_MODE, 0);
 	*ipp = ip;
@@ -1339,6 +1360,8 @@ static int x9dp_m4dump(struct x9dp *d)
 #define DISP_TE_QACTIVE_PLL_EN		BIT(0)
 
 #define IDMA_ENABLE			0x0000
+#define  IDMA_SRSET			BIT(24)
+#define  DPP_SRSET			BIT(24)
 #define  IDMA_SRAM_CLOCK_GATE_EN	BIT(9)
 #define IDMA_IN_CON			0x0008
 #define  IDMA_IMG_FORMAT		GENMASK(15, 11)
@@ -1601,9 +1624,13 @@ MODULE_PARM_DESC(dma_icmax, "DMA channel 1 IC_MAX, outstanding reads 1-255 (defa
  * IDMA_VG0 (blender channel 0, on the DPU1 port with G0, DECON0's live
  * channel; stock bts.c:109-111, helper.c:604-633).
  */
-static uint dma_ch = 1;
+static bool dma_reset;
+module_param(dma_reset, bool, 0644);
+MODULE_PARM_DESC(dma_reset, "the dma step software-resets the DMA/DPP channel before programming it (default 0: dp26, a cold channel underflows its first frame far more often)");
+
+static uint dma_ch = 2;
 module_param(dma_ch, uint, 0644);
-MODULE_PARM_DESC(dma_ch, "DMA channel for win_dma: 1 IDMA_G1 (default), 2 IDMA_VG0");
+MODULE_PARM_DESC(dma_ch, "DMA channel for win_dma: 1 IDMA_G1, 2 IDMA_VG0 (default: G1 starved at full 1080p in dp17-18, VG0 does not)");
 
 static int x9dp_ch(struct x9dp *d, void __iomem **dma, void __iomem **dpp, u32 *blend)
 {
@@ -1660,6 +1687,23 @@ static int x9dp_dma(struct x9dp *d)
 			return -ENOMEM;
 		x9dp_fb_fill(d->fb_cpu, w, h);
 		wmb();
+	}
+	/*
+	 * dp25: starts alternated bad/good, as if a channel stopped mid-frame
+	 * (DECON2 stopped under a running stream) resumed mid-frame. The
+	 * channel's own software reset first, as dpp_reg_deinit with reset
+	 * (dpp_reg.c:1330-1351, :138-158, :530-551): DMA then DPP.
+	 */
+	if (dma_reset) {
+		u32 v1, v2;
+		int r1, r2;
+
+		writel(readl(dma + IDMA_ENABLE) | IDMA_SRSET, dma + IDMA_ENABLE);
+		writel(readl(dpp + 0x0) | DPP_SRSET, dpp + 0x0);
+		r1 = readl_poll_timeout(dma + IDMA_ENABLE, v1, !(v1 & IDMA_SRSET), 10, 100000);
+		r2 = readl_poll_timeout(dpp + 0x0, v2, !(v2 & DPP_SRSET), 10, 100000);
+		if (r1 || r2)
+			dev_warn(d->dev, "dma: channel reset timed out (dma %08x dpp %08x)\n", v1, v2);
 	}
 	writel(readl(dma + IDMA_ENABLE) & ~IDMA_SRAM_CLOCK_GATE_EN, dma + IDMA_ENABLE);
 	writel((readl(dma + IDMA_OUT_CON) & ~IDMA_OUT_FRAME_ALPHA) |
@@ -1832,15 +1876,23 @@ static uint m4_order;
 module_param(m4_order, uint, 0644);
 MODULE_PARM_DESC(m4_order, "m4up order: 0 stock (link video on, LH, DECON2 start), 1 DECON2 first (LH, DECON2 start, then link video on)");
 
-static uint m4_tries = 3;
+static uint m4_tries = 5;
 module_param(m4_tries, uint, 0644);
 MODULE_PARM_DESC(m4_tries, "m4up attempts while the link's MAPI FIFO underflows in the first 100 ms of video (default 3)");
+
+static bool m4_switch = true;
+module_param(m4_switch, bool, 0644);
+MODULE_PARM_DESC(m4_switch, "m4up with m4_src 1: start on the colour map and switch to the DMA (default 1), or start on the DMA");
+
+static bool m4_retrain;
+module_param(m4_retrain, bool, 0644);
+MODULE_PARM_DESC(m4_retrain, "m4up retries reset the link controller and retrain (default 0: only the SST1 FIFOs are cleared and DECON2 restarted)");
 
 static bool hpd_m4;
 module_param(hpd_m4, bool, 0644);
 MODULE_PARM_DESC(hpd_m4, "with hpd_read and hpd_bist: on HPD high train and run m4up (DECON2) instead of the colour bars (default 0)");
 
-static int x9dp_m4up_once(struct x9dp *d)
+static int x9dp_m4up_once(struct x9dp *d, bool retrain)
 {
 	static const struct {
 		const char *name;
@@ -1870,15 +1922,32 @@ static int x9dp_m4up_once(struct x9dp *d)
 		if (ret)
 			return ret;
 	}
-	ret = x9dp_ctrl(d);
-	ret = ret ?: x9dp_train(d);
-	if (ret) {
-		scnprintf(d->last, sizeof(d->last), "m4up: reset/train failed %d", ret);
-		return ret;
+	if (retrain || !d->rate) {
+		ret = x9dp_ctrl(d);
+		ret = ret ?: x9dp_train(d);
+		if (ret) {
+			scnprintf(d->last, sizeof(d->last), "m4up: reset/train failed %d", ret);
+			return ret;
+		}
+	} else {
+		/*
+		 * Recovery without a new training (dp22: retraining several
+		 * times in a row upset the dock): with the link's video off,
+		 * the SST1 FIFOs cleared (SST1_MAIN_FIFO_CONTROL: MAPI, pixel
+		 * mapping, GL data) and the interrupt status cleared.
+		 */
+		writel(CLEAR_MAPI_FIFO | CLEAR_PIXEL_MAPPING_FIFO | CLEAR_GL_DATA_FIFO,
+		       d->link + SST1_MAIN_FIFO_CONTROL);
+		udelay(10);
+		writel(0, d->link + SST1_MAIN_FIFO_CONTROL);
+		writel(~0, d->link + SST1_INTERRUPT_STATUS_SET0);
+		writel(~0, d->link + SST1_INTERRUPT_STATUS_SET1);
 	}
 	for (i = 0; i < ARRAY_SIZE(seq); i++) {
-		/* always start on the colour map; the DMA comes in on the running pipeline */
-		if (seq[i].fn == x9dp_dma || seq[i].fn == x9dp_win_dma)
+		/* m4_switch: start on the colour map, the DMA comes in on the running pipeline */
+		if ((m4_switch || !m4_src) && (seq[i].fn == x9dp_dma || seq[i].fn == x9dp_win_dma))
+			continue;
+		if (!m4_switch && m4_src && seq[i].fn == x9dp_win)
 			continue;
 		/* order 0: the first video entry (before lh); order 1: the last */
 		if (seq[i].fn == x9dp_video) {
@@ -1902,7 +1971,7 @@ static int x9dp_m4up_once(struct x9dp *d)
 	 * does on a running DECON (the DMA is programmed before the switch
 	 * and its first fetch is at a frame start).
 	 */
-	if (m4_src) {
+	if (m4_src && m4_switch) {
 		msleep(50);
 		ret = x9dp_dma(d);
 		dev_info(d->dev, "m4up: %s\n", d->last);
@@ -1923,13 +1992,51 @@ static int x9dp_m4up_once(struct x9dp *d)
  * the controller is reset. m4up checks the SST1 underflow status over the
  * first 100 ms of video and starts again, up to m4_tries times.
  */
+/*
+ * vreset: the link's video restarted while DECON2 and its DMA keep running
+ * (dp26: a cold DMA channel underflows its first frame far more often than
+ * a warm one, 1/10 vs 4/10): VIDEO_EN off, the SST1 FIFOs and interrupt
+ * status cleared, VIDEO_EN on, so the link picks the stream up again at
+ * DECON2's next frame.
+ */
+static int x9dp_vreset(struct x9dp *d)
+{
+	u32 st;
+
+	if (!d->ctrl_on || !d->video_on)
+		return -EAGAIN;
+	link_rmw(d, SST1_VIDEO_ENABLE, VIDEO_EN, 0);
+	writel(CLEAR_MAPI_FIFO | CLEAR_PIXEL_MAPPING_FIFO | CLEAR_GL_DATA_FIFO,
+	       d->link + SST1_MAIN_FIFO_CONTROL);
+	udelay(10);
+	writel(0, d->link + SST1_MAIN_FIFO_CONTROL);
+	writel(~0, d->link + SST1_INTERRUPT_STATUS_SET0);
+	link_rmw(d, SST1_VIDEO_ENABLE, VIDEO_EN, VIDEO_EN);
+	msleep(100);
+	st = readl(d->link + SST1_INTERRUPT_STATUS_SET0);
+	scnprintf(d->last, sizeof(d->last), "vreset: SST1 int0 %08x over 100 ms (%s)", st,
+		  st & BIT(8) ? "UNDERFLOWING" : "clean");
+	return st & BIT(8) ? -EIO : 0;
+}
+
+static uint m4_vresets;
+module_param(m4_vresets, uint, 0644);
+MODULE_PARM_DESC(m4_vresets, "m4up: on an underflowing start, restart only the link's video this many times before a full restart (default 0: dp27, the link then shows no VSYNC, its video stays stopped)");
+
 static int x9dp_m4up(struct x9dp *d)
 {
 	u32 tries = clamp_t(u32, m4_tries, 1, 10), i, st = 0;
 	int ret = 0;
 
 	for (i = 1; i <= tries; i++) {
-		ret = x9dp_m4up_once(d);
+		/*
+		 * A new training only after HPD rose (or with no trained link):
+		 * dp24 showed the dock failing HBR training when retrained under
+		 * a running stream without an HPD cycle.
+		 */
+		ret = x9dp_m4up_once(d, (i == 1 && d->link_fresh) || m4_retrain);
+		if (i == 1)
+			d->link_fresh = false;
 		if (ret)
 			return ret;
 		writel(~0, d->link + SST1_INTERRUPT_STATUS_SET0);
@@ -1939,6 +2046,20 @@ static int x9dp_m4up(struct x9dp *d)
 			 readl(d->decon2 + DECON_FRAME_COUNT));
 		if (!(st & BIT(8)))		/* MAPI_FIFO_UNDER_FLOW */
 			break;
+		{
+			u32 k;
+
+			for (k = 0; k < min_t(u32, m4_vresets, 20); k++) {
+				ret = x9dp_vreset(d);
+				dev_info(d->dev, "m4up: %s\n", d->last);
+				if (!ret)
+					break;
+			}
+			if (!ret) {
+				st = readl(d->link + SST1_INTERRUPT_STATUS_SET0);
+				break;
+			}
+		}
 	}
 	scnprintf(d->last, sizeof(d->last), "m4up: %s after %u tries (int0 %08x)",
 		  st & BIT(8) ? "UNDERFLOWING" : "running", min(i, tries), st);
@@ -1982,7 +2103,7 @@ static const struct {
 	{ "video", x9dp_video }, { "decon2_start", x9dp_decon2_start },
 	{ "decon2_stop", x9dp_decon2_stop }, { "dma", x9dp_dma },
 	{ "win", x9dp_win }, { "win_dma", x9dp_win_dma }, { "frames", x9dp_frames },
-	{ "m4up", x9dp_m4up },
+	{ "m4up", x9dp_m4up }, { "vreset", x9dp_vreset },
 };
 
 static int x9dp_run(struct x9dp *d, const char *name)
@@ -2048,6 +2169,7 @@ static void x9dp_hpd_work(struct work_struct *work)
 
 		/* m4up stops, resets and trains itself */
 		if (decon) {
+			d->link_fresh = true;
 			ret = x9dp_run(d, "m4up");
 		} else {
 			if (d->video_on)
