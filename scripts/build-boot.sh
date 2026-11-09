@@ -41,6 +41,11 @@
 #                                (-dp2: 7.1.0-zboot-wd-dp2): a test kernel whose ABI
 #                                differs from one on the phone gets its own release and
 #                                module set; the running kernel's set is never replaced
+#     --usb-net                  USB Ethernet adapters as modules (usbnet, CDC Ethernet
+#                                and NCM, Realtek RTL8152/8153: the USB-C docks' NICs);
+#                                the modules go into the set (build-bt-modules.sh). It
+#                                changes the module ABI: give it its own release
+#                                (--release-suffix with --dp-altmode)
 #     --cmdline "..."            extra kernel command line (zboot.rescue=1 ...)
 #     --config-only              stop after the configuration: out/<name>.config,
 #                                to build the modules for it first (below)
@@ -84,7 +89,7 @@ FALLBACK=boot
 DTS_FLAGS=()
 EXTRA=
 WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
-UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID= DPALT= DPTX= RELSUFFIX=
+UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID= DPALT= DPTX= RELSUFFIX= USBNET=
 CONFIG_ONLY= MODULES= MODCHECK=1
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -98,6 +103,7 @@ while [ $# -gt 0 ]; do
 	--pm-debug) PMDEBUG=1 ;;
 	--lockup) LOCKUP=1 ;;
 	--waydroid) WAYDROID=1 ;;
+	--usb-net) USBNET=1 ;;
 	--dp-altmode) DTS_FLAGS+=(--dp-altmode); DPALT=1 ;;
 	--release-suffix) RELSUFFIX=$2; shift ;;
 	--dp-tx) DTS_FLAGS+=(--dp-tx); DPTX=1 ;;
@@ -441,6 +447,11 @@ fi
 # e.g. sk_may_scm_recv() allows SO_PASSCRED on AF_BLUETOOTH sockets only then
 # (btmon needs it). No built-in Bluetooth code; it changes the module ABI.
 cfg --module BT
+# --usb-net: the docks' Ethernet (RTL8153 in the Belkin 6-in-1) as modules
+if [ -n "$USBNET" ]; then
+	cfg --enable NETDEVICES --enable USB_NET_DRIVERS --module USB_USBNET \
+		--module USB_RTL8152 --module USB_NET_CDCETHER --module USB_NET_CDC_NCM
+fi
 # The release names the module ABI (see the top): 32-bit compat changes
 # structures modules use, so a COMPAT kernel gets its own /lib/modules.
 LV=-zboot

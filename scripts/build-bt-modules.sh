@@ -96,6 +96,19 @@ make -s -j"$JOBS" O="$BASE" vmlinux
 	exit 1
 }
 
+# The target's own =m drivers outside the trees below: the USB Ethernet ones
+# (build-boot.sh --usb-net), built in the target tree itself
+NET=
+if grep -q '^CONFIG_USB_USBNET=m' "$CONFIG"; then
+	echo "=== USB Ethernet, in the target tree ==="
+	for m in USB_USBNET:drivers/net/usb/usbnet USB_NET_CDCETHER:drivers/net/usb/cdc_ether \
+		USB_NET_CDC_NCM:drivers/net/usb/cdc_ncm USB_RTL8152:drivers/net/usb/r8152 MII:drivers/net/mii \
+		USB_NET_AX88179_178A:drivers/net/usb/ax88179_178a USB_RTL8153_ECM:drivers/net/usb/r8153_ecm; do
+		grep -q "^CONFIG_${m%%:*}=m" "$CONFIG" && NET="$NET ${m#*:}.ko"
+	done
+	make -s -j"$JOBS" O="$BASE" KBUILD_MODPOST_WARN=1 $NET 2>&1 | intree
+fi
+
 echo "=== with Bluetooth as modules ($OB) ==="
 python3 "$ROOT/bluetooth/patch-btbcm.py" "$SRC"
 setup "$OB"
@@ -138,6 +151,9 @@ for f in "$OS"/sound/soundcore.ko "$OS"/sound/core/snd{,-timer,-pcm}.ko \
 done
 for e in $EXT_BT $EXT_SND; do
 	ship "$ROOT/${e%%:*}/${e#*:}.ko"
+done
+for f in $NET; do
+	ship "$BASE/$f"
 done
 [ -z "$missing" ] || { echo "not built:$missing" >&2; exit 1; }
 for k in "$OUT"/*.ko; do
