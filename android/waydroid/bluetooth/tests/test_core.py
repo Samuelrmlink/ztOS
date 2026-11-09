@@ -568,9 +568,6 @@ class Helpers(unittest.TestCase):
         self.assertTrue(ad.endswith(b"\x02\x2a\x01"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 def logged():
     """make(), with the bridge's log kept as lines."""
@@ -711,3 +708,38 @@ class SilentDevices(unittest.TestCase):
         br.device_changed(SPEAKER, {"Connected": True})
         c.request("SCAN_START", P.T_LE)
         self.assertEqual([e for e in c.events("EV_DEVICE_FOUND") if e[0][0] in (LOCK, SPEAKER)], [])
+
+
+class ScanRecord(unittest.TestCase):
+    """RM_2685, 9 Nov: connected, BlueZ's UUIDs held every resolved service; the
+    record rebuilt from them ran to 125 bytes and Android, which keeps 62,
+    cut the UUID list: iTi's filtered scan found nothing."""
+
+    ADV = ["49646561-7346-6c6f-6174-40882af10000"]
+    GATT = ["%08x-0000-1000-8000-00805f9b34fb" % (0x43882bf00000 & 0xffffffff | i) for i in range(6)] + \
+        ["0000180a-0000-1000-8000-00805f9b34fb"]
+
+    def test_advertised_uuids_not_the_resolved_ones(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"UUIDs": self.ADV, "Name": "RM_2685"})
+        br.device_changed(SENSOR, {"Connected": True})
+        br.device_changed(SENSOR, {"ServicesResolved": True, "UUIDs": self.ADV + self.GATT})
+        ad = build_ad(br.devs[SENSOR])
+        import uuid
+        self.assertIn(b"\x11\x07" + uuid.UUID(self.ADV[0]).bytes[::-1], ad)
+        self.assertEqual(ad.count(b"\x11\x07"), 1)             # one 128-bit UUID: the advertised one
+        self.assertNotIn(b"\x03\x03\x0a\x18", ad)
+        self.assertLessEqual(len(ad), 62)
+
+    def test_capped_at_62_bytes_dropping_128_bit_uuids(self):
+        many = ["%08x-1111-2222-3333-444455556666" % i for i in range(5)]
+        ad = build_ad({"Name": "A long device name here", "UUIDs": many})
+        self.assertLessEqual(len(ad), 62)
+        self.assertIn(b"A long device name here", ad)
+        # whole UUIDs only: the list's length is a multiple of 16
+        i = ad.index(b"\x07")
+        self.assertEqual((ad[i - 1] - 1) % 16, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
