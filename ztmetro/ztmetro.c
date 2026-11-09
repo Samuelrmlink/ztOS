@@ -5878,8 +5878,23 @@ static double status_glyph(cairo_t *cr, const char *name, double x, double base,
 	return ink[i].w * k;
 }
 
-/* The ink height of `text`'s capitals or digits in `font` at `size`. */
+/* The ink of `text` in `font` at `size`: its height, and its bottom below the
+ * layout's top (draw_text's y). */
+static void ink_box(const char *text, const char *font, double size, double *height, double *bottom);
+
 static double ink_height(const char *text, const char *font, double size) {
+	double h, b;
+	ink_box(text, font, size, &h, &b);
+	return h;
+}
+
+static double ink_bottom(const char *text, const char *font, double size) {
+	double h, b;
+	ink_box(text, font, size, &h, &b);
+	return b;
+}
+
+static void ink_box(const char *text, const char *font, double size, double *height, double *bottom) {
 	cairo_surface_t *scratch = cairo_image_surface_create(CAIRO_FORMAT_A8, 1, 1);
 	cairo_t *m = cairo_create(scratch);
 	PangoLayout *layout = pango_cairo_create_layout(m);
@@ -5893,7 +5908,8 @@ static double ink_height(const char *text, const char *font, double size) {
 	g_object_unref(layout);
 	cairo_destroy(m);
 	cairo_surface_destroy(scratch);
-	return ink.height / (double)PANGO_SCALE;
+	*height = ink.height / (double)PANGO_SCALE;
+	*bottom = (ink.y + ink.height) / (double)PANGO_SCALE;
 }
 
 #define STATUS_ICON_K	1.15	/* the status icons' height, in the clock digits' */
@@ -5942,7 +5958,8 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 			double tx = x + icon_gap * 0.5;
 			status_pop(cr, tx + tw / 2, base - icon_h / 2, server->st_tech);
 			cairo_set_source_rgb(cr, 1, 1, 1);
-			draw_text(cr, server->st_tech_text, FONT_SEMIBOLD, size, tx, base - size * 1.08 - 1.0, 0, 0, false);
+			/* its capitals' bottom on the baseline, measured */
+			draw_text(cr, server->st_tech_text, FONT_SEMIBOLD, size, tx, base - ink_bottom("H", FONT_SEMIBOLD, size), 0, 0, false);
 			status_pop_end(cr, server->st_tech);
 		}
 		/* what stands to the right of it moves over as it comes and goes */
