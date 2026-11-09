@@ -30,6 +30,12 @@
  *   ctrl   link controller reset, PCS + AUX functions on, lane map
  *   dpcd   AUX: read DPCD 0x000-0x00f (receiver capabilities)
  *   edid   AUX: read EDID block 0 over I2C-over-AUX
+ *   train  link training at link_rate (default HBR) on the pin assignment's
+ *          lanes: clock recovery then channel EQ, lower rates on failure
+ *   bist   1080p60 colour bars from the link controller's own pattern
+ *          generator (no DECON): video timing, Mvid/Nvid, transfer unit,
+ *          BIST on, VIDEO_EN
+ *   video_off  VIDEO_EN and BIST off
  *   off    AUX/PCS off, PHY reset, PMA back to low power and reset
  *
  * auto=1 runs pma..edid itself when the class enters a DP pin state, and
@@ -57,6 +63,7 @@
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/math64.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -105,6 +112,53 @@
 #define AUX_RX_DATA_SET0		0x1040
 #define AUX_DATA_MAX			16	/* displayport.h:661 */
 #define PCS_LANE_CONTROL		0x3004	/* LANEn_MAP at 4n */
+/* M3 (regs-displayport.h:28, :374-395, :586-767) */
+#define SYSTEM_MAIN_LINK_BANDWIDTH	0x000c
+#define SYSTEM_MAIN_LINK_LANE_COUNT	0x0010
+#define PCS_CONTROL			0x3000
+#define  LINK_TRAINING_PATTERN_SET	GENMASK(5, 4)
+#define  SCRAMBLE_BYPASS		BIT(0)
+#define PCS_TEST_PATTERN_CONTROL	0x3008
+#define  LINK_QUALITY_PATTERN_SET	GENMASK(2, 0)
+#define SST1_MAIN_CONTROL		0x5000
+#define  MVID_MODE			BIT(11)
+#define  VIDEO_MODE			BIT(6)
+#define  ENHANCED_MODE			BIT(5)
+#define SST1_MVID_MASTER_MODE		0x5044
+#define SST1_NVID_MASTER_MODE		0x5048
+#define SST1_MVID_SFR_CONFIGURE		0x504c
+#define SST1_NVID_SFR_CONFIGURE		0x5050
+#define SST1_ACTIVE_SYMBOL_INTEGER_FEC_OFF	0x5080
+#define SST1_ACTIVE_SYMBOL_FRACTION_FEC_OFF	0x5084
+#define SST1_ACTIVE_SYMBOL_THRESHOLD_FEC_OFF	0x5088
+#define SST1_ACTIVE_SYMBOL_THRESHOLD_SEL_FEC_OFF 0x508c
+#define SST1_ACTIVE_SYMBOL_INTEGER_FEC_ON	0x5090
+#define SST1_ACTIVE_SYMBOL_FRACTION_FEC_ON	0x5094
+#define SST1_ACTIVE_SYMBOL_THRESHOLD_FEC_ON	0x5098
+#define SST1_ACTIVE_SYMBOL_THRESHOLD_SEL_FEC_ON	0x509c
+#define SST1_ACTIVE_SYMBOL_MODE_CONTROL	0x5104
+#define SST1_VIDEO_CONTROL		0x5400
+#define  STRM_VALID_FORCE		BIT(9)
+#define  STRM_VALID_CTRL		BIT(8)
+#define  DYNAMIC_RANGE_MODE		BIT(7)	/* 0 VESA (0-255), 1 CEA */
+#define  VIDEO_BPC			GENMASK(6, 4)	/* 0 6 bpc, 1 8 bpc, 2 10 bpc */
+#define  COLOR_FORMAT			GENMASK(3, 2)	/* 0 RGB */
+#define  VSYNC_POLARITY			BIT(1)
+#define  HSYNC_POLARITY			BIT(0)
+#define SST1_VIDEO_ENABLE		0x5404
+#define  VIDEO_EN			BIT(0)
+#define SST1_VIDEO_MASTER_TIMING_GEN	0x5408
+#define SST1_VIDEO_HORIZONTAL_TOTAL_PIXELS	0x5414
+#define SST1_VIDEO_VERTICAL_TOTAL_PIXELS	0x5418
+#define SST1_VIDEO_HORIZONTAL_FRONT_PORCH	0x541c
+#define SST1_VIDEO_HORIZONTAL_BACK_PORCH	0x5420
+#define SST1_VIDEO_HORIZONTAL_ACTIVE		0x5424
+#define SST1_VIDEO_VERTICAL_FRONT_PORCH		0x5428
+#define SST1_VIDEO_VERTICAL_BACK_PORCH		0x542c
+#define SST1_VIDEO_VERTICAL_ACTIVE		0x5430
+#define SST1_VIDEO_BIST_CONTROL		0x5450
+#define  BIST_EN			BIT(3)
+#define  BIST_TYPE			GENMASK(1, 0)	/* 0 colour bar, 1 WGB, 2 MW */
 
 /* ---- combo PHY, DP side and common block (regs-displayport.h, phy-exynos-usbdp-reg.h) */
 #define COM_CMN_R0E			0x0038
@@ -134,6 +188,8 @@
 #define COM_TRSV_R56			0x0218
 #define DP_REG_0			0x0800
 #define  LN_LANE_EN(n)			BIT(3 - (n))	/* LN0 bit 3 .. LN3 bit 0 */
+#define DP_REG_3			0x080c	/* TX amplitude level, 2 bits per lane, LN0 at 7:6 */
+#define DP_REG_4			0x0810	/* TX pre-emphasis level, same layout */
 #define DP_REG_1			0x0804
 #define  CMN_INIT_RSTN			BIT(0)
 #define DP_REG_B			0x082c
@@ -144,6 +200,10 @@
 #define DP_REG_16			0x0858
 #define DP_REG_1A			0x0868
 #define DP_REG_31			0x08c4
+#define DP_REG_36			0x08d8
+#define DP_REG_3A			0x08e8
+#define DP_REG_76			0x09d8
+#define DP_REG_7A			0x09e8
 #define DP_REG_51			0x0944
 #define DP_REG_56			0x0958
 #define DP_REG_5A			0x0968
@@ -178,6 +238,14 @@ MODULE_PARM_DESC(auto, "run the bring-up phases on a DP pin state, off on leavin
 static bool hpd_read;
 module_param(hpd_read, bool, 0644);
 MODULE_PARM_DESC(hpd_read, "on HPD high: bring-up phases as needed, then read DPCD and EDID (default 0)");
+
+static bool hpd_bist;
+module_param(hpd_bist, bool, 0644);
+MODULE_PARM_DESC(hpd_bist, "with hpd_read: after DPCD/EDID, train the link and start the 1080p60 colour bars (default 0)");
+
+static uint link_rate = DP_LINK_BW_2_7;
+module_param(link_rate, uint, 0644);
+MODULE_PARM_DESC(link_rate, "link training start rate, DPCD code: 0x06 RBR, 0x0a HBR (default), 0x14 HBR2");
 
 static bool pma_early;
 module_param(pma_early, bool, 0644);
@@ -216,6 +284,8 @@ struct x9dp {
 	bool dpcd_ok;
 	u8 edid[EDID_LENGTH];
 	bool edid_ok;
+	u8 rate, nlanes;		/* trained link, 0: none */
+	bool video_on;
 };
 
 /* ---- register access ----------------------------------------------------------- */
@@ -410,7 +480,8 @@ static int x9dp_pma(struct x9dp *d)
  * carry a 2-lane assignment is the board's (DT); the register values for
  * "lanes 0+1" and "lanes 2+3" are the PHY's.
  */
-static int x9dp_phy(struct x9dp *d)
+/* the PHY in DP mode, left in CMN reset (the caller sets the link rate, then releases) */
+static int x9dp_phy_program(struct x9dp *d, u32 *lane_en)
 {
 	static const u32 init[][2] = {
 		{ DP_REG_11, 0x00 }, { DP_REG_31, 0x00 }, { DP_REG_51, 0x00 },
@@ -419,7 +490,7 @@ static int x9dp_phy(struct x9dp *d)
 		{ DP_REG_DF, 0x08 }, { DP_REG_EF, 0x08 },
 	};
 	int lanes = x9dp_lanes(d), o = x9dp_oidx(d), i, ret;
-	u32 mode, tx, b3_10, b3_76, en, clk, v;
+	u32 mode, tx, b3_10, b3_76, en, clk;
 
 	if (!d->pma_on || !d->id_done)
 		return -EAGAIN;		/* pma first; id: the link is read for PLL lock */
@@ -436,6 +507,7 @@ static int x9dp_phy(struct x9dp *d)
 		en = LN_LANE_EN(0) | LN_LANE_EN(1);
 	}
 
+	/* reset, init values, lane mode (displayport_reg.c:129-229) */
 	ret = phy_rmw(d, DP_REG_1, CMN_INIT_RSTN, 0);
 	for (i = 0; !ret && i < ARRAY_SIZE(init); i++)
 		ret = phy_wr(d, init[i][0], init[i][1]);
@@ -447,6 +519,18 @@ static int x9dp_phy(struct x9dp *d)
 			     FIELD_PREP(CMN_DUMMY_CTRL_7_6, b3_76));
 	ret = ret ?: phy_rmw(d, DP_REG_B, LN_TXCLK_SOURCE_LANE, clk);
 	ret = ret ?: phy_wr(d, DP_REG_0, en | 0xf0);
+	if (ret)
+		return ret;
+	*lane_en = en;
+	return 0;
+}
+
+static int x9dp_phy(struct x9dp *d)
+{
+	int lanes = x9dp_lanes(d), o = x9dp_oidx(d), ret;
+	u32 en, v;
+
+	ret = x9dp_phy_program(d, &en);
 	ret = ret ?: phy_rmw(d, DP_REG_1, CMN_INIT_RSTN, CMN_INIT_RSTN);
 	if (ret)
 		return ret;
@@ -594,8 +678,13 @@ static int x9dp_edid(struct x9dp *d)
 }
 
 /* back down: displayport_reg_deinit / phy_disable (:1320-1346), PMA as found */
+static int x9dp_video_off(struct x9dp *d);
+
 static int x9dp_off(struct x9dp *d)
 {
+	if (d->video_on)
+		x9dp_video_off(d);
+	d->rate = 0;
 	if (d->ctrl_on) {
 		link_rmw(d, SYSTEM_COMMON_FUNCTION_ENABLE, PCS_FUNC_EN | AUX_FUNC_EN, 0);
 		link_rmw(d, SYSTEM_SW_FUNCTION_ENABLE, SW_FUNC_EN, 0);
@@ -619,12 +708,329 @@ static int x9dp_off(struct x9dp *d)
 	return 0;
 }
 
+/* ---- M3: link training ------------------------------------------------------------ */
+
+/*
+ * TX swing/pre-emphasis per level, stock displayport_reg.c:20-25:
+ * [swing][pre-emphasis] = { amplitude, emphasis, driver current enable }.
+ */
+static const u8 phy_tune[4][4][3] = {
+	{ {4, 0, 0}, {0, 7, 0}, {2,  9, 1}, {0, 13, 1} },
+	{ {2, 0, 0}, {2, 6, 1}, {0, 10, 1}, {0, 10, 1} },
+	{ {2, 0, 1}, {0, 6, 1}, {0,  6, 1}, {0,  6, 1} },
+	{ {0, 0, 1}, {0, 0, 1}, {0,  0, 1}, {0,  0, 1} },
+};
+
+static u32 x9dp_ls_khz(u8 rate)
+{
+	return rate == DP_LINK_BW_5_4 ? 540000 : rate == DP_LINK_BW_2_7 ? 270000 : 162000;
+}
+
+/*
+ * The levels the sink asked for, on the PMA lanes that carry each link lane
+ * (the DT's lane map for this orientation): stock set_phy_tune and
+ * set_voltage_and_pre_emphasis (displayport_reg.c:302-430). The amplitude
+ * and emphasis tables per PMA lane are at DP_REG_16/1A + 0x20 * lane.
+ */
+static int x9dp_levels(struct x9dp *d, const u8 *swing, const u8 *pre)
+{
+	static const u32 amp[4] = { DP_REG_16, DP_REG_36, DP_REG_56, DP_REG_76 };
+	static const u32 emp[4] = { DP_REG_1A, DP_REG_3A, DP_REG_5A, DP_REG_7A };
+	const u32 *map = d->lane_map[x9dp_oidx(d)];
+	u32 r3 = 0, r4 = 0;
+	int i, ret = 0;
+
+	for (i = 0; !ret && i < d->nlanes; i++) {
+		const u8 *t = phy_tune[swing[i]][pre[i]];
+		u32 pma = map[i];
+
+		ret = phy_wr(d, amp[pma] + swing[i] * 4, t[0] | t[2] << 4);
+		ret = ret ?: phy_wr(d, emp[pma] + pre[i] * 4, t[1]);
+	}
+	for (i = 0; i < d->nlanes; i++) {
+		r3 |= swing[i] << (6 - 2 * i);
+		r4 |= pre[i] << (6 - 2 * i);
+	}
+	ret = ret ?: phy_wr(d, DP_REG_3, r3);
+	return ret ?: phy_wr(d, DP_REG_4, r4);
+}
+
+static int x9dp_dpcd_wr(struct x9dp *d, u32 addr, const u8 *buf, size_t len)
+{
+	return x9dp_aux(d, DP_AUX_NATIVE_WRITE, addr, (void *)buf, len);
+}
+
+static int x9dp_dpcd_rd(struct x9dp *d, u32 addr, u8 *buf, size_t len)
+{
+	return x9dp_aux(d, DP_AUX_NATIVE_READ, addr, buf, len);
+}
+
+static void x9dp_pattern(struct x9dp *d, u8 tps)
+{
+	/* displayport_reg.c:271-280 */
+	link_rmw(d, PCS_TEST_PATTERN_CONTROL, LINK_QUALITY_PATTERN_SET, 0);
+	link_rmw(d, PCS_CONTROL, LINK_TRAINING_PATTERN_SET | SCRAMBLE_BYPASS,
+		 FIELD_PREP(LINK_TRAINING_PATTERN_SET, tps) | (tps ? SCRAMBLE_BYPASS : 0));
+}
+
+/*
+ * One rate: the PHY re-programmed with the rate and lane count set while its
+ * common block is in reset, PLL lock, LINK_BW_SET (displayport_drv.c:301-345),
+ * clock recovery with TPS1 (:347-430), channel EQ with TPS2/3 (:460-628).
+ * Levels as the sink requests them in ADJUST_REQUEST.
+ */
+static int x9dp_train_at(struct x9dp *d, u8 rate, u8 lanes, bool enh, bool tps3, u32 rd_us)
+{
+	u8 swing[4] = {}, pre[4] = {}, set[4], st[3], adj[2], v[2], same = 0;
+	int i, tries, ret;
+	u32 en, pll;
+	bool ok = false;
+
+	d->nlanes = lanes;
+	ret = x9dp_phy_program(d, &en);
+	if (ret)
+		return ret;
+	writel(rate, d->link + SYSTEM_MAIN_LINK_BANDWIDTH);
+	writel(lanes, d->link + SYSTEM_MAIN_LINK_LANE_COUNT);
+	link_rmw(d, SST1_MAIN_CONTROL, ENHANCED_MODE, enh ? ENHANCED_MODE : 0);
+	udelay(60);
+	ret = phy_rmw(d, DP_REG_1, CMN_INIT_RSTN, CMN_INIT_RSTN);
+	if (ret)
+		return ret;
+	if (readl_poll_timeout(d->link + SYSTEM_PLL_LOCK_CONTROL, pll, pll & PLL_LOCK_STATUS, 1, 300))
+		dev_warn(d->dev, "train: PLL not locked at rate %02x\n", rate);
+
+	v[0] = rate;
+	v[1] = lanes | (enh ? DP_LANE_COUNT_ENHANCED_FRAME_EN : 0);
+	ret = x9dp_dpcd_wr(d, DP_LINK_BW_SET, v, 2);
+	if (ret)
+		return ret;
+
+	/* clock recovery */
+	x9dp_pattern(d, 1);
+	v[0] = DP_TRAINING_PATTERN_1 | DP_LINK_SCRAMBLING_DISABLE;
+	ret = x9dp_dpcd_wr(d, DP_TRAINING_PATTERN_SET, v, 1);
+	for (tries = 0; !ret && tries < 16; tries++) {
+		ret = x9dp_levels(d, swing, pre);
+		for (i = 0; i < 4; i++)
+			set[i] = swing[i] | pre[i] << DP_TRAIN_PRE_EMPHASIS_SHIFT |
+				 (swing[i] == 3 ? DP_TRAIN_MAX_SWING_REACHED : 0) |
+				 (pre[i] == 3 ? DP_TRAIN_MAX_PRE_EMPHASIS_REACHED : 0);
+		ret = ret ?: x9dp_dpcd_wr(d, DP_TRAINING_LANE0_SET, set, lanes);
+		usleep_range(rd_us, rd_us + 100);
+		ret = ret ?: x9dp_dpcd_rd(d, DP_LANE0_1_STATUS, st, 2);
+		ret = ret ?: x9dp_dpcd_rd(d, DP_ADJUST_REQUEST_LANE0_1, adj, 2);
+		if (ret)
+			break;
+		for (ok = true, i = 0; i < lanes; i++)
+			ok &= !!(st[i / 2] >> (4 * (i & 1)) & DP_LANE_CR_DONE);
+		dev_info(d->dev, "train %02x CR: status %02x %02x, adjust %02x %02x\n",
+			 rate, st[0], st[1], adj[0], adj[1]);
+		if (ok)
+			break;
+		for (same++, i = 0; i < lanes; i++) {
+			u8 a = adj[i / 2] >> (4 * (i & 1));
+
+			if ((a & 3) != swing[i])
+				same = 0;
+			swing[i] = a & 3;
+			pre[i] = (a >> 2) & 3;
+		}
+		if (same >= 5 || swing[0] == 3)
+			break;
+	}
+	if (ret || !ok)
+		return ret ?: -EAGAIN;
+
+	/* channel EQ */
+	x9dp_pattern(d, tps3 ? 3 : 2);
+	v[0] = (tps3 ? DP_TRAINING_PATTERN_3 : DP_TRAINING_PATTERN_2) | DP_LINK_SCRAMBLING_DISABLE;
+	ret = x9dp_dpcd_wr(d, DP_TRAINING_PATTERN_SET, v, 1);
+	for (tries = 0; !ret && tries < 6; tries++) {
+		ret = x9dp_levels(d, swing, pre);
+		for (i = 0; i < 4; i++)
+			set[i] = swing[i] | pre[i] << DP_TRAIN_PRE_EMPHASIS_SHIFT |
+				 (swing[i] == 3 ? DP_TRAIN_MAX_SWING_REACHED : 0) |
+				 (pre[i] == 3 ? DP_TRAIN_MAX_PRE_EMPHASIS_REACHED : 0);
+		ret = ret ?: x9dp_dpcd_wr(d, DP_TRAINING_LANE0_SET, set, lanes);
+		usleep_range(rd_us, rd_us + 100);
+		ret = ret ?: x9dp_dpcd_rd(d, DP_LANE0_1_STATUS, st, 3);
+		ret = ret ?: x9dp_dpcd_rd(d, DP_ADJUST_REQUEST_LANE0_1, adj, 2);
+		if (ret)
+			break;
+		dev_info(d->dev, "train %02x EQ: status %02x %02x align %02x, adjust %02x %02x\n",
+			 rate, st[0], st[1], st[2], adj[0], adj[1]);
+		for (ok = st[2] & DP_INTERLANE_ALIGN_DONE, i = 0; i < lanes; i++) {
+			u8 l = st[i / 2] >> (4 * (i & 1));
+
+			if (!(l & DP_LANE_CR_DONE))
+				return -EAGAIN;	/* lost CR: a lower rate */
+			ok &= (l & (DP_LANE_CHANNEL_EQ_DONE | DP_LANE_SYMBOL_LOCKED)) ==
+			      (DP_LANE_CHANNEL_EQ_DONE | DP_LANE_SYMBOL_LOCKED);
+		}
+		if (ok)
+			break;
+		for (i = 0; i < lanes; i++) {
+			u8 a = adj[i / 2] >> (4 * (i & 1));
+
+			swing[i] = a & 3;
+			pre[i] = (a >> 2) & 3;
+		}
+	}
+	if (ret || !ok)
+		return ret ?: -EAGAIN;
+
+	/* normal data, scrambling on (displayport_drv.c:556-560) */
+	x9dp_pattern(d, 0);
+	v[0] = DP_TRAINING_PATTERN_DISABLE;
+	ret = x9dp_dpcd_wr(d, DP_TRAINING_PATTERN_SET, v, 1);
+	if (!ret)
+		dev_info(d->dev, "train: done at %02x x%u, levels %u/%u %u/%u\n", rate, lanes,
+			 swing[0], pre[0], swing[1], pre[1]);
+	return ret;
+}
+
+static int x9dp_train(struct x9dp *d)
+{
+	u8 cap[DP_RECEIVER_CAP_SIZE], v = DP_SET_POWER_D0, rate, lanes;
+	u32 rd_us;
+	int ret;
+
+	if (!d->ctrl_on)
+		return -EAGAIN;
+	ret = x9dp_dpcd_rd(d, DP_DPCD_REV, cap, sizeof(cap));
+	if (ret)
+		return ret;
+	x9dp_dpcd_wr(d, DP_SET_POWER, &v, 1);	/* sink to D0 (displayport_drv.c:2682-2696) */
+	rate = min_t(u8, link_rate, cap[DP_MAX_LINK_RATE]);
+	lanes = min_t(u8, x9dp_lanes(d), cap[DP_MAX_LANE_COUNT] & DP_MAX_LANE_COUNT_MASK);
+	/* TRAINING_AUX_RD_INTERVAL: 0 = 400 us, else n * 4 ms (stock :392) */
+	rd_us = (cap[DP_TRAINING_AUX_RD_INTERVAL] & DP_TRAINING_AUX_RD_MASK) * 4000 + 400;
+	d->rate = 0;
+	for (;;) {
+		ret = x9dp_train_at(d, rate, lanes, cap[DP_MAX_LANE_COUNT] & DP_ENHANCED_FRAME_CAP,
+				    cap[DP_MAX_LANE_COUNT] & DP_TPS3_SUPPORTED, rd_us);
+		if (ret != -EAGAIN)
+			break;
+		dev_info(d->dev, "train: failed at %02x, lower rate\n", rate);
+		if (rate == DP_LINK_BW_5_4)
+			rate = DP_LINK_BW_2_7;
+		else if (rate == DP_LINK_BW_2_7)
+			rate = DP_LINK_BW_1_62;
+		else
+			break;
+	}
+	if (ret) {
+		u8 off = DP_TRAINING_PATTERN_DISABLE;
+
+		x9dp_pattern(d, 0);
+		x9dp_dpcd_wr(d, DP_TRAINING_PATTERN_SET, &off, 1);
+		return ret;
+	}
+	d->rate = rate;
+	scnprintf(d->last, sizeof(d->last), "train: done, rate %02x (%u Mbit/s per lane) x%u",
+		  rate, x9dp_ls_khz(rate) / 100, lanes);
+	return 0;
+}
+
+/* ---- M3: video, the link's own pattern generator ------------------------------------- */
+
+/*
+ * 1080p60, CEA-861 VIC 16 (stock supported_videos V1920X1080P60, v4l2
+ * V4L2_DV_BT_CEA_1920X1080P60): 148.5 MHz, h 1920+88+44+148, v 1080+4+5+36,
+ * positive syncs. A test mode; the mode list comes from the EDID with DECON2.
+ */
+static const struct {
+	u32 khz, ha, hfp, hs, hbp, va, vfp, vs, vbp;
+} x9dp_1080p60 = { 148500, 1920, 88, 44, 148, 1080, 4, 5, 36 };
+
+/*
+ * displayport_reg_set_video_configuration + set_bist_video_configuration +
+ * displayport_reg_start (displayport_reg.c:1348-1369, :570-729, :1487-1490):
+ * VESA range, 8 bpc, RGB, the timing, Mvid/Nvid in master mode, the
+ * transfer unit's active symbols, the link as timing master, BIST colour
+ * bars, VIDEO_EN.
+ */
+static int x9dp_bist(struct x9dp *d)
+{
+	const typeof(x9dp_1080p60) *m = &x9dp_1080p60;
+	u32 ls = x9dp_ls_khz(d->rate), bpp = 24, ip, fp, thr;
+	u64 tu;
+
+	if (!d->rate)
+		return -EAGAIN;
+	link_rmw(d, SST1_VIDEO_CONTROL, DYNAMIC_RANGE_MODE | VIDEO_BPC | COLOR_FORMAT,
+		 FIELD_PREP(VIDEO_BPC, 1));
+	writel(m->va + m->vfp + m->vs + m->vbp, d->link + SST1_VIDEO_VERTICAL_TOTAL_PIXELS);
+	writel(m->ha + m->hfp + m->hs + m->hbp, d->link + SST1_VIDEO_HORIZONTAL_TOTAL_PIXELS);
+	writel(m->va, d->link + SST1_VIDEO_VERTICAL_ACTIVE);
+	writel(m->vfp, d->link + SST1_VIDEO_VERTICAL_FRONT_PORCH);
+	writel(m->vbp, d->link + SST1_VIDEO_VERTICAL_BACK_PORCH);
+	writel(m->ha, d->link + SST1_VIDEO_HORIZONTAL_ACTIVE);
+	writel(m->hfp, d->link + SST1_VIDEO_HORIZONTAL_FRONT_PORCH);
+	writel(m->hbp, d->link + SST1_VIDEO_HORIZONTAL_BACK_PORCH);
+	link_rmw(d, SST1_VIDEO_CONTROL, VSYNC_POLARITY | HSYNC_POLARITY,
+		 VSYNC_POLARITY | HSYNC_POLARITY);	/* stock writes SYNC_POSITIVE */
+
+	/* Mvid/Nvid master mode, kHz (displayport_reg.c:636-656) */
+	writel(m->khz >> 1, d->link + SST1_MVID_MASTER_MODE);
+	writel(ls, d->link + SST1_NVID_MASTER_MODE);
+	link_rmw(d, SST1_MAIN_CONTROL, MVID_MODE, MVID_MODE);
+	writel(m->khz, d->link + SST1_MVID_SFR_CONFIGURE);
+	writel(ls, d->link + SST1_NVID_SFR_CONFIGURE);
+
+	/* transfer unit: active symbols per 32-symbol TU, x1e10 (:658-729) */
+	link_rmw(d, SST1_ACTIVE_SYMBOL_MODE_CONTROL, BIT(0), BIT(0));
+	link_rmw(d, SST1_ACTIVE_SYMBOL_THRESHOLD_SEL_FEC_OFF, BIT(0), BIT(0));
+	link_rmw(d, SST1_ACTIVE_SYMBOL_THRESHOLD_SEL_FEC_ON, BIT(0), BIT(0));
+	tu = div64_u64((u64)m->khz * bpp * 32 * 10000000000ULL, (u64)d->nlanes * ls * 8);
+	ip = div64_u64(tu, 10000000000ULL);
+	fp = div64_u64(tu - (u64)ip * 10000000000ULL, 10);
+	thr = ip <= 2 ? 7 : ip <= 5 ? 8 : 9;
+	link_rmw(d, SST1_ACTIVE_SYMBOL_INTEGER_FEC_OFF, GENMASK(5, 0), ip);
+	link_rmw(d, SST1_ACTIVE_SYMBOL_FRACTION_FEC_OFF, GENMASK(29, 0), fp);
+	link_rmw(d, SST1_ACTIVE_SYMBOL_THRESHOLD_FEC_OFF, GENMASK(3, 0), thr);
+	tu = div64_u64(tu * 1000, 976);
+	ip = div64_u64(tu, 10000000000ULL);
+	fp = div64_u64(tu - (u64)ip * 10000000000ULL, 10);
+	link_rmw(d, SST1_ACTIVE_SYMBOL_INTEGER_FEC_ON, GENMASK(5, 0), ip);
+	link_rmw(d, SST1_ACTIVE_SYMBOL_FRACTION_FEC_ON, GENMASK(29, 0), fp);
+	link_rmw(d, SST1_ACTIVE_SYMBOL_THRESHOLD_FEC_ON, GENMASK(3, 0),
+		 ip <= 2 ? 7 : ip <= 5 ? 8 : 9);
+
+	link_rmw(d, SST1_VIDEO_MASTER_TIMING_GEN, BIT(0), BIT(0));
+	link_rmw(d, SST1_MAIN_CONTROL, VIDEO_MODE, 0);
+	/* BIST colour bars, stream valid forced (:554-560) */
+	link_rmw(d, SST1_VIDEO_BIST_CONTROL, BIST_TYPE, 0);
+	link_rmw(d, SST1_VIDEO_CONTROL, STRM_VALID_FORCE | STRM_VALID_CTRL,
+		 STRM_VALID_FORCE | STRM_VALID_CTRL);
+	link_rmw(d, SST1_VIDEO_BIST_CONTROL, BIST_EN, BIST_EN);
+	link_rmw(d, SST1_VIDEO_ENABLE, VIDEO_EN, VIDEO_EN);
+	d->video_on = true;
+	scnprintf(d->last, sizeof(d->last), "bist: 1080p60 colour bars on, TU %u.%09u, Mvid %u Nvid %u",
+		  ip, fp, m->khz >> 1, ls);
+	return 0;
+}
+
+static int x9dp_video_off(struct x9dp *d)
+{
+	if (d->ctrl_on) {
+		link_rmw(d, SST1_VIDEO_ENABLE, VIDEO_EN, 0);	/* displayport_reg_stop, :1499-1502 */
+		link_rmw(d, SST1_VIDEO_BIST_CONTROL, BIST_EN, 0);
+		link_rmw(d, SST1_VIDEO_CONTROL, STRM_VALID_FORCE | STRM_VALID_CTRL, 0);
+	}
+	d->video_on = false;
+	scnprintf(d->last, sizeof(d->last), "video_off");
+	return 0;
+}
+
 static const struct {
 	const char *name;
 	int (*fn)(struct x9dp *d);
 } phases[] = {
 	{ "id", x9dp_id }, { "pma", x9dp_pma }, { "phy", x9dp_phy }, { "ctrl", x9dp_ctrl },
-	{ "dpcd", x9dp_dpcd }, { "edid", x9dp_edid }, { "off", x9dp_off },
+	{ "dpcd", x9dp_dpcd }, { "edid", x9dp_edid }, { "train", x9dp_train },
+	{ "bist", x9dp_bist }, { "video_off", x9dp_video_off }, { "off", x9dp_off },
 };
 
 static int x9dp_run(struct x9dp *d, const char *name)
@@ -678,6 +1084,8 @@ static void x9dp_hpd_work(struct work_struct *work)
 	if (x9dp_run(d, "edid") == 0)
 		for (i = 0; i < EDID_LENGTH; i += 16)
 			dev_info(d->dev, "EDID %02x: %16ph\n", i, d->edid + i);
+	if (hpd_bist && !d->video_on && x9dp_run(d, "train") == 0)
+		x9dp_run(d, "bist");
 out:
 	mutex_unlock(&d->lock);
 }
@@ -749,6 +1157,8 @@ static int x9dp_state_show(struct seq_file *s, void *unused)
 	seq_printf(s, "id %d pma %d phy %d ctrl %d; PHY %s; link %s\n", d->id_done, d->pma_on,
 		   d->phy_on, d->ctrl_on, x9dp_phy_ok(d) ? "not isolated" : "ISOLATED",
 		   x9dp_link_ok(d) ? "powered and clocked" : "OFF");
+	seq_printf(s, "link: rate %02x x%u, video %s\n", d->rate, d->rate ? d->nlanes : 0,
+		   d->video_on ? "on (colour bars)" : "off");
 	seq_printf(s, "last: %s\n", d->last);
 	if (d->dpcd_ok)
 		seq_printf(s, "dpcd: %16phN\n", d->dpcd);

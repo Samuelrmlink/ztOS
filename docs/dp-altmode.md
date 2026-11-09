@@ -84,6 +84,39 @@ while we sink, not at a PR_Swap. A PD hard reset exits every mode, so
 max77705-usbc then drops the partner's DP altmode and its DP state; after
 the new contract the discovery and Enter Mode run again.
 
+**M2 done (dp8).** With `hpd_read=1` on the HPD rising edge the capture
+card's sink answered:
+
+- DPCD: rev 1.2, max HBR2 (0x14), 2 lanes;
+- EDID: "HDMI TO USB", 1920x1080@60, 148.5 MHz.
+
+Replugging the capture card's USB at the PC is a reliable HPD trigger. The
+sink drops HPD again about 7 s later if no link training follows.
+
+**M3 steps (dp10):**
+
+- `train`: link training. The PHY is re-programmed with the rate and lane
+  count set while its common block is in reset, then:
+  - clock recovery with TPS1;
+  - channel EQ with TPS2 (TPS3 if the sink has it);
+  - levels as the sink requests;
+  - lower rates on failure.
+
+  It starts at `exynos9810_dp.link_rate` (DPCD code, default 0x0a HBR:
+  1080p60 at 24 bpp needs about 3.56 Gbit/s, and 2 lanes of RBR give 3.24).
+- `bist`: 1080p60 colour bars from the link controller's own pattern
+  generator, with no DECON:
+  - the timing, Mvid/Nvid and the transfer unit as stock;
+  - BIST on;
+  - VIDEO_EN.
+- `video_off` stops it.
+- `hpd_bist=1` (with `hpd_read=1`) trains and starts the bars right on HPD
+  high.
+
+DECON2/IDMA (a real framebuffer) comes after, and will touch DECON0's
+registers (stock routes DECON2 through a DECON0 register). It will be
+proposed before it is built.
+
 **Fallback: the PMA up before Enter Mode.** Stock's USB3 bring-up powers the
 combo PHY's PMA before the dock is asked to enter DP. If HPD stays low even
 with USB enumerating, `exynos9810_dp.pma_early=1` (a `--dp-tx` image;
