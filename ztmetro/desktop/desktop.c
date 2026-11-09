@@ -181,6 +181,7 @@ struct zt_desk {
 	bool autostart_virtual;		/* and on the virtual output too */
 	enum desk_unplug unplug;
 	int virt_w, virt_h, virt_hz;
+	int mon_w, mon_h, mon_hz;	/* a monitor's mode (monitor_mode =); 0: its preferred */
 	float scale;			/* 0: by the monitor's size */
 	bool xwayland_on;
 
@@ -212,6 +213,7 @@ static void desk_config_load(struct zt_desk *desk) {
 	desk->autostart_virtual = false;
 	desk->unplug = UNPLUG_KEEP;
 	desk->virt_w = 1920, desk->virt_h = 1080, desk->virt_hz = 60;
+	desk->mon_w = desk->mon_h = desk->mon_hz = 0;
 	desk->scale = 0.0f;
 	desk->xwayland_on = true;
 	char path[512], line[256];
@@ -239,6 +241,13 @@ static void desk_config_load(struct zt_desk *desk) {
 			if (n >= 2 && w >= 640 && h >= 480 && w <= 3840 && h <= 2160) {
 				desk->virt_w = w, desk->virt_h = h;
 				desk->virt_hz = n == 3 && hz >= 10 && hz <= 120 ? hz : 60;
+			}
+		} else if (strcmp(key, "monitor_mode") == 0) {
+			int w, h, hz = 0;
+			int n = sscanf(value, "%dx%d@%d", &w, &h, &hz);
+			if (n >= 2 && w >= 640 && h >= 480 && w <= 7680 && h <= 4320) {
+				desk->mon_w = w, desk->mon_h = h;
+				desk->mon_hz = n == 3 && hz > 0 && hz <= 240 ? hz : 0;
 			}
 		} else if (strcmp(key, "scale") == 0) {
 			float s = strtof(value, NULL);
@@ -2659,6 +2668,21 @@ static float desk_auto_scale(struct zt_desk *desk, struct wlr_output *wo, int px
 	return px_w >= 3200 ? 2.0f : 1.0f;
 }
 
+/* The monitor's mode the setting (or "desktop mode") asks for, if it has it:
+ * WxH at HZ (rounded), or the fastest WxH; NULL: none asked for or not there. */
+static struct wlr_output_mode *desk_monitor_mode(struct zt_desk *desk, struct wlr_output *wo) {
+	struct wlr_output_mode *m, *best = NULL;
+	if (desk->mon_w <= 0) {
+		return NULL;
+	}
+	wl_list_for_each(m, &wo->modes, link) {
+		if (m->width != desk->mon_w || m->height != desk->mon_h) continue;
+		if (desk->mon_hz > 0 && (m->refresh + 500) / 1000 != desk->mon_hz) continue;
+		if (!best || m->refresh > best->refresh) best = m;
+	}
+	return best;
+}
+
 static void desk_new_output(struct zt_server *server, struct wlr_output *wo) {
 	struct zt_desk *desk = server->desk;
 	if (!desk) {
@@ -2669,7 +2693,10 @@ static void desk_new_output(struct zt_server *server, struct wlr_output *wo) {
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
 	wlr_output_state_set_enabled(&state, true);
-	struct wlr_output_mode *mode = wlr_output_preferred_mode(wo);
+	struct wlr_output_mode *mode = virtual ? NULL : desk_monitor_mode(desk, wo);
+	if (!mode) {
+		mode = wlr_output_preferred_mode(wo);
+	}
 	int px_w = wo->width;
 	if (mode) {
 		wlr_output_state_set_mode(&state, mode);
@@ -2849,6 +2876,8 @@ static struct desk_view *desk_view_named(struct zt_desk *desk, const char *name)
  *     desktop pointer X Y       put the pointer there (output points), for tests
  *     desktop click X Y [B]     and click (B: 1 left, 2 right, 3 middle)
  *     desktop state             write ztmetro-desktop.state now
+ *     desktop mode WxH[@HZ]|preferred   the monitors' mode, now (monitor_mode = in
+ *                               ~/.config/ztmetro/desktop keeps one across plugs)
  */
 static void desk_ctl(struct zt_server *server, const char *args) {
 	struct zt_desk *desk = server->desk;
@@ -2880,6 +2909,37 @@ static void desk_ctl(struct zt_server *server, const char *args) {
 			if (o->virtual) {
 				wlr_output_destroy(o->wo);
 				return;
+			}
+		}
+	} else if (!strncmp(args, "mode", 4)) {
+		n = sscanf(args + 4, " %dx%d@%d", &w, &h, &hz);
+		if (n >= 2 && w >= 640 && h >= 480) {
+			desk->mon_w = w, desk->mon_h = h, desk->mon_hz = n == 3 ? hz : 0;
+		} else {
+			desk->mon_w = desk->mon_h = desk->mon_hz = 0;	/* "preferred" */
+		}
+		struct desk_output *o;
+		wl_list_for_each(o, &desk->outputs, link) {
+			if (o->virtual) continue;
+			struct wlr_output_mode *m = desk_monitor_mode(desk, o->wo);
+			if (!m) m = wlr_output_preferred_mode(o->wo);
+			if (!m) continue;
+			struct wlr_output_state state;
+			wlr_output_state_init(&state);
+			wlr_output_state_set_mode(&state, m);
+			wlr_output_state_set_scale(&state, desk_auto_scale(desk, o->wo, m->width));
+			bool ok = wlr_output_commit_state(o->wo, &state);
+			wlr_output_state_finish(&state);
+			wlr_log(WLR_INFO, "desktop: %s mode %dx%d@%.3f: %s", o->wo->name, m->width,
+				m->height, m->refresh / 1000.0, ok ? "set" : "refused");
+			if (ok && desk->out == o) {
+				desk->out = NULL;	/* the desktop's size again */
+				desk_use_output(desk, o);
+				/* xfdesktop keeps its old size on a new mode of the same
+				 * output (dp37): the session puts its pieces up again */
+				if (desk->session_pid > 0) {
+					desk_spawn("ztos-desktop-session", "--refresh", NULL);
+				}
 			}
 		}
 	} else if (!strcmp(args, "start")) {
