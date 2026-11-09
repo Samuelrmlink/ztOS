@@ -2503,7 +2503,9 @@ static void desk_output_frame(struct wl_listener *l, void *data) {
 static int desk_idle_tick(void *data) {
 	struct zt_desk *desk = data;
 	struct desk_output *o;
+	bool any = false;
 	wl_list_for_each(o, &desk->outputs, link) {
+		any = any || o->virtual;
 		if (o->virtual && !desk_watched(desk)) {
 			wlr_scene_output_commit(o->so, NULL);
 			struct timespec now;
@@ -2513,7 +2515,8 @@ static int desk_idle_tick(void *data) {
 			wlr_output_schedule_frame(o->wo);	/* watched again: back to every frame */
 		}
 	}
-	wl_event_source_timer_update(desk->idle_timer, 1000);
+	/* only while there is a virtual output: the phone asleep is not woken for nothing */
+	wl_event_source_timer_update(desk->idle_timer, any ? 1000 : 0);
 	return 0;
 }
 
@@ -2693,6 +2696,9 @@ static void desk_new_output(struct zt_server *server, struct wlr_output *wo) {
 	o->destroy.notify = desk_output_destroy;
 	wl_signal_add(&wo->events.destroy, &o->destroy);
 	wl_list_insert(desk->outputs.prev, &o->link);
+	if (virtual) {
+		wl_event_source_timer_update(desk->idle_timer, 1000);
+	}
 	/* right of the phone's panel in the session's layout (what xdg-output
 	 * tells clients), and at the same place in the desktop's own */
 	struct wlr_output_layout_output *lo = wlr_output_layout_add_auto(server->output_layout, wo);
@@ -3082,8 +3088,7 @@ static void desk_init(struct zt_server *server, struct wlr_compositor *composito
 		}
 	}
 #endif
-	desk->idle_timer = wl_event_loop_add_timer(server->loop, desk_idle_tick, desk);
-	wl_event_source_timer_update(desk->idle_timer, 1000);
+	desk->idle_timer = wl_event_loop_add_timer(server->loop, desk_idle_tick, desk);	/* (armed by a virtual output) */
 	(void)desk_session_reap;
 }
 
