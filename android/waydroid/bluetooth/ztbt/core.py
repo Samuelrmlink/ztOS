@@ -924,10 +924,15 @@ class Bridge(GattServerMixin):
         if d is None or not self.bonded(d):
             answer(P.ST_NOT_FOUND)
             return
-        if not self.store.is_android_bond(addr) or not self.visible(addr):
-            self.log("remove bond", addr, "refused: not made by Android")
+        # Settings' "Let Android apps remove Bluetooth pairings" (read now,
+        # not cached): on, any bond but one Linux is using; off, none
+        if not self.visible(addr) or not self.store.android_may_remove_bonds():
+            self.log("remove bond", addr, "refused:",
+                     "Linux is using it" if not self.visible(addr) else "switched off in Settings")
             answer(P.ST_NOT_PERMITTED)
+            self._event(client, "EV_BOND_STATE", [addr, P.BOND_BONDED, P.ST_NOT_PERMITTED])
             return
+        self.log("remove bond", addr, "(made by Android)" if self.store.is_android_bond(addr) else "(made on Linux)")
 
         def ok():
             self.removing.discard(addr)

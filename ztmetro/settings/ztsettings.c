@@ -161,6 +161,7 @@ enum action {
 	ACT_IB_MODE,		/* arg: 0 off, 1 shadow, 2 on */
 	ACT_IB_ENGINE,		/* arg: 0 the processor, 1 SCORE */
 	ACT_LED_MASTER,
+	ACT_ANDROID_BT_REMOVE_BOND,
 	ACT_LED_SWITCH,		/* then one for each source */
 	ACT_LED_SWITCH_LAST = ACT_LED_SWITCH + N_LED_SOURCES - 1,
 	ACT_LED_COLOUR,		/* arg: source * 16 + place in the palette */
@@ -241,6 +242,7 @@ static struct {
 
 	bool wifi_on, wifi_loading;
 	bool wifi_suspend;
+	bool android_bt_remove_bond;	/* Android apps may remove Bluetooth pairings (ztos-btbridge reads it) */
 	struct network networks[MAX_NETWORKS];
 	int n_networks;
 	char wifi_status[96];
@@ -400,6 +402,7 @@ static void config_load(void) {
 	app.aod_image_faint = 0;
 	app.aod_force_mark = true;
 	app.double_tap_wake = true;
+	app.android_bt_remove_bond = true;
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
@@ -509,6 +512,8 @@ static void config_load(void) {
 			else if (t <= 180) app.timeout_idx = 2;
 			else if (t <= 300) app.timeout_idx = 3;
 			else app.timeout_idx = 4;
+		} else if (strcmp(key, "android_bt_remove_bond") == 0) {
+			app.android_bt_remove_bond = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			app.wifi_suspend = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
 		} else if (strcmp(key, "aod") == 0) {
@@ -719,6 +724,7 @@ static void config_format(void) {
 	}
 	KEY("quick", "%s", quick);
 	KEY("wifi_suspend", "%s", app.wifi_suspend ? "on" : "off");
+	KEY("android_bt_remove_bond", "%s", app.android_bt_remove_bond ? "on" : "off");
 	KEY("aod", "%s", !app.aod ? "off" : app.aod_charging ? "charging" : "on");
 	KEY("clock_24h", "%s", app.clock_24h ? "on" : "off");
 	KEY("lock_timeout", "%d", LOCK_TIMEOUT_SECONDS[app.lock_timeout_idx]);
@@ -3775,9 +3781,22 @@ static double draw_main(cairo_t *cr) {
 	y = zmc_entry(cr, y, "battery + performance", detail, ACT_OPEN_PAGE, PAGE_POWER);
 
 	y = zmc_entry(cr, y, "apps", "Choose apps that run in the background", ACT_OPEN_PAGE, PAGE_INSTALLED_APPS);
+	y = zmc_entry(cr, y, "android apps", "What apps in Waydroid may do with Bluetooth", ACT_OPEN_PAGE, PAGE_ANDROID);
 	y = zmc_entry(cr, y, "system", "Date, keyboard, developer, about", ACT_OPEN_PAGE, PAGE_SYSTEM);
 
 	return y + 20;
+}
+
+/* Android apps (Waydroid). ztos-btbridge reads android_bt_remove_bond from
+ * the config at each request, so a change counts from the next one. */
+static double draw_android(cairo_t *cr) {
+	double y = zmc_header(cr, "android apps");
+	y = zmc_switch(cr, y, "Let Android apps remove Bluetooth pairings", app.android_bt_remove_bond,
+		ACT_ANDROID_BT_REMOVE_BOND);
+	cairo_set_source_rgb(cr, .6, .6, .6);
+	y += zmc_text(cr, "An app can unpair any device, also one paired here, but not one ztOS is using.",
+		FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 20;
+	return y;
 }
 
 static double render_page_content(cairo_t *cr, int p) {
@@ -3793,6 +3812,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_POWER: return draw_power(cr);
 	case PAGE_SYSTEM: return draw_system(cr);
 	case PAGE_INSTALLED_APPS: return draw_installed_apps(cr);
+	case PAGE_ANDROID: return draw_android(cr);
 	case PAGE_APP_DETAIL: return draw_app_detail(cr);
 	case PAGE_SOUND_EQ: case PAGE_SOUND_FX: case PAGE_SOUND_OUT: case PAGE_SOUND_APPS:
 		return sound_render(cr, p);
@@ -4173,6 +4193,10 @@ static void activate(int action, int arg) {
 		}
 		app.wifi_on = !app.wifi_on;
 		wifi_refresh(app.wifi_on ? "sleep 3" : NULL);
+		break;
+	case ACT_ANDROID_BT_REMOVE_BOND:
+		app.android_bt_remove_bond = !app.android_bt_remove_bond;
+		config_save();
 		break;
 	case ACT_WIFI_SUSPEND:
 		app.wifi_suspend = !app.wifi_suspend;

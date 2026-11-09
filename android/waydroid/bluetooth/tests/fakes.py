@@ -182,6 +182,7 @@ class FakeStore:
         self.expect = set()      # what ztos-bt-agent may ask about now
         self.writes = []
         self.android = set()
+        self.may_remove = True   # Settings' android_bt_remove_bond
 
     def expected(self, addrs, seconds):
         self.expect = set(addrs)
@@ -195,6 +196,9 @@ class FakeStore:
 
     def forget_android_bond(self, addr):
         self.android.discard(addr)
+
+    def android_may_remove_bonds(self):
+        return self.may_remove
 
 
 class FakeClient:

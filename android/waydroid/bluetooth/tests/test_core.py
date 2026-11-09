@@ -502,21 +502,39 @@ class Bonds(unittest.TestCase):
         br.set_frozen(True)
         self.assertEqual(be.called("disconnect"), [])   # the person may be answering the sheet
 
-    def test_remove_only_android_made_bonds(self):
+    def test_remove_any_bond_when_settings_allow(self):
         be, store, br, c = make()
+        rid = c.request("BOND_REMOVE", LOCK)            # paired in Settings
+        self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_OK)
+        self.assertEqual(be.called("remove"), [("remove", LOCK)])
+        self.assertEqual(c.events("EV_BOND_STATE"), [[LOCK, P.BOND_NONE, P.ST_OK]])
+        store.android.add(SPEAKER)
+        rid = c.request("BOND_REMOVE", SPEAKER)
+        self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_OK)
+        self.assertNotIn(SPEAKER, store.android)
+
+    def test_switched_off_refuses_all(self):
+        be, store, br, c = make()
+        store.may_remove = False
+        store.android.add(LOCK)
         rid = c.request("BOND_REMOVE", LOCK)
         self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_NOT_PERMITTED)
         self.assertEqual(be.called("remove"), [])
-        store.android.add(LOCK)
+        self.assertEqual(c.events("EV_BOND_STATE"), [[LOCK, P.BOND_BONDED, P.ST_NOT_PERMITTED]])
+        store.may_remove = True                         # read again at the next request
         rid = c.request("BOND_REMOVE", LOCK)
         self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_OK)
-        self.assertEqual(be.called("remove"), [("remove", LOCK)])
-        self.assertNotIn(LOCK, store.android)
 
     def test_never_removes_a_linux_connected_bond(self):
         be, store, br, c = make()
         store.android.add(AIRPODS)
         rid = c.request("BOND_REMOVE", AIRPODS)
+        self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_NOT_PERMITTED)
+        self.assertEqual(be.called("remove"), [])
+        self.assertEqual(c.events("EV_BOND_STATE"), [[AIRPODS, P.BOND_BONDED, P.ST_NOT_PERMITTED]])
+        be.ifaces[LOCK] = {"org.bluez.Input1"}          # an LE keyboard Linux is using
+        br.device_changed(LOCK, {"Connected": True})
+        rid = c.request("BOND_REMOVE", LOCK)
         self.assertEqual(c.reply(rid, "BOND_REMOVE")[0], P.ST_NOT_PERMITTED)
 
     def test_bonds_made_by_linux_are_reported(self):

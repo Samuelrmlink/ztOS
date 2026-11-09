@@ -171,6 +171,17 @@ class ServerTests(unittest.TestCase):
         st.forget_android_bond("AA:BB:CC:DD:EE:FF")
         self.assertFalse(st.is_android_bond("AA:BB:CC:DD:EE:FF"))
 
+    def test_remove_bond_setting(self):
+        conf = os.path.join(self.dir.name, "config")
+        st = S.Store(os.path.join(self.dir.name, "run"), os.path.join(self.dir.name, "state"), config_path=conf)
+        self.assertTrue(st.android_may_remove_bonds())        # no file: on
+        with open(conf, "w") as f:
+            f.write("accent=cobalt\n# android_bt_remove_bond=on\nandroid_bt_remove_bond = off\n")
+        self.assertFalse(st.android_may_remove_bonds())
+        with open(conf, "w") as f:
+            f.write("android_bt_remove_bond=on\n")
+        self.assertTrue(st.android_may_remove_bonds())        # read again each time
+
 
 if __name__ == "__main__":
     unittest.main()

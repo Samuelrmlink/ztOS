@@ -226,8 +226,10 @@ class Store:
     these while they haven't expired; it takes the file only if it is a
     regular file of its own user, writable by nobody else."""
 
-    def __init__(self, runtime_dir, state_dir, log=None, clock=None):
+    def __init__(self, runtime_dir, state_dir, log=None, clock=None, config_path=None):
         self.expected_path = os.path.join(runtime_dir, "ztos-btbridge", "expected")
+        # Settings' file (ztsettings.c config_path): android_bt_remove_bond=on|off
+        self.config_path = config_path or os.path.join(os.path.expanduser("~"), ".config", "ztmetro", "config")
         self.bonds_path = os.path.join(state_dir, "ztos-btbridge", "android-bonds")
         self.log = log or (lambda *a: None)
         self.clock = clock or time.time
@@ -275,6 +277,20 @@ class Store:
 
     def forget_android_bond(self, addr):
         self._save(self._bonds() - {addr.upper()})
+
+    def android_may_remove_bonds(self):
+        """Settings > Android apps > "Let Android apps remove Bluetooth
+        pairings": on unless the config says off. Read at each request."""
+        value = "on"
+        try:
+            with open(self.config_path) as f:
+                for line in f:
+                    key, eq, val = line.partition("=")
+                    if eq and not line.lstrip().startswith("#") and key.strip() == "android_bt_remove_bond":
+                        value = val.strip()
+        except OSError:
+            pass
+        return value not in ("off", "0")
 
 
 def log(*words):

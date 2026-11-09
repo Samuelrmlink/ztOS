@@ -429,7 +429,7 @@ match its op's signature.
 | `readRemoteRssi`, `requestConnectionPriority`, `setPreferredPhy` | Device1 `RSSI`; no-op with success; `Adapter1`/mgmt PHY configuration, read-only at first |
 | `BluetoothDevice.createBond` → `bt_interface_t::create_bond` | Device1 `Pair()`; **BlueZ's agent** (ztOS's `ztos-bt-agent`, the shell's sheet) asks the user; the result → `bond_state_changed_cb`. The Android pairing dialog is never shown: the shim never calls `ssp_request_cb`/`pin_request_cb` |
 | encrypted characteristic (insufficient authentication) | BlueZ itself pairs on the ATT error (its agent again), retries, and returns the value; Android only sees a slower read |
-| `removeBond` | refused for bonds BlueZ made outside Android; allowed only for a bond an Android app created, and only after the shell's confirmation (Device1 `RemoveDevice` is never called silently) |
+| `removeBond` | Adapter1 `RemoveDevice`, for any bond (Settings-made too) unless Linux is using the device, while Settings > Android apps > "Let Android apps remove Bluetooth pairings" is on (the default); refused for everything when it's off |
 | `BluetoothLeAdvertiser.startAdvertisingSet` → `BleAdvertiserInterface::StartAdvertisingSet` | LEAdvertisingManager1 `RegisterAdvertisement` of an `org.bluez.LEAdvertisement1` object exported by `ztos-btbridge` (Type, ServiceUUIDs, ManufacturerData, ServiceData, LocalName, Includes `tx-power`, MinInterval/MaxInterval, `SecondaryChannel` for extended); 5 instances shared with Linux |
 | `openGattServer`, `addService` → `btgatt_server_interface_t::add_service` | GattManager1 `RegisterApplication` of an ObjectManager tree (GattService1/Characteristic1/Descriptor1) that `ztos-btbridge` exports per Android server; `ReadValue`/`WriteValue` calls from BlueZ → `request_read_*_cb`/`request_write_*_cb`, Android's `sendResponse` → the D-Bus reply; `notifyCharacteristicChanged` → `PropertiesChanged(Value)` or the `AcquireNotify` fd |
 | `createRfcommSocketToServiceRecord(uuid)`, the hidden `createRfcommSocket(channel)`, `connect()` → `btsock_interface_t::connect` | by UUID: Profile1 (client role) for that UUID + Device1 `ConnectProfile(uuid)`, BlueZ does SDP and security, `Profile1.NewConnection(fd)`; by channel: an RFCOMM socket from the bridge. The RFCOMM socket stays in the bridge, which relays it to Android's stream (see "Classic RFCOMM") |
@@ -495,10 +495,19 @@ The policy lives in the host daemon, so Android can't get around it.
   thawed, so its connections stay. While Android can't read, scan results
   are dropped and the other events are queued (bounded) until it thaws. A
   stopped container closes the socket, which releases everything too.
-- **Removing bonds.** `removeBond` from Android is refused, except for a
-  bond that an Android app created through the bridge. The bridge records
-  those addresses in `~/.local/state/ztos-btbridge/android-bonds`. A
-  confirmation sheet in the shell for that case is still to do.
+- **Removing bonds.** The user's decision (9 Nov): Android apps may
+  remove pairings, behind a switch in Settings > Android apps ("Let
+  Android apps remove Bluetooth pairings", config key
+  `android_bt_remove_bond=on|off` in `~/.config/ztmetro/config`, default
+  on, read by the bridge at each request). On, `removeBond` removes the
+  BlueZ device for any bond, Settings-made ones included, except a device
+  Linux is using (hidden from Android anyway); off, every `removeBond` is
+  refused. No confirm sheet. A refusal sends BOND_BONDED with a failure
+  status. Either way Android hears BOND_NONE when a bond goes, also when
+  it is removed on Linux (Settings, `bluetoothctl remove`: BlueZ just
+  drops the object, so `device_removed` sends it). The bridge still
+  records the bonds Android made in
+  `~/.local/state/ztos-btbridge/android-bonds`, for the log.
 
 ### Container side
 
