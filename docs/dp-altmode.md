@@ -171,10 +171,13 @@ Verified on the phone (read-only, chg11/chg12):
 - **MAX77705 USB-C firmware:** 0x32. PD_INT_M 0x1c (DP bits masked) and
   VDM_INT_M 0xff before the driver touches them.
 - **PCAL6524 at 0x22:** answers on the bit-banged gpp6-2/gpp6-3 bus (zrn-bt
-  has used it since the Bluetooth work). Its port 0 registers:
-  - output 0xff;
-  - configuration 0x7f: pins 0-6 are inputs, pin 7 (BT_EN) is an output.
-  - So pins 1 and 4 were not driven before this work.
+  has used it since the Bluetooth work). Its registers:
+  - output 0xff 0xff 0xff;
+  - polarity 0x00 0x00 0x00, so gpio-pca953x's "clear polarity inversion"
+    at probe writes what is already there;
+  - configuration 0x7f 0xff 0xff: every pin is an input except pin 7
+    (BT_EN). Pins 1 and 4 were not driven before this work, and pin 8
+    (WPC_EN) is an input that nothing in the tree claims.
 - **Typec port and DP altmode (chg12):** `/sys/class/typec/port0` exists, and
   the DP port altmode registers (svid ff01).
 
