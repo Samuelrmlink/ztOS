@@ -13,6 +13,10 @@ ExecStart=/usr/local/sbin/zboot-usb-gadget
 # Disarm the boot stage's deadman: USB is up, so this boot can be reached and
 # does not need to be reset. A boot that never gets here still resets.
 ExecStartPost=/usr/bin/touch /run/zboot.hold
+# With OTG, a USB device or dock plugged in at boot puts the controller in host
+# mode and there is no UDC for the gadget: that boot is up all the same, so it
+# disarms too (a gadget failure for any other reason still resets).
+ExecStopPost=/bin/sh -c '[ "$SERVICE_RESULT" = success ] && exit 0; for i in $(seq 15); do grep -qx host /sys/class/usb_role/*/role 2>/dev/null && { echo "USB is in host mode (OTG): no gadget this boot, deadman disarmed"; touch /run/zboot.hold; exit 0; }; sleep 1; done'
 
 [Install]
 WantedBy=multi-user.target

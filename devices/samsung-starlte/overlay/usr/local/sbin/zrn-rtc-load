@@ -7,6 +7,9 @@
 M=/var/lib/zrn-sleep/rtc-loading
 F=/var/lib/zrn-sleep/rtc-early-failed
 P=/usr/local/libexec/ztos-power/mif-trial
+# the running kernel's own build (another release's is refused: vermagic)
+KO=/usr/lib/modules/$(uname -r)/extra/zrn-exynos-rtc.ko
+[ -f "$KO" ] || KO=$P/zrn-exynos-rtc.ko
 [ -d /sys/module/zrn_exynos_rtc ] && exit 0
 mkdir -p /var/lib/zrn-sleep
 if [ -e "$M" ]; then
@@ -19,7 +22,7 @@ if [ -e "$F" ]; then
 fi
 date +%s > "$M"
 sync
-if insmod "$P/zrn-exynos-rtc.ko"; then
+if insmod "$KO"; then
 	echo "zrn-rtc: loaded"
 else
 	echo "zrn-rtc: insmod failed; zrn-sleepd tries again at its first sleep"

@@ -5708,6 +5708,29 @@ static void draw_signal(cairo_t *cr, double x, double base, double w, double h, 
 	}
 }
 
+/* The status row's Bluetooth rune, standing on `base` with its ink `h` tall
+ * and its left edge at x; returns its width. Drawn here rather than through
+ * draw_icon, whose hairline stroke (7 % of the icon) came out thin and
+ * narrow beside the solid Wi-Fi fan: the stroke is the fan's band width. */
+static double draw_status_bt(cairo_t *cr, double x, double base, double h) {
+	double lw = fmax(1.0, round(h * 0.115 * 2) / 2);
+	double u = (h - lw) / 1.8;	/* the rune is 1.8 u tall and 0.85 u wide */
+	double cx = x + lw / 2 + 0.45 * u, cy = base - lw / 2 - 0.9 * u;
+	cairo_save(cr);
+	cairo_set_line_width(cr, lw);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_BEVEL);	/* no miter spikes past the ink */
+	cairo_move_to(cr, cx - u * 0.45, cy - u * 0.42);
+	cairo_line_to(cr, cx + u * 0.4, cy + u * 0.42);
+	cairo_line_to(cr, cx, cy + u * 0.9);
+	cairo_line_to(cr, cx, cy - u * 0.9);
+	cairo_line_to(cr, cx + u * 0.4, cy - u * 0.42);
+	cairo_line_to(cr, cx - u * 0.45, cy + u * 0.42);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+	return 0.85 * u + lw;
+}
+
 static void draw_wifi(cairo_t *cr, double x, double base, double s, int bars) {
 	/* A quarter fan whose corner is the glyph's bottom right. Measured off
 	 * the Windows Phone 8.1 glyph, as fractions of its size: three bands
@@ -5993,9 +6016,13 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 			} else {
 				cairo_set_source_rgb(cr, 0.55, 0.55, 0.55);
 			}
-			bt_right = x + status_glyph(cr, "bluetooth", x, base, icon_h);
+			/* a little more room than the other gaps: the fan's dot sits
+			 * in its bottom right corner, hard against what follows */
+			x += round(icon_gap * 0.4);
+			bt_right = x + draw_status_bt(cr, x, base, icon_h * 1.08);
 		} else {
-			bt_right = x + icon_h * 0.55;	/* (blinking: its place, kept) */
+			x += round(icon_gap * 0.4);
+			bt_right = x + icon_h * 0.6;	/* (blinking: its place, kept) */
 		}
 	}
 	cairo_set_source_rgb(cr, 1, 1, 1);

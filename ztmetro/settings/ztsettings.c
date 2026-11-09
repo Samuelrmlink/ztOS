@@ -2295,11 +2295,37 @@ static void bt_on_seed(void) {
 	fclose(f);
 }
 
+/* bluetoothctl colours the lines of its own event messages ("[NEW]",
+ * "[CHG]", a pairing's prompts), and while one of those is printing its
+ * terminal escapes ("ESC[0m", "ESC[0;94m") land in the device list we read:
+ * a name came out as "RM_2685\e[0m". Drop escape sequences and any other
+ * control characters, in place, and the spaces they leave at the end. */
+static void bt_clean(char *s) {
+	char *w = s;
+	for (const char *r = s; *r; r++) {
+		if (*r == 0x1b) {
+			if (r[1] == '[') {	/* CSI: parameters, then one final byte */
+				r += 2;
+				while (*r && !(*r >= 0x40 && *r <= 0x7e)) r++;
+				if (!*r) break;
+			} else if (r[1]) {
+				r++;		/* a two-byte escape */
+			}
+			continue;
+		}
+		if ((unsigned char)*r < 0x20 || *r == 0x7f) continue;
+		*w++ = *r;
+	}
+	while (w > s && w[-1] == ' ') w--;
+	*w = 0;
+}
+
 static void bt_parse(char *text) {
 	static struct bt_device fresh[MAX_BT];
 	int n_fresh = 0;
 	bool devices = false;
 	for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+		bt_clean(line);
 		if (strcmp(line, "@devices") == 0) {
 			devices = true;
 		} else if (!devices && strncmp(line, "name=", 5) == 0) {
