@@ -5896,6 +5896,8 @@ static double ink_height(const char *text, const char *font, double size) {
 	return ink.height / (double)PANGO_SCALE;
 }
 
+#define STATUS_ICON_K	1.15	/* the status icons' height, in the clock digits' */
+
 static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool live) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	/* Sized against the screen, off photos of the real thing: the battery is
@@ -5914,7 +5916,8 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	 * all standing on the clock's baseline, and one gap between each two. Colour: white is on and working; a whole icon dimmed is on but
 	 * not connected (Bluetooth with no device); the bars and the fan's bands a
 	 * signal does not reach are dimmed too, which is its strength. */
-	const double icon_h = round(ink_height("0", FONT_REGULAR, cell * 1.3) * 2) / 2;	/* the clock's digits */
+	/* 1.15 times the clock's digits (the user's choice, 2026-11-08) */
+	const double icon_h = round(ink_height("0", FONT_REGULAR, cell * 1.3) * STATUS_ICON_K * 2) / 2;
 	const double icon_gap = round(icon_h * 0.5);
 	double bt_right = x;	/* where Bluetooth's own mark ends */
 	if (server->cell_airplane) {
