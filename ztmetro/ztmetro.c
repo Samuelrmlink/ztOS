@@ -789,6 +789,8 @@ struct zt_server {
 		bool active, shown, noted, osk_was_visible, osk_was_terminal;
 		struct bt_pair_request req;
 		int entered;
+		bool remember;		/* "Use this PIN for similar devices for 3 hours" ticked */
+		double check_y;		/* where that box is, in the dialog, as last drawn */
 		char entry[BT_PAIR_PIN_MAX + 1], status[64];
 		size_t entry_len;
 		struct wl_event_source *deadline;
@@ -1168,6 +1170,7 @@ static void bt_pair_sync(struct zt_server *);
 static void bt_pair_hide(struct zt_server *);
 static bool bt_pair_action(struct zt_server *, const char *);
 static double bt_pair_field_h(struct zt_server *);
+static bool bt_pair_touch(struct zt_server *, double, double);
 static void bt_pair_draw(struct zt_server *, cairo_t *, double, double, double);
 static void bt_pair_ctl(struct zt_server *, char *);
 enum { LEVEL_TORCH, LEVEL_BRIGHT };
@@ -14108,6 +14111,10 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		if (y >= server->dialog_y && y <= server->dialog_y + server->dialog_h) {
 			double dy = y - server->dialog_y;
 			double pad = 24.0, btn_gap = 12.0;
+			if (server->bt_pair.shown && bt_pair_touch(server, x, dy)) {
+				p->role = ROLE_NONE;
+				return;
+			}
 			double content_w = server->width - 2 * pad;
 			if (server->dialog_btn2[0]) {
 				if (server->dialog_stacked) {

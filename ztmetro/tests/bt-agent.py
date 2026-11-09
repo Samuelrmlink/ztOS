@@ -25,6 +25,8 @@ class FakeIO:
         self.next_timer = 0
         self.aborted = []
         self.android = None
+        self.settings_pairing = None   # the address `bluetoothctl pair` is running for
+        self.clock = 1000.0
 
     def show(self, line):
         if self.shell_up:
@@ -50,6 +52,12 @@ class FakeIO:
 
     def abort(self, device):
         self.aborted.append(device)
+
+    def local_pair(self, address):
+        return address == self.settings_pairing
+
+    def now(self):
+        return self.clock
 
     def fire(self):
         (handle, (_seconds, fn)), = self.timers.items()
@@ -324,10 +332,11 @@ class Untrusted(Base):
         self.assertEqual(agent.adapter_of(DEV), "/org/bluez/hci0")
 
     def test_replies(self):
-        self.assertEqual(agent.parse_reply("3\tOK\t1234\n"), ("3", True, "1234"))
-        self.assertEqual(agent.parse_reply("3\tOK\t\n"), ("3", True, ""))
-        self.assertEqual(agent.parse_reply("3\tCANCEL\n"), ("3", False, ""))
-        for bad in ("", "3", "3\tYES\t1", "3\tOK", "3\tCANCEL\tx"):
+        self.assertEqual(agent.parse_reply("3\tOK\t1234\n"), ("3", True, "1234", False))
+        self.assertEqual(agent.parse_reply("3\tOK\t\n"), ("3", True, "", False))
+        self.assertEqual(agent.parse_reply("3\tCANCEL\n"), ("3", False, "", False))
+        self.assertEqual(agent.parse_reply("3\tOK\t1234\tremember\n"), ("3", True, "1234", True))
+        for bad in ("", "3", "3\tYES\t1", "3\tOK", "3\tCANCEL\tx", "3\tOK\t1\tx", "3\tCANCEL\tremember"):
             self.assertIsNone(agent.parse_reply(bad))
 
 
@@ -404,6 +413,169 @@ class AndroidPairing(Base):
             link = os.path.join(d, "link")
             os.symlink(path, link)
             self.assertFalse(agent.expected(link, A, now=1000))
+
+
+PRINTER_A = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"
+PRINTER_B = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_00"
+ADV = ["49646561-7346-6c6f-6174-40882af10000", "0000180a-0000-1000-8000-00805f9b34fb"]
+
+
+class RememberedCodes(Base):
+    """A code ticked on the sheet answers the next similar device by itself,
+    for 3 hours, only when the phone started the pairing (9 Nov)."""
+
+    def setUp(self):
+        super().setUp()
+        self.io.on = False
+        self.io.android = "AA:BB:CC:DD:EE:FF"
+        # the app scanned: BlueZ showed what each printer advertises
+        for path in (PRINTER_A, PRINTER_B):
+            self.broker.device_changed(path, {"UUIDs": ADV, "ServicesResolved": False})
+        # then they connected and resolved: UUIDs is the GATT database now
+        self.io.props = {"Alias": "RM_2685", "Address": "AA:BB:CC:DD:EE:FF", "Paired": False,
+                         "ServicesResolved": True, "UUIDs": ADV + ["00001800-0000-1000-8000-00805f9b34fb"]}
+
+    def teach(self, mode="passkey", text="123456"):
+        self.ask(mode, device=PRINTER_A)
+        self.broker.answered(self.broker.cur.id, True, text, True)
+        self.broker.device_changed(PRINTER_A, {"Paired": True})
+
+    def second(self, mode="passkey"):
+        self.io.props = dict(self.io.props, Alias="RM_2686", Address="AA:BB:CC:DD:EE:00")
+        self.io.android = "AA:BB:CC:DD:EE:00"
+        self.io.lines = []
+        self.reply = Reply()
+        self.ask(mode, device=PRINTER_B)
+
+    def test_used_for_a_similar_device(self):
+        self.teach()
+        self.second()
+        self.assertEqual(self.reply.oks, [123456])            # no sheet
+        self.assertFalse(any(x.startswith("bt-pair ") for x in self.io.lines))
+        self.assertIsNone(self.broker.cur)
+        self.broker.device_changed(PRINTER_B, {"Paired": True})
+        self.assertEqual(self.io.lines, ["notify Bluetooth|Paired|Paired RM_2686 with the remembered passkey\n"])
+        self.assertEqual(self.io.timers, {})
+
+    def test_pin_too_and_kept_apart_from_passkeys(self):
+        self.teach("pin", "0000")
+        self.second("passkey")                                  # a passkey request: not the PIN
+        self.assertEqual(self.reply.oks, [])
+        self.assertTrue(self.io.lines[0].startswith("bt-pair "))
+
+    def test_not_ticked_not_remembered(self):
+        self.ask("passkey", device=PRINTER_A)
+        self.answered(True, "123456")
+        self.second()
+        self.assertEqual(self.reply.oks, [])
+        self.assertTrue(self.io.lines[0].startswith("bt-pair "))
+
+    def test_expires_after_3_hours(self):
+        self.teach()
+        self.io.clock += agent.REMEMBER_SECONDS + 1
+        self.second()
+        self.assertEqual(self.reply.oks, [])
+        self.assertTrue(self.io.lines[0].startswith("bt-pair "))
+
+    def test_only_when_the_phone_started_it(self):
+        self.teach()
+        self.io.on = True                                       # discoverable: the sheet may show
+        self.io.props = dict(self.io.props, Alias="RM_2686", Address="AA:BB:CC:DD:EE:00")
+        self.io.android = None                                  # nothing of ours: unsolicited
+        self.io.lines = []
+        self.reply = Reply()
+        self.ask("passkey", device=PRINTER_B)
+        self.assertEqual(self.reply.oks, [])
+        self.assertTrue(self.io.lines[0].startswith("bt-pair "))
+        self.answered(False)
+        self.io.settings_pairing = "AA:BB:CC:DD:EE:00"          # Settings' bluetoothctl pair
+        self.reply = Reply()
+        self.ask("passkey", device=PRINTER_B)
+        self.assertEqual(self.reply.oks, [123456])
+
+    def test_never_unsolicited_even_when_not_discoverable(self):
+        self.teach()
+        self.io.props = dict(self.io.props, Alias="RM_2686", Address="AA:BB:CC:DD:EE:00")
+        self.io.android = None
+        self.reply = Reply()
+        self.ask("passkey", device=PRINTER_B)
+        self.assertEqual(self.reply.oks, [])
+        self.assertEqual(self.reply.errs, ["Rejected"])
+
+    def test_the_uuids_must_match_exactly(self):
+        self.teach()
+        for uuids in (ADV[:1], ADV + ["0000180f-0000-1000-8000-00805f9b34fb"]):
+            self.broker.device_changed(PRINTER_B, {"UUIDs": uuids})
+            self.second()
+            self.assertEqual(self.reply.oks, [], uuids)
+            self.answered(False)
+        self.broker.device_changed(PRINTER_B, {"UUIDs": [u.upper() for u in reversed(ADV)]})
+        self.second()
+        self.assertEqual(self.reply.oks, [123456])              # same set, any order or case
+
+    def test_advertised_not_the_resolved_list(self):
+        self.teach()
+        self.broker.device_changed(PRINTER_B, {"ServicesResolved": True})
+        self.broker.device_changed(PRINTER_B, {"UUIDs": ADV + ["00001801-0000-1000-8000-00805f9b34fb"]})
+        self.second()
+        self.assertEqual(self.reply.oks, [123456])              # resolved services don't count
+
+    def test_failure_falls_back_to_the_sheet(self):
+        self.teach()
+        self.second()
+        self.assertEqual(self.reply.oks, [123456])
+        self.broker.device_changed(PRINTER_B, {"Connected": False})   # AuthenticationFailed: dropped
+        self.assertFalse(any(x.startswith("notify") for x in self.io.lines))
+        self.second()
+        self.assertEqual(self.reply.oks, [])
+        self.assertTrue(self.io.lines[0].startswith("bt-pair "))
+
+    def test_asked_again_or_no_pairing_counts_as_failed(self):
+        self.teach()
+        self.second()
+        self.second()                                           # asked again at once: it didn't work
+        self.assertEqual(self.reply.oks, [])
+        self.answered(False)
+        self.broker.remembered[0].failed.clear()
+        self.second()
+        self.assertEqual(self.reply.oks, [123456])
+        (_s, fn), = [v for v in self.io.timers.values() if v[0] == agent.REMEMBER_WAIT_SECONDS]
+        fn()                                                    # never Paired
+        self.second()
+        self.assertEqual(self.reply.oks, [])
+
+    def test_a_code_that_failed_where_typed_is_forgotten(self):
+        self.ask("passkey", device=PRINTER_A)
+        self.broker.answered(self.broker.cur.id, True, "654321", True)
+        self.broker.device_changed(PRINTER_A, {"Connected": False})   # mistyped
+        self.assertEqual(self.broker.remembered, [])
+
+    def test_settings_pairing_is_seen_in_proc(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            for pid, argv in (("10", [b"timeout", b"120", b"bluetoothctl", b"pair", b"AA:BB:CC:DD:EE:00"]),
+                              ("11", [b"bluetoothctl", b"info", b"AA:BB:CC:DD:EE:01"]),
+                              ("12", [b"/usr/bin/bluetoothctl", b"pair", b"aa:bb:cc:dd:ee:02"])):
+                os.mkdir(os.path.join(d, pid))
+                with open(os.path.join(d, pid, "cmdline"), "wb") as f:
+                    f.write(b"\0".join(argv) + b"\0")
+            os.mkdir(os.path.join(d, "self"))
+            self.assertFalse(agent.local_pair("AA:BB:CC:DD:EE:00", d))   # timeout's, not bluetoothctl's
+            self.assertFalse(agent.local_pair("AA:BB:CC:DD:EE:01", d))   # not pairing
+            self.assertTrue(agent.local_pair("AA:BB:CC:DD:EE:02", d))
+            self.assertFalse(agent.local_pair("AA:BB:CC:DD:EE:03", d))
+
+    def test_never_logged(self):
+        import contextlib
+        import io as sio
+        err = sio.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.teach("pin", "8642")
+            self.second("pin")
+            self.broker.device_changed(PRINTER_B, {"Paired": True})
+        self.assertNotIn("8642", err.getvalue())
+        self.assertEqual(self.reply.oks, ["8642"])
 
 
 if __name__ == "__main__":
