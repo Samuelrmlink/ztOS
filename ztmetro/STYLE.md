@@ -16,6 +16,7 @@ output: those keep their own spelling.
 | Switches, buttons, options, captions, slider labels | Sentence case | Set time automatically, 24-hour time, Vibration strength: 80%, On, Off |
 | Descriptions, help, details under an entry, messages | Sentence case, normal punctuation | Shown whenever the screen is off. |
 | Quick-action tiles' labels | ALL CAPS (WP 8.1's action centre) | WI-FI, BLUETOOTH, ALL SETTINGS |
+| Context-menu actions (hold a tile or an app) | all lowercase, as WP | pin to start, uninstall |
 
 Names:
 

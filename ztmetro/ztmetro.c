@@ -5158,7 +5158,7 @@ static void draw_search(struct zt_server *server) {
 		draw_text(cr, server->search, FONT_REGULAR, 19, 10, 8, w - 52, 0, false);
 	} else {
 		cairo_set_source_rgb(cr, 0.55, 0.55, 0.55);
-		draw_text(cr, "search", FONT_REGULAR, 19, 10, 8, w - 52, 0, false);
+		draw_text(cr, "Search", FONT_REGULAR, 19, 10, 8, w - 52, 0, false);
 	}
 	set_rgb(cr, server->accent);
 	cairo_rectangle(cr, 10 + fmin(tw, w - 54) + 1, 9, 2, h - 18);
@@ -7502,7 +7502,7 @@ static void draw_sensorhub_fail(struct zt_server *server) {
 	cairo_rectangle(cr, pad, btn_y2, content_w, btn_h);
 	cairo_stroke(cr);
 	cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
-	draw_text(cr, "Continue Anyway", FONT_REGULAR, 16.0, pad, btn_y2, content_w, btn_h, true);
+	draw_text(cr, "Continue anyway", FONT_REGULAR, 16.0, pad, btn_y2, content_w, btn_h, true);
 
 	zt_buffer_show(server, &server->sensorhub_fail_layer, buffer, cr, server->width, server->height);
 }
@@ -7895,7 +7895,7 @@ static void draw_osk(struct zt_server *server) {
         cairo_set_source_rgb(cr, 0.08, 0.08, 0.08);
         cairo_paint(cr);
         cairo_set_source_rgb(cr, 0.55, 0.55, 0.55);
-        draw_text(cr, "move cursor", FONT_REGULAR, 16, 0, 0,
+        draw_text(cr, "Move cursor", FONT_REGULAR, 16, 0, 0,
             server->width, server->osk_h, true);
     }
     /* The corner dot stays small; its invisible touch target is larger.
@@ -9422,7 +9422,7 @@ static void draw_hyper(struct zt_server *server) {
 	cairo_arc(cr, 12 + 14, 16 + 14, 12, 0, 2 * M_PI);
 	cairo_stroke(cr);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	draw_text(cr, "Hyperscan", FONT_SEMILIGHT, 24, 12 + 38, 13, 0, 0, false);
+	draw_text(cr, "hyperscan", FONT_SEMILIGHT, 24, 12 + 38, 13, 0, 0, false);
 	/* the box, white with the keyboard up for it, and its caret */
 	cairo_rectangle(cr, 12, HYPER_BOX_Y, w - 24, HYPER_BOX_H);
 	cairo_fill(cr);
@@ -9431,7 +9431,7 @@ static void draw_hyper(struct zt_server *server) {
 		draw_text(cr, server->hyper_q, FONT_REGULAR, 17, 22, HYPER_BOX_Y + 9, w - 48, 0, false);
 	} else {
 		cairo_set_source_rgb(cr, 0.55, 0.55, 0.55);
-		draw_text(cr, "search apps, settings, files and the web", FONT_REGULAR, 15, 22,
+		draw_text(cr, "Search apps, settings, files and the web", FONT_REGULAR, 15, 22,
 			HYPER_BOX_Y + 11, w - 48, 0, false);
 	}
 	double caret = 22 + (server->hyper_q[0] ? text_width(server->hyper_q, FONT_REGULAR, 17) + 1 : 0);
@@ -15871,7 +15871,7 @@ static void power_key_apply(struct zt_server *server, enum power_key_action acti
 		if (server->splash || server->sensorhub_fail_screen) break;
 		activity(server);
 		dialog_show(server, "Power", "Tap below or press the power button to cancel.",
-			"power off", "power_off", "reboot", "reboot");
+			"Power off", "power_off", "Reboot", "reboot");
 		break;
 	case POWER_KEY_CLOSE_MENU:
 		dialog_close(server);
