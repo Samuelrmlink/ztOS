@@ -1,0 +1,18 @@
+[Unit]
+Description=ztOS: Bluetooth for Android apps, the Waydroid container's socket to BlueZ
+Documentation=file:///usr/share/doc/ztos-waydroid/waydroid.md
+# Waydroid set up, and Android booted once (its /data/misc exists): systemd
+# would otherwise make /data/misc itself, with the wrong owner for Android
+ConditionPathExists=/var/lib/waydroid/waydroid.cfg
+ConditionPathIsDirectory=%h/.local/share/waydroid/data/misc
+
+[Socket]
+# Android's /data/misc/ztos-btbridge/bridge.sock. Anyone may connect;
+# ztos-btbridge keeps only the Bluetooth app (uid 1002) in the container.
+ListenSequentialPacket=%h/.local/share/waydroid/data/misc/ztos-btbridge/bridge.sock
+SocketMode=0666
+DirectoryMode=0711
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

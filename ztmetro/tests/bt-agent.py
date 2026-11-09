@@ -24,6 +24,7 @@ class FakeIO:
         self.timers = {}
         self.next_timer = 0
         self.aborted = []
+        self.android = None
 
     def show(self, line):
         if self.shell_up:
@@ -35,6 +36,9 @@ class FakeIO:
 
     def discoverable(self, path, cb):
         cb(self.on)
+
+    def android_pairing(self, address):
+        return address == self.android
 
     def after(self, seconds, fn):
         self.next_timer += 1
@@ -345,6 +349,47 @@ class Logs(Base):
         self.assertIn("AA:BB:CC:DD:EE:FF", text)
         for secret in ("SECRET9", "778899", "445566", "112233"):
             self.assertNotIn(secret, text)
+
+
+class AndroidPairing(Base):
+    """ztos-btbridge pairs a device for an Android app: the agent asks, even
+    though the phone isn't discoverable; for that device only."""
+
+    def test_asks_for_the_device_the_bridge_pairs(self):
+        self.io.on = False
+        self.io.android = "AA:BB:CC:DD:EE:FF"
+        self.ask("confirm", "123456")
+        self.assertEqual(len(self.io.lines), 1)
+        self.assertEqual(self.reply.oks + self.reply.errs, [])   # still the person's answer
+        self.answered(True)
+        self.assertEqual(len(self.reply.oks), 1)
+
+    def test_another_device_is_refused(self):
+        self.io.on = False
+        self.io.android = "11:22:33:44:55:66"
+        self.ask("confirm", "123456")
+        self.assertEqual(self.reply.errs, ["Rejected"])
+        self.assertEqual(self.io.lines, [])
+
+    def test_the_note(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "pairing")
+            self.assertFalse(agent.android_pairing(path, "AA:BB:CC:DD:EE:FF"))
+            with open(path, "w") as f:
+                f.write("AA:BB:CC:DD:EE:FF\n")
+            os.chmod(path, 0o600)
+            self.assertTrue(agent.android_pairing(path, "aa:bb:cc:dd:ee:ff"))
+            self.assertFalse(agent.android_pairing(path, "AA:BB:CC:DD:EE:00"))
+            mtime = os.stat(path).st_mtime
+            self.assertFalse(agent.android_pairing(path, "AA:BB:CC:DD:EE:FF", now=mtime + 91))
+            os.chmod(path, 0o622)
+            self.assertFalse(agent.android_pairing(path, "AA:BB:CC:DD:EE:FF"))
+            os.chmod(path, 0o600)
+            link = os.path.join(d, "link")
+            os.symlink(path, link)
+            self.assertFalse(agent.android_pairing(link, "AA:BB:CC:DD:EE:FF"))
 
 
 if __name__ == "__main__":

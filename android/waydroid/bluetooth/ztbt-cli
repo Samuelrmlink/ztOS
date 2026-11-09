@@ -1,0 +1,142 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""ztbt-cli: speak the shim's protocol to ztos-btbridge, for testing.
+
+    ztbt-cli SOCKET hello
+    ztbt-cli SOCKET bonded
+    ztbt-cli SOCKET scan [SECONDS] [le|bredr|auto]
+    ztbt-cli SOCKET gatt ADDRESS              connect, list the database, disconnect
+    ztbt-cli SOCKET read ADDRESS HANDLE
+
+Start the bridge for it with --socket SOCKET --allow-uid $(id -u)
+--no-container-check. "gatt" and "read" connect to a device: never point them
+at someone's own devices without asking.
+"""
+import os
+import select
+import socket
+import sys
+import time
+
+sys.path.insert(0, os.environ.get("ZTOS_BTBRIDGE_LIB", "/usr/lib/ztos-waydroid/btbridge"))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from ztbt import proto as P  # noqa: E402
+
+
+class Conn:
+    def __init__(self, path):
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self.s.connect(path)
+        self.next = 1
+        self.events = []
+
+    def request(self, op, *values, timeout=45):
+        rid = self.next
+        self.next += 1
+        self.s.send(P.message(op, rid, list(values)))
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            packet = self.recv(end - time.monotonic())
+            if packet is None:
+                break
+            num, _, mid, items = P.decode_raw(packet)
+            if num == P.REPLY and mid == rid:
+                st = items[0][1]
+                sig = "u" + (P.OPS[op][2] if st == P.ST_OK else ("y" if st == P.ST_ATT else ""))
+                vals = P.decode_with(sig, packet)[2]
+                return vals[0], vals[1:]
+            self.events.append(packet)
+        raise SystemExit("%s: no reply" % op)
+
+    def recv(self, timeout):
+        r, _, _ = select.select([self.s], [], [], max(0, timeout))
+        if not r:
+            return None
+        data = self.s.recv(P.MAX_PACKET)
+        if not data:
+            raise SystemExit("bridge closed the connection")
+        return data
+
+    def event(self, packet):
+        num = P.HEADER.unpack_from(packet)[0]
+        name = P.BY_NUMBER.get(num, hex(num))
+        return name, P.decode_with(P.OPS[name][1], packet)[2] if name in P.OPS else None
+
+
+def status(st):
+    names = {v: k for k, v in vars(P).items() if k.startswith("ST_")}
+    return names.get(st, str(st))
+
+
+def main():
+    if len(sys.argv) < 3:
+        raise SystemExit(__doc__)
+    c = Conn(sys.argv[1])
+    cmd, rest = sys.argv[2], sys.argv[3:]
+    st, vals = c.request("HELLO", P.VERSION, "ztbt-cli")
+    print("hello:", status(st), vals)
+    c.request("ENABLE", True)
+    if cmd == "hello":
+        return
+    if cmd == "bonded":
+        st, vals = c.request("BONDED_LIST")
+        for d in (vals[0] if vals else []):
+            print(" ", d[0], repr(d[2]), "type", d[4], "bond", d[5], "connected" if d[6] else "")
+        return
+    if cmd == "scan":
+        secs = float(rest[0]) if rest else 10
+        t = {"le": P.T_LE, "bredr": P.T_BREDR, "auto": P.T_AUTO}[rest[1] if len(rest) > 1 else "le"]
+        st, _ = c.request("SCAN_START", t)
+        print("scan:", status(st))
+        seen = {}
+        end = time.monotonic() + secs
+        while time.monotonic() < end:
+            for packet in c.events:
+                name, v = c.event(packet)
+                if name == "EV_DEVICE_FOUND":
+                    first = v[0][0] not in seen
+                    seen[v[0][0]] = v
+                    if first:
+                        print(" ", v[0][0], repr(v[0][2]), "rssi", v[1], "ad", v[3].hex())
+            c.events.clear()
+            packet = c.recv(end - time.monotonic())
+            if packet:
+                c.events.append(packet)
+        c.request("SCAN_STOP", t)
+        print(len(seen), "devices")
+        return
+    if cmd in ("gatt", "read"):
+        addr = rest[0].upper()
+        st, vals = c.request("GATT_OPEN", addr, P.ADDR_PUBLIC, P.T_LE)
+        print("open:", status(st), vals)
+        if st != P.ST_OK:
+            return
+        link = vals[0]
+        end = time.monotonic() + 40
+        up = False
+        while time.monotonic() < end and not up:
+            for packet in c.events:
+                name, v = c.event(packet)
+                print(" ", name, v)
+                if name == "EV_LINK" and v[0] == link:
+                    up = v[2]
+                    if not up:
+                        return
+            c.events.clear()
+            packet = c.recv(end - time.monotonic())
+            if packet:
+                c.events.append(packet)
+        if cmd == "gatt":
+            st, vals = c.request("GATT_DISCOVER", link)
+            for e in (vals[0] if vals else []):
+                print("  kind %d handle %04x %04x-%04x %s props %02x" % tuple(e))
+        else:
+            print(c.request("GATT_READ", link, int(rest[1], 0), 0))
+        c.request("GATT_CLOSE", link)
+        return
+    raise SystemExit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

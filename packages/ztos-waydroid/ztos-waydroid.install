@@ -2,7 +2,7 @@
 # before: no units enabled, no sudo rule, no nftables tables, no images. The
 # user's Android data (~/.local/share/waydroid: apps, chats) is kept and named.
 
-_user_units='ztos-waydroid-boot.service ztos-waydroid-audio-reconnect.service'
+_user_units='ztos-waydroid-boot.service ztos-waydroid-audio-reconnect.service ztos-btbridge.socket'
 
 post_install() {
 	ztos-user-dropins > /dev/null || echo 'ztos-waydroid: ztos-user-dropins failed: no sudo rule for the user'
@@ -21,6 +21,7 @@ post_install() {
 post_upgrade() {
 	ztos-user-dropins > /dev/null || true
 	systemctl daemon-reload
+	systemctl --global enable ztos-btbridge.socket > /dev/null 2>&1 || true
 }
 
 pre_remove() {
@@ -53,6 +54,7 @@ post_remove() {
 		rm -f "$ZTOS_HOME"/.local/share/applications/waydroid.*.desktop \
 			"$ZTOS_HOME"/.local/share/applications/ztos-android-*-waydroid.desktop
 		rm -f "$ZTOS_RUNTIME_DIR"/ztos-waydroid-* 2> /dev/null || true
+		rm -rf "$ZTOS_RUNTIME_DIR"/ztos-btbridge 2> /dev/null || true
 	fi
 	systemctl daemon-reload
 	if [ -n "$ZTOS_HOME" ] && [ -d "$ZTOS_HOME/.local/share/waydroid" ]; then

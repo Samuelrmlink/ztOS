@@ -10,7 +10,7 @@
 # without it the package installs, fetches its images and waits.
 pkgname=ztos-waydroid
 pkgver=1.0
-pkgrel=2
+pkgrel=3
 pkgdesc='ztOS: Android apps through Waydroid (optional; LineageOS 20 image fetched at set-up)'
 arch=(aarch64)
 url='https://github.com/ztos/ztos'
@@ -48,6 +48,17 @@ package() {
 	for u in ztos-waydroid-session ztos-waydroid-boot ztos-waydroid-audio-reconnect; do
 		install -Dm644 "$w/$u.service" "$pkgdir/usr/lib/systemd/user/$u.service"
 	done
+
+	# Bluetooth for Android apps: the bridge to BlueZ, socket-activated by the
+	# container's Bluetooth app (docs/waydroid.md, "Bluetooth for Android apps")
+	local bt=$w/bluetooth
+	install -Dm755 "$bt/ztos-btbridge" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztos-btbridge"
+	install -Dm755 "$bt/ztbt-cli" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztbt-cli"
+	for f in "$bt"/ztbt/*.py; do
+		install -Dm644 "$f" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztbt/${f##*/}"
+	done
+	install -Dm644 "$bt/ztos-btbridge.socket" "$pkgdir/usr/lib/systemd/user/ztos-btbridge.socket"
+	install -Dm644 "$bt/ztos-btbridge.service" "$pkgdir/usr/lib/systemd/user/ztos-btbridge.service"
 
 	# the recipe for the image: strip, patch, config, microG (ztos-waydroid-images
 	# runs install.sh from here; PACKAGED tells it the files above are in place)

@@ -528,6 +528,40 @@ Effort is roughly 2 to 3 weeks for stage 1 (shim, bridge and policy),
 1 week for stage 2 and 1 week for stage 3. Each stage needs the container
 running, which needs the `--waydroid` kernel.
 
+### The bridge (built)
+
+`android/waydroid/bluetooth/`:
+
+| File | What |
+|---|---|
+| `ztos-btbridge` | the daemon (Python, dbus-python, GLib) |
+| `ztbt/proto.py` | the wire format and the table of ops |
+| `ztbt/core.py` | the policy and the ops, with no D-Bus or socket in it |
+| `ztbt/bluez.py` | BlueZ: Adapter1, Device1, the GATT objects |
+| `ztbt/server.py` | the socket, the `SO_PEERCRED` and cgroup checks, the freezer watch, the store |
+| `ztos-btbridge.socket`, `.service` | user units. The socket is enabled by the package; the daemon starts on the first connection and exits 5 minutes after the last one |
+| `ztbt-cli` | the shim's side of the protocol, for tests on the host |
+| `tests/` | `python3 -m unittest` in that directory: the wire format, the policy and BLE central ops against a fake BlueZ, the backend's bookkeeping, the socket |
+
+The package installs it in `/usr/lib/ztos-waydroid/btbridge/`.
+`ztos-bt-agent` (base system) reads the bridge's pairing note.
+
+The bridge carries stage 1's ops now: adapter, bonded list, LE scan and
+Classic discovery, GATT client (connect, database, read, write,
+notifications through the CCCD), MTU, RSSI, and bonds through BlueZ. On the
+phone it was run against BlueZ 5.87 with `ztbt-cli`
+(`ztos-btbridge --socket /tmp/... --allow-uid $(id -u) --no-container-check`):
+`HELLO`, the bonded list, and LE and auto scans found 15 advertisers, with
+the AD structures rebuilt. Connecting and pairing were not tried on the
+phone, because of the testing rules below.
+
+Not done yet: reliable (prepared) writes, `AcquireNotify` (a notification
+that arrives while the same characteristic is being read is lost, because
+BlueZ's `Value` change can't be told apart from the read's), background
+(`autoConnect`) connections (the bridge always connects directly), PHY and
+connection priority, advertising and the GATT server (stage 2), and RFCOMM
+(stage 3).
+
 ### Testing rules
 
 Scanning, and advertising a test service, are fine. Don't pair with, connect
