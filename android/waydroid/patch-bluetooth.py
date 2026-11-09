@@ -30,13 +30,14 @@ import shutil
 import sys
 
 STOCK_JNI = "9b6dc6ff611abe505356e588b2641483d2237738ec166268751f82e8a90e9e3f"
-WRAPPER = "a176455109f10414b5b8b58b5c9d7d112dbe01e3d5ba5da8fedf8fc3f915db5a"
+WRAPPER = "9126a25f836ca5d218b000422cf32294dcb45c2868ce16452d581e4fb7bfcc3a"
 APP = "9c19c7d494699b64fa20fea16029efaf11a7c67b37b4a01bd44f8143780bdfbf"
 OLD_WRAPPERS = {   # earlier builds of the wrapper, replaced in place
     "c32ddd2f473a19c56413e08dc6766e4ee16957e99ca2477f370a8ba631583557",   # stage 1 (no sockets)
     "e35642447ddf142fea5bd7b4ea154c08bf5bcadf62ebfdba35a85b8611afeff8",   # + RFCOMM (the phone, 8 Nov)
     "95c93a515c6413665bdc61e69d99743e26f0f61b81d77f760a00b21b5d615922",   # + advertising
     "cc3300cdacaeb72d6a4d70d236f5daa485b7ba497bb1a5c5b1800dfd17027f12",   # + GATT server (the phone, 8 Nov)
+    "a176455109f10414b5b8b58b5c9d7d112dbe01e3d5ba5da8fedf8fc3f915db5a",   # + GATT ids, linger (the phone, 8 Nov)
 }
 APEX = "system/apex/com.android.btservices"
 FEATURES = {
