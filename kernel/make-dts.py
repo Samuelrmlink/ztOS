@@ -318,12 +318,14 @@ DP_TX_NODE = """
 	 */
 	displayport@11090000 {
 		compatible = "samsung,exynos9810-dp";
-		reg = <0x11090000 0x10000>, <0x110a0000 0x1000>;
-		reg-names = "link", "phy";
+		reg = <0x11090000 0x10000>, <0x110a0000 0x1000>,
+		      <0x11003014 0x8>;	/* CMU_FSYS0 QCH_CON_DP_LINK_QCH, _GTC */
+		reg-names = "link", "phy", "link-qch";
 		interrupts = <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
 		samsung,usb-phy = <&usbdrd_phy>;
 		samsung,pmu-syscon = <&pmu_system_controller>;
 		samsung,phy-isolation = <0x704 0x1>;
+		samsung,link-power-status = <0x4024 0xf>;	/* pd-dpu STATUS: 0xf = on */
 		samsung,lane-map = <3 2 0 1>, <0 1 3 2>;
 		samsung,two-lane-lanes = <2 3>, <0 1>;
 		orientation-switch;

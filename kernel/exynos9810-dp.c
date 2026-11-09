@@ -22,7 +22,8 @@
  * the first run on the phone can stop at the first phase that misbehaves:
  *
  *   id     read the link controller's version register (the first access
- *          to 0x11090000 at all)
+ *          to 0x11090000 at all), only once x9dp_link_ok() has seen the
+ *          link block powered and clocked
  *   pma    power the combo PMA up and run its common init
  *   phy    the PMA in DP mode for the pin assignment and orientation the
  *          typec class gave (lanes, PLL lock, AUX TX level)
@@ -191,6 +192,9 @@ struct x9dp {
 	void __iomem *usbcon;		/* the USB PHY's USBCON block (not ours: two bits) */
 	struct regmap *pmu;
 	u32 iso_off, iso_mask;		/* PHY isolation bit: set = not isolated */
+	u32 pd_off, pd_mask;		/* link power domain status: all mask bits = on */
+	void __iomem *qch;		/* the link's clock Q-channels (CMU, read only) */
+	u32 qch_n;
 	u32 lane_map[2][4];		/* PCS lane map per orientation (DT) */
 	u32 two_lanes[2][2];		/* PMA lanes for a 2-lane pin assignment (DT) */
 
@@ -224,6 +228,33 @@ static bool x9dp_phy_ok(struct x9dp *d)
 		dev_warn_ratelimited(d->dev, "combo PHY isolated (PMU %#x = %08x): not touched\n",
 				     d->iso_off, v);
 		return false;
+	}
+	return true;
+}
+
+/*
+ * Read only, before the first access to the link controller: its power
+ * domain on (PMU status, all mask bits set: pd-dpu on the 9810) and every
+ * clock Q-channel either in hardware control (ENABLE, bit 0: the clock is
+ * requested on access) or with its clock request forced (CLOCK_REQ, bit 1).
+ * Read on the phone before this driver existed: pd-dpu 0x0010000f, both
+ * DP_LINK Q-channels 0x003f0002 (forced on).
+ */
+static bool x9dp_link_ok(struct x9dp *d)
+{
+	u32 v = 0, i;
+
+	if (regmap_read(d->pmu, d->pd_off, &v) || (v & d->pd_mask) != d->pd_mask) {
+		dev_warn(d->dev, "link power domain off (PMU %#x = %08x): link not touched\n",
+			 d->pd_off, v);
+		return false;
+	}
+	for (i = 0; i < d->qch_n; i++) {
+		v = readl(d->qch + 4 * i);
+		if (!(v & (BIT(0) | BIT(1)))) {
+			dev_warn(d->dev, "link clock Q-channel %u off (%08x): link not touched\n", i, v);
+			return false;
+		}
 	}
 	return true;
 }
@@ -276,8 +307,11 @@ static int x9dp_oidx(struct x9dp *d)
 
 static int x9dp_id(struct x9dp *d)
 {
-	u32 v = readl(d->link + SYSTEM_DEVICE_VERSION);
+	u32 v;
 
+	if (!x9dp_link_ok(d))
+		return -EIO;
+	v = readl(d->link + SYSTEM_DEVICE_VERSION);
 	d->id_done = true;
 	scnprintf(d->last, sizeof(d->last), "id: SYSTEM_DEVICE_VERSION %08x", v);
 	return 0;
@@ -387,8 +421,8 @@ static int x9dp_phy(struct x9dp *d)
 	int lanes = x9dp_lanes(d), o = x9dp_oidx(d), i, ret;
 	u32 mode, tx, b3_10, b3_76, en, clk, v;
 
-	if (!d->pma_on)
-		return -EAGAIN;
+	if (!d->pma_on || !d->id_done)
+		return -EAGAIN;		/* pma first; id: the link is read for PLL lock */
 	if (!lanes)
 		return -ENOLINK;	/* no DP pin state from the class yet */
 	if (lanes == 4) {
@@ -712,8 +746,9 @@ static int x9dp_state_show(struct seq_file *s, void *unused)
 		   d->mode, x9dp_lanes(d),
 		   d->orient == TYPEC_ORIENTATION_REVERSE ? "reverse" : "normal", d->dp_status,
 		   d->dp_status & DP_STATUS_HPD_STATE ? "high" : "low", d->dp_conf);
-	seq_printf(s, "pma %d phy %d ctrl %d; PHY %s\n", d->pma_on, d->phy_on, d->ctrl_on,
-		   x9dp_phy_ok(d) ? "not isolated" : "ISOLATED");
+	seq_printf(s, "id %d pma %d phy %d ctrl %d; PHY %s; link %s\n", d->id_done, d->pma_on,
+		   d->phy_on, d->ctrl_on, x9dp_phy_ok(d) ? "not isolated" : "ISOLATED",
+		   x9dp_link_ok(d) ? "powered and clocked" : "OFF");
 	seq_printf(s, "last: %s\n", d->last);
 	if (d->dpcd_ok)
 		seq_printf(s, "dpcd: %16phN\n", d->dpcd);
@@ -824,6 +859,22 @@ static int x9dp_probe(struct platform_device *pdev)
 	d->pmu = syscon_regmap_lookup_by_phandle(dev->of_node, "samsung,pmu-syscon");
 	if (IS_ERR(d->pmu))
 		return dev_err_probe(dev, PTR_ERR(d->pmu), "samsung,pmu-syscon\n");
+	{
+		struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "link-qch");
+
+		if (!res)
+			return dev_err_probe(dev, -EINVAL, "reg \"link-qch\": the link's clock Q-channels\n");
+		/* the CMU's: mapped to read, not requested */
+		d->qch = devm_ioremap(dev, res->start, resource_size(res));
+		if (!d->qch)
+			return -ENOMEM;
+		d->qch_n = resource_size(res) / 4;
+	}
+	ret = x9dp_read_pairs(dev, "samsung,link-power-status", iso, 2);
+	if (ret)
+		return ret;
+	d->pd_off = iso[0];
+	d->pd_mask = iso[1];
 	ret = x9dp_read_pairs(dev, "samsung,phy-isolation", iso, 2);
 	ret = ret ?: x9dp_read_pairs(dev, "samsung,lane-map", &d->lane_map[0][0], 8);
 	ret = ret ?: x9dp_read_pairs(dev, "samsung,two-lane-lanes", &d->two_lanes[0][0], 4);
