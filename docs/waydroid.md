@@ -479,7 +479,7 @@ The policy lives in the host daemon, so Android can't get around it.
 ### Shim build
 
 The wrapper and shim are C++ for aarch64 bionic. They are built on the PC
-with the NDK (r25 or later, API 33) and:
+with NDK r25c (API 33) and:
 
 - the interface headers of LineageOS `android_packages_modules_Bluetooth`
   at `lineage-20.0` (`system/include/hardware/bluetooth.h`, `bt_gatt*.h`,
@@ -487,33 +487,65 @@ with the NDK (r25 or later, API 33) and:
   script at a pinned commit;
 - AOSP `external/libchrome` (r576279) headers at `android-13.0.0_r75`.
   These are needed because `BleScannerInterface`, `BleAdvertiserInterface`
-  and the GATT client take `base::Callback`s. The out-of-line `base::`
-  functions they need come from the stock library, which exports them (for
-  example the constructors of `base::internal::BindStateBase`). So the shim
-  links against `libbluetooth_jni_stock.so` and uses the same libchrome
-  code;
-- AOSP `external/libcxx` headers and the image's own `libc++.so`
-  (`std::__1`), not the NDK's `libc++_shared` (`std::__ndk1`). `std::vector`
-  and `std::string` cross the interface, so both sides must use the same
-  libc++.
+  and the GATT client take `base::Callback`s. The shim only runs and copies
+  callbacks the JNI code made. The few out-of-line functions that takes
+  (libchrome's `callback_internal.cc` and `memory/ref_counted.cc`) are
+  compiled into the shim. It can't link against the stock library, because
+  both have the soname `libbluetooth_jni.so`;
+- the NDK's libc++ headers compiled with `_LIBCPP_ABI_NAMESPACE=__1`, and
+  linked against the image's own `libc++.so`, not the NDK's
+  `libc++_shared` (`std::__ndk1`). `std::vector` and `std::string` cross the
+  interface, so both sides must use the same libc++. NDK r25c's clang is
+  r450784d1, the compiler Android 13 itself is built with, so its libc++
+  headers are the platform's.
+- the flags AOSP builds arm64 platform code with: `-fsanitize=shadow-call-stack`,
+  `-fno-exceptions`, `-fno-rtti`, `NDEBUG` (libchrome's
+  `RefCountedThreadSafeBase` has extra members when DCHECKs are on).
 
-A check after each build compares the shim's vtable sizes and struct sizes
-with the stock library. For example, `sizeof(bt_interface_t)` must be 328,
-the size of the stock symbol.
+`shim/fetch.sh` gets the pinned sources (`shim/sources.conf`), the NDK
+(sha256-checked) and, from the system image with debugfs, `libc++.so`,
+`liblog.so` and the stock `libbluetooth_jni.so`. `shim/build.sh` builds
+`out/libbluetooth_jni.so` (125 KB; the build is reproducible) and fails
+unless:
 
-The image has no Bluetooth app, so it has to come from somewhere else. That
-needs a decision:
+- it exports only `JNI_OnLoad` and needs only `libc++`, `liblog`, `libdl`,
+  `libc` and `libm`;
+- it links with no undefined symbol against the image's libraries;
+- `sizeof(bt_interface_t)` is the size of the stock `bluetoothInterface`
+  symbol (328). The wrapper also checks the stock `size` field at run time,
+  and refuses to patch on a mismatch;
+- the libchrome callback functions built into the shim use the same field
+  offsets as the stock library's (`shim/abi-check.sh` compares the
+  disassembly).
 
-1. **Take it from another LineageOS 20 arm64 build of the same release** (a
-   GSI or a device build with `TQ3A.230901.001`), only `Bluetooth.apk`. A
-   check compares its native methods (class, name and signature) with the
-   strings the stock `libbluetooth_jni.so` registers, and rejects it on a
-   mismatch. This is the cheapest option, but it depends on finding such a
-   build.
-2. **Build it** from a LineageOS 20 checkout (about 150 GB without the
-   history) with `m Bluetooth` for `lineage_waydroid_arm64-userdebug`. This
-   takes hours of sync and build, once. After that, the app (and the shim as
-   a Soong module, if wanted) are exact.
+The built library is kept in `prebuilts/waydroid-bt/`, with its sha256.
+
+**The Bluetooth app** comes from AndyYan's LineageOS 20 GSI (lineage-20-td,
+20251021, `TQ3A.230901.001`), the one `Bluetooth.apk` from its btservices
+APEX. Source URL and hashes are in `prebuilts/waydroid-bt/SOURCES`.
+`bluetooth/tools/check-bt-app.py` reads the app's dex files and the stock
+library's `JNINativeMethod` tables (through their RELR relocations). All 23
+classes with native methods match the Waydroid library's tables. As in stock
+AOSP 13, AdapterService declares three natives that no library registers.
+The GSI's `framework-bluetooth.jar` is byte-identical to the Waydroid
+image's, and its JNI library looks up the same Java callbacks.
+
+**Testing without Android.** `tests/test_shim_host.py` builds the shim for
+the PC (g++, the same sources and headers, `shim/tests/host-build.sh`) and
+drives it the way Android's JNI does (`shim/tests/host_test.cc`). It runs
+against the bridge's real core and socket, with a fake BlueZ that answers at
+once and plays the radio. The test covers:
+
+- enable, and the bonded list without the Linux-connected device;
+- LE scan results and Classic discovery;
+- GATT connect, database, reads (including an ATT error), the CCCD write and
+  the notification it brings, writes, MTU and PHY;
+- the Linux-connected device refused (133);
+- pairing through `Pair()`, removing a Linux bond refused, removing the
+  Android-made one allowed;
+- disable;
+- that no PIN or SSP request ever reaches Android, and that every callback
+  comes on the one thread that announced itself with `ASSOCIATE_JVM`.
 
 ### Stages
 

@@ -35,6 +35,7 @@ import uuid
 from . import proto as P
 
 CONNECT_SECONDS = 35
+RELEASE_SECONDS = 10    # how long a device we let go may still show Connected
 DISCOVER_SECONDS = 30
 CCCD = "00002902-0000-1000-8000-00805f9b34fb"
 AD_FIELDS = ("RSSI", "ManufacturerData", "ServiceData", "AdvertisingData",
@@ -77,6 +78,7 @@ class Bridge:
         self.resolving = {}       # addr -> [callbacks waiting for ServicesResolved]
         self.notifying = {}       # (addr, char handle) -> count of links
         self.le_seen = set()      # addresses reported by an LE scan
+        self.releasing = {}       # addr -> timer: we called Disconnect(), BlueZ not done yet
 
     # ---- state from the backend -------------------------------------------
 
@@ -87,7 +89,9 @@ class Bridge:
         d = self.devs.get(addr)
         if d is None or d.get("Blocked"):
             return False
-        return not (d.get("Connected") and addr not in self.holds)
+        # connected and not ours: Linux uses it. A device we just let go still
+        # shows Connected until BlueZ is done; it is not Linux's for that.
+        return not (d.get("Connected") and addr not in self.holds and addr not in self.releasing)
 
     def bonded(self, d):
         return bool(d.get("Bonded", d.get("Paired")))
@@ -355,7 +359,7 @@ class Bridge:
         answer(P.ST_OK, [link.id])
         hold = self.holds.get(addr)
         if hold is None:
-            hold = self.holds[addr] = Hold(made=not self.devs[addr].get("Connected"))
+            hold = self.holds[addr] = Hold(made=self._taken_back(addr) or not self.devs[addr].get("Connected"))
             hold.tokens.add(link.id)
             self._connect(addr, hold)
         else:
@@ -371,6 +375,9 @@ class Bridge:
 
         def err(name, msg):
             if self.holds.get(addr) is not hold:
+                return
+            if name.endswith("AlreadyConnected"):   # taken back while BlueZ was letting go
+                self._connected(addr, hold)
                 return
             self.log("connect", addr, "failed:", name, msg)
             self._drop_hold(addr, P.ST_TIMEOUT if "Timeout" in name or "timeout" in msg.lower() else P.ST_FAIL)
@@ -399,6 +406,8 @@ class Bridge:
         self._event_all("EV_ACL", [addr, True, P.T_LE if addr in self.le_seen or "Class" not in self.devs[addr] else P.T_BREDR])
 
     def _connected_changed(self, addr, connected):
+        if not connected and addr in self.releasing:
+            self.be.cancel(self.releasing.pop(addr))
         hold = self.holds.get(addr)
         if hold is None:
             return
@@ -426,8 +435,24 @@ class Bridge:
         for token in list(hold.tokens):
             self._end_link(token, status)
         if disconnect and hold.made:
+            self._release_timer(addr)
             self.be.disconnect(addr, lambda: None, lambda n, m: self.log("disconnect", addr, n, m))
         self._event_all("EV_ACL", [addr, False, P.T_AUTO])
+
+    def _release_timer(self, addr):
+        if addr in self.releasing:
+            self.be.cancel(self.releasing[addr])
+
+        def done():
+            self.releasing.pop(addr, None)
+        self.releasing[addr] = self.be.after(RELEASE_SECONDS, done)
+
+    def _taken_back(self, addr):
+        """Android wants a device we are still letting go: it is ours again."""
+        if addr in self.releasing:
+            self.be.cancel(self.releasing.pop(addr))
+            return True
+        return False
 
     def _end_link(self, token, status):
         link = self.links.pop(token, None) if isinstance(token, int) else None
@@ -605,7 +630,7 @@ class Bridge:
         self.pairing[addr] = client
         hold = self.holds.get(addr)
         if hold is None:
-            hold = self.holds[addr] = Hold(made=not d.get("Connected"))
+            hold = self.holds[addr] = Hold(made=self._taken_back(addr) or not d.get("Connected"))
             if d.get("Connected"):
                 hold.state = "connected"
         hold.tokens.add(PAIR)

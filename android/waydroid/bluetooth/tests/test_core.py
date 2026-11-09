@@ -194,6 +194,36 @@ class Gatt(unittest.TestCase):
         c.request("BOND_CREATE", LOCK, P.T_LE)    # already bonded: no hold
         self.assertEqual(br.holds, {})
 
+    def test_a_device_being_let_go_is_not_linux_s(self):
+        be, store, br, c, link = self.connected()
+        c.request("GATT_CLOSE", link)
+        self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])
+        # BlueZ still says Connected for a moment: not hidden, not busy
+        rid = c.request("BOND_CREATE", SENSOR, P.T_LE)
+        self.assertEqual(c.reply(rid, "BOND_CREATE")[0], P.ST_OK)
+        self.assertTrue(br.holds[SENSOR].made)
+
+    def test_taken_back_while_letting_go(self):
+        be, store, br, c, link = self.connected()
+        c.request("GATT_CLOSE", link)
+        st, (link2,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect", error=("org.bluez.Error.AlreadyConnected", ""))
+        self.assertEqual(c.events("EV_LINK")[-1], [link2, P.ST_OK, True, 247])
+        self.assertTrue(br.holds[SENSOR].made)       # still ours to disconnect later
+
+    def test_release_window_ends(self):
+        be, store, br, c, link = self.connected()
+        c.request("GATT_CLOSE", link)
+        be.timers[-1][1]()                     # BlueZ never said Disconnected: after 10 s
+        rid = c.request("GATT_OPEN", SENSOR, 1, P.T_LE)
+        self.assertEqual(c.reply(rid, "GATT_OPEN")[0], P.ST_BUSY)
+
+    def test_release_window_closes_on_disconnected(self):
+        be, store, br, c, link = self.connected()
+        c.request("GATT_CLOSE", link)
+        br.device_changed(SENSOR, {"Connected": False})
+        self.assertEqual(br.releasing, {})
+
     def test_remote_disconnect_ends_links(self):
         be, store, br, c, link = self.connected()
         br.device_changed(SENSOR, {"Connected": False})
