@@ -173,6 +173,24 @@ SUBSYSTEM=="drm", KERNEL=="card*", DRIVERS=="exynos9810-dp", ENV{ID_SEAT}="seat-
 the sink. An HPD rise with the pipe enabled restarts it; HPD changes send
 a hotplug event. No config change: the release stays 7.1.0-zboot-wd-dp4.
 
+**Desktop on DP-1 (dp34/dp35, branch feature/desktop-dp).** For the shell the
+card is named `exynos` (Mesa's kmsro pairs it with Panfrost, as s9p-decon)
+and hangs off a platform device of its own, `x9dp-drm`: wlroots without
+`WLR_DRM_DEVICES` takes the first KMS card in udev's syspath order as its
+primary GPU, and `platform/x9dp-drm` sorts after DECON0's
+`platform/soc@0/16030000.decon` (under `soc@0/11090000.displayport` the DP
+card would have come first). A 60 Hz vblank timer paces the page flips.
+
+- `exynos9810_dp.hpd_read=1 exynos9810_dp.drm_auto=1` on the command line
+  (dp35) register the card at the first HPD high.
+- The running shell (wlroots 0.20) adds it as a secondary GPU on hotplug,
+  finds DP-1 connected and sets 1920x1080@60; HPD low/high takes DP-1 away
+  and back. A shell started with the card present still takes DECON0's
+  card as the primary.
+- The desktop-mode shell (feature/desktop-mode, merged into
+  feature/desktop-dp) puts its desktop on DP-1; `desktop start` on its
+  control pipe (or the setting "start automatically") starts XFCE there.
+
 **Fallback: the PMA up before Enter Mode.** Stock's USB3 bring-up powers the
 combo PHY's PMA before the dock is asked to enter DP. If HPD stays low even
 with USB enumerating, `exynos9810_dp.pma_early=1` (a `--dp-tx` image;
