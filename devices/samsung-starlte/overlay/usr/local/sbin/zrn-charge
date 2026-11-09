@@ -88,6 +88,7 @@ TRIP_COUNT=input_current_trips			# chargers cutting VBUS, this boot
 TRIP_LIMIT=input_current_trip_limit		# uA in force at the last trip
 TRIP_VOLTAGE=input_current_trip_voltage		# uV at the last trip, 0 = unknown
 PD_CAPS=pd_source_caps				# the source's PDOs, "mV:mA mV:mA ..."
+LOW_HV_PCT=15					# below it, a PD 5 V x 3 A charger stays at 5 V
 PD_HARD_RESETS=pd_hard_resets			# a count
 PD_CAPS_REDUCED=pd_caps_reduced_after_hard_reset	# a count
 # What each charger did before, per fingerprint (charger_type, usb_type and
@@ -482,6 +483,19 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	[ $tknown = 1 ] || hvok=0
 	# held at 5 V by hand (a new driver on trial): touch /etc/zrn-charge/no-hv
 	[ -e "$R/etc/zrn-charge/no-hv" ] && [ $hvok = 1 ] && { hvok=0; why+=" 9 V off by hand"; }
+	# Battery under LOW_HV_PCT on a PD charger whose 5 V already gives the full
+	# 15 W (5 V x 3 A): stay at 5 V, stock's choice, so there is no switch and no
+	# few seconds at 500 mA while the input ramps up again at 9 V, when a few
+	# percent is all that keeps the phone on. Only before switching (on 9 V
+	# already, it stays: going down dips too). AFC/QC2 still switch: there 9 V
+	# is a real gain over the DCP's 1800 mA.
+	if [ $hvok = 1 ] && [ $src = wired ] && [ $hvbus = 0 ] && [ "$type" = pd ] &&
+	   num "$B/capacity" && [ $REPLY -lt $LOW_HV_PCT ]; then
+		local pc
+		for pc in $caps; do
+			case $pc in 5000:*) [ "${pc#5000:}" -ge 3000 ] 2>/dev/null && { hvok=0; why+=" 5 V while under $LOW_HV_PCT %"; break; } ;; esac
+		done
+	fi
 
 	if [ $src = wired ]; then
 		if [ $hvbus = 1 ] && screen_on; then min in 500; min chg 1000; why+=" screen on"; fi
