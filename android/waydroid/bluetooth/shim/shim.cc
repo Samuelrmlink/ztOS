@@ -3,8 +3,8 @@
 // BleScannerInterface, BleAdvertiserInterface), answered by ztos-btbridge on
 // the host, which uses BlueZ. See docs/waydroid.md, "Bluetooth for Android
 // apps". Stage 1: adapter, bonded devices, LE scan and discovery, GATT client,
-// pairing through BlueZ. The advertiser and GATT server refuse (stage 2);
-// sockets are absent (stage 3).
+// pairing through BlueZ; Classic RFCOMM client sockets (stage 3). The
+// advertiser and GATT server refuse (stage 2); no listening sockets yet.
 //
 // What this never does: talk HCI (dut_mode_send, le_test_mode refuse), hold
 // or pass link keys, or ask Android for a PIN or a confirmation (pin_request
@@ -28,6 +28,9 @@
 #include <base/callback.h>
 #include <hardware/bluetooth.h>
 #include <hardware/bt_gatt.h>
+#include <hardware/bt_sock.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include "conn.h"
 #include "log.h"
@@ -1090,9 +1093,48 @@ const btgatt_interface_t kGatt = {
     sizeof(btgatt_interface_t), GattInit, GattCleanup, &kClient, &kServer, &gScanner, &gAdvertiser,
 };
 
+// ---- sockets: Classic RFCOMM ---------------------------------------------------
+//
+// Android's BluetoothSocket reads its socket fd: first the channel (int), then
+// sock_connect_signal_t, then data. The shim makes a stream socketpair, gives
+// Android one end and the bridge the other (SCM_RIGHTS). The bridge writes the
+// channel and signal once BlueZ's RFCOMM link is up and relays from then on,
+// or closes its end if the connect fails (Android: IOException). Android never
+// holds a Bluetooth socket. Listening sockets: not yet.
+
+bt_status_t SockListen(btsock_type_t, const char*, const Uuid*, int, int* sock_fd, int, int) {
+  if (sock_fd) *sock_fd = -1;
+  return BT_STATUS_UNSUPPORTED;
+}
+
+bt_status_t SockConnect(const RawAddress* bd_addr, btsock_type_t type, const Uuid* uuid, int channel,
+                        int* sock_fd, int flags, int) {
+  if (sock_fd) *sock_fd = -1;
+  if (!g || !bd_addr || !sock_fd) return BT_STATUS_PARM_INVALID;
+  if (type != BTSOCK_RFCOMM) return BT_STATUS_UNSUPPORTED;   // L2CAP, SCO: not offered
+  int sv[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0) return BT_STATUS_FAIL;
+  std::array<uint8_t, 16> u{};
+  if (uuid) memcpy(u.data(), uuid, 16);
+  RawAddress a = *bd_addr;
+  g->conn->Request(ZTBT_OP_RFCOMM_CONNECT,
+                   {Value::Addr(a.address), Value::Uuid(u), Value::I32(channel), Value::U32((uint32_t)flags)},
+                   ZTBT_SIG_RFCOMM_CONNECT_REPLY, [a](uint32_t st, const Values&) {
+    if (st != ZTBT_ST_OK) LOGW("RFCOMM %s: bridge said %u", AddrText(a.address).c_str(), st);
+  }, sv[1]);
+  close(sv[1]);   // sent: the bridge has its own; not sent: Android reads end of stream
+  *sock_fd = sv[0];
+  return BT_STATUS_SUCCESS;
+}
+
+void SockMaxTx(const RawAddress&) {}
+
+const btsock_interface_t kSock = {sizeof(btsock_interface_t), SockListen, SockConnect, SockMaxTx};
+
 const void* GetProfileInterface(const char* id) {
   if (id && strcmp(id, BT_PROFILE_GATT_ID) == 0) return &kGatt;
-  return nullptr;   // sockets: stage 3; audio, HID, PAN...: Linux's
+  if (id && strcmp(id, BT_PROFILE_SOCKETS_ID) == 0) return &kSock;
+  return nullptr;   // audio, HID, PAN...: Linux's
 }
 
 }  // namespace

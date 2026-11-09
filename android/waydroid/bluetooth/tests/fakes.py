@@ -11,6 +11,8 @@ AIRPODS = "AA:00:00:00:00:01"     # bonded, connected by Linux
 SENSOR = "C0:00:00:00:00:02"      # LE, random, not bonded
 LOCK = "D0:00:00:00:00:03"        # LE, bonded, not connected
 SPEAKER = "E0:00:00:00:00:04"     # Classic, bonded, not connected
+PRINTER = "E8:00:00:00:00:05"     # Classic SPP printer, not bonded yet
+SPP = "00001101-0000-1000-8000-00805f9b34fb"
 
 HR = "0000180d-0000-1000-8000-00805f9b34fb"
 HRM = "00002a37-0000-1000-8000-00805f9b34fb"
@@ -22,6 +24,7 @@ class FakeBackend:
         self.calls = []
         self.pending = []      # (name, args, ok, err): answered by the test
         self.timers = []
+        self.relays = []
         self.powered = True
         self.devs = {
             AIRPODS: {"Address": AIRPODS, "AddressType": "public", "Name": "AirPods", "Alias": "AirPods",
@@ -33,6 +36,8 @@ class FakeBackend:
                    "Bonded": True, "Connected": False, "UUIDs": []},
             SPEAKER: {"Address": SPEAKER, "AddressType": "public", "Name": "Speaker", "Alias": "Speaker",
                       "Class": 0x240414, "Paired": True, "Bonded": True, "Connected": False, "UUIDs": []},
+            PRINTER: {"Address": PRINTER, "AddressType": "public", "Name": "Printer", "Alias": "Printer",
+                      "Class": 0x040680, "Paired": False, "Connected": False, "UUIDs": [SPP]},
         }
         # the GATT database of the sensor: service 1..5, characteristic value 3, CCCD 4
         self.db = [(P.DB_PRIMARY, 1, 1, 5, HR, 0), (P.DB_CHARACTERISTIC, 3, 3, 3, HRM, 0x10),
@@ -89,6 +94,22 @@ class FakeBackend:
     def mtu(self, addr):
         return 247
 
+    def rfcomm_connect(self, addr, uuid, channel, secure, ok, err):
+        self._later("rfcomm", [addr, uuid, channel, secure], ok, err)
+
+    def relay(self, a, b, prefix, on_close):
+        r = {"a": a, "b": b, "prefix": prefix, "on_close": on_close, "open": True}
+        self.calls.append(("relay", a, b, prefix))
+        self.relays.append(r)
+        return r
+
+    def unrelay(self, r):
+        self.calls.append(("unrelay",))
+        if r["open"]:
+            r["open"] = False
+            os.close(r["a"])
+            os.close(r["b"])
+
     def after(self, seconds, fn):
         self.timers.append((seconds, fn))
         return fn
@@ -97,12 +118,14 @@ class FakeBackend:
         self.timers = [t for t in self.timers if t[1] is not handle]
 
     # test helpers
-    def answer(self, name, error=None, value=None):
+    def answer(self, name, error=None, value=None, values=None):
         for i, (n, args, ok, err) in enumerate(self.pending):
             if n == name:
                 del self.pending[i]
                 if error:
                     err(*error)
+                elif values is not None:
+                    ok(*values)
                 elif value is not None:
                     ok(value)
                 else:
@@ -150,10 +173,10 @@ class FakeClient:
         self.closed = True
         self.bridge.detach(self)
 
-    def request(self, op, *values):
+    def request(self, op, *values, fds=()):
         msg_id = self.next_id
         self.next_id += 1
-        self.bridge.handle(self, P.message(op, msg_id, list(values)))
+        self.bridge.handle(self, P.message(op, msg_id, list(values)), fds)
         return msg_id
 
     def reply(self, msg_id, op):

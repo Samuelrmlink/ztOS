@@ -39,6 +39,14 @@ class PatchBluetooth(unittest.TestCase):
         self.assertEqual(pb.sha(apk), pb.APP)
         self.assertEqual(os.stat(apk).st_mode & 0o777, 0o644)
 
+    def test_older_wrapper_updated(self):
+        old = b"an older wrapper"
+        pb.OLD_WRAPPERS.add(hashlib.sha256(old).hexdigest())
+        (self.lib / "libbluetooth_jni_stock.so").write_bytes(self.stock)
+        (self.lib / "libbluetooth_jni.so").write_bytes(old)
+        self.assertEqual(pb.system(str(self.root), str(PREBUILTS)), 0)
+        self.assertEqual(pb.sha(self.lib / "libbluetooth_jni.so"), pb.WRAPPER)
+
     def test_unknown_stock_refused(self):
         (self.lib / "libbluetooth_jni.so").write_bytes(b"another build")
         self.assertEqual(pb.system(str(self.root), str(PREBUILTS)), 3)

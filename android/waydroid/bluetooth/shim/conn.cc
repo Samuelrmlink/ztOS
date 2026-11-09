@@ -91,7 +91,30 @@ void Conn::Cancel(uint64_t timer) {
   }
 }
 
-void Conn::Request(uint16_t op, const Values& args, const char* reply_sig, Reply cb) {
+namespace {
+
+ssize_t SendWithFd(int sock, const std::string& packet, int fd) {
+  if (fd < 0) return send(sock, packet.data(), packet.size(), MSG_NOSIGNAL);
+  struct iovec iov = {(void*)packet.data(), packet.size()};
+  char ctl[CMSG_SPACE(sizeof(int))];
+  memset(ctl, 0, sizeof ctl);
+  struct msghdr msg;
+  memset(&msg, 0, sizeof msg);
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = ctl;
+  msg.msg_controllen = sizeof ctl;
+  struct cmsghdr* c = CMSG_FIRSTHDR(&msg);
+  c->cmsg_level = SOL_SOCKET;
+  c->cmsg_type = SCM_RIGHTS;
+  c->cmsg_len = CMSG_LEN(sizeof(int));
+  memcpy(CMSG_DATA(c), &fd, sizeof(int));
+  return sendmsg(sock, &msg, MSG_NOSIGNAL);
+}
+
+}  // namespace
+
+void Conn::Request(uint16_t op, const Values& args, const char* reply_sig, Reply cb, int fd) {
   std::string packet;
   uint32_t id;
   {
@@ -99,7 +122,7 @@ void Conn::Request(uint16_t op, const Values& args, const char* reply_sig, Reply
     id = next_id_++;
     if (next_id_ == 0) next_id_ = 1;
   }
-  if (!Encode(op, id, args, &packet)) {
+  if (!Encode(op, id, args, &packet, fd >= 0 ? kFlagFd : 0)) {
     LOGE("request 0x%04x: can't encode", op);
     Post([cb] { cb(ZTBT_ST_INVALID, {}); });
     return;
@@ -116,8 +139,7 @@ void Conn::Request(uint16_t op, const Values& args, const char* reply_sig, Reply
   bool sent;
   {
     std::lock_guard<std::mutex> l(send_mu_);
-    int fd = fd_;
-    sent = fd >= 0 && send(fd, packet.data(), packet.size(), MSG_NOSIGNAL) == (ssize_t)packet.size();
+    sent = fd_ >= 0 && SendWithFd(fd_, packet, fd) == (ssize_t)packet.size();
   }
   if (!sent) {
     Reply failed;

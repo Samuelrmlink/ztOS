@@ -13,6 +13,7 @@ AID_BLUETOOTH = 1002
 CONTAINER_CGROUP = "lxc.payload.waydroid"
 CGROUP_EVENTS = "/sys/fs/cgroup/" + CONTAINER_CGROUP + "/cgroup.events"
 QUEUE_MAX = 4096
+MAX_FDS = 1             # a request carries at most one fd
 
 
 def peer_cred(sock):
@@ -48,20 +49,25 @@ class Client:
             self.close()
             return False
         try:
-            data, _, flags, _ = self.sock.recvmsg(P.MAX_PACKET)
+            data, anc, flags, _ = self.sock.recvmsg(P.MAX_PACKET, socket.CMSG_SPACE(4 * MAX_FDS),
+                                                    socket.MSG_CMSG_CLOEXEC)
         except BlockingIOError:
             return True
         except OSError:
             self.close()
             return False
-        if not data:
+        fds = []
+        for level, kind, payload in anc:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                fds.extend(struct.unpack("%di" % (len(payload) // 4), payload[:len(payload) // 4 * 4]))
+        if not data or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+            for fd in fds:
+                os.close(fd)
+            if data:
+                self.server.log(self.who, "packet or its fds cut short")
             self.close()
             return False
-        if flags & socket.MSG_TRUNC:
-            self.server.log(self.who, "packet too long")
-            self.close()
-            return False
-        self.server.bridge.handle(self, data)
+        self.server.bridge.handle(self, data, fds)
         return not self.closed
 
     def send(self, packet, droppable=False):

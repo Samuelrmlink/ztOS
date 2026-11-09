@@ -42,7 +42,7 @@ struct Value {
 using Values = std::vector<Value>;
 
 // Encode one message; false if it doesn't fit in kMaxPacket.
-bool Encode(uint16_t op, uint32_t id, const Values& args, std::string* out);
+bool Encode(uint16_t op, uint32_t id, const Values& args, std::string* out, uint16_t flags = 0);
 // Decode one packet; false on any malformation.
 bool Decode(const uint8_t* p, size_t n, uint16_t* op, uint32_t* id, Values* args);
 // Do args fit a signature such as "uqyqb" or "L(yqqqUq)"?

@@ -29,6 +29,8 @@ import uuid as _uuid
 VERSION = 1
 MAX_PACKET = 65536
 HEADER = struct.Struct("<HHI")
+FLAG_FD = 0x0001        # header flag: the packet carries one fd (SCM_RIGHTS)
+FD_OPS = {"RFCOMM_CONNECT"}   # the requests that must carry one
 
 # statuses (REPLY's first argument, and some events')
 ST_OK = 0
@@ -80,6 +82,10 @@ OPS = {
     "BOND_CREATE":     (0x0040, "ay", ""),         # address, transport; the result comes as BOND_STATE
     "BOND_CANCEL":     (0x0041, "a", ""),
     "BOND_REMOVE":     (0x0042, "a", ""),
+    # Classic RFCOMM. The request carries one fd (FLAG_FD): the bridge's end of
+    # a stream socketpair whose other end the shim gave Android as the socket.
+    # address, UUID (all zero: none), channel (-1: by SDP), Android's SEC_FLAG_*
+    "RFCOMM_CONNECT":  (0x0050, "aUiu", "u"),      # -> stream id; the outcome goes down the stream
     # events, bridge -> shim
     "EV_ADAPTER":      (0x8001, "Bs", None),       # powered, name
     "EV_DEVICE_FOUND": (0x8010, "T(aysuyyBLU)iib", None),  # device, rssi, tx power (127: unknown), AD structures
@@ -259,9 +265,9 @@ def _match_all(specs, items):
     return [_match(s, it) for s, it in zip(specs, items)]
 
 
-def encode(op, msg_id, args):
+def encode(op, msg_id, args, flags=0):
     num = OPS[op][0] if isinstance(op, str) else op
-    out = bytearray(HEADER.pack(num, 0, msg_id))
+    out = bytearray(HEADER.pack(num, flags, msg_id))
     for a in args:
         _enc(a, out)
     if len(out) > MAX_PACKET:
@@ -281,13 +287,17 @@ def decode_raw(packet):
 
 
 def decode_request(packet):
-    """-> (op name, id, [plain args]) checked against OPS; ProtoError otherwise."""
-    num, _, msg_id, items = decode_raw(packet)
+    """-> (op name, id, [plain args]) checked against OPS; ProtoError otherwise.
+    An op in FD_OPS must have FLAG_FD set, any other must not (the caller
+    checks that exactly one fd came with it)."""
+    num, flags, msg_id, items = decode_raw(packet)
     name = BY_NUMBER.get(num)
     if name is None or num & 0x8000 or name == "REPLY":
         raise ProtoError("unknown request op 0x%04x" % num)
     if msg_id == 0:
         raise ProtoError("request without id")
+    if flags & ~FLAG_FD or bool(flags & FLAG_FD) != (name in FD_OPS):
+        raise ProtoError("%s: wrong flags 0x%x" % (name, flags))
     specs, _ = _parse_sig(OPS[name][1])
     return name, msg_id, _match_all(specs, items)
 
@@ -325,8 +335,17 @@ def _wrap(spec, v):
 
 
 def message(op, msg_id, values):
-    """Encode op with plain values, typed by OPS' signature (for events)."""
-    return encode(op, msg_id, typed(OPS[op][1], values))
+    """Encode op with plain values, typed by OPS' signature (FLAG_FD set for
+    the ops that carry an fd)."""
+    return encode(op, msg_id, typed(OPS[op][1], values), FLAG_FD if op in FD_OPS else 0)
+
+
+def connect_signal(addr, channel, status):
+    """What Android's BluetoothSocket reads first from an RFCOMM stream: the
+    channel (int), then sock_connect_signal_t (packed, 20 bytes: size, address,
+    channel, status, max tx and rx packet sizes). Native order: little endian."""
+    return (struct.pack("<i", channel) +
+            struct.pack("<h6siiHH", 20, addr_bytes(addr), channel, status, 0, 0))
 
 
 def reply(request_op, msg_id, status, values=()):

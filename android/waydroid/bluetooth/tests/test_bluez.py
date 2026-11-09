@@ -113,6 +113,80 @@ class BlueZTests(unittest.TestCase):
         self.assertEqual(b.core.changes[-1], (SENSOR, None, False))
         self.assertNotIn(SENSOR, b.dev_path)
 
+    def rfcomm(self, reply_first):
+        b = backend()
+        b.profiles = {}
+        b.rfcomm_pending = {}
+        calls = []
+
+        def fake_call(path, iface, method, args, ok, err, timeout=None, convert=None):
+            calls.append((path, method, args))
+            self.reply_ok, self.reply_err = ok, err
+        b._call = fake_call
+        b._ensure_profile = lambda uuid, ok, err: ok()
+        got = []
+        b.rfcomm_connect(SENSOR, "00001101-0000-1000-8000-00805f9b34fb", -1, True,
+                         lambda fd, ch: got.append((fd, ch)), lambda n, m: got.append((n, m)))
+        self.assertEqual(calls, [(DEV, "ConnectProfile", ["00001101-0000-1000-8000-00805f9b34fb"])])
+        import socket
+        a, s = socket.socketpair()
+        if reply_first:
+            self.reply_ok()
+            self.assertEqual(got, [])
+            b._new_connection("00001101-0000-1000-8000-00805f9b34fb", DEV, s.detach())
+        else:
+            b._new_connection("00001101-0000-1000-8000-00805f9b34fb", DEV, s.detach())
+            self.assertEqual(got, [])
+            self.reply_ok()
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0][1], 1)
+        self.assertEqual(b.rfcomm_pending, {})
+        import os
+        os.close(got[0][0])
+        a.close()
+        return b
+
+    def test_rfcomm_reply_then_connection(self):
+        self.rfcomm(True)
+
+    def test_rfcomm_connection_then_reply(self):
+        self.rfcomm(False)
+
+    def test_rfcomm_failure_closes_a_connection_that_came(self):
+        import os
+        import socket
+        b = backend()
+        b.profiles = {}
+        b.rfcomm_pending = {}
+
+        def fake_call(path, iface, method, args, ok, err, timeout=None, convert=None):
+            self.reply_err = err
+        b._call = fake_call
+        b._ensure_profile = lambda uuid, ok, err: ok()
+        got = []
+        b.rfcomm_connect(SENSOR, "00001101-0000-1000-8000-00805f9b34fb", -1, True,
+                         lambda fd, ch: got.append("ok"), lambda n, m: got.append(n))
+        a, s = socket.socketpair()
+        fd = s.detach()
+        b._new_connection("00001101-0000-1000-8000-00805f9b34fb", DEV, fd)
+        self.reply_err("org.bluez.Error.Failed", "Connection refused")
+        self.assertEqual(got, ["org.bluez.Error.Failed"])
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+        a.close()
+
+    def test_unasked_connection_closed(self):
+        import os
+        import socket
+        b = backend()
+        b.rfcomm_pending = {}
+        a, s = socket.socketpair()
+        fd = s.detach()
+        b._new_connection("00001101-0000-1000-8000-00805f9b34fb", DEV, fd)
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+        a.close()
+
     def test_other_adapters_devices_ignored(self):
         b = backend()
         b._on_added(dbus.ObjectPath("/org/bluez/hci1/dev_11_22_33_44_55_66"),

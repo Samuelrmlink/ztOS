@@ -25,8 +25,11 @@ import shutil
 import sys
 
 STOCK_JNI = "9b6dc6ff611abe505356e588b2641483d2237738ec166268751f82e8a90e9e3f"
-WRAPPER = "c32ddd2f473a19c56413e08dc6766e4ee16957e99ca2477f370a8ba631583557"
+WRAPPER = "e35642447ddf142fea5bd7b4ea154c08bf5bcadf62ebfdba35a85b8611afeff8"
 APP = "9c19c7d494699b64fa20fea16029efaf11a7c67b37b4a01bd44f8143780bdfbf"
+OLD_WRAPPERS = {   # earlier builds of the wrapper, replaced in place
+    "c32ddd2f473a19c56413e08dc6766e4ee16957e99ca2477f370a8ba631583557",   # stage 1 (no sockets)
+}
 APEX = "system/apex/com.android.btservices"
 FEATURES = {
     "android.hardware.bluetooth.xml": "android.hardware.bluetooth",
@@ -84,6 +87,9 @@ def system(root, prebuilts):
         print("libbluetooth_jni.so: the shim's wrapper; the stock one is libbluetooth_jni_stock.so")
     elif have == WRAPPER and os.path.isfile(stock) and sha(stock) == STOCK_JNI:
         print("libbluetooth_jni.so: already the wrapper")
+    elif have in OLD_WRAPPERS and os.path.isfile(stock) and sha(stock) == STOCK_JNI:
+        put(os.path.join(prebuilts, "libbluetooth_jni.so"), jni, stock, WRAPPER)
+        print("libbluetooth_jni.so: wrapper updated")
     else:
         print("libbluetooth_jni.so: unknown (%s): not the pinned image" % have[:16], file=sys.stderr)
         return 3

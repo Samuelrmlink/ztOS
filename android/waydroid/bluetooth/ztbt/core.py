@@ -29,6 +29,7 @@ Backend methods the core calls (callbacks ok(...) / err(name, message)):
 and calls back: device_changed(addr, props_changed, added), device_removed(addr),
 adapter_changed(props), value_changed(addr, char_handle, value).
 """
+import os
 import re
 import uuid
 
@@ -41,6 +42,21 @@ CCCD = "00002902-0000-1000-8000-00805f9b34fb"
 AD_FIELDS = ("RSSI", "ManufacturerData", "ServiceData", "AdvertisingData",
              "AdvertisingFlags", "Name", "Alias", "TxPower", "UUIDs", "Appearance")
 PAIR = "pair"   # the hold token of a Pair() in flight
+RFCOMM = "rfcomm"   # hold tokens (RFCOMM, stream id)
+NO_UUID = "00000000-0000-0000-0000-000000000000"
+SEC_ENCRYPT, SEC_AUTH, SEC_AUTH_MITM = 0x01, 0x02, 0x08   # Android's BluetoothSocket SEC_FLAG_*
+
+
+class Stream:
+    """An Android RFCOMM socket: our end of its socketpair, then the relay."""
+
+    def __init__(self, sid, client, addr, fd):
+        self.id = sid
+        self.client = client
+        self.addr = addr
+        self.fd = fd              # ours until the relay takes it
+        self.relay = None
+        self.hint = False
 
 
 class Hold:
@@ -79,6 +95,8 @@ class Bridge:
         self.notifying = {}       # (addr, char handle) -> count of links
         self.le_seen = set()      # addresses reported by an LE scan
         self.releasing = {}       # addr -> timer: we called Disconnect(), BlueZ not done yet
+        self.streams = {}         # stream id -> Stream (RFCOMM)
+        self.next_stream = 1
 
     # ---- state from the backend -------------------------------------------
 
@@ -194,11 +212,28 @@ class Bridge:
             if st["enabled"]:
                 self._event(c, op, values, droppable)
 
-    def handle(self, client, packet):
+    def handle(self, client, packet, fds=()):
+        """One request. fds: the file descriptors that came with it (ours to
+        close, or to hand to the op that takes one)."""
+        fds = list(fds)
+
+        def close_fds():
+            for fd in fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            fds.clear()
         try:
             op, msg_id, args = P.decode_request(packet)
         except P.ProtoError as e:
+            close_fds()
             self.log("bad packet:", e)
+            client.close()
+            return
+        if (op in P.FD_OPS) != (len(fds) == 1) or len(fds) > 1:
+            close_fds()
+            self.log(op, "came with the wrong number of fds")
             client.close()
             return
         done = [False]
@@ -211,15 +246,21 @@ class Bridge:
                 client.send(P.reply(op, msg_id, status, values))
         fn = getattr(self, "op_" + op.lower(), None)
         if fn is None:
+            close_fds()
             answer(P.ST_UNSUPPORTED)
             return
         if client not in self.clients:
             self.attach(client)
         if op != "HELLO" and not self.clients[client]["hello"]:
+            close_fds()
             answer(P.ST_NOT_READY)
             return
         try:
-            fn(client, answer, *args)
+            if fds:
+                fd = fds.pop()      # the op owns it now
+                fn(client, answer, *args, fd=fd)
+            else:
+                fn(client, answer, *args)
         except P.ProtoError as e:
             self.log(op, "bad arguments:", e)
             answer(P.ST_INVALID)
@@ -455,6 +496,9 @@ class Bridge:
         return False
 
     def _end_link(self, token, status):
+        if isinstance(token, tuple) and token[0] == RFCOMM:
+            self._end_stream(token[1])
+            return
         link = self.links.pop(token, None) if isinstance(token, int) else None
         if link is None:
             return
@@ -677,6 +721,94 @@ class Bridge:
             answer(P.ST_OK)
             self._event_all("EV_BOND_STATE", [addr, P.BOND_NONE, P.ST_OK])
         self.be.remove(addr, ok, lambda n, m: answer(P.ST_FAIL))
+
+
+    # ---- ops: Classic RFCOMM ----------------------------------------------
+
+    def op_rfcomm_connect(self, client, answer, addr, uuid_, channel, flags, fd):
+        """Android's BluetoothSocket.connect(). fd is our end of the stream
+        Android holds: nothing goes down it until the RFCOMM link is up (then
+        the channel and the connect signal, then the data); a failure closes
+        it, which Android reports as an IOException."""
+        def refuse(status):
+            os.close(fd)
+            answer(status)
+        if not self._ready(client, answer):
+            os.close(fd)
+            return
+        by_uuid = P.full_uuid(uuid_) != NO_UUID
+        if not by_uuid and channel <= 0:
+            refuse(P.ST_INVALID)
+            return
+        d = self.devs.get(addr)
+        if d is None and by_uuid:
+            refuse(P.ST_NOT_FOUND)    # BlueZ's SDP needs a device it knows
+            return
+        if d is not None and not self.visible(addr):
+            refuse(P.ST_BUSY)
+            return
+        stream = Stream(self.next_stream, client, addr, fd)
+        self.next_stream += 1
+        self.streams[stream.id] = stream
+        answer(P.ST_OK, [stream.id])
+        connected = bool(d and d.get("Connected"))
+        hold = self.holds.get(addr)
+        if hold is None:
+            hold = self.holds[addr] = Hold(made=self._taken_back(addr) or not connected)
+            if connected:
+                hold.state = "connected"
+        token = (RFCOMM, stream.id)
+        hold.tokens.add(token)
+        if not (d and self.bonded(d)):
+            # BlueZ may pair on the way (SSP): its agent asks, for this device
+            self.store.pairing_hint(addr)
+            stream.hint = True
+        secure = bool(flags & (SEC_ENCRYPT | SEC_AUTH | SEC_AUTH_MITM))
+        self.log("rfcomm", stream.id, addr, "uuid" if by_uuid else "channel",
+                 uuid_ if by_uuid else channel, "for Android")
+
+        def ok(rfd, chan):
+            if self.streams.get(stream.id) is not stream:
+                os.close(rfd)
+                return
+            self._unhint(stream)
+            h = self.holds.get(addr)
+            if h is not None and h.state == "connecting":
+                h.state = "connected"
+            stream.relay = self.be.relay(stream.fd, rfd, P.connect_signal(addr, chan, 0),
+                                         lambda: self._stream_gone(stream.id))
+            stream.fd = None
+
+        def err(name, msg):
+            self.log("rfcomm", stream.id, addr, "failed:", name, msg)
+            self._unhint(stream)
+            self._stream_gone(stream.id)
+        self.be.rfcomm_connect(addr, P.full_uuid(uuid_) if by_uuid else None, channel, secure, ok, err)
+
+    def _unhint(self, stream):
+        if stream.hint:
+            stream.hint = False
+            self.store.pairing_hint(None)
+
+    def _end_stream(self, sid):
+        """Close a stream (its hold token is being dropped by the caller)."""
+        stream = self.streams.pop(sid, None)
+        if stream is None:
+            return
+        self._unhint(stream)
+        if stream.relay is not None:
+            self.be.unrelay(stream.relay)
+        elif stream.fd is not None:
+            os.close(stream.fd)
+        stream.fd = stream.relay = None
+
+    def _stream_gone(self, sid):
+        """Either side closed, or the connect failed: end it, let go of the device."""
+        stream = self.streams.get(sid)
+        if stream is None:
+            return
+        self._end_stream(sid)
+        self._release(stream.addr, (RFCOMM, sid))
 
 
 def pair_status(name):

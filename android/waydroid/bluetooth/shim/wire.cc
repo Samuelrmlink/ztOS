@@ -161,10 +161,10 @@ bool match_one(const char* sig, size_t* i, const Value& v) {
 
 }  // namespace
 
-bool Encode(uint16_t op, uint32_t id, const Values& args, std::string* out) {
+bool Encode(uint16_t op, uint32_t id, const Values& args, std::string* out, uint16_t flags) {
   out->clear();
   put16(out, op);
-  put16(out, 0);
+  put16(out, flags);
   put32(out, id);
   for (auto& v : args) if (!enc(v, out)) return false;
   return out->size() <= kMaxPacket;

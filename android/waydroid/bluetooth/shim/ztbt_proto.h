@@ -9,6 +9,7 @@ namespace ztbt {
 
 constexpr uint32_t kVersion = 1;
 constexpr size_t kMaxPacket = 65536;
+constexpr uint16_t kFlagFd = 0x0001;   // header flag: one fd comes with the packet (SCM_RIGHTS)
 constexpr const char* kSocketPath = "/data/misc/ztos-btbridge/bridge.sock";
 
 enum Op : uint16_t {
@@ -29,6 +30,7 @@ enum Op : uint16_t {
   ZTBT_OP_BOND_CREATE = 0x0040,
   ZTBT_OP_BOND_CANCEL = 0x0041,
   ZTBT_OP_BOND_REMOVE = 0x0042,
+  ZTBT_OP_RFCOMM_CONNECT = 0x0050,   // carries one fd (kFlagFd): the bridge's end of the stream
   ZTBT_OP_EV_ADAPTER = 0x8001,
   ZTBT_OP_EV_DEVICE_FOUND = 0x8010,
   ZTBT_OP_EV_BOND_STATE = 0x8012,
@@ -71,6 +73,8 @@ enum Op : uint16_t {
 #define ZTBT_SIG_BOND_CANCEL_REPLY ""
 #define ZTBT_SIG_BOND_REMOVE "a"
 #define ZTBT_SIG_BOND_REMOVE_REPLY ""
+#define ZTBT_SIG_RFCOMM_CONNECT "aUiu"
+#define ZTBT_SIG_RFCOMM_CONNECT_REPLY "u"
 #define ZTBT_SIG_EV_ADAPTER "Bs"
 #define ZTBT_SIG_EV_DEVICE_FOUND "T(aysuyyBLU)iib"
 #define ZTBT_SIG_EV_BOND_STATE "ayu"

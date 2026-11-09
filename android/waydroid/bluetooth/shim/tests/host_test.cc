@@ -18,6 +18,9 @@
 
 #include <hardware/bluetooth.h>
 #include <hardware/bt_gatt.h>
+#include <hardware/bt_sock.h>
+#include <poll.h>
+#include <unistd.h>
 
 #include "shim.h"
 
@@ -69,6 +72,18 @@ std::string A(const RawAddress& a) {
   snprintf(b, sizeof b, "%02X:%02X:%02X:%02X:%02X:%02X", a.address[0], a.address[1], a.address[2], a.address[3],
            a.address[4], a.address[5]);
   return b;
+}
+
+bool ReadFull(int fd, uint8_t* buf, size_t n, int ms = 5000) {
+  size_t got = 0;
+  while (got < n) {
+    struct pollfd p = {fd, POLLIN, 0};
+    if (poll(&p, 1, ms) <= 0) return false;
+    ssize_t r = read(fd, buf + got, n - got);
+    if (r <= 0) return false;
+    got += (size_t)r;
+  }
+  return true;
 }
 
 RawAddress Addr(const char* s) {
@@ -300,6 +315,38 @@ int main() {
   RawAddress lock = Addr(LOCK);
   Expect(bt->remove_bond(&lock) == BT_STATUS_FAIL, "remove a Linux bond refused");
   Expect(bt->remove_bond(&sensor) == BT_STATUS_SUCCESS, "remove the bond Android made");
+
+  // ---- Classic RFCOMM: an SPP printer (the harness's printer echoes)
+  auto* sock = (const btsock_interface_t*)bt->get_profile_interface(BT_PROFILE_SOCKETS_ID);
+  Expect(sock && sock->size == sizeof(btsock_interface_t), "socket interface");
+  RawAddress printer = Addr("E8:00:00:00:00:05");
+  bluetooth::Uuid::UUID128Bit spp_be = {0, 0, 0x11, 0x01, 0, 0, 0x10, 0, 0x80, 0, 0, 0x80, 0x5f, 0x9b, 0x34, 0xfb};
+  bluetooth::Uuid spp = bluetooth::Uuid::From128BitBE(spp_be);
+  int fd = -1;
+  Expect(sock->connect(&printer, BTSOCK_RFCOMM, &spp, -1, &fd, 0x3, 10123) == BT_STATUS_SUCCESS && fd >= 0,
+         "rfcomm connect");
+  // what Android's BluetoothSocket reads first: channel, then the 20-byte signal
+  uint8_t sig[24];
+  Expect(ReadFull(fd, sig, sizeof sig), "channel and connect signal");
+  int32_t chan, chan2, status;
+  int16_t size;
+  memcpy(&chan, sig, 4);
+  memcpy(&size, sig + 4, 2);
+  memcpy(&chan2, sig + 12, 4);
+  memcpy(&status, sig + 16, 4);
+  Expect(chan == 1 && size == 20 && chan2 == 1 && status == 0, "signal contents");
+  Expect(memcmp(sig + 6, printer.address, 6) == 0, "signal address");
+  const char job[] = "PRINT THIS\n";
+  Expect(write(fd, job, sizeof job - 1) == (ssize_t)(sizeof job - 1), "write job");
+  char back[sizeof job - 1];
+  Expect(ReadFull(fd, (uint8_t*)back, sizeof back) && memcmp(back, job, sizeof back) == 0, "printer answered");
+  close(fd);
+  // the Linux-connected AirPods: refused, Android reads the end of the stream
+  fd = -1;
+  Expect(sock->connect(&airpods, BTSOCK_RFCOMM, &spp, -1, &fd, 0x3, 10123) == BT_STATUS_SUCCESS, "connect returns");
+  Expect(!ReadFull(fd, sig, 4), "AirPods: end of stream");
+  close(fd);
+  Expect(sock->connect(&printer, BTSOCK_L2CAP, &spp, -1, &fd, 0, 10123) == BT_STATUS_UNSUPPORTED, "no L2CAP");
 
   // ---- classic discovery
   bt->start_discovery();

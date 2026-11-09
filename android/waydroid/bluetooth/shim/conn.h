@@ -40,7 +40,9 @@ class Conn {
   // From any thread. The reply comes on the loop thread; values are checked
   // against reply_sig (an ATT status brings one 'y'). Not connected: the
   // reply is ZTBT_ST_NOT_READY, posted.
-  void Request(uint16_t op, const Values& args, const char* reply_sig, Reply cb);
+  // fd >= 0: sent with the request (SCM_RIGHTS, kFlagFd); the caller keeps
+  // its own copy and closes it when it likes.
+  void Request(uint16_t op, const Values& args, const char* reply_sig, Reply cb, int fd = -1);
   // Wait for the reply (never on the loop thread: false at once there).
   bool Call(uint16_t op, const Values& args, const char* reply_sig, uint32_t* status,
             Values* out, int timeout_ms = 3000);

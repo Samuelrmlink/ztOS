@@ -1,6 +1,7 @@
 """ztos-btbridge's socket: who may connect, packets in and out, a reader that stalls."""
 import os
 import socket
+import struct
 import tempfile
 import unittest
 
@@ -20,8 +21,9 @@ class FakeBridge:
         self.detached = []
         self.frozen = []
 
-    def handle(self, client, packet):
+    def handle(self, client, packet, fds=()):
         self.packets.append(packet)
+        self.fds = list(fds)
         client.send(b"echo" + packet)
 
     def attach(self, c):
@@ -114,6 +116,21 @@ class ServerTests(unittest.TestCase):
                 break
         self.assertEqual(got[-1], b"link down")
         self.assertEqual(len(got), sent + 1)
+
+    def test_an_fd_comes_with_its_packet(self):
+        self.server(os.getuid())
+        c = self.connect()
+        a, b = socket.socketpair()
+        c.sendmsg([b"\x50\x00\x01\x00\x01\x00\x00\x00"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                                                struct.pack("i", b.fileno()))])
+        spin()
+        fd, = self.bridge.fds
+        os.write(fd, b"through")
+        self.assertEqual(a.recv(10), b"through")
+        os.close(fd)
+        a.close()
+        b.close()
+        c.close()
 
     def test_in_container(self):
         self.assertFalse(S.in_container(os.getpid()))

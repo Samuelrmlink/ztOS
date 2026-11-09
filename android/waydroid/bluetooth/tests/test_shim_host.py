@@ -10,7 +10,9 @@ import tempfile
 import time
 import unittest
 
-from fakes import LOCK, SENSOR, FakeBackend, FakeStore, P  # noqa: F401
+import socket
+
+from fakes import LOCK, PRINTER, SENSOR, SPP, FakeBackend, FakeStore, P  # noqa: F401
 from ztbt.core import Bridge
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +21,7 @@ WORK = os.environ.get("ZTBT_WORK", os.path.expanduser("~/ztbt-work"))
 
 try:
     from gi.repository import GLib
+    from ztbt.relay import Relay
     from ztbt.server import Server
 except ImportError:
     GLib = None
@@ -70,6 +73,32 @@ class AutoBackend(FakeBackend):
         if on:
             GLib.timeout_add(30, lambda: (self.core.value_changed(addr, handle, b"\x2a"), False)[-1])
 
+    def rfcomm_connect(self, addr, uuid, channel, secure, ok, err):
+        """An SPP printer that sends back what it is sent."""
+        self.calls.append(("rfcomm", addr, uuid, channel, secure))
+        ours, printer = socket.socketpair()
+        self.printers.append(printer)
+
+        def echo(fd, cond):
+            try:
+                data = printer.recv(65536)
+            except OSError:
+                data = b""
+            if not data:
+                printer.close()
+                return False
+            printer.sendall(data)
+            return True
+        GLib.io_add_watch(printer.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, echo)
+        GLib.idle_add(lambda: (ok(ours.detach(), 1), False)[-1])
+
+    def relay(self, a, b, prefix, on_close):
+        self.calls.append(("relay",))
+        return Relay(a, b, prefix, on_close)
+
+    def unrelay(self, r):
+        r.close()
+
     def after(self, seconds, fn):
         return GLib.timeout_add(int(seconds * 1000), lambda: (fn(), False)[-1])
 
@@ -86,6 +115,7 @@ class ShimHostTest(unittest.TestCase):
         binary = build.stdout.strip().splitlines()[-1]
 
         be = AutoBackend()
+        be.printers = []
         store = FakeStore()
         bridge = Bridge(be, store)
         be.core = bridge
@@ -103,6 +133,10 @@ class ShimHostTest(unittest.TestCase):
                 time.sleep(0.002)
             if proc.poll() is None:
                 proc.kill()
+            settle = time.monotonic() + 1      # the relays see Android's ends close
+            while bridge.streams and time.monotonic() < settle:
+                ctx.iteration(False)
+                time.sleep(0.002)
             out, err = proc.communicate()
             self.assertEqual(proc.returncode, 0, err[-4000:])
             self.assertIn("host test passed", out)
@@ -115,6 +149,10 @@ class ShimHostTest(unittest.TestCase):
         self.assertIn(("remove", SENSOR), be.calls)
         self.assertNotIn(("remove", LOCK), be.calls)
         self.assertFalse([c for c in be.calls if c[0] == "connect" and c[1] != SENSOR])
+        # RFCOMM: the printer by its SPP UUID, through a relay; never the AirPods
+        self.assertIn(("rfcomm", PRINTER, SPP, -1, True), be.calls)
+        self.assertFalse([c for c in be.calls if c[0] == "rfcomm" and c[1] != PRINTER])
+        self.assertEqual(bridge.streams, {})
 
 
 if __name__ == "__main__":

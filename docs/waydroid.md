@@ -413,7 +413,8 @@ match its op's signature.
 | `removeBond` | refused for bonds BlueZ made outside Android; allowed only for a bond an Android app created, and only after the shell's confirmation (Device1 `RemoveDevice` is never called silently) |
 | `BluetoothLeAdvertiser.startAdvertisingSet` → `BleAdvertiserInterface::StartAdvertisingSet` | LEAdvertisingManager1 `RegisterAdvertisement` of an `org.bluez.LEAdvertisement1` object exported by `ztos-btbridge` (Type, ServiceUUIDs, ManufacturerData, ServiceData, LocalName, Includes `tx-power`, MinInterval/MaxInterval, `SecondaryChannel` for extended); 5 instances shared with Linux |
 | `openGattServer`, `addService` → `btgatt_server_interface_t::add_service` | GattManager1 `RegisterApplication` of an ObjectManager tree (GattService1/Characteristic1/Descriptor1) that `ztos-btbridge` exports per Android server; `ReadValue`/`WriteValue` calls from BlueZ → `request_read_*_cb`/`request_write_*_cb`, Android's `sendResponse` → the D-Bus reply; `notifyCharacteristicChanged` → `PropertiesChanged(Value)` or the `AcquireNotify` fd |
-| `listenUsingRfcommWithServiceRecord`, `createRfcommSocketToServiceRecord` → `btsock_interface_t::listen/connect` | ProfileManager1 `RegisterProfile(uuid, {Role, Channel})`; `Profile1.NewConnection(fd)` → the socket fd passed into Android over the Unix socket (SCM_RIGHTS), which is what `btsock` returns to Java anyway; outgoing: Device1 `ConnectProfile(uuid)` |
+| `createRfcommSocketToServiceRecord(uuid)`, the hidden `createRfcommSocket(channel)`, `connect()` → `btsock_interface_t::connect` | by UUID: Profile1 (client role) for that UUID + Device1 `ConnectProfile(uuid)`, BlueZ does SDP and security, `Profile1.NewConnection(fd)`; by channel: an RFCOMM socket from the bridge. The RFCOMM socket stays in the bridge, which relays it to Android's stream (see "Classic RFCOMM") |
+| `listenUsingRfcommWithServiceRecord` → `btsock_interface_t::listen` | not yet: ProfileManager1 `RegisterProfile(uuid, {Role: server})`, `NewConnection` per incoming connection |
 | `BluetoothLeScanner` with `PendingIntent`, batch scan, `BluetoothHeadset`/A2DP profiles | not offered (A2DP/HFP stay Linux's: audio goes through PipeWire anyway) |
 
 ### Policy (`ztos-btbridge`, on the host)
@@ -546,6 +547,73 @@ once and plays the radio. The test covers:
 - disable;
 - that no PIN or SSP request ever reaches Android, and that every callback
   comes on the one thread that announced itself with `ASSOCIATE_JVM`.
+
+### Classic RFCOMM (stage 3, ahead of stage 2)
+
+The user's thermal printers (the Nelko app) use BLE or Classic SPP
+(`00001101-...`, RFCOMM). Classic comes before the peripheral stage.
+
+**What Android expects.** `BluetoothSocket.connect()` gets an fd from
+`btsock_interface_t::connect` at once: Fluoride's end of a Unix stream
+socketpair. It then reads a channel (`int`), then `sock_connect_signal_t`
+(packed, 20 bytes: size 20, address, channel, status, max tx and rx packet
+sizes; native order, which is little endian), and a non-zero status or the
+end of the stream fails with `IOException`. After that, the stream is the
+data.
+
+**How the bridge does it.**
+
+1. The shim makes the socketpair and returns one end to Android as the
+   socket. It sends the other end to the bridge in `RFCOMM_CONNECT`
+   (address, UUID or zero, channel or -1, Android's `SEC_FLAG_*`), as
+   `SCM_RIGHTS` with the packet (header flag `FLAG_FD`; the bridge closes the
+   connection on any packet whose fds don't fit its op). The shim keeps no
+   copy.
+2. The bridge applies the same policy as for GATT: Linux connected → busy,
+   adapter off or container frozen → refused. Otherwise it holds the device
+   for Android. If the device isn't bonded yet, it writes the agent's pairing
+   note: BlueZ pairs it (SSP) with its own agent and the shell's sheet, and
+   the bond is BlueZ's.
+3. **By UUID** (`createRfcommSocketToServiceRecord`, what printer apps use):
+   the bridge registers an `org.bluez.Profile1` for that UUID, once, client
+   role (no SDP record of ours), and calls `Device1.ConnectProfile(uuid)`.
+   BlueZ does the SDP lookup, connects with its security and keys, and calls
+   `NewConnection(device, fd)` (accepted only from bluetoothd's bus name).
+   The bridge reads the channel from the socket.
+   **By channel** (the hidden `createRfcommSocket(int)`, a common fallback in
+   printer apps): the bridge opens the RFCOMM socket itself
+   (`BT_SECURITY` medium when Android asked for a secure socket). The kernel
+   uses BlueZ's link keys for that link.
+4. Up: the bridge writes the channel and the connect signal into Android's
+   stream and relays both ways (`ztbt/relay.py`: GLib, non-blocking, at most
+   256 KiB waiting each way, so a slow printer slows the app instead of
+   filling memory). Failed: it closes Android's end (`IOException`).
+5. Down: when either side closes, what is still owed to the other side is
+   written out, both are closed, and the device is let go as for GATT (the
+   bridge disconnects only what it connected). A freeze closes every stream.
+
+**Why not pass the RFCOMM socket into Android.** fd passing would work
+across the namespaces, but then Android would hold an `AF_BLUETOOTH` socket
+(socket options, its security level). With the relay, Android holds only a
+Unix stream. For printers' rates (kB/s) the extra copy costs nothing.
+
+**Not yet:** listening sockets (`listenUsingRfcommWithServiceRecord`, a
+server-role Profile1), L2CAP and SCO sockets (refused), and `control_req`.
+Insecure sockets are connected with BlueZ's default security: SSP makes
+encryption mandatory for RFCOMM anyway.
+
+**Tested without Android or a printer:**
+
+- the core against a fake BlueZ (`tests/test_rfcomm.py`): the signal bytes,
+  the relay set-up, failures, busy, freeze, remote disconnect, a connect
+  finishing after its stream ended, the fd rules;
+- the relay with socketpairs (`tests/test_relay.py`), including a 1 MiB job to
+  a slow reader;
+- the Profile1 flow in both orders of reply and `NewConnection`
+  (`tests/test_bluez.py`);
+- the shim end to end (`test_shim_host.py`): `btsock connect` to an echoing
+  fake SPP printer by UUID, the signal read as Java reads it, a job written
+  and answered, the AirPods refused (end of stream), L2CAP refused.
 
 ### Stages
 

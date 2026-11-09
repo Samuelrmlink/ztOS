@@ -2,17 +2,71 @@
 """ztos-btbridge's backend: BlueZ over D-Bus (dbus-python, GLib main loop).
 
 Only BlueZ's public D-Bus API is used: Adapter1, Device1, GattService1,
-GattCharacteristic1, GattDescriptor1. No mgmt or HCI socket, and nothing that
-could read keys. The bridge is one more D-Bus client of bluetoothd, so its
-discovery filter and its StartDiscovery are its own: they don't disturb the
-shell's.
+GattCharacteristic1, GattDescriptor1, ProfileManager1/Profile1. No mgmt or
+HCI socket, and nothing that could read keys. The bridge is one more D-Bus
+client of bluetoothd, so its discovery filter and its StartDiscovery are its
+own: they don't disturb the shell's.
+
+RFCOMM (Android's BluetoothSocket): by UUID, the bridge registers an
+org.bluez.Profile1 for that UUID (client role) and calls Device1.ConnectProfile:
+BlueZ looks the channel up with SDP, connects with its own security and keys
+(pairing, if needed, through its agent), and hands the connected socket to
+Profile1.NewConnection. By channel only (apps that call the hidden
+createRfcommSocket(int)), the bridge opens the RFCOMM socket itself; the
+kernel uses BlueZ's link keys. Either way the RFCOMM socket stays here.
 """
+import errno
+import os
 import re
+import socket
+import struct
 
 import dbus
+import dbus.service
 from gi.repository import GLib
 
 from . import proto as P
+from .relay import Relay
+
+PROFILE_MANAGER = "org.bluez.ProfileManager1"
+PROFILE = "org.bluez.Profile1"
+PROFILE_ROOT = "/org/ztos/btbridge/profile"
+RFCOMM_TIMEOUT = 40
+SOL_BLUETOOTH = 274
+BT_SECURITY = 4
+BT_SECURITY_LOW, BT_SECURITY_MEDIUM = 1, 2
+
+
+class _Profile(dbus.service.Object):
+    """Profile1 for one UUID, client role: BlueZ calls it with the connected socket."""
+
+    def __init__(self, backend, uuid, path):
+        super().__init__(backend.bus, path)
+        self.backend = backend
+        self.uuid = uuid
+
+    def _from_bluez(self, sender):
+        try:
+            return sender == self.backend.bus.get_name_owner("org.bluez")
+        except dbus.DBusException:
+            return False
+
+    @dbus.service.method(PROFILE, in_signature="oha{sv}", out_signature="", sender_keyword="sender")
+    def NewConnection(self, device, fd, props, sender=None):
+        fd = fd.take()
+        if not self._from_bluez(sender):
+            os.close(fd)
+            raise dbus.DBusException("not bluetoothd", name="org.bluez.Error.Rejected")
+        self.backend._new_connection(self.uuid, str(device), fd)
+
+    @dbus.service.method(PROFILE, in_signature="o", out_signature="", sender_keyword="sender")
+    def RequestDisconnection(self, device, sender=None):
+        pass    # the stream ends when either side closes its socket
+
+    @dbus.service.method(PROFILE, in_signature="", out_signature="", sender_keyword="sender")
+    def Release(self, sender=None):
+        if self._from_bluez(sender):
+            self.backend.profiles.pop(self.uuid, None)
 
 BUS = "org.bluez"
 OM = "org.freedesktop.DBus.ObjectManager"
@@ -59,6 +113,18 @@ def _err(e):
     return (e.get_dbus_name() or "org.bluez.Error.Failed", e.get_dbus_message() or "")
 
 
+def _rfcomm_channel(fd):
+    """The channel of a connected RFCOMM socket (BlueZ's NewConnection doesn't say)."""
+    try:
+        s = socket.socket(fileno=os.dup(fd))
+        try:
+            return int(s.getpeername()[1])
+        finally:
+            s.close()
+    except (OSError, IndexError, ValueError):
+        return 1
+
+
 class BlueZ:
     def __init__(self, log=None):
         self.log = log or (lambda *a: None)
@@ -70,6 +136,8 @@ class BlueZ:
         self.reading = {}         # characteristic path -> pending reads
         self.notify_on = set()    # characteristic paths we StartNotify'd
         self.our_discovery = False
+        self.profiles = {}        # uuid -> _Profile (registered with BlueZ)
+        self.rfcomm_pending = {}  # (device path, uuid) -> {"ok", "err", "fd", "replied", "timer"}
 
     # ---- objects ----------------------------------------------------------
 
@@ -372,6 +440,140 @@ class BlueZ:
             if a[0] == "char" and a[4].get("MTU"):
                 return int(a[4]["MTU"])
         return 23
+
+    # ---- RFCOMM ------------------------------------------------------------
+
+    def rfcomm_connect(self, addr, uuid, channel, secure, ok, err):
+        """ok(fd, channel) with a connected RFCOMM socket, or err(name, message)."""
+        if uuid is None:
+            self._rfcomm_raw(addr, channel, secure, ok, err)
+            return
+        p = self._dev(addr, err)
+        if not p:
+            return
+        key = (p, uuid)
+        if key in self.rfcomm_pending:
+            err("org.bluez.Error.InProgress", "a connect to this profile is under way")
+            return
+        entry = {"ok": ok, "err": err, "fd": None, "replied": False, "timer": None}
+        self.rfcomm_pending[key] = entry
+
+        def fail(name, msg):
+            if self.rfcomm_pending.get(key) is not entry:
+                return
+            del self.rfcomm_pending[key]
+            if entry["timer"] is not None:
+                GLib.source_remove(entry["timer"])
+            if entry["fd"] is not None:
+                os.close(entry["fd"])
+            err(name, msg)
+
+        def timeout():
+            entry["timer"] = None
+            fail("org.bluez.Error.Failed", "no connection from BlueZ")
+            return False
+        entry["timer"] = GLib.timeout_add_seconds(RFCOMM_TIMEOUT, timeout)
+
+        def replied():
+            entry["replied"] = True
+            self._rfcomm_done(key)
+
+        def connect():
+            self._call(p, DEVICE, "ConnectProfile", [uuid], replied, fail, timeout=RFCOMM_TIMEOUT)
+        self._ensure_profile(uuid, connect, fail)
+
+    def _ensure_profile(self, uuid, ok, err):
+        if uuid in self.profiles:
+            ok()
+            return
+        path = "%s/%s" % (PROFILE_ROOT, uuid.replace("-", "_"))
+        prof = _Profile(self, uuid, path)
+        # client role: no SDP record of ours. Encryption: SSP makes it
+        # mandatory for RFCOMM anyway; BlueZ pairs (its agent) if it must.
+        opts = dbus.Dictionary({"Role": "client", "Name": "ztOS: Android app",
+                                "RequireAuthentication": dbus.Boolean(False),
+                                "RequireAuthorization": dbus.Boolean(False),
+                                "AutoConnect": dbus.Boolean(False)}, signature="sv")
+
+        def done():
+            self.profiles[uuid] = prof
+            ok()
+
+        def failed(name, msg):
+            prof.remove_from_connection()
+            if name.endswith("AlreadyExists"):
+                err(name, "another program has the profile %s" % uuid)
+            else:
+                err(name, msg)
+        self._call("/org/bluez", PROFILE_MANAGER, "RegisterProfile", [dbus.ObjectPath(path), uuid, opts],
+                   done, failed)
+
+    def _new_connection(self, uuid, device, fd):
+        entry = self.rfcomm_pending.get((device, uuid))
+        if entry is None or entry["fd"] is not None:
+            self.log("RFCOMM connection nobody asked for:", device, uuid)
+            os.close(fd)
+            return
+        entry["fd"] = fd
+        self._rfcomm_done((device, uuid))
+
+    def _rfcomm_done(self, key):
+        entry = self.rfcomm_pending.get(key)
+        if entry is None or entry["fd"] is None or not entry["replied"]:
+            return
+        del self.rfcomm_pending[key]
+        if entry["timer"] is not None:
+            GLib.source_remove(entry["timer"])
+        fd = entry["fd"]
+        entry["ok"](fd, _rfcomm_channel(fd))
+
+    def _rfcomm_raw(self, addr, channel, secure, ok, err):
+        try:
+            s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM | socket.SOCK_CLOEXEC,
+                              socket.BTPROTO_RFCOMM)
+            s.setsockopt(SOL_BLUETOOTH, BT_SECURITY,
+                         struct.pack("BB", BT_SECURITY_MEDIUM if secure else BT_SECURITY_LOW, 0))
+            s.setblocking(False)
+            rc = s.connect_ex((addr, channel))
+        except OSError as e:
+            err("org.bluez.Error.Failed", str(e))
+            return
+        if rc not in (0, errno.EINPROGRESS, errno.EAGAIN):
+            s.close()
+            err("org.bluez.Error.Failed", os.strerror(rc))
+            return
+        state = {"watch": None, "timer": None}
+
+        def finish(e):
+            for k, remove in (("watch", GLib.source_remove), ("timer", GLib.source_remove)):
+                if state[k] is not None:
+                    remove(state[k])
+                    state[k] = None
+            if e:
+                s.close()
+                err("org.bluez.Error.Failed", os.strerror(e))
+            else:
+                ok(s.detach(), channel)
+
+        def writable(fd, cond):
+            state["watch"] = None
+            finish(s.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR))
+            return False
+
+        def timeout():
+            state["timer"] = None
+            finish(errno.ETIMEDOUT)
+            return False
+        state["watch"] = GLib.io_add_watch(s.fileno(), GLib.PRIORITY_DEFAULT,
+                                           GLib.IOCondition(int(GLib.IO_OUT) | int(GLib.IO_ERR) | int(GLib.IO_HUP)),
+                                           writable)
+        state["timer"] = GLib.timeout_add_seconds(RFCOMM_TIMEOUT, timeout)
+
+    def relay(self, a, b, prefix, on_close):
+        return Relay(a, b, prefix, on_close)
+
+    def unrelay(self, r):
+        r.close()
 
     def after(self, seconds, fn):
         def fire():
