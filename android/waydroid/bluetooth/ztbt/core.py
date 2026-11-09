@@ -173,6 +173,11 @@ class Bridge(GattServerMixin):
         was_bonded = self.bonded(old) if old else False
         d = self.devs.setdefault(addr, {"Address": addr})
         d.update(changed)
+        # The UUIDs it advertises, as against the services a connection
+        # resolved: BlueZ merges both into UUIDs, and a scan record rebuilt
+        # from the merged list runs past what Android keeps of one (62 bytes).
+        if "UUIDs" in changed and not d.get("Connected") and not d.get("ServicesResolved"):
+            d["AdvUUIDs"] = list(changed["UUIDs"])
         if "RSSI" in changed:
             d["LastRSSI"] = changed["RSSI"]     # BlueZ drops RSSI when discovery ends
 
@@ -1309,7 +1314,7 @@ def _ad(t, data):
     return bytes([len(data) + 1, t]) + data
 
 
-def build_ad(d):
+def build_ad(d, _n128=None):
     """Advertising data (AD structures) rebuilt from Device1's properties.
 
     BlueZ parses the advertisement into properties and keeps the types it
@@ -1322,7 +1327,7 @@ def build_ad(d):
         out += _ad(0x01, d["AdvertisingFlags"])
         raw.pop(0x01, None)
     u16, u128 = [], []
-    for u in d.get("UUIDs", []):
+    for u in d.get("AdvUUIDs") or d.get("UUIDs", []):
         s = P.short_uuid(u)
         if s:
             u16.append(int(s, 16).to_bytes(2, "little"))
@@ -1330,8 +1335,10 @@ def build_ad(d):
             u128.append(uuid.UUID(P.full_uuid(u)).bytes[::-1])
     if u16 and 0x02 not in raw and 0x03 not in raw:
         out += _ad(0x03, b"".join(u16))
-    if u128 and 0x06 not in raw and 0x07 not in raw:
-        out += _ad(0x07, b"".join(u128))
+    if _n128 is None:
+        _n128 = len(u128)
+    if u128[:_n128] and 0x06 not in raw and 0x07 not in raw:
+        out += _ad(0x07, b"".join(u128[:_n128]))
     if d.get("Name") and 0x08 not in raw and 0x09 not in raw:
         out += _ad(0x09, d["Name"].encode("utf-8")[:29])
     if "TxPower" in d and 0x0a not in raw:
@@ -1348,4 +1355,9 @@ def build_ad(d):
         out += _ad(0xff, int(cid).to_bytes(2, "little") + bytes(v))
     for t, v in sorted(raw.items()):
         out += _ad(t, v)
+    # Android keeps 62 bytes of a legacy advertisement (with its scan
+    # response) and cuts the rest, which would cut a UUID list in half and
+    # lose all of it: drop 128-bit UUIDs from the end until it fits.
+    if len(out) > 62 and _n128 > 0:
+        return build_ad(d, _n128 - 1)
     return bytes(out)
