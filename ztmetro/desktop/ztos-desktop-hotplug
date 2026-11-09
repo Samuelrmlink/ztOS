@@ -1,0 +1,27 @@
+#!/bin/sh
+# Run by the shell (ztmetro, desktop/desktop.c) whenever a monitor output
+# comes or goes:
+#
+#   ztos-desktop-hotplug add CONNECTOR       e.g. add DP-1
+#   ztos-desktop-hotplug remove CONNECTOR
+#
+# The desktop itself needs nothing from here: a DRM connector that becomes
+# connected is a new wlroots output, and the shell puts the desktop on it
+# (and starts XFCE if Settings says so). This is where the USB-C DP Alt Mode
+# work (branch feature/dp-altmode) hooks in anything it needs at that moment:
+# a mode quirk, keeping the USB-C link up, a log. Every executable in
+# /etc/ztos/desktop-hotplug.d/ and /usr/lib/ztos/desktop-hotplug.d/ is run
+# with the same two arguments, in name order. Nothing here waits for long:
+# the shell does not wait for it, but a hook that hangs stays around.
+set -u
+event=${1:-}
+connector=${2:-}
+case "$event" in add|remove) ;; *) echo "usage: $0 add|remove CONNECTOR" >&2; exit 2 ;; esac
+logger -t ztos-desktop-hotplug "$event $connector" 2>/dev/null || true
+for d in /usr/lib/ztos/desktop-hotplug.d /etc/ztos/desktop-hotplug.d; do
+	[ -d "$d" ] || continue
+	for hook in "$d"/*; do
+		[ -x "$hook" ] && timeout 10 "$hook" "$event" "$connector"
+	done
+done
+exit 0

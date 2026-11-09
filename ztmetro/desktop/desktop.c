@@ -2463,6 +2463,19 @@ static void desk_x_ready(struct wl_listener *l, void *data) {
 
 /* ---- outputs ------------------------------------------------------------------------------------- */
 
+/* A helper, not waited for: none of the shell's descriptors go with it. */
+static void desk_spawn(const char *program, const char *a1, const char *a2) {
+	pid_t pid = fork();
+	if (pid == 0) {
+		setsid();
+		signal(SIGCHLD, SIG_DFL);
+		child_priority();
+		close_inherited();
+		execlp(program, program, a1, a2, (char *)NULL);
+		_exit(127);
+	}
+}
+
 static bool desk_watched(struct zt_desk *desk) {
 	struct zt_server *server = desk->server;
 	if ((int32_t)(desk->watch_until - now_ms()) > 0) {
@@ -2535,12 +2548,7 @@ static void desk_output_destroy(struct wl_listener *l, void *data) {
 	wlr_log(WLR_INFO, "desktop: output %s gone", name);
 	if (real) {
 		/* the DP Alt Mode agent's hook (stage 6: desktop/DESIGN.md) */
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			execlp("ztos-desktop-hotplug", "ztos-desktop-hotplug", "remove", name, (char *)NULL);
-			_exit(127);
-		}
+		desk_spawn("ztos-desktop-hotplug", "remove", name);
 	}
 	if (!was_active) {
 		return;
@@ -2569,6 +2577,8 @@ static void desk_output_destroy(struct wl_listener *l, void *data) {
 		wl_list_for_each_safe(v, tmp, &desk->views, link) {
 			if (v->top) desk_give_to_phone(v);
 		}
+		/* and no XFCE with nowhere to draw (it would only start again and again) */
+		desk_session_stop(desk);
 		struct zt_server *server = desk->server;
 		wlr_seat_set_capabilities(server->seat, WL_SEAT_CAPABILITY_TOUCH | WL_SEAT_CAPABILITY_KEYBOARD);
 	}
@@ -2628,12 +2638,7 @@ static void desk_use_output(struct zt_desk *desk, struct desk_output *o) {
 	wlr_log(WLR_INFO, "desktop: on %s, %dx%d points at %+d,%+d", o->wo->name, nb.width, nb.height, nb.x, nb.y);
 	if (old && desk->session_pid > 0) {
 		/* panels on the old output were closed: the session puts them up again */
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			execlp("ztos-desktop-session", "ztos-desktop-session", "--refresh", (char *)NULL);
-			_exit(127);
-		}
+		desk_spawn("ztos-desktop-session", "--refresh", NULL);
 	}
 	desk_state_write(desk);
 }
@@ -2709,12 +2714,7 @@ static void desk_new_output(struct zt_server *server, struct wlr_output *wo) {
 		}
 	}
 	if (!virtual) {
-		pid_t pid = fork();
-		if (pid == 0) {
-			setsid();
-			execlp("ztos-desktop-hotplug", "ztos-desktop-hotplug", "add", wo->name, (char *)NULL);
-			_exit(127);
-		}
+		desk_spawn("ztos-desktop-hotplug", "add", wo->name);
 	}
 	if ((virtual ? desk->autostart_virtual : desk->autostart) && desk->session_pid <= 0) {
 		desk_session_start(desk);
