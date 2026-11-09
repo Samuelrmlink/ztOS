@@ -1457,6 +1457,10 @@ static u32 x9dp_c10(u32 c8)
  * cleared (:2023-2034). Then the blender background colour (bg_rgb) and
  * no window enabled on DECON2.
  */
+static bool trig_unmask;
+module_param(trig_unmask, bool, 0644);
+MODULE_PARM_DESC(trig_unmask, "decon2: clear HW_TRIG_MASK_DECON (experiment; default 0, as stock leaves it in video mode)");
+
 static int x9dp_decon2(struct x9dp *d)
 {
 	const u32 w = x9dp_1080p60.ha, h = x9dp_1080p60.va;
@@ -1473,6 +1477,9 @@ static int x9dp_decon2(struct x9dp *d)
 		    h << 16 | w);
 	x9dp_d2_rmw(d, DECON_SCALED_SIZE_CONTROL_0, GENMASK(29, 16) | GENMASK(13, 0), h << 16 | w);
 	x9dp_d2_rmw(d, DECON_HW_SW_TRIG_CONTROL, DECON_HW_TRIG_EN, DECON_HW_TRIG_EN);
+	/* experiment: HW_TRIG_MASK_DECON (bit 4, set after reset) cleared, so a
+	 * frame starts on the hardware trigger rather than free-running */
+	x9dp_d2_rmw(d, DECON_HW_SW_TRIG_CONTROL, BIT(4), trig_unmask ? 0 : BIT(4));
 	x9dp_d2_rmw(d, DECON_OUTFIFO_DATA_ORDER, DECON_PIXEL_ORDER_SWAP, 0);
 	x9dp_d2_rmw(d, DECON_DATA_PATH_CONTROL_2, DECON_SCALER_PATH | DECON_COMP_OUTIF_PATH,
 		    DECON2_NOCOMP_OUTFIFO0_DPIF);
