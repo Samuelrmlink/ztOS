@@ -21,6 +21,7 @@ class PatchBluetooth(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.lib = self.root / pb.APEX / "lib64"
         self.lib.mkdir(parents=True)
+        (self.root / "system" / "product" / "etc").mkdir(parents=True)
         self.stock = b"pretend stock library"
         (self.lib / "libbluetooth_jni.so").write_bytes(self.stock)
         self.old = pb.STOCK_JNI
@@ -38,6 +39,13 @@ class PatchBluetooth(unittest.TestCase):
         apk = self.root / pb.APEX / "app" / "Bluetooth" / "Bluetooth.apk"
         self.assertEqual(pb.sha(apk), pb.APP)
         self.assertEqual(os.stat(apk).st_mode & 0o777, 0o644)
+        grants = (self.root / pb.DEFAULT_PERMISSIONS).read_text()
+        for p in ("BLUETOOTH_CONNECT", "BLUETOOTH_SCAN", "BLUETOOTH_ADVERTISE"):
+            self.assertIn('<permission name="android.permission.%s" fixed="true"/>' % p, grants)
+        self.assertIn('<exception package="com.android.bluetooth">', grants)
+        import xml.dom.minidom
+        xml.dom.minidom.parseString(grants)        # well-formed
+        self.assertEqual(os.stat(self.root / pb.DEFAULT_PERMISSIONS).st_mode & 0o777, 0o644)
 
     def test_older_wrapper_updated(self):
         old = b"an older wrapper"

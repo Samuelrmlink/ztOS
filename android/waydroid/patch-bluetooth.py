@@ -13,7 +13,12 @@ Bluetooth.apk and libbluetooth_jni.so (default: the package's
 system: in the flattened com.android.btservices APEX, the stock
 libbluetooth_jni.so becomes libbluetooth_jni_stock.so and the shim's wrapper
 takes its name; Bluetooth.apk goes to app/Bluetooth/. Every file is pinned by
-sha256: an unknown stock library (another image) or prebuilt is refused.
+sha256: an unknown stock library (another image) or prebuilt is refused. And
+product/etc/default-permissions/ztos-bluetooth_default-permissions.xml grants
+the app its Nearby-devices
+permissions on a fresh set-up. (An image whose Android already booted once
+doesn't apply default grants again: there, `pm grant com.android.bluetooth
+android.permission.BLUETOOTH_CONNECT` and _SCAN, _ADVERTISE, once.)
 vendor: the android.hardware.bluetooth and bluetooth_le features, without
 which system_server starts no Bluetooth service and apps see none.
 
@@ -36,6 +41,23 @@ FEATURES = {
     "android.hardware.bluetooth_le.xml": "android.hardware.bluetooth_le",
 }
 XATTR = "security.selinux"
+# The Bluetooth app's Nearby-devices runtime permissions. Without them its
+# ProfileService refuses to start ("Permission denied!"), GattService never
+# runs and Android never asks the stack to enable. A stock build grants them
+# by its default-grant policy; this file does the same for our added app, at
+# the first boot of a fresh set-up (and on a build fingerprint change).
+# product's directory: the stock image has one there (and none in system/etc)
+DEFAULT_PERMISSIONS = "system/product/etc/default-permissions/ztos-bluetooth_default-permissions.xml"
+DEFAULT_PERMISSIONS_XML = """<?xml version="1.0" encoding="utf-8"?>
+<!-- ztOS: Bluetooth through BlueZ (ztos-btbridge); docs/waydroid.md -->
+<exceptions>
+    <exception package="com.android.bluetooth">
+        <permission name="android.permission.BLUETOOTH_CONNECT" fixed="true"/>
+        <permission name="android.permission.BLUETOOTH_SCAN" fixed="true"/>
+        <permission name="android.permission.BLUETOOTH_ADVERTISE" fixed="true"/>
+    </exception>
+</exceptions>
+"""
 
 
 def sha(path):
@@ -104,7 +126,29 @@ def system(root, prebuilts):
     else:
         put(os.path.join(prebuilts, "Bluetooth.apk"), apk, stock, APP)
         print("Bluetooth.apk: added to the btservices APEX")
+    default_permissions(root)
     return 0
+
+
+def default_permissions(root):
+    path = os.path.join(root, DEFAULT_PERMISSIONS)
+    d = os.path.dirname(path)
+    etc = os.path.dirname(d)
+    if not os.path.isdir(d):
+        os.mkdir(d)
+        if os.path.isdir(etc):
+            like(etc, d)
+    if os.path.isfile(path) and open(path).read() == DEFAULT_PERMISSIONS_XML:
+        print("default-permissions: already there")
+        return
+    with open(path + ".ztbt", "w") as f:
+        f.write(DEFAULT_PERMISSIONS_XML)
+    ref = next((os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith(".xml") and not f.endswith(".ztbt")),
+               None)
+    like(ref or etc, path + ".ztbt")
+    os.chmod(path + ".ztbt", 0o644)
+    os.replace(path + ".ztbt", path)
+    print("default-permissions: Nearby-devices grants for com.android.bluetooth")
 
 
 def vendor(root):

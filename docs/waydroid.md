@@ -475,6 +475,16 @@ The policy lives in the host daemon, so Android can't get around it.
   PAN, LE Audio, hearing aids and so on) with the app's `profile_supported`
   config (a runtime resource overlay) and the `bluetooth.profile.*.enabled`
   properties. Then the Java side never asks for their native interfaces.
+- Grant the app its Nearby-devices runtime permissions (`BLUETOOTH_CONNECT`,
+  `_SCAN`, `_ADVERTISE`) with a default-permissions file in
+  `product/etc/default-permissions`. Without them its ProfileService refuses
+  to start ("Permission denied!"), GattService never runs, and Android times
+  out turning Bluetooth on (`BLE_START_TIMEOUT`) without ever asking the
+  stack. Android applies default grants only at a set-up's first boot or
+  after a fingerprint change. So an installation whose Android booted before
+  the app was added needs them once with `pm grant com.android.bluetooth
+  android.permission.BLUETOOTH_CONNECT` (and `_SCAN`, `_ADVERTISE`), as on
+  the test phone on 8 Nov.
 - No HCI HAL service is needed: the shim never opens one.
 
 ### Shim build
