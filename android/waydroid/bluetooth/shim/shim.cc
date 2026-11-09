@@ -346,15 +346,17 @@ void OnAdapter(const Values& v) {
   ReportAdapter(BT_PROPERTY_BDNAME);
 }
 
-void OnFound(const Values& v) {
+// A scan result. Version 2's EV_DEVICE_FOUND2 says the event type, from the
+// advertisement as received (ztos-bt-adwatch); EV_DEVICE_FOUND's is taken to be
+// legacy, connectable, scannable.
+void Found(const Values& v, uint16_t event_type, const std::string& data) {
   Dev d = DevFrom(v[0]);
   Remember(d);
   int rssi = v[1].sint();
   int tx = v[2].sint();
   if (g->le_scan && g->scan_cb) {
-    std::vector<uint8_t> ad(v[3].s.begin(), v[3].s.end());
-    // legacy, connectable, scannable: BlueZ doesn't say which it was
-    g->scan_cb->OnScanResult(0x13, d.addr_type, d.addr, 1, 0, 0xff, (int8_t)tx, (int8_t)rssi, 0, ad);
+    std::vector<uint8_t> ad(data.begin(), data.end());
+    g->scan_cb->OnScanResult(event_type, d.addr_type, d.addr, 1, 0, 0xff, (int8_t)tx, (int8_t)rssi, 0, ad);
   }
   if (g->discovery && g->cb && g->found.insert(Key(d.addr)).second) {
     Props p;
@@ -362,6 +364,10 @@ void OnFound(const Values& v) {
     g->cb->device_found_cb(p.Count(), p.Get());
   }
 }
+
+void OnFound(const Values& v) { Found(v, 0x13, v[3].s); }
+
+void OnFound2(const Values& v) { Found(v, (uint16_t)v[3].num(), v[4].s); }
 
 void OnBond(const Values& v) {
   RawAddress a = AddrFrom(v[0]);
@@ -476,6 +482,7 @@ int Init(bt_callbacks_t* callbacks, bool, bool, int, const char**, bool, const c
   c->OnDisconnected(Disconnected);
   c->OnEvent(ZTBT_OP_EV_ADAPTER, ZTBT_SIG_EV_ADAPTER, OnAdapter);
   c->OnEvent(ZTBT_OP_EV_DEVICE_FOUND, ZTBT_SIG_EV_DEVICE_FOUND, OnFound);
+  c->OnEvent(ZTBT_OP_EV_DEVICE_FOUND2, ZTBT_SIG_EV_DEVICE_FOUND2, OnFound2);
   c->OnEvent(ZTBT_OP_EV_BOND_STATE, ZTBT_SIG_EV_BOND_STATE, OnBond);
   c->OnEvent(ZTBT_OP_EV_ACL, ZTBT_SIG_EV_ACL, OnAcl);
   c->OnEvent(ZTBT_OP_EV_SCAN_STOPPED, ZTBT_SIG_EV_SCAN_STOPPED, OnScanStopped);

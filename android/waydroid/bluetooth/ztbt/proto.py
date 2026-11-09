@@ -26,7 +26,8 @@ the numbers; tests/test_proto.py checks the two agree.
 import struct
 import uuid as _uuid
 
-VERSION = 1
+VERSION = 2            # 2: EV_DEVICE_FOUND2 (the event type); a version 1 shim still gets EV_DEVICE_FOUND
+MIN_VERSION = 1
 MAX_PACKET = 65536
 HEADER = struct.Struct("<HHI")
 FLAG_FD = 0x0001        # header flag: the packet carries one fd (SCM_RIGHTS)
@@ -102,6 +103,8 @@ OPS = {
     # events, bridge -> shim
     "EV_ADAPTER":      (0x8001, "Bs", None),       # powered, name
     "EV_DEVICE_FOUND": (0x8010, "T(aysuyyBLU)iib", None),  # device, rssi, tx power (127: unknown), AD structures
+    # version 2: as EV_DEVICE_FOUND, with Android's event type (0x13 connectable, 0x10 not, 0x1b/0x1a a scan response)
+    "EV_DEVICE_FOUND2": (0x8011, "T(aysuyyBLU)iiqb", None),
     "EV_BOND_STATE":   (0x8012, "ayu", None),      # address, bond state, status
     "EV_ACL":          (0x8013, "aBy", None),      # address, connected, transport
     "EV_SCAN_STOPPED": (0x8020, "yu", None),       # transport, why (status)

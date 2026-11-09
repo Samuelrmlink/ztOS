@@ -26,7 +26,7 @@ class Basics(unittest.TestCase):
     def test_hello_reports_adapter(self):
         be, store, br, c = make()
         st, vals = c.reply(1, "HELLO")
-        self.assertEqual(vals, [P.VERSION, "00:B5:D0:3D:D8:44", "ztos", 0x6c0110, True, 5])
+        self.assertEqual(vals, [1, "00:B5:D0:3D:D8:44", "ztos", 0x6c0110, True, 5])
 
 
 class Hidden(unittest.TestCase):
@@ -167,7 +167,7 @@ class Scanning(unittest.TestCase):
         c.send = lambda packet, droppable=False: c.close()     # its socket breaks on this send
         br.device_changed(SENSOR, {"RSSI": -61})                # no RuntimeError
         self.assertTrue(c.closed)
-        self.assertEqual(len(other.events("EV_DEVICE_FOUND")), 1)
+        self.assertEqual(len(other.events("EV_DEVICE_FOUND2")), 1)
 
     def test_nothing_reported_when_not_scanning(self):
         be, store, br, c = make()

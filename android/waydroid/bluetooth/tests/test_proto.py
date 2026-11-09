@@ -69,9 +69,9 @@ class ProtoTests(unittest.TestCase):
             self.skipTest("no shim header yet")
         text = open(header).read()
         found = dict((m.group(1), int(m.group(2), 16))
-                     for m in re.finditer(r"ZTBT_OP_([A-Z_]+)\s*=\s*0x([0-9a-fA-F]+)", text))
+                     for m in re.finditer(r"ZTBT_OP_([A-Z0-9_]+)\s*=\s*0x([0-9a-fA-F]+)", text))
         self.assertEqual(found, {k: v[0] for k, v in P.OPS.items()})
-        sigs = dict(re.findall(r'ZTBT_SIG_([A-Z_]+)\s+"([^"]*)"', text))
+        sigs = dict(re.findall(r'ZTBT_SIG_([A-Z0-9_]+)\s+"([^"]*)"', text))
         for name, (_, req, rep) in P.OPS.items():
             if req is not None:
                 self.assertEqual(sigs.get(name), req, name)

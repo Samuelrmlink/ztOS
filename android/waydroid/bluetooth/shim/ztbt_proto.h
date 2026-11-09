@@ -7,7 +7,7 @@
 
 namespace ztbt {
 
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;
 constexpr size_t kMaxPacket = 65536;
 constexpr uint16_t kFlagFd = 0x0001;   // header flag: one fd comes with the packet (SCM_RIGHTS)
 constexpr const char* kSocketPath = "/data/misc/ztos-btbridge/bridge.sock";
@@ -41,6 +41,7 @@ enum Op : uint16_t {
   ZTBT_OP_SERVER_NOTIFY = 0x0073,
   ZTBT_OP_EV_ADAPTER = 0x8001,
   ZTBT_OP_EV_DEVICE_FOUND = 0x8010,
+  ZTBT_OP_EV_DEVICE_FOUND2 = 0x8011,
   ZTBT_OP_EV_BOND_STATE = 0x8012,
   ZTBT_OP_EV_ACL = 0x8013,
   ZTBT_OP_EV_SCAN_STOPPED = 0x8020,
@@ -111,6 +112,7 @@ enum Op : uint16_t {
 #define ZTBT_SIG_EV_SERVER_MTU "uq"
 #define ZTBT_SIG_EV_ADAPTER "Bs"
 #define ZTBT_SIG_EV_DEVICE_FOUND "T(aysuyyBLU)iib"
+#define ZTBT_SIG_EV_DEVICE_FOUND2 "T(aysuyyBLU)iiqb"
 #define ZTBT_SIG_EV_BOND_STATE "ayu"
 #define ZTBT_SIG_EV_ACL "aBy"
 #define ZTBT_SIG_EV_SCAN_STOPPED "yu"

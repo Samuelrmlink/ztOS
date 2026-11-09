@@ -35,6 +35,7 @@ import time
 import uuid
 
 from . import proto as P
+from . import rawads as R
 from .gatts import GattServerMixin
 
 CONNECT_SECONDS = 35
@@ -43,6 +44,7 @@ LINGER_SECONDS = 4      # a device we connected stays up this long after Android
 EXPECT_SECONDS = 60     # how long ztos-bt-agent takes an expected address on trust (refreshed)
 SILENT_SECONDS = 2      # how often a connected, unused LE device is reported to a scan
 SLOW_SECONDS = 5        # a GATT op BlueZ hasn't answered by then is logged
+RAW_MAX = 256           # advertisements as received, kept for this many devices
 # BlueZ interfaces that mean a Linux profile uses a device (on it or its children)
 LINUX_USE = {"org.bluez.Input1", "org.bluez.MediaControl1", "org.bluez.MediaTransport1",
              "org.bluez.MediaPlayer1", "org.bluez.Network1"}
@@ -111,6 +113,7 @@ class Bridge(GattServerMixin):
         self.advs = {}            # advertiser id -> Adv (Android's advertising sets)
         self.expected = set()     # addresses ztos-bt-agent may ask about (see _update_expected)
         self.reported = set()     # devices reported to Android in this discovery (for the log)
+        self.raw = {}             # addr -> the advertisement as received (raw_ad), newest last
         self.silent_timer = None
         self.expect_timer = None
         self._gatts_init()
@@ -203,6 +206,7 @@ class Bridge(GattServerMixin):
             self._drop_hold(addr, P.ST_FAIL)
         old = self.devs.pop(addr, None)
         self.le_seen.discard(addr)
+        self.raw.pop(addr, None)
         if old and self.bonded(old) and addr not in self.pairing and addr not in self.removing:
             self.log("bond gone on Linux:", addr)
             self.store.forget_android_bond(addr)
@@ -247,7 +251,7 @@ class Bridge(GattServerMixin):
     # ---- clients ----------------------------------------------------------
 
     def attach(self, client):
-        self.clients[client] = {"hello": False, "enabled": False, "scans": set()}
+        self.clients[client] = {"hello": False, "enabled": False, "scans": set(), "version": 1}
 
     def detach(self, client):
         if client not in self.clients:
@@ -330,12 +334,13 @@ class Bridge(GattServerMixin):
     # ---- ops: adapter -----------------------------------------------------
 
     def op_hello(self, client, answer, version, name):
-        if version != P.VERSION:
+        if not P.MIN_VERSION <= version <= P.VERSION:
             answer(P.ST_UNSUPPORTED)
             return
         self.clients[client]["hello"] = True
+        self.clients[client]["version"] = version
         a = self.be.adapter()
-        answer(P.ST_OK, [P.VERSION, a.get("Address", "00:00:00:00:00:00"), a.get("Name", ""),
+        answer(P.ST_OK, [version, a.get("Address", "00:00:00:00:00:00"), a.get("Name", ""),
                          int(a.get("Class", 0)), bool(a.get("Powered")), int(a.get("AdvInstances", 0))])
 
     def op_enable(self, client, answer, on):
@@ -427,6 +432,7 @@ class Bridge(GattServerMixin):
                     if self.visible(addr) and "RSSI" in self.devs[addr]:
                         self._report_found(addr)
             self._silent_ticker(want in (P.T_LE, P.T_AUTO))
+            self.be.watch_ads(want in (P.T_LE, P.T_AUTO))
 
         def err(name, msg):
             self.log("discovery", want, "failed:", name, msg)
@@ -451,14 +457,40 @@ class Bridge(GattServerMixin):
     def _send_found(self, addr, rssi, silent=False):
         d = self.devs[addr]
         tx = int(d["TxPower"]) if "TxPower" in d else 127
-        values = [self.dev_tuple(addr), rssi, tx, build_ad(d)]
+        raw = self.raw.get(addr)
+        if raw is not None:     # what it sent, as received: what a phone's app would get
+            data, etype = raw["record"], raw["type"]
+        else:                   # nothing heard raw (yet): rebuilt from BlueZ's properties
+            data, etype = build_ad(d), R.ADV_IND
         if addr not in self.reported:
             self.reported.add(addr)
             self.log("scan: reported", addr, repr(d.get("Name", "")),
+                     "as received" if raw is not None else "rebuilt",
                      "(connected to Linux, not advertising)" if silent else "")
+        dev = self.dev_tuple(addr)
         for c, st in list(self.clients.items()):   # a send may drop a client
             if st["enabled"] and st["scans"]:
-                self._event(c, "EV_DEVICE_FOUND", values, droppable=True)
+                if st.get("version", 1) >= 2:
+                    self._event(c, "EV_DEVICE_FOUND2", [dev, rssi, tx, etype, data], droppable=True)
+                else:
+                    self._event(c, "EV_DEVICE_FOUND", [dev, rssi, tx, data], droppable=True)
+
+    def raw_ad(self, addr, addr_type, rssi, flags, data):
+        """An LE advertisement as the controller delivered it (ztos-bt-adwatch):
+        its data, then its scan response if the kernel had one to add. A scan
+        response on its own goes after the last advertisement heard."""
+        old = self.raw.pop(addr, None)
+        if flags & R.SCAN_RSP:
+            adv = old["adv"] if old else b""
+            rec = {"adv": adv, "record": adv + data, "type": R.event_type(flags)}
+        else:
+            rec = {"adv": data, "record": data, "type": R.event_type(flags)}
+        self.raw[addr] = rec
+        while len(self.raw) > RAW_MAX:
+            del self.raw[next(iter(self.raw))]
+        if (self.discovering in (P.T_LE, P.T_AUTO) and addr in self.devs and self.visible(addr)
+                and not self.devs[addr].get("Connected")):
+            self._send_found(addr, rssi)
 
     def _connected_unused_le(self, addr):
         """An LE device Linux is connected to but not using: Android may use

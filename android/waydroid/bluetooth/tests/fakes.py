@@ -57,6 +57,9 @@ class FakeBackend:
         self.calls.append((name,) + tuple(args))
         self.pending.append((name, args, ok, err))
 
+    def watch_ads(self, on):
+        self.calls.append(("watch_ads", on))
+
     def discover(self, transport, ok, err):
         self.calls.append(("discover", transport))
         ok()
@@ -251,13 +254,15 @@ class FakeClient:
         return [d for packet, d in self.out if P.HEADER.unpack_from(packet)[0] == P.OPS[op][0]]
 
 
-def make():
+def make(version=1):
+    """A bridge on the fake backend and a client: a version 1 shim (EV_DEVICE_FOUND)
+    unless asked."""
     be = FakeBackend()
     store = FakeStore()
     br = Bridge(be, store)
     br.start()
     c = FakeClient(br)
-    rid = c.request("HELLO", P.VERSION, "test")
+    rid = c.request("HELLO", version, "test")
     assert c.reply(rid, "HELLO")[0] == P.ST_OK
     rid = c.request("ENABLE", True)
     assert c.reply(rid, "ENABLE")[0] == P.ST_OK

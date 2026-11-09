@@ -809,6 +809,61 @@ BLE failed.
   "Invalid Length" are now 0x07 and 0x0d.
 - The bridge logs how long connects, pairings and RFCOMM connects take.
 
+### Scan results as received (9 Nov)
+
+The user's requirement: an app gets what it would see on a phone, the
+device's own advertising bytes, not a record rebuilt from BlueZ's parsed and
+merged properties. The rebuilt one went wrong in practice: once RM_2685 had
+connected, BlueZ's `UUIDs` held every resolved service, the rebuilt record
+ran to 125 bytes, Android kept 62 and cut the UUID list, and iTi's
+UUID-filtered scan found nothing (98bb663 rebuilt from the advertised UUIDs,
+capped at 62 bytes, as a stopgap; it stays as the fallback).
+
+- **Where the bytes are.** Not in BlueZ's D-Bus API. The kernel's management
+  interface has them: its Device Found event carries the advertising data
+  followed by the scan response (as the kernel merged them), the RSSI, and
+  flags: not connectable, scan response only.
+- **Who reads them: `ztos-bt-adwatch`** (`bluetooth/adwatch/`, about 150
+  lines of C). Device Found reaches only a *trusted* management socket,
+  which takes CAP_NET_ADMIN, so it's a program of its own, not python3 with
+  a capability. Its privileges:
+  - a system service started by its socket
+    (`/run/ztos-bt-adwatch.sock`, SOCK_SEQPACKET, 0666), running as a
+    systemd `DynamicUser` with **only CAP_NET_ADMIN** (ambient and bounding
+    set), `NoNewPrivileges`, address families AF_UNIX and AF_BLUETOOTH only,
+    `ProtectSystem=strict`, no home directories, the `@system-service`
+    syscall set without `@privileged`;
+  - a client must be root or a user with a session (`/run/user/UID` theirs);
+  - it opens the management socket only while a client is connected, and
+    exits after 30 s without one;
+  - it **never writes** to the management socket: no command, so it can't
+    change the adapter, scan, pair or connect. Events come only while
+    something scans (bluetoothd, for the bridge's discovery);
+  - it passes on Device Found and nothing else, unchanged (controller index,
+    then the event's parameters), dropping any that don't add up;
+  - what clients send is ignored.
+
+  The same advertisements are readable by any local user through BlueZ's
+  D-Bus API already, parsed: the socket being open to session users gives
+  away nothing new.
+- **The bridge** connects to it only while Android scans LE
+  (`rawads.Watch`), and keeps the last record per device (256 devices at
+  most, forgotten with the device). A scan result carries, in this order:
+  the record as received (a lone scan response goes after the last
+  advertisement heard); else, until one arrives, the rebuilt record
+  within 62 bytes. Hidden (Linux's) devices are never reported. A connected
+  device Linux holds (the 2 s reports) gets its last advertisement as
+  received, or the rebuilt one if none was heard. The exact bytes go
+  through, padding and malformed structures included, as a phone would pass
+  them.
+- **The event type.** Version 2 of the protocol adds `EV_DEVICE_FOUND2`
+  with Android's event type: 0x13 connectable, 0x10 not, 0x1b/0x1a for a
+  scan response on its own. The bridge accepts a version 1 shim and sends it
+  `EV_DEVICE_FOUND` as before (always 0x13), so the bridge can go first and
+  the shim with the next image swap.
+- Without the helper (not installed, or not running) the bridge logs it
+  once per scan and falls back to rebuilt records.
+
 ### Stages
 
 1. **BLE central**: adapter state, bonded list, LE scan with filters, GATT

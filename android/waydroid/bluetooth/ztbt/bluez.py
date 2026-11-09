@@ -207,6 +207,8 @@ class BlueZ:
 
     def attach(self, core):
         self.core = core
+        from .rawads import Watch
+        self.ads = Watch(core.raw_ad, self.log)
         om = dbus.Interface(self.bus.get_object(BUS, "/"), OM)
         for path, ifaces in om.GetManagedObjects().items():
             self._added(str(path), ifaces, quiet=True)
@@ -327,6 +329,10 @@ class BlueZ:
 
     def devices(self):
         return {addr: dict(self.objs[p][DEVICE]) for addr, p in self.dev_path.items()}
+
+    def watch_ads(self, on):
+        """The advertisements as received (ztos-bt-adwatch), while Android scans LE."""
+        self.ads.set(on)
 
     def discover(self, transport, ok, err):
         if self.adapter_path is None:
