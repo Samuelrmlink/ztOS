@@ -204,7 +204,8 @@ class BlueZTests(unittest.TestCase):
         """A layout like the P21 printer's (8 Nov): services ff00 and ae30,
         notifying characteristics with CCCDs, the way BlueZ 5.87 exports
         them (Handle = the declaration handle). Every handle in the database
-        Android gets must find its object again for reads and CCCD writes."""
+        Android gets must find its object again for reads and CCCD writes; a
+        characteristic's is its value handle (declaration + 1), as Fluoride's."""
         b = backend()
         b.profiles, b.rfcomm_pending, b.advs, b.apps = {}, {}, {}, {}
         dev = "/org/bluez/hci0/dev_8C_D0_0D_AB_11_9A"
@@ -241,14 +242,14 @@ class BlueZTests(unittest.TestCase):
             self.assertIsNotNone(attr, hex(h))
             if kind == P.DB_CHARACTERISTIC:
                 b.read(addr, h, 0, lambda v: None, lambda n, m: None)
-                self.assertTrue(calls[-1][0].endswith("/char%04x" % h), (hex(h), calls[-1]))
+                self.assertTrue(calls[-1][0].endswith("/char%04x" % (h - 1)), (hex(h), calls[-1]))
             if kind == P.DB_DESCRIPTOR:
                 self.assertEqual(attr[0], "desc")
                 b.notify(addr, attr[2], True, lambda: None, lambda n, m: None)   # the CCCD write's parent
-                self.assertEqual(calls[-1], ("%s/char%04x" % (calls[-1][0].rsplit("/char", 1)[0], attr[2]),
+                self.assertEqual(calls[-1], ("%s/char%04x" % (calls[-1][0].rsplit("/char", 1)[0], attr[2] - 1),
                                              "StartNotify"))
         ae3c = next(e for e in db if e[4] == u("ae3c"))
-        self.assertEqual(ae3c[1], 0x13)
+        self.assertEqual(ae3c[1], 0x14)                                # its value handle
 
     def test_device_interfaces(self):
         b = backend()

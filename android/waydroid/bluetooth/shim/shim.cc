@@ -465,7 +465,15 @@ void OnValue(const Values& v) {
   p.len = (uint16_t)n;
   p.bda = it->second.addr;
   p.handle = (uint16_t)v[1].num();
+  // BlueZ doesn't say which it was. StartNotify enables notifications when
+  // the characteristic has them, indications only when it has nothing else.
   p.is_notify = 1;
+  for (auto& el : it->second.db) {
+    if (el.type == BTGATT_DB_CHARACTERISTIC && el.attribute_handle == p.handle) {
+      p.is_notify = (el.properties & 0x10) || !(el.properties & 0x20);
+      break;
+    }
+  }
   g->gcb->client->notify_cb((int)id, p);
 }
 

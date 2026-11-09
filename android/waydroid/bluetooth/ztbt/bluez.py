@@ -289,14 +289,19 @@ class BlueZ:
         return None
 
     def _handle(self, path, iface):
+        """The handle Android gets for a GATT object. A characteristic's is its
+        value handle, as Fluoride gives it (the instance id apps see): BlueZ's
+        Handle, and its path, name the declaration, and the value attribute
+        is the one right after it (Core spec, Vol 3 Part G 3.3)."""
         props = self.objs.get(path, {}).get(iface, {})
         if "Handle" in props and props["Handle"]:
-            return int(props["Handle"])
-        m = _HANDLE_IN_PATH.search(path)
-        if not m:
-            return None
-        h = int(m.group(2), 16)
-        return h + 1 if iface == CHAR else h    # a path names the declaration; Android wants the value
+            h = int(props["Handle"])
+        else:
+            m = _HANDLE_IN_PATH.search(path)
+            if not m:
+                return None
+            h = int(m.group(2), 16)
+        return h + 1 if iface == CHAR else h
 
     def _iface(self, path, iface):
         return dbus.Interface(self.bus.get_object(BUS, path), iface)
