@@ -23,7 +23,10 @@ if [ ! -e /dev/umts_boot0 ]; then
 		exit 1
 	fi
 	touch "$MARK"; sync
-	insmod /usr/local/lib/zrn-modem.ko || { echo "ztoscorenetworking-modem: the module did not load"; rm -f "$MARK"; exit 1; }
+	# the running kernel's own build (another release's is refused: vermagic)
+	KO=/usr/lib/modules/$(uname -r)/extra/zrn-modem.ko
+	[ -f "$KO" ] || KO=/usr/local/lib/zrn-modem.ko
+	insmod "$KO" || { echo "ztoscorenetworking-modem: the module did not load"; rm -f "$MARK"; exit 1; }
 	sleep 2
 	rm -f "$MARK"; sync
 fi

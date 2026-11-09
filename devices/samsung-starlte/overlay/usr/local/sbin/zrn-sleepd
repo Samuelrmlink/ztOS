@@ -53,6 +53,14 @@ import ztos_user
 
 D = Path('/usr/local/libexec/ztos-power/mif-trial')
 LIB = Path('/usr/local/libexec/ztos-power')
+
+
+def ko(name):
+	"""The running kernel's own build of a module (/usr/lib/modules/<release>/extra,
+	scripts/build-bt-modules.sh), or the copy in D from before modules followed
+	the release (refused by any other kernel release: vermagic)."""
+	k = Path('/usr/lib/modules') / os.uname().release / 'extra' / name
+	return k if k.exists() else D / name
 STATE = Path('/var/lib/zrn-sleep')
 ENABLED = STATE / 'enabled'
 MARK = STATE / 'sleeping'
@@ -449,7 +457,7 @@ def setup():
 		log('no suspend-aware zrn-hotplug: not sleeping')
 		return False
 	if not Path('/sys/module/zrn_exynos_rtc').exists():
-		run('insmod', D / 'zrn-exynos-rtc.ko', check=False)
+		run('insmod', ko('zrn-exynos-rtc.ko'), check=False)
 	run('python3', D / 'initialize-calendar.py')
 	# ACPM's TMU plugin and the buck ramp rates as stock leaves them: in
 	# every good trial. ACPM has been seen not to answer once; not fatal.
@@ -464,7 +472,7 @@ def setup():
 	if len(syms) != 2:
 		log('no cpu_suspend/cpu_resume in kallsyms')
 		return False
-	r = run('insmod', D / 'zrn-sleep-init.ko', 'enable_deep=1', 'psci_system=0', 'dry_run=1',
+	r = run('insmod', ko('zrn-sleep-init.ko'), 'enable_deep=1', 'psci_system=0', 'dry_run=1',
 		'prepare_only=0', f'eint_wake={EINT_WAKE:#x}',
 		f'suspend_enter=0x{syms["cpu_suspend"]}', f'resume=0x{syms["cpu_resume"]}',
 		*module_options())

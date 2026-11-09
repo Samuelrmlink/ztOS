@@ -23,12 +23,31 @@
 #                                policy routing, Android netd's xtables matches
 #                                (kernel/waydroid.config, docs/waydroid.md)
 #     --cmdline "..."            extra kernel command line (zboot.rescue=1 ...)
+#     --config-only              stop after the configuration: out/<name>.config,
+#                                to build the modules for it first (below)
+#     --modules DIR              the module set that goes with this kernel (default
+#                                out/modules-<release>, from scripts/build-bt-modules.sh)
+#     --no-module-check          build even without a module set made for this config
 #     --wifi-nvram FILE          Wi-Fi calibration to build in, for --wlan (default:
 #                                firmware/nvram.txt_r02a_b2, the G960N's; see
 #                                docs/g960f-differences.md for the G960F's)
 #
-# Output: out/<name>.img (+ .config, .dts, .sha256). Runs unprivileged; the
-# toolchain, kernel tree and busybox live under build/.
+# Output: out/<name>.img (+ .config, .dts, .release, .sha256). Runs unprivileged;
+# the toolchain, kernel tree and busybox live under build/.
+#
+# Kernel release and modules. The image builds no modules, but the phone loads
+# ~26 (Bluetooth, sound, zrn-*) built against the same config with
+# scripts/build-bt-modules.sh. This kernel has no MODVERSIONS: a module built
+# against another config loads if the release matches and then misreads kernel
+# structures. So:
+#   - CONFIG_COMPAT (--waydroid) changes the release: 7.1.0-zboot-wd, whose
+#     modules live in /lib/modules/7.1.0-zboot-wd; without it 7.1.0-zboot. The
+#     kernel refuses a module of the other release (vermagic).
+#   - the image is not built unless out/modules-<release>/ABI is this config's
+#     scripts/module-abi.sh hash, i.e. its modules were built against it. For a
+#     new config: build-boot.sh <name> <options> --config-only, then
+#     scripts/build-bt-modules.sh out/<name>.config, then the same build-boot.sh
+#     line without --config-only.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 B=$ROOT/build
@@ -45,6 +64,7 @@ DTS_FLAGS=()
 EXTRA=
 WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
 UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID=
+CONFIG_ONLY= MODULES= MODCHECK=1
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--fallback) FALLBACK=$2; shift ;;
@@ -57,6 +77,9 @@ while [ $# -gt 0 ]; do
 	--pm-debug) PMDEBUG=1 ;;
 	--lockup) LOCKUP=1 ;;
 	--waydroid) WAYDROID=1 ;;
+	--config-only) CONFIG_ONLY=1 ;;
+	--modules) MODULES=$(realpath -m "$2"); shift ;;
+	--no-module-check) MODCHECK= ;;
 	--acpm) ACPM=1 ;;
 	--cpufreq) CPUFREQ=1; ACPM=1 ;;
 	--cmdline) EXTRA=$2; shift ;;
@@ -324,7 +347,6 @@ if [ -n "$WAYDROID" ]; then
 fi
 cfg --set-str INITRAMFS_SOURCE "$LIST"
 cfg --set-val CMA_SIZE_MBYTES 128
-cfg --set-str LOCALVERSION "-zboot"
 # The watchdog is armed by uniLoader and again by the clock-gates node, then
 # taken over by s3c2410_wdt (tmr_atboot). The kernel pets it until userspace
 # opens /dev/watchdog, so a wedged kernel resets into the fallback target.
@@ -347,6 +369,44 @@ if [ -n "$WAYDROID" ]; then
 	[ -z "$missing" ] || { echo "--waydroid: not enabled:$missing" >&2; exit 1; }
 	echo "waydroid: kernel/waydroid.config applied"
 fi
+# The release names the module ABI (see the top): 32-bit compat changes
+# structures modules use, so a COMPAT kernel gets its own /lib/modules.
+LV=-zboot
+grep -q '^CONFIG_COMPAT=y$' out/.config && LV=-zboot-wd
+cfg --set-str LOCALVERSION "$LV"
+make -s O=out olddefconfig
+RELEASE=$(sh "$ROOT/scripts/module-abi.sh" --release out/.config "$(make -s kernelversion)")
+ABI=$(sh "$ROOT/scripts/module-abi.sh" out/.config)
+echo "release $RELEASE, module ABI $ABI"
+if [ -n "$CONFIG_ONLY" ]; then
+	cp out/.config "$OUT.config"
+	echo "CONFIG_OK $OUT.config release=$RELEASE"
+	echo "next: scripts/build-bt-modules.sh out/$NAME.config, then this line without --config-only"
+	exit 0
+fi
+
+echo "=== modules ==="
+MODULES=${MODULES:-$ROOT/out/modules-$RELEASE}
+if [ -n "$MODCHECK" ]; then
+	if [ ! -f "$MODULES/ABI" ]; then
+		echo "no module set for $RELEASE in $MODULES. Build it first:" >&2
+		echo "  scripts/build-boot.sh $NAME <these options> --config-only" >&2
+		echo "  scripts/build-bt-modules.sh out/$NAME.config" >&2
+		echo "(or --no-module-check, for an image whose modules you will not ship)" >&2
+		exit 1
+	fi
+	if [ "$(cat "$MODULES/RELEASE")" != "$RELEASE" ] || [ "$(cat "$MODULES/ABI")" != "$ABI" ]; then
+		echo "$MODULES was built against another config ($(cat "$MODULES/RELEASE"), ABI $(cat "$MODULES/ABI")):" >&2
+		diff <(grep '^CONFIG_' "$MODULES/config" | sort) <(grep '^CONFIG_' out/.config | sort) | head -30 >&2 || true
+		echo "rebuild it: build-boot.sh ... --config-only, then scripts/build-bt-modules.sh out/$NAME.config" >&2
+		exit 1
+	fi
+	(cd "$MODULES" && sha256sum --quiet -c SHA256SUMS) ||
+		{ echo "$MODULES: modules changed since they were built" >&2; exit 1; }
+	echo "modules: $MODULES ($(ls "$MODULES"/*.ko | wc -l)) built for this config"
+else
+	echo "modules: not checked (--no-module-check)"
+fi
 
 echo "=== kernel ==="
 make -j"$(nproc)" O=out Image dtbs > "$B/kernel-build.log" 2>&1 || {
@@ -356,6 +416,11 @@ make -j"$(nproc)" O=out Image dtbs > "$B/kernel-build.log" 2>&1 || {
 IMAGE=$SRC/out/arch/arm64/boot/Image
 DTB=$SRC/out/arch/arm64/boot/dts/exynos/exynos9810-starlte-zt.dtb
 ls -l "$IMAGE" "$DTB"
+# what uname -r will say (LOCALVERSION_AUTO could add to it): the modules' release
+[ "$(cat out/include/config/kernel.release)" = "$RELEASE" ] || {
+	echo "the kernel's release is $(cat out/include/config/kernel.release), not $RELEASE" >&2
+	exit 1
+}
 if grep -q '=m$' out/.config; then
 	echo "note: $(grep -c '=m$' out/.config) symbols are =m and are not built"
 fi
@@ -393,7 +458,9 @@ rm -f "$OUT.img"
 python3 -I "$PORT/scripts/build/mkboot.py" --ref "$REF" --kernel "$STAGE/uniLoader" \
 	--ramdisk "$PARTS/ramdisk.gz" --dt "$PARTS/dt.img" --cmdline "console=tty0" -o "$OUT.img"
 cp "$SRC/out/.config" "$OUT.config"
+echo "$RELEASE" > "$OUT.release"
 cp "$SRC/$DTS" "$OUT.dts"
 echo "$CMDLINE" > "$OUT.cmdline"
 (cd "$ROOT/out" && sha256sum "$NAME.img" > "$NAME.img.sha256" && cat "$NAME.img.sha256")
-echo "BUILD_OK $OUT.img fallback=$FALLBACK"
+echo "BUILD_OK $OUT.img fallback=$FALLBACK release=$RELEASE"
+[ -z "$MODCHECK" ] || echo "modules for it: $MODULES (install-modules.sh, on the phone, before flashing)"

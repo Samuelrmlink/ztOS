@@ -40,23 +40,45 @@ install -Dm644 "$DEVROOT/third_party/s9plus/firmware/bcm4361B2_semco.hcd" \
 for f in "$DEVROOT"/firmware/calliope_*.bin; do
 	[ -f "$f" ] && install -Dm644 -t "$R/usr/lib/firmware" "$f"
 done
-install -d "$R/usr/lib/modules/7.1.0-zboot/extra"
+# Modules go by kernel release (uname -r): 7.1.0-zboot, and 7.1.0-zboot-wd for a
+# kernel with 32-bit compat (--waydroid), whose structures differ (build-boot.sh).
+# The loaders find them under /usr/lib/modules/$(uname -r)/extra.
+KREL=7.1.0-zboot
+install -d "$R/usr/lib/modules/$KREL/extra"
 install -d "$R/usr/local/lib"
 # which modules: pick-modules.sh, which refuses stale and wrong-kernel ones
 MODULES=$(sh "$D/pick-modules.sh" "$DEVROOT") || exit 1
-for k in $MODULES; do
-	install -m644 "$k" "$R/usr/lib/modules/7.1.0-zboot/extra/"
+for k in $MODULES "$DEVROOT/prebuilts/power/zrn-sleep-init.ko" "$DEVROOT/prebuilts/power/zrn-exynos-rtc.ko"; do
+	install -m644 "$k" "$R/usr/lib/modules/$KREL/extra/"
 	case $k in */zrn-modem.ko) install -m644 "$k" "$R/usr/local/lib/zrn-modem.ko" ;; esac
 done
-if [ -f "$DEVROOT/build/linux-7.1/out/modules.builtin" ]; then
-	install -m644 "$DEVROOT/build/linux-7.1/out/modules.builtin" "$R/usr/lib/modules/7.1.0-zboot/"
-	install -m644 "$DEVROOT/build/linux-7.1/out/modules.builtin.modinfo" "$R/usr/lib/modules/7.1.0-zboot/"
+if [ -f "$DEVROOT/build/linux-7.1/out/modules.builtin" ] &&
+	[ "$(cat "$DEVROOT/build/linux-7.1/out/include/config/kernel.release" 2> /dev/null)" = "$KREL" ]; then
+	install -m644 "$DEVROOT/build/linux-7.1/out/modules.builtin" "$R/usr/lib/modules/$KREL/"
+	install -m644 "$DEVROOT/build/linux-7.1/out/modules.builtin.modinfo" "$R/usr/lib/modules/$KREL/"
 fi
-ch depmod -a 7.1.0-zboot > /dev/null 2>&1 || true
+# module sets from scripts/build-bt-modules.sh (out/modules-<release>/), each
+# built against one kernel config, into that release's own directory: the
+# -wd set for a Waydroid kernel, and a rebuilt 7.1.0-zboot set over the picks
+for set in "$DEVROOT"/out/modules-*/; do
+	[ -f "$set/RELEASE" ] && [ -f "$set/ABI" ] || continue
+	rel=$(cat "$set/RELEASE")
+	(cd "$set" && sha256sum --quiet -c SHA256SUMS) || { echo "$set: damaged" >&2; exit 1; }
+	install -d "$R/usr/lib/modules/$rel/extra"
+	install -m644 "$set"/*.ko "$R/usr/lib/modules/$rel/extra/"
+	install -m644 "$set/ABI" "$R/usr/lib/modules/$rel/extra/ztos-modules.abi"
+	for f in modules.builtin modules.builtin.modinfo; do
+		[ -f "$set/$f" ] && install -m644 "$set/$f" "$R/usr/lib/modules/$rel/"
+	done
+	echo "modules for $rel: $(ls "$set"/*.ko | wc -l) from $set"
+done
+for moddir in "$R"/usr/lib/modules/*-zboot*; do
+	[ -d "$moddir" ] && ch depmod -a "$(basename "$moddir")" > /dev/null 2>&1 || true
+done
 for moddir in "$R"/usr/lib/modules/*; do
 	[ -d "$moddir" ] || continue
 	kver=$(basename "$moddir")
-	[ "$kver" = "7.1.0-zboot" ] && continue
+	case $kver in *-zboot*) continue ;; esac
 	install -d "$moddir/extra"
 	for k in $MODULES; do
 		install -m644 "$k" "$moddir/extra/"

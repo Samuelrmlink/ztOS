@@ -99,6 +99,25 @@ The build prints `waydroid: kernel/waydroid.config applied` after the config
 step. A `--waydroid: not enabled: ...` error means an option did not survive;
 nothing was built in that case.
 
+`COMPAT` changes structures loadable modules see (`struct proto_ops` gains
+`compat_ioctl`, among others), and this kernel has no `MODVERSIONS`: chg10's
+first boot loaded the 7.1.0-zboot modules built without it, and Bluetooth and
+sound oopsed (21 oopses, `bt_sock_create` → `kmem_cache_alloc`). So a COMPAT
+kernel is release `7.1.0-zboot-wd`, with its modules in
+`/lib/modules/7.1.0-zboot-wd`, and build-boot.sh refuses to build an image
+unless `out/modules-<release>/` was built against its exact config:
+
+```sh
+scripts/build-boot.sh <name> <flags> --waydroid --config-only
+scripts/build-bt-modules.sh out/<name>.config          # -> out/modules-7.1.0-zboot-wd/
+scripts/build-boot.sh <name> <flags> --waydroid
+```
+
+Copy `out/modules-7.1.0-zboot-wd/` to the phone and run `sudo sh
+install-modules.sh` in it **before** flashing; after booting the image,
+`sh install-modules.sh --verify` checks the running kernel against them. A
+7.1.0-zboot kernel (no COMPAT) keeps using `/lib/modules/7.1.0-zboot`.
+
 ## Installing and removing
 
 On the phone, from a checkout (or a copy of `android/waydroid`,
