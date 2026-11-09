@@ -1,0 +1,11 @@
+#!/bin/bash
+# hdmi-watch DIR: record the HDMI capture card continuously (20 s chunks, up to 10 min) and keep a
+# frame from every chunk that holds a picture (DIR/PICTURE-N.jpg); a test can then trigger HPD at will.
+# Pairs with hdmi-grab; the MS2109 card is described there.
+D=$1; mkdir -p $D; rm -rf $D/*
+for k in $(seq 1 30); do
+  c=$D/c$k; mkdir -p $c
+  timeout 25 gst-launch-1.0 -q v4l2src device=/dev/video0 num-buffers=1200 ! image/jpeg,width=1920,height=1080,framerate=60/1 ! multifilesink location=$c/f%04d.jpg >/dev/null 2>&1
+  big=$(find $c -name '*.jpg' -size +60k | sort | tail -1)
+  if [ -n "$big" ]; then cp "$big" $D/PICTURE-$k.jpg; echo "$(date +%T) chunk $k: picture frames $(find $c -name '*.jpg' -size +60k | wc -l)"; else echo "$(date +%T) chunk $k: no signal"; rm -rf $c; fi
+done
