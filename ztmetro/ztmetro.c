@@ -14532,8 +14532,10 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 			server->switch_x = to < 0 ? to * 0.35f : to > last ? last + (to - last) * 0.35f : to;
 		} else {
 			server->drop_card = p->index;
-			/* up with the finger; down it only gives a little */
-			server->drop = y < p->y0 ? (float)(y - p->y0) : (float)(y - p->y0) * 0.15f;
+			/* up with the finger; down it only gives a little, unless there
+			 * is a desktop to pull it down to (desktop/DESIGN.md) */
+			server->drop = y < p->y0 ? (float)(y - p->y0) :
+				(float)(y - p->y0) * (desk_available(server) ? 0.6f : 0.15f);
 		}
 		damage(server);
 		break;
@@ -14830,6 +14832,10 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 				uint32_t ms = (uint32_t)(((float)server->height + server->drop) / speed);
 				animate(server, &server->drop, (float)-server->height, ms < 90 ? 90 : ms > 240 ? 240 : ms,
 					0, true);
+			} else if (!cancelled && server->drop > 110.0f && desk_available(server) &&
+					desk_take_from_phone(server, server->cards[server->drop_card])) {
+				/* pulled down: the app goes to the desktop, and its card with it */
+				hap(server, HAP_CLICK, HG_NAV);
 			} else {
 				animate(server, &server->drop, 0.0f, 260, 0, false);
 			}
