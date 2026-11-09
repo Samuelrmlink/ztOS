@@ -29,6 +29,10 @@
 #                                private kernel tree (KSRC=, e.g. a reflink copy of
 #                                build/linux-7.1): the shared tree's out/.config is what
 #                                every other build's module ABI check reads
+#     --release-suffix -TAG      replaces --dp-altmode's -dp in the release
+#                                (-dp2: 7.1.0-zboot-wd-dp2): a test kernel whose ABI
+#                                differs from one on the phone gets its own release and
+#                                module set; the running kernel's set is never replaced
 #     --cmdline "..."            extra kernel command line (zboot.rescue=1 ...)
 #     --config-only              stop after the configuration: out/<name>.config,
 #                                to build the modules for it first (below)
@@ -72,7 +76,7 @@ FALLBACK=boot
 DTS_FLAGS=()
 EXTRA=
 WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
-UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID= DPALT=
+UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID= DPALT= RELSUFFIX=
 CONFIG_ONLY= MODULES= MODCHECK=1
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -87,6 +91,7 @@ while [ $# -gt 0 ]; do
 	--lockup) LOCKUP=1 ;;
 	--waydroid) WAYDROID=1 ;;
 	--dp-altmode) DTS_FLAGS+=(--dp-altmode); DPALT=1 ;;
+	--release-suffix) RELSUFFIX=$2; shift ;;
 	--config-only) CONFIG_ONLY=1 ;;
 	--modules) MODULES=$(realpath -m "$2"); shift ;;
 	--no-module-check) MODCHECK= ;;
@@ -99,6 +104,10 @@ while [ $# -gt 0 ]; do
 	shift
 done
 [ -n "$UFS" ] && DTS_FLAGS+=(--ufs)
+if [ -n "$RELSUFFIX" ]; then
+	[[ "$RELSUFFIX" =~ ^-[a-z0-9]+$ ]] || { echo "--release-suffix: -[a-z0-9]+, not '$RELSUFFIX'" >&2; exit 1; }
+	[ -n "$DPALT" ] || { echo "--release-suffix is for --dp-altmode test kernels" >&2; exit 1; }
+fi
 if [ -n "$DPALT" ] && [ "$SRC" = "$(realpath -m "$B/linux-7.1")" ]; then
 	echo "--dp-altmode builds in a private tree, not the shared $SRC:" >&2
 	echo "  cp -a --reflink=always $B/linux-7.1 $B/linux-7.1-dp; KSRC=$B/linux-7.1-dp $0 ..." >&2
@@ -399,7 +408,7 @@ fi
 # structures modules use, so a COMPAT kernel gets its own /lib/modules.
 LV=-zboot
 grep -q '^CONFIG_COMPAT=y$' out/.config && LV=-zboot-wd
-[ -n "$DPALT" ] && LV=$LV-dp
+[ -n "$DPALT" ] && LV=$LV${RELSUFFIX:--dp}
 cfg --set-str LOCALVERSION "$LV"
 make -s O=out olddefconfig
 RELEASE=$(sh "$ROOT/scripts/module-abi.sh" --release out/.config "$(make -s kernelversion)")

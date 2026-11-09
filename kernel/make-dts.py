@@ -239,17 +239,19 @@ if args.power:
 			interrupts = <3>;
 		};""")
 # ---- end MAX77705 USB-C controller -----------------------------------------
-USBC_OLD = """		max77705_usbc: usb-c@25 {
-			compatible = "maxim,max77705-usbc";
-			reg = <0x25>;
-			interrupt-parent = <&max77705>;
-			interrupts = <3>;
-		};"""
-USBC_NEW = """		max77705_usbc: usb-c@25 {
-			compatible = "maxim,max77705-usbc";
-			reg = <0x25>;
-			interrupt-parent = <&max77705>;
-			interrupts = <3>;
+# what goes inside the USB-C node: properties first, then the connector child.
+# Inserted before the node's closing brace, so it composes with other edits
+# that add properties after "interrupts = <3>;" (the OTG branch's
+# vbus-supply / usb-role-switch): dtc wants properties before subnodes, and
+# those land above this either way.
+USBC_INSIDE = """
+			/*
+			 * Read-only: the board's CC-orientation input (stock
+			 * dp,usb_con_sel / phy,gpio_phy_port, gpg0-4). Logged
+			 * next to the orientation the MCU reports, to settle the
+			 * SBU select polarity; never driven.
+			 */
+			orientation-sense-gpios = <&gpg0 4 GPIO_ACTIVE_HIGH>;
 
 			usbc_connector: connector {
 				compatible = "usb-c-connector";
@@ -276,7 +278,20 @@ USBC_NEW = """		max77705_usbc: usb-c@25 {
 					};
 				};
 			};
-		};"""
+"""
+
+
+def usbc_append(inside):
+    """Add to the end of the max77705_usbc node, before its closing brace."""
+    global s
+    head = "		max77705_usbc: usb-c@25 {\n"
+    if s.count(head) != 1:
+        sys.exit("make-dts: the max77705_usbc node is not there once")
+    i = s.index(head)
+    close = s.index("\n		};", i)
+    s = s[:close] + "\n" + inside.rstrip("\n") + s[close:]
+
+
 ROOT_NODES = """
 /* ---- USB-C SBU switch and the PCAL6524 expander (make-dts.py --dp-altmode) ---- */
 / {
@@ -341,7 +356,7 @@ ROOT_NODES = """
 if args.dp_altmode:
     if not args.power:
         sys.exit("make-dts: --dp-altmode needs --power (the MAX77705 USB-C node)")
-    sub(USBC_OLD, USBC_NEW)
+    usbc_append(USBC_INSIDE)
     s += ROOT_NODES
 # ---- end USB-C connector and DisplayPort Alt Mode ---------------------------
 

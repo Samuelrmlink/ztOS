@@ -45,6 +45,7 @@
 #include <linux/completion.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/ktime.h>
@@ -479,6 +480,8 @@ struct max77705_usbc {
 	struct fwnode_handle *conn;	/* the usb-c-connector child, if the DT has one */
 	struct delayed_work typec_work;	/* typec port registration, while its switches defer */
 	unsigned int typec_tries;
+	struct gpio_desc *orient_sense;	/* DT orientation-sense-gpios: read, never driven */
+	u8 orient_last;			/* CCPinStat at the last log, 0xff: none yet */
 	u16 dp_svid0;			/* first SVID of Discover SVIDs, this attach */
 	bool dp_mode_found;		/* Discover Modes ACK for 0xff01 */
 	u32 dp_mode_vdo;
@@ -2998,6 +3001,31 @@ static void usbc_vdm_events(struct max77705_usbc *u, u8 vdm_int)
 		usbc_vdm_read(u, VDM_SUB_MODES);
 }
 
+/*
+ * The board's own orientation input next to the MCU's: stock selects the SBU
+ * switch from gpg0-4 (dp,usb_con_sel), the typec class from the CC chip.
+ * Logged at each change of CCPinStat, so one plug each way round says which
+ * select level goes with which orientation. GPIOD_ASIS: the pin's
+ * configuration is left alone, only its data register is read.
+ */
+static const char * const ccpin_name[4] = { "none", "CC1 (normal)", "CC2 (reverse)", "?" };
+
+static int usbc_orient_sense(struct max77705_usbc *u)
+{
+	return u->orient_sense ? gpiod_get_value_cansleep(u->orient_sense) : -ENODEV;
+}
+
+static void usbc_orient_log(struct max77705_usbc *u)
+{
+	u8 pin = FIELD_GET(CC0_CCPINSTAT, u->st[ST(REG_CC_STATUS0)]);
+
+	if (!u->orient_sense || pin == u->orient_last)
+		return;
+	u->orient_last = pin;
+	dev_info(u->dev, "orientation: MCU CCPinStat %s, orientation-sense %d\n",
+		 ccpin_name[pin], usbc_orient_sense(u));
+}
+
 /* ---- events --------------------------------------------------------------- */
 
 /* SYSMsg: log it; after an MCU (re)boot re-apply the masks and forget what
@@ -3095,6 +3123,7 @@ static void usbc_event_work(struct work_struct *work)
 		usbc_pd_read_caps(u);
 	usbc_typec_update(u);
 	usbc_dp_update(u);
+	usbc_orient_log(u);
 
 	usbc_publish(u);
 
@@ -3499,6 +3528,17 @@ static const struct file_operations usbc_probe_fops = {
 	.release = single_release,
 };
 
+static int usbc_orientation_show(struct seq_file *s, void *unused)
+{
+	struct max77705_usbc *u = s->private;
+	u8 pin = FIELD_GET(CC0_CCPINSTAT, u->st[ST(REG_CC_STATUS0)]);
+
+	seq_printf(s, "MCU CCPinStat %s, orientation-sense %d\n", ccpin_name[pin],
+		   usbc_orient_sense(u));
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(usbc_orientation);
+
 static void usbc_debugfs_init(struct max77705_usbc *u)
 {
 	u->debugfs = debugfs_create_dir("max77705-usbc", NULL);
@@ -3509,6 +3549,8 @@ static void usbc_debugfs_init(struct max77705_usbc *u)
 		debugfs_create_file("pd_request", 0600, u->debugfs, u, &usbc_pd_request_fops);
 		debugfs_create_file("probe", 0600, u->debugfs, u, &usbc_probe_fops);
 	}
+	if (u->orient_sense)
+		debugfs_create_file("orientation", 0400, u->debugfs, u, &usbc_orientation_fops);
 	if (vdm_debugfs > 0 || usbc_discovery(u))
 		debugfs_create_file("vdm", vdm_debugfs > 0 ? 0600 : 0400,
 				    u->debugfs, u, &usbc_vdm_fops);
@@ -3598,6 +3640,13 @@ static int max77705_usbc_probe(struct i2c_client *client)
 		dev_info(dev, "masks were %02x %02x %02x %02x\n",
 			 mask[0], mask[1], mask[2], mask[3]);
 	usbc_dp_from_dt(u);	/* before the masks: DP opens PD_INT's DP bits */
+	u->orient_last = 0xff;
+	u->orient_sense = devm_gpiod_get_optional(dev, "orientation-sense", GPIOD_ASIS);
+	if (IS_ERR(u->orient_sense)) {
+		/* a debug readout: never a reason to fail charging */
+		dev_warn(dev, "orientation-sense-gpios: %ld, not read\n", PTR_ERR(u->orient_sense));
+		u->orient_sense = NULL;
+	}
 	ret = usbc_set_masks(u);
 	if (ret)
 		return dev_err_probe(dev, ret, "mask write failed\n");

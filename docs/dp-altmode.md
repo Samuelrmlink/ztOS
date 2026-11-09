@@ -45,7 +45,10 @@ sent.
 `kernel/make-dts.py --dp-altmode` (with `--power`) adds the nodes below. The
 build switch is `scripts/build-boot.sh --dp-altmode`, which also builds in
 `CONFIG_TYPEC_DP_ALTMODE` and `CONFIG_TYPEC_MUX_GPIO_SBU`, and must run in a
-private kernel tree (`KSRC=`). The drivers carry SoC- and protocol-level
+private kernel tree (`KSRC=`). Its release is `<base>-dp`;
+`--release-suffix -dp2` (etc.) gives a test kernel whose ABI differs from
+one on the phone its own release and module set, so a running kernel's
+modules are never replaced. The drivers carry SoC- and protocol-level
 logic only. A tree that lacks a node makes its driver log an error and stay
 off. They do not fall back to S9 values.
 
@@ -96,6 +99,17 @@ usb-c@25 {
 - **Pin mask:** the vdo's pin mask is the board's statement of which lane
   configurations its wiring carries. The DP Configure that the kernel sends
   is checked against it.
+- **`orientation-sense-gpios`** (on the USB-C node, gpg0-4 on the S9): the
+  board's own orientation input, the one stock selects the SBU switch from.
+  max77705-usbc only reads it (`GPIOD_ASIS`: its configuration is left as it
+  is). It logs `orientation: MCU CCPinStat ..., orientation-sense N` at each
+  orientation change, and debugfs `max77705-usbc/orientation` shows both.
+  This is how the select polarity gets settled. It is optional, and a board
+  without it loses only the log.
+- **Node order:** make-dts.py adds these at the end of the USB-C node, so they
+  compose with the OTG branch's `vbus-supply` / `usb-role-switch` properties
+  on the same node (dtc wants properties before child nodes). Both orders
+  were checked with dtc.
 - **A later DP controller:** when one exists, the connector gets a
   `displayport = <&dp>` property. typec_displayport then delivers HPD to that
   DRM connector.
