@@ -81,7 +81,10 @@ Panfrost/GLES remains enabled; Vulkan remains disabled. Bootanimation is disable
 because its texture allocations failed under CMA pressure. Host output scale is 4:
 360x672 logical configuration produces 1440x2688 Android pixels, with density 560.
 A smaller `wm size` was investigated but not retained. No host display settings
-were changed. The black background subsurface is disabled.
+were changed. The background subsurface stays on
+(`persist.waydroid.no_background_subsurface = false`): with it off, dialog
+windows such as the package installer's were drawn at the top of the screen
+and took no touch (see `waydroid.cfg`).
 
 The September vendor also has two upstream composer defects. `patch-vendor.sh`
 works on a copy and preserves `vendor.img.stock`. `patch-composer.py` validates the
