@@ -717,13 +717,15 @@ class Bridge(GattServerMixin):
         self._close_link(link)
         answer(P.ST_OK)
 
-    def _link(self, client, answer, link_id):
+    def _link(self, client, answer, link_id, what="op"):
         link = self.links.get(link_id)
         if link is None or link.client is not client:
+            self.log("gatt", what, "on link", link_id, "refused: no such link")
             answer(P.ST_NOT_FOUND)
             return None
         hold = self.holds.get(link.addr)
         if hold is None or hold.state != "connected":
+            self.log("gatt", link.addr, what, "refused: not connected (%s)" % (hold.state if hold else "let go"))
             answer(P.ST_NOT_READY)
             return None
         return link
@@ -799,28 +801,32 @@ class Bridge(GattServerMixin):
         return err
 
     def op_gatt_read(self, client, answer, link_id, handle, offset):
-        link = self._link(client, answer, link_id)
+        link = self._link(client, answer, link_id, "read 0x%04x" % handle)
         if link is None:
             return
         attr = self.be.attribute(link.addr, handle)
         if attr is None:
+            self.log("gatt", link.addr, "read 0x%04x refused: no such handle" % handle)
             answer(P.ST_ATT, [0x01])           # invalid handle
             return
         if attr[0] == "desc" and P.full_uuid(attr[1]) == CCCD:
+            self.log("gatt", link.addr, "read CCCD 0x%04x: answered from the bridge" % handle)
             answer(P.ST_OK, [link.cccd.get(handle, b"\x00\x00")[offset:]])
             return
         answer = self._logged(answer, link.addr, "read %s 0x%04x %s" % (attr[0], handle, P.full_uuid(attr[1])))
         self.be.read(link.addr, handle, offset, lambda v: answer(P.ST_OK, [bytes(v)]), self._att_answer(answer))
 
     def op_gatt_write(self, client, answer, link_id, handle, wtype, offset, value):
-        link = self._link(client, answer, link_id)
+        link = self._link(client, answer, link_id, "write 0x%04x" % handle)
         if link is None:
             return
         attr = self.be.attribute(link.addr, handle)
         if attr is None:
+            self.log("gatt", link.addr, "write 0x%04x refused: no such handle" % handle)
             answer(P.ST_ATT, [0x01])
             return
         if wtype == P.W_PREPARE:
+            self.log("gatt", link.addr, "write 0x%04x refused: a prepared (reliable) write" % handle)
             answer(P.ST_UNSUPPORTED)           # reliable writes: not yet
             return
         if attr[0] == "desc" and P.full_uuid(attr[1]) == CCCD:
