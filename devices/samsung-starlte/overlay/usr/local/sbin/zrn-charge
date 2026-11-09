@@ -89,7 +89,6 @@ TRIP_LIMIT=input_current_trip_limit		# uA in force at the last trip
 TRIP_VOLTAGE=input_current_trip_voltage		# uV at the last trip, 0 = unknown
 PD_CAPS=pd_source_caps				# the source's PDOs, "mV:mA mV:mA ..."
 LOW_HV_PCT=15					# below it, a PD 5 V x 3 A charger stays at 5 V
-LOW_HV_UP_PCT=18				# held so, it may go up only from this (no flapping at 14/15 %)
 PD_HARD_RESETS=pd_hard_resets			# a count
 PD_CAPS_REDUCED=pd_caps_reduced_after_hard_reset	# a count
 # What each charger did before, per fingerprint (charger_type, usb_type and
@@ -330,11 +329,11 @@ trip() {	# fingerprint, limit mA, 1 if at 9 V, how it was seen: remember, and sa
 }
 
 # what one pass remembers for the next (the daemon keeps it; a lone pass reads it)
-STATE="lowhold lowdone redrop src_was key_was cap win ceil wceil off_since plug_at settle hot_stop cold_stop warm cold cool vhold hv_at logged
+STATE="lowdone redrop src_was key_was cap win ceil wceil off_since plug_at settle hot_stop cold_stop warm cold cool vhold hv_at logged
 	sess_fp held_val held_since trips_seen hr_seen reduced_seen hr_sess hr_caps caps_was anom anom_cap
 	last_fp last_in last_hv"
 src_was=none key_was= cap=0 win=0 ceil=0 wceil=0 off_since=0 plug_at=0 settle=0
-lowhold=0 lowdone=0 hot_stop=0 cold_stop=0 warm=0 cold=0 cool=0 vhold=0 hv_at=0 logged=
+lowdone=0 hot_stop=0 cold_stop=0 warm=0 cold=0 cool=0 vhold=0 hv_at=0 logged=
 redrop=0 sess_fp= held_val=0 held_since=0 trips_seen= hr_seen= reduced_seen= hr_sess=0 hr_caps= caps_was=
 anom=0 anom_cap=1500
 last_fp= last_in=0 last_hv=0
@@ -358,7 +357,7 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 		if [ "$src_was" = none ] && [ $((NOW - off_since)) -ge $REPLUG_S ]; then
 			cap=0 win=0 ceil=0 wceil=0 hv_at=0 plug_at=$NOW settle=$((NOW + 15))
 			sess_fp= held_val=0 held_since=0 anom=0 anom_cap=1500 hr_sess=0 hr_caps= caps_was=
-			lowhold=0 lowdone=0
+			lowdone=0
 			mem_age
 		elif [ "$src_was" = none ] && [ $src = wired ] && [ -n "$last_fp" ] &&
 		     [ $last_in -ge 1000 ] && ! cget $TRIP_COUNT; then
@@ -398,7 +397,7 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 		if [ -n "$sess_fp" ] && [ "${sess_fp%%+*}" != "$type" ]; then
 			cap=0 win=0 ceil=0 wceil=0 hv_at=0 plug_at=$NOW settle=$((NOW + 15))
 			sess_fp= held_val=0 held_since=0 anom=0 anom_cap=1500 hr_sess=0 hr_caps= caps_was=
-			lowhold=0 lowdone=0
+			lowdone=0
 		fi
 		redrop=0
 	fi
@@ -487,27 +486,22 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	# held at 5 V by hand (a new driver on trial): touch /etc/zrn-charge/no-hv
 	[ -e "$R/etc/zrn-charge/no-hv" ] && [ $hvok = 1 ] && { hvok=0; why+=" 9 V off by hand"; }
 	# Battery under LOW_HV_PCT on a PD charger whose 5 V already gives the full
-	# 15 W (5 V x 3 A): stay at 5 V, stock's choice, so there is no switch and no
-	# few seconds at 500 mA while the input ramps up again at 9 V, when a few
-	# percent is all that keeps the phone on. AFC/QC2 still switch: there 9 V is a
-	# real gain over the DCP's 1800 mA. It can't loop: it only ever holds back a
-	# switch up, never makes one down; once holding, the battery must reach
-	# LOW_HV_UP_PCT before it lets go (lowhold); and once it has let go it stays
-	# out of the way for the rest of the plug (lowdone), so a failed or undone
-	# 9 V doesn't bring it back each time the reading crosses the line.
+	# 15 W (5 V x 3 A): stay at 5 V, stock's choice, so there's no switch (and no
+	# few seconds at 500 mA while the input ramps up again) when a few percent is
+	# all that keeps the phone on. From LOW_HV_PCT on, 9 V: the same charging
+	# speed, a bit more efficient, and less lost in the cable. Either works; this
+	# only picks when. It never switches down, and once 9 V is allowed it stays
+	# so for the plug (lowdone), so it can't flap. AFC/QC2 aren't affected.
 	if [ $src = wired ] && [ "$type" = pd ] && [ $lowdone = 0 ] && [ $hvok = 1 ] && [ $hvbus = 0 ]; then
 		local pc full5=0 lvl=100
 		for pc in $caps; do
 			case $pc in 5000:*) [ "${pc#5000:}" -ge 3000 ] 2>/dev/null && { full5=1; break; } ;; esac
 		done
 		num "$B/capacity" && lvl=$REPLY
-		if [ $full5 = 1 ]; then
-			if [ $lowhold = 0 ] && [ $lvl -lt $LOW_HV_PCT ]; then
-				lowhold=1
-			elif [ $lowhold = 1 ] && [ $lvl -ge $LOW_HV_UP_PCT ]; then
-				lowhold=0 lowdone=1
-			fi
-			[ $lowhold = 1 ] && { hvok=0; why+=" 5 V while under $LOW_HV_UP_PCT %"; }
+		if [ $full5 = 1 ] && [ $lvl -lt $LOW_HV_PCT ]; then
+			hvok=0; why+=" 5 V while under $LOW_HV_PCT %"
+		else
+			lowdone=1
 		fi
 	fi
 

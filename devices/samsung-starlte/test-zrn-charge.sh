@@ -258,13 +258,13 @@ fresh; w "$U" pd_hard_resets=0; echo 0 > "$U/hv_enable"; w "$B" capacity=10
 w "$C" online=1; w "$U" online=1 charger_type=pd usb_type='Unknown SDP DCP CDP C [PD]'
 pd "5000:3000 9000:3000" 3000000
 check "low: 10 %, 5 V x 3 A: stays at 5 V" "0" "$(cat "$U/hv_enable")"
-grep -q '5 V while under 18 %' "$T/out" || { echo "FAIL low: no reason logged"; fail=1; }
-w "$B" capacity=15; pd "5000:3000 9000:3000" 3000000
+grep -q '5 V while under 15 %' "$T/out" || { echo "FAIL low: no reason logged"; fail=1; }
 w "$B" capacity=14; pd "5000:3000 9000:3000" 3000000
-w "$B" capacity=17; pd "5000:3000 9000:3000" 3000000
-check "low: 14-17 % after holding: still 5 V (no flapping)" "0" "$(cat "$U/hv_enable")"
-w "$B" capacity=18; pd "5000:3000 9000:3000" 3000000
-check "low: 18 %: up to 9 V" "1" "$(cat "$U/hv_enable")"
+check "low: 14 %: still 5 V" "0" "$(cat "$U/hv_enable")"
+w "$B" capacity=15; pd "5000:3000 9000:3000" 3000000
+check "low: 15 %: up to 9 V" "1" "$(cat "$U/hv_enable")"
+w "$B" capacity=14; pd "5000:3000 9000:3000" 3000000 9000000
+check "low: back at 14 % on 9 V: stays (no flapping)" "1" "$(cat "$U/hv_enable")"
 w "$B" capacity=12; pd "5000:3000 9000:3000" 3000000 5000000
 check "low: let go once, a 5 V moment at 12 % doesn't bring it back" "1" "$(cat "$U/hv_enable")"
 unplug; tick 1; run; tick 10; run
