@@ -57,8 +57,12 @@
  *   video  the link's video from DECON2 (no BIST); after video_off
  *   decon2_start  DECON2 on, RUN_STATUS (needs lh, route, sram)
  *   decon2_stop   DECON2 off, LH off, DECON2 soft reset
- *   dma    W6 DMA/DPP channel 1 on a 1920x1080 test image (no window
- *          maps it to DECON2 yet)
+ *   dma    W6 DMA/DPP channel 1 on a 1920x1080 test image
+ *   win    blender window 4 on DECON2 as a colour map (win_rgb)
+ *   win_dma  window 4 fed by DMA channel 1 (after dma)
+ *   frames read only: DECON2's frame counter over 100 ms, the link's video state
+ *   m4up   all of the above in stock's order on a trained link (m4_src picks
+ *          the colour map or the DMA image); hpd_m4=1 runs it on HPD high
  *
  * auto=1 runs pma..edid itself when the class enters a DP pin state, and
  * off when it leaves; default 0.
@@ -329,6 +333,7 @@ struct x9dp {
 	/* M4 writes: DECON0's DP_CONNECTION_CONTROL (and its shadow, read
 	 * only), the disp sysreg's TE_QACTIVE_PLL_EN; mapped, not requested */
 	void __iomem *d0conn, *d0conn_shd, *dsys;
+	void __iomem *d0win;		/* DECON0-space blender window 4 (approved), 0x1c */
 	bool vsrc_decon;		/* video_on with DECON2's pixels, not BIST */
 	bool decon2_on;
 	void *fb_cpu;			/* the dma step's test image */
@@ -1010,6 +1015,15 @@ static int x9dp_video_cfg(struct x9dp *d, u32 *ipp, u32 *fpp)
 
 	if (!d->rate)
 		return -EAGAIN;
+	/*
+	 * The stream must fit the link: active symbols per 32-symbol TU =
+	 * 32 * pixel rate * bpp / (lanes * link symbol rate * 8) below 32
+	 * (dp14: a retrain fell back to RBR x2 and started 1080p60 at TU 45).
+	 */
+	if ((u64)m->khz * bpp >= (u64)d->nlanes * ls * 8) {
+		dev_warn(d->dev, "1080p60 does not fit rate %02x x%u\n", d->rate, d->nlanes);
+		return -ERANGE;
+	}
 	/* the SST1 video function, as stock's function_enable does at init (:432-437) */
 	link_rmw(d, SYSTEM_SST1_FUNCTION_ENABLE, SST1_VIDEO_FUNC_EN, SST1_VIDEO_FUNC_EN);
 	link_rmw(d, SST1_VIDEO_CONTROL, DYNAMIC_RANGE_MODE | VIDEO_BPC | COLOR_FORMAT,
@@ -1591,6 +1605,161 @@ static int x9dp_dma(struct x9dp *d)
 	return 0;
 }
 
+/*
+ * Blender window 4 for DECON2 (stock decon_t default_win = <4>; DECON0
+ * itself uses only window 5 on this phone: its DATA_PATH_CONTROL_0 reads
+ * 0x00100000). Window registers sit in DECON0's space for every DECON
+ * (decon_reg_set_window_control, decon_reg.c:2221-2242: decon_write(0, ..)),
+ * the window enable, colour-map enable and channel map in DECON2's own
+ * DATA_PATH_CONTROL_0/1 (:2061-2069, :2104-2116, :686-697). Full frame,
+ * COPY blending (no alpha), start time 0. Stock never starts DECON2 with
+ * no window (decon_update_regs returns before decon_reg_start when
+ * num_of_window == 0), and dp14 showed why: with none, DECON2 ran but
+ * FRAME_COUNT stayed 0 and the link's MAPI underflowed.
+ *
+ *   win      window 4 as a colour map (win_rgb), no DMA
+ *   win_dma  window 4 fed by DMA channel 1 (IDMA_G1 = blender channel 3,
+ *            helper.c:604-633): the dma step's test image
+ */
+#define DECON_WIN_EN(w)			BIT(4 * (w))
+#define DECON_WIN_MAPCOLOR_EN(w)	BIT(4 * (w) + 1)
+#define DECON_WIN_CHMAP(w)		(0x7 << (4 * (w)))
+#define DECON_DATA_PATH_CONTROL_1	0x0218
+#define X9DP_WIN			4
+#define X9DP_WIN_G1_CH			3
+/* offsets inside the window's 0x30 block (regs-decon.h WIN_*) */
+#define WIN_CONTROL_0			0x00	/* ALPHA1 [31:24] ALPHA0 [23:16] FUNC [11:8] MULT_SEL [1:0] */
+#define  WIN_FUNC_COPY_MULT_AF		0x00000102
+#define WIN_START_POSITION		0x08
+#define WIN_END_POSITION		0x0c
+#define WIN_COLORMAP_0			0x10	/* A [23:16] R [9:0] */
+#define WIN_COLORMAP_1			0x14	/* G [25:16] B [9:0] */
+#define WIN_START_TIME_CONTROL		0x18
+
+static uint win_rgb = 0x00ff00;
+module_param(win_rgb, uint, 0644);
+MODULE_PARM_DESC(win_rgb, "colour of the win step's colour-map window, 0xRRGGBB (default 0x00ff00 green, against the orange background)");
+
+static int x9dp_win_set(struct x9dp *d, bool dma)
+{
+	const u32 w = x9dp_1080p60.ha, h = x9dp_1080p60.va;
+	u32 r = (win_rgb >> 16) & 0xff, g = (win_rgb >> 8) & 0xff, b = win_rgb & 0xff;
+	u32 en = DECON_WIN_EN(X9DP_WIN) | (dma ? 0 : DECON_WIN_MAPCOLOR_EN(X9DP_WIN));
+	int ret = x9dp_m4_ok(d, false);
+
+	if (ret)
+		return ret;
+	if (!d->d0win)
+		return -ENODEV;
+	if (dma && !d->fb_cpu)
+		return -EAGAIN;		/* dma first */
+	writel(WIN_FUNC_COPY_MULT_AF, d->d0win + WIN_CONTROL_0);
+	writel(0, d->d0win + WIN_START_POSITION);
+	writel((h - 1) << 16 | (w - 1), d->d0win + WIN_END_POSITION);
+	writel(0xff << 16 | x9dp_c10(r), d->d0win + WIN_COLORMAP_0);
+	writel(x9dp_c10(g) << 16 | x9dp_c10(b), d->d0win + WIN_COLORMAP_1);
+	writel(0, d->d0win + WIN_START_TIME_CONTROL);
+	x9dp_d2_rmw(d, DECON_DATA_PATH_CONTROL_1, DECON_WIN_CHMAP(X9DP_WIN),
+		    X9DP_WIN_G1_CH << (4 * X9DP_WIN));
+	x9dp_d2_rmw(d, DECON_DATA_PATH_CONTROL_0,
+		    DECON_WIN_EN(X9DP_WIN) | DECON_WIN_MAPCOLOR_EN(X9DP_WIN), en);
+	x9dp_d2_rmw(d, DECON_SHADOW_REG_UPDATE_REQ, DECON_SHADOW_GLOBAL | BIT(X9DP_WIN), ~0);
+	scnprintf(d->last, sizeof(d->last),
+		  "win%s: w4 ctl %08x pos %08x-%08x map %08x/%08x st %08x; d2 dpc0 %08x dpc1 %08x shadow_req %08x frames %08x",
+		  dma ? "_dma" : "", readl(d->d0win + WIN_CONTROL_0),
+		  readl(d->d0win + WIN_START_POSITION), readl(d->d0win + WIN_END_POSITION),
+		  readl(d->d0win + WIN_COLORMAP_0), readl(d->d0win + WIN_COLORMAP_1),
+		  readl(d->d0win + WIN_START_TIME_CONTROL),
+		  readl(d->decon2 + DECON_DATA_PATH_CONTROL_0),
+		  readl(d->decon2 + DECON_DATA_PATH_CONTROL_1),
+		  readl(d->decon2 + DECON_SHADOW_REG_UPDATE_REQ),
+		  readl(d->decon2 + DECON_FRAME_COUNT));
+	return 0;
+}
+
+static int x9dp_win(struct x9dp *d)
+{
+	return x9dp_win_set(d, false);
+}
+
+static int x9dp_win_dma(struct x9dp *d)
+{
+	return x9dp_win_set(d, true);
+}
+
+/* read only: DECON2's frame counter and the link's video state, twice 100 ms apart */
+static int x9dp_frames(struct x9dp *d)
+{
+	u32 f0, f1;
+	int ret = x9dp_m4_ok(d, false);
+
+	if (ret)
+		return ret;
+	f0 = readl(d->decon2 + DECON_FRAME_COUNT);
+	mutex_unlock(&d->lock);
+	msleep(100);
+	mutex_lock(&d->lock);
+	f1 = readl(d->decon2 + DECON_FRAME_COUNT);
+	scnprintf(d->last, sizeof(d->last),
+		  "frames: DECON2 %u -> %u in 100 ms; global %08x int %08x extra %08x; dma err %08x irq %08x; link fsm %08x mapi %08x int0 %08x",
+		  f0, f1, readl(d->decon2 + DECON_GLOBAL_CONTROL),
+		  readl(d->decon2 + DECON_INTERRUPT_PENDING),
+		  readl(d->decon2 + DECON_EXTRA_INTERRUPT_PENDING),
+		  d->dma1_sz >= 0x874 ? readl(d->dma1 + IDMA_CFG_ERR_STATE) : 0,
+		  readl(d->dma1 + 0x4),
+		  d->ctrl_on ? readl(d->link + SST1_VIDEO_DEBUG_FSM_STATE) : 0,
+		  d->ctrl_on ? readl(d->link + SST1_VIDEO_DEBUG_MAPI) : 0,
+		  d->ctrl_on ? readl(d->link + SST1_INTERRUPT_STATUS_SET0) : 0);
+	return 0;
+}
+
+/*
+ * The whole M4 bring-up in stock's order, on a trained link: DECON2 stopped
+ * if it ran, route, sram, decon2, the window (m4_src 0: colour map, 1: DMA
+ * channel 1's test image), the link's video from DECON2, LH, DECON2 start.
+ */
+static uint m4_src;
+module_param(m4_src, uint, 0644);
+MODULE_PARM_DESC(m4_src, "m4up's window source: 0 colour map (win_rgb), 1 DMA channel 1 test image (default 0)");
+
+static bool hpd_m4;
+module_param(hpd_m4, bool, 0644);
+MODULE_PARM_DESC(hpd_m4, "with hpd_read and hpd_bist: on HPD high train and run m4up (DECON2) instead of the colour bars (default 0)");
+
+static int x9dp_m4up(struct x9dp *d)
+{
+	static const struct {
+		const char *name;
+		int (*fn)(struct x9dp *d);
+	} seq[] = {
+		{ "route", x9dp_route }, { "sram", x9dp_sram }, { "decon2", x9dp_decon2 },
+		{ "dma", x9dp_dma }, { "win", x9dp_win }, { "win_dma", x9dp_win_dma },
+		{ "video_off", x9dp_video_off }, { "video", x9dp_video }, { "lh", x9dp_lh },
+		{ "decon2_start", x9dp_decon2_start },
+	};
+	int i, ret;
+
+	if (!d->rate)
+		return -EAGAIN;		/* train first */
+	if (d->decon2_on) {
+		ret = x9dp_decon2_stop(d);
+		if (ret)
+			return ret;
+	}
+	for (i = 0; i < ARRAY_SIZE(seq); i++) {
+		if ((m4_src && seq[i].fn == x9dp_win) ||
+		    (!m4_src && (seq[i].fn == x9dp_dma || seq[i].fn == x9dp_win_dma)))
+			continue;
+		ret = seq[i].fn(d);
+		dev_info(d->dev, "m4up: %s\n", d->last);
+		if (ret) {
+			scnprintf(d->last, sizeof(d->last), "m4up: %s failed %d", seq[i].name, ret);
+			return ret;
+		}
+	}
+	return 0;
+}
+
 static int x9dp_m4regs_show(struct seq_file *s, void *unused)
 {
 	struct x9dp *d = s->private;
@@ -1627,6 +1796,8 @@ static const struct {
 	{ "route", x9dp_route }, { "sram", x9dp_sram }, { "decon2", x9dp_decon2 },
 	{ "video", x9dp_video }, { "decon2_start", x9dp_decon2_start },
 	{ "decon2_stop", x9dp_decon2_stop }, { "dma", x9dp_dma },
+	{ "win", x9dp_win }, { "win_dma", x9dp_win_dma }, { "frames", x9dp_frames },
+	{ "m4up", x9dp_m4up },
 };
 
 static int x9dp_run(struct x9dp *d, const char *name)
@@ -1687,10 +1858,15 @@ static void x9dp_hpd_work(struct work_struct *work)
 	 * video is logged.
 	 */
 	if (hpd_bist) {
+		bool decon = hpd_m4 || d->decon2_on;
+
+		/* DECON2 stops before the link goes down under it (stock: decon
+		 * disable before displayport_disable on HPD low) */
+		if (d->decon2_on)
+			x9dp_run(d, "decon2_stop");
 		if (d->video_on)
 			x9dp_run(d, "video_off");
-		if (x9dp_run(d, "train") == 0 &&
-		    x9dp_run(d, d->decon2_on ? "video" : "bist") == 0) {
+		if (x9dp_run(d, "train") == 0 && x9dp_run(d, decon ? "m4up" : "bist") == 0) {
 			mutex_unlock(&d->lock);
 			msleep(100);
 			mutex_lock(&d->lock);
@@ -1918,6 +2094,7 @@ static int x9dp_probe(struct platform_device *pdev)
 	d->d0conn = x9dp_map_opt(pdev, "decon0-dp-conn", NULL);
 	d->d0conn_shd = x9dp_map_opt(pdev, "decon0-dp-conn-shadow", NULL);
 	d->dsys = x9dp_map_opt(pdev, "disp-sysreg-te", NULL);
+	d->d0win = x9dp_map_opt(pdev, "decon0-win4", NULL);
 	ret = x9dp_read_pairs(dev, "samsung,link-power-status", iso, 2);
 	if (ret)
 		return ret;
