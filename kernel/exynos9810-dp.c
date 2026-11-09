@@ -34,6 +34,12 @@
  * auto=1 runs pma..edid itself when the class enters a DP pin state, and
  * off when it leaves; default 0.
  *
+ * pma_early=1 (default 0, writable at run time) runs only the pma phase when
+ * the class enters a DP state, and off when it leaves. max77705-usbc sets a
+ * DP state at Discover SVIDs, before Enter Mode, so this is stock's order:
+ * Samsung's USB3 bring-up has the PMA up before the dock is asked to enter
+ * DP (dp-hpd-research candidate 1). For a dock that raises HPD only then.
+ *
  * Every combo PHY access first reads the PMU isolation bit the DT names
  * (PMU 0x704 bit 0 on the 9810, stock's USBDP_PHY_CONTROL check,
  * displayport.h:1076-1145): with the PHY isolated the access is skipped and
@@ -161,6 +167,10 @@
 static bool auto_bringup;
 module_param_named(auto, auto_bringup, bool, 0644);
 MODULE_PARM_DESC(auto, "run the bring-up phases on a DP pin state, off on leaving it (default 0: debugfs only)");
+
+static bool pma_early;
+module_param(pma_early, bool, 0644);
+MODULE_PARM_DESC(pma_early, "power the combo PMA up when a DP state is set (before Enter Mode), down when it ends (default 0)");
 
 enum { ORIENT_NORMAL, ORIENT_REVERSE };
 
@@ -299,6 +309,30 @@ static int x9dp_pma(struct x9dp *d)
 	ret = ret ?: phy_wr(d, COM_CMN_R27, BIT(7) | (5 << 4) | BIT(3) | 0x4);
 	ret = ret ?: phy_wr(d, COM_TRSV_R23, BIT(7) | 0x5);
 	ret = ret ?: phy_rmw(d, COM_CMN_R24, CMN24_SSC_EN, CMN24_SSC_EN);
+	/*
+	 * The lane mux for the cable orientation (usbdp.c:415-449, used_phy_port
+	 * = !gpg0-4): the same values as a 2-lane DP mode on the PMA lanes the
+	 * DT gives for this orientation, plus the lower DP TX level on the two
+	 * lanes DP does not get.
+	 */
+	if (d->two_lanes[x9dp_oidx(d)][0] == 2) {
+		ret = ret ?: phy_rmw(d, CMN_REG2C, MAN_USBDP_MODE | MAN_USBDP_MODE_EN,
+				     FIELD_PREP(MAN_USBDP_MODE, 3) | MAN_USBDP_MODE_EN);
+		ret = ret ?: phy_rmw(d, CMN_REG2D, USB_TX1_SEL | USB_TX3_SEL, USB_TX1_SEL);
+		ret = ret ?: phy_rmw(d, DP_REG_B3, CMN_DUMMY_CTRL_7_6 | CMN_DUMMY_CTRL_1_0,
+				     FIELD_PREP(CMN_DUMMY_CTRL_7_6, 1) |
+				     FIELD_PREP(CMN_DUMMY_CTRL_1_0, 3));
+		ret = ret ?: phy_wr(d, DP_REG_16, 0);
+		ret = ret ?: phy_wr(d, DP_REG_1A, 0);
+	} else {
+		ret = ret ?: phy_rmw(d, CMN_REG2C, MAN_USBDP_MODE | MAN_USBDP_MODE_EN,
+				     MAN_USBDP_MODE_EN);
+		ret = ret ?: phy_rmw(d, CMN_REG2D, USB_TX1_SEL | USB_TX3_SEL, USB_TX3_SEL);
+		ret = ret ?: phy_rmw(d, DP_REG_B3, CMN_DUMMY_CTRL_7_6 | CMN_DUMMY_CTRL_1_0,
+				     FIELD_PREP(CMN_DUMMY_CTRL_7_6, 2));
+		ret = ret ?: phy_wr(d, DP_REG_56, 0);
+		ret = ret ?: phy_wr(d, DP_REG_5A, 0);
+	}
 	ret = ret ?: phy_rmw(d, CMN_REG2D, LCPLL_SSCDIV, FIELD_PREP(LCPLL_SSCDIV, 1));
 	ret = ret ?: phy_wr(d, COM_TRSV_R38, (2 << 5) | (2 << 2) | BIT(0));
 	ret = ret ?: phy_rmw(d, COM_TRSV_R1F, BIT(0), BIT(0));
@@ -566,11 +600,11 @@ static void x9dp_auto_work(struct work_struct *work)
 {
 	struct x9dp *d = container_of(work, struct x9dp, auto_work);
 	static const char * const up[] = { "pma", "phy", "ctrl", "dpcd", "edid" };
-	int i;
+	int i, n = auto_bringup ? ARRAY_SIZE(up) : 1;	/* pma_early: the PMA only */
 
 	mutex_lock(&d->lock);
 	if (x9dp_lanes(d)) {
-		for (i = 0; i < ARRAY_SIZE(up); i++)
+		for (i = 0; i < n; i++)
 			if (x9dp_run(d, up[i]))
 				break;
 	} else if (d->pma_on) {
@@ -597,6 +631,15 @@ static int x9dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state
 	struct x9dp *d = typec_mux_get_drvdata(mux);
 	bool was, now;
 
+	/*
+	 * The USB Safe State is what typec_displayport sets around Enter Mode
+	 * and each Configure: a pause between DP states, not their end (USB, or
+	 * the orientation going to none, is). Nothing changes for it, so the
+	 * PMA stays up through Enter and Configure, as on stock.
+	 */
+	if (state->mode == TYPEC_STATE_SAFE)
+		return 0;
+
 	mutex_lock(&d->lock);
 	was = x9dp_lanes(d);
 	d->mode = state->mode;
@@ -614,7 +657,7 @@ static int x9dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state
 		dev_info(d->dev, "pin state %lu: %d lanes, %s\n", state->mode, x9dp_lanes(d),
 			 d->orient == TYPEC_ORIENTATION_REVERSE ? "reverse" : "normal");
 	mutex_unlock(&d->lock);
-	if (auto_bringup && was != now)
+	if ((auto_bringup || pma_early) && was != now)
 		schedule_work(&d->auto_work);
 	return 0;
 }
@@ -780,7 +823,8 @@ static int x9dp_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	dev_info(dev, "registered (PHY isolation PMU %#x mask %#x); hardware untouched until a step%s\n",
-		 d->iso_off, d->iso_mask, auto_bringup ? " or a DP pin state" : "");
+		 d->iso_off, d->iso_mask,
+		 auto_bringup ? " or a DP pin state" : pma_early ? " or a DP state (pma_early)" : "");
 	return 0;
 }
 

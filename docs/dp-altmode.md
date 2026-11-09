@@ -64,6 +64,26 @@ access behind the PMU isolation check) is built with `--dp-tx` only. With it
 come its DT node and the connector's SuperSpeed port (port@1). That port
 would otherwise wait for a switch that never comes.
 
+**Fallback: the PMA up before Enter Mode.** Stock's USB3 bring-up powers the
+combo PHY's PMA before the dock is asked to enter DP. If HPD stays low even
+with USB enumerating, `exynos9810_dp.pma_early=1` (a `--dp-tx` image;
+writable in `/sys/module/exynos9810_dp/parameters/` at run time; default 0)
+does the same:
+
+- It powers the PMA up when the DP state from SVID discovery reaches the
+  driver.
+- It powers it down at the USB state at detach.
+- It treats the Safe State around Enter and Configure as no change.
+
+The PMA steps are stock's, with these exceptions:
+
+- `pma_ready`, the common block and its lane mux for the cable
+  orientation, `pma_sw_rst_release`.
+- Not stock's USB-only parts: the PCS reset, the SS tune values, and
+  LINK_CTRL's PIPE3 override and the pipe3 pclk select, which the USB 2.0
+  link needs as they are.
+- Every access comes after the PMU isolation check.
+
 The MAX77705 side follows Samsung's S9 code byte for byte
 (`drivers/ccic/max77705_alternate.c`). The firmware runs discovery itself
 once 0x55 = 3. The AP sends Enter Mode and DP Configure with 0x48. The
