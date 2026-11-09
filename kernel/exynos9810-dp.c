@@ -358,6 +358,7 @@ struct x9dp {
 	bool qos_changed;
 	/* the DRM device (debugfs step drm) */
 	struct drm_device *drm;
+	struct platform_device *drm_pdev;
 	bool drm_on;			/* its pipe is enabled: HPD rises restart it */
 	dma_addr_t scan_addr;		/* its framebuffer, 0: the test image */
 	struct work_struct hp_work;	/* connector hotplug event */		/* the DMA common QoS LUT is not 0x44444444 (experiment) */		/* HPD rose: the next m4up trains the link first */
@@ -2184,6 +2185,10 @@ static int x9dp_m4up(struct x9dp *d)
 }
 
 /* m4up with the window source given (the DRM pipe: the DMA) */
+static bool drm_auto;
+module_param(drm_auto, bool, 0644);
+MODULE_PARM_DESC(drm_auto, "register the DP-1 DRM device at the first HPD high (default 0; by hand: debugfs step drm)");
+
 static int x9dp_m4up_src(struct x9dp *d, uint src)
 {
 	uint saved = m4_src;
@@ -2290,6 +2295,11 @@ static void x9dp_drm_flip(struct x9dp *d, dma_addr_t addr)
 	x9dp_d2_rmw(d, DECON_SHADOW_REG_UPDATE_REQ, BIT(X9DP_WIN), ~0);
 }
 
+/*
+ * The commit's event at the next vblank (a 60 Hz timer for now, the DRM
+ * vblank timer helpers; the base address itself is taken by the hardware at
+ * DECON2's next frame), or at once when the CRTC is off.
+ */
 static void x9dp_drm_send_event(struct drm_crtc *crtc)
 {
 	struct drm_pending_vblank_event *event;
@@ -2297,9 +2307,23 @@ static void x9dp_drm_send_event(struct drm_crtc *crtc)
 	spin_lock_irq(&crtc->dev->event_lock);
 	event = crtc->state->event;
 	crtc->state->event = NULL;
-	if (event)
-		drm_crtc_send_vblank_event(crtc, event);
+	if (event) {
+		if (crtc->state->active && drm_crtc_vblank_get(crtc) == 0)
+			drm_crtc_arm_vblank_event(crtc, event);
+		else
+			drm_crtc_send_vblank_event(crtc, event);
+	}
 	spin_unlock_irq(&crtc->dev->event_lock);
+}
+
+static int x9dp_drm_enable_vblank(struct drm_simple_display_pipe *pipe)
+{
+	return drm_crtc_vblank_start_timer(&pipe->crtc);
+}
+
+static void x9dp_drm_disable_vblank(struct drm_simple_display_pipe *pipe)
+{
+	drm_crtc_vblank_cancel_timer(&pipe->crtc);
 }
 
 static void x9dp_drm_enable(struct drm_simple_display_pipe *pipe,
@@ -2320,6 +2344,7 @@ static void x9dp_drm_enable(struct drm_simple_display_pipe *pipe,
 	}
 	dev_info(d->dev, "drm: enable, fb %pad: %d (%s)\n", &d->scan_addr, ret, d->last);
 	mutex_unlock(&d->lock);
+	drm_crtc_vblank_on(&pipe->crtc);
 	x9dp_drm_send_event(&pipe->crtc);
 }
 
@@ -2336,6 +2361,7 @@ static void x9dp_drm_disable(struct drm_simple_display_pipe *pipe)
 	d->scan_addr = 0;
 	dev_info(d->dev, "drm: disable\n");
 	mutex_unlock(&d->lock);
+	drm_crtc_vblank_off(&pipe->crtc);
 	x9dp_drm_send_event(&pipe->crtc);
 }
 
@@ -2365,6 +2391,8 @@ static const struct drm_simple_display_pipe_funcs x9dp_pipe_funcs = {
 	.enable = x9dp_drm_enable,
 	.disable = x9dp_drm_disable,
 	.update = x9dp_drm_update,
+	.enable_vblank = x9dp_drm_enable_vblank,
+	.disable_vblank = x9dp_drm_disable_vblank,
 };
 
 static const u32 x9dp_drm_formats[] = { DRM_FORMAT_XRGB8888 };
@@ -2381,7 +2409,8 @@ static const struct drm_driver x9dp_drm_driver = {
 	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_ATOMIC,
 	.fops = &x9dp_drm_fops,
 	DRM_GEM_DMA_DRIVER_OPS,
-	.name = "exynos9810-dp",
+	/* "exynos": Mesa's kmsro pairs it with Panfrost by this name (as s9p-decon) */
+	.name = "exynos",
 	.desc = "Exynos 9810 DisplayPort (DECON2)",
 	.major = 1,
 	.minor = 0,
@@ -2401,12 +2430,32 @@ static int x9dp_drm_register(struct x9dp *d)
 	ret = dma_set_mask_and_coherent(d->dev, DMA_BIT_MASK(32));
 	if (ret)
 		return ret;
-	xd = devm_drm_dev_alloc(d->dev, &x9dp_drm_driver, struct x9dp_drm, drm);
+	/*
+	 * The card's parent: a platform device of its own, "x9dp-drm". wlroots
+	 * (no WLR_DRM_DEVICES) takes the first KMS card udev lists as its primary
+	 * GPU, in syspath order: under soc@0/11090000.displayport this card would
+	 * come before DECON0's (soc@0/16030000.decon) whenever the shell starts
+	 * with both present; platform/x9dp-drm comes after. Buffers are still
+	 * allocated for this device (drm_dev_set_dma_dev).
+	 */
+	if (!d->drm_pdev) {
+		d->drm_pdev = platform_device_register_simple("x9dp-drm", PLATFORM_DEVID_NONE, NULL, 0);
+		if (IS_ERR(d->drm_pdev)) {
+			ret = PTR_ERR(d->drm_pdev);
+			d->drm_pdev = NULL;
+			return ret;
+		}
+	}
+	xd = devm_drm_dev_alloc(&d->drm_pdev->dev, &x9dp_drm_driver, struct x9dp_drm, drm);
 	if (IS_ERR(xd))
 		return PTR_ERR(xd);
 	xd->d = d;
 	drm = &xd->drm;
+	drm_dev_set_dma_dev(drm, d->dev);
 	ret = drmm_mode_config_init(drm);
+	if (ret)
+		return ret;
+	ret = drm_vblank_init(drm, 1);
 	if (ret)
 		return ret;
 	drm->mode_config.min_width = 1920;
@@ -2527,6 +2576,11 @@ static void x9dp_hpd_work(struct work_struct *work)
 	if (x9dp_run(d, "edid") == 0)
 		for (i = 0; i < EDID_LENGTH; i += 16)
 			dev_info(d->dev, "EDID %02x: %16ph\n", i, d->edid + i);
+	if (drm_auto && !d->drm) {
+		x9dp_run(d, "drm");
+		if (d->drm)
+			schedule_work(&d->hp_work);
+	}
 	/*
 	 * Every HPD rise: the sink lost the link while HPD was low, so the
 	 * video stops, the link is trained again and the bars restart (or,
@@ -2717,6 +2771,8 @@ static void x9dp_unregister(void *data)
 	cancel_work_sync(&d->hp_work);
 	if (d->drm)
 		drm_dev_unplug(d->drm);
+	if (d->drm_pdev)
+		platform_device_unregister(d->drm_pdev);
 	debugfs_remove_recursive(d->dbg);
 	mutex_lock(&d->lock);
 	x9dp_off(d);
