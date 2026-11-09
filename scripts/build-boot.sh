@@ -170,6 +170,10 @@ python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
 # stock-like AICL back-off (300 mA floor) instead of mainline's ratchet that
 # wraps to 3.2 A, the battery's charge current, and max77705-wireless (WCIN)
 [ -n "$POWER" ] && python3 "$ROOT/kernel/patch-max77705-charger.py" "$SRC"
+# USB OTG: the charger's CHGIN boost as the USB-C VBUS regulator (DT
+# usb-otg-vbus, --power only), and the USB 2.0 PHY's host mode for dwc3
+[ -n "$POWER" ] && python3 "$ROOT/kernel/patch-max77705-otg.py" "$SRC"
+python3 "$ROOT/kernel/patch-usbphy-host.py" "$SRC"
 # the wireless charging receiver (IDT P9320), built in with --power
 python3 "$ROOT/kernel/patch-p9320.py" "$SRC"
 # the MAX77705 USB-C controller driver (replaces s9p-max77705-muic with --power)

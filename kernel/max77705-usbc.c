@@ -55,11 +55,13 @@
 #include <linux/of.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
 #include <linux/unaligned.h>
 #include <linux/usb/pd.h>
 #include <linux/usb/pd_vdo.h>
+#include <linux/usb/role.h>
 #include <linux/usb/typec.h>
 #include <linux/usb/typec_altmode.h>
 #include <linux/usb/typec_dp.h>
@@ -183,6 +185,8 @@
 #define PROBE_DRAIN_MS		2000
 #define OP_CONTROL1_R		0x05
 #define OP_CONTROL1_W		0x06
+#define OP_AUTO_VBUS		0x54	/* raw 0x54 in S9: who drives VBUS out */
+#define  AUTO_VBUS_OFF		0x00	/* the AP does (stock, at probe) */
 #define OP_FW_AUTOIBUS		0x57	/* OPCODE_SAMSUNG_FW_AUTOIBUS */
 #define  AUTOIBUS_AT_OFF	0x01	/* MCU firmware on, automatic IBUS off */
 
@@ -256,6 +260,17 @@ MODULE_PARM_DESC(dp_altmode,
 static bool test_cmds;
 module_param(test_cmds, bool, 0444);
 MODULE_PARM_DESC(test_cmds, "debugfs pd_request and probe files for hand-run tests (default 0)");
+
+/*
+ * otg: USB host role and VBUS out. With a sink partner (CC Rd: a USB drive,
+ * an unpowered dock) the phone is the source: VBUS from the DT's vbus-supply
+ * (the charger's boost) and dwc3 to host through the DT's usb-role-switch.
+ * Also host when PD makes the phone DFP as a sink (a powered dock). Off:
+ * device mode only, never VBUS out.
+ */
+static bool otg = true;
+module_param(otg, bool, 0644);
+MODULE_PARM_DESC(otg, "USB host role and VBUS out to a sink partner (default 1)");
 
 #define CHG_DETAILS_00_ILIM_BY_CHG	BIT(7)
 #define AUTOIBUS_CHECK_MS	2000	/* at most one DETAILS_00 check per */
@@ -346,6 +361,24 @@ enum hv_mode { HV_NONE, HV_AFC_9V, HV_QC2_9V };
 struct pd_caps {
 	u8 n;
 	u32 pdo[PD_MAX_PDO];
+};
+
+/* USB OTG: host role and VBUS out; all in the ordered work */
+struct usbc_otg {
+	struct regulator *vbus;		/* vbus-supply, got on first need */
+	bool vbus_absent;		/* the DT has none: no VBUS out */
+	bool vbus_on;			/* we hold it enabled */
+	bool vbus_fault;		/* refused/over-current: off until detach */
+	bool vbus_ext_warned;		/* VBUS already there at a sink attach */
+	struct notifier_block nb;
+	struct usb_role_switch *sw;	/* usb-role-switch, got on first need */
+	bool sw_absent;
+	bool sw_waiting;		/* said once: dwc3 not there yet */
+	enum usb_role want;		/* what the CC/PD state says */
+	enum usb_role role;		/* what the switch was last set to */
+	bool dr_seen;			/* a DataRole interrupt in this attach */
+	u8 ccstat;			/* last seen, for the log */
+	bool autovbus_sent;		/* 0x54 since probe / MCU reboot */
 };
 
 /* USB-PD as a sink, one CC attach */
@@ -461,6 +494,8 @@ struct max77705_usbc {
 	struct usb_power_delivery *partner_pd;
 	struct usb_power_delivery_capabilities *partner_src_caps;
 	unsigned int partner_pd_gen;
+
+	struct usbc_otg otg;		/* USB OTG (host role, VBUS out) */
 
 	/* VDMs (vdm_discovery / vdm_debugfs) */
 	bool altmode_sent;		/* 0x55 since probe / MCU reboot */
@@ -989,7 +1024,8 @@ static void usbc_dp_from_dt(struct max77705_usbc *u)
  * too, so these are the opcodes and data stock sends to this firmware).
  * Data is checked as well as the opcode. Never on it, by design: 0xd0
  * (firmware update), 0x50 (key revocation), 0xd1 (RAM BIST), 0x74 (debug),
- * 0x70 (GRL/FW clear), 0x1b, 0x20, 0x33, 0x54, 0x55, 0x16/0x18 and every
+ * 0x70 (GRL/FW clear), 0x1b, 0x20, 0x33, 0x54 other than 0 (auto VBUS on,
+ * water detect), 0x55 other than 3, 0x16/0x18 and every
  * other write whose effect is not known.
  */
 static bool usbc_op_allowed(struct max77705_usbc *u, u8 op, const u8 *w, int wlen)
@@ -999,6 +1035,10 @@ static bool usbc_op_allowed(struct max77705_usbc *u, u8 op, const u8 *w, int wle
 		return wlen == 0;
 	case OP_CONTROL1_W:
 		return wlen == 1 && (w[0] == COM_USB || w[0] == COM_OPEN);
+	case OP_AUTO_VBUS:
+		/* only stock's probe value: the firmware never drives VBUS out
+		 * itself (max77705_usbc_disable_auto_vbus) */
+		return otg && wlen == 1 && w[0] == AUTO_VBUS_OFF;
 	case OP_FW_AUTOIBUS:
 		/* only "USBC fw on, auto IBUS off": stock's AUTOIBUS_AT_OFF */
 		return wlen == 1 && w[0] == AUTOIBUS_AT_OFF;
@@ -1633,6 +1673,9 @@ static u8 usbc_path_for(enum usbc_kind k)
 static void usbc_route(struct max77705_usbc *u)
 {
 	u8 want = usbc_path_for(usbc_bc_kind(u->st[ST(REG_BC_STATUS)]));
+
+	if (u->otg.role == USB_ROLE_HOST)	/* usbc_otg_update() set it */
+		return;
 
 	if (!want) {
 		if (u->path)
@@ -2783,7 +2826,7 @@ static void usbc_typec_pd(struct max77705_usbc *u)
 
 static void usbc_typec_update(struct max77705_usbc *u)
 {
-	u8 cc0 = u->st[ST(REG_CC_STATUS0)], pd1 = u->st[ST(REG_PD_STATUS1)];
+	u8 cc0 = u->st[ST(REG_CC_STATUS0)];
 	u8 ccstat = FIELD_GET(CC0_CCSTAT, cc0);
 	enum typec_pwr_opmode mode;
 
@@ -2811,7 +2854,7 @@ static void usbc_typec_update(struct max77705_usbc *u)
 	}
 
 	typec_set_pwr_role(u->port, ccstat == CCSTAT_SOURCE ? TYPEC_SOURCE : TYPEC_SINK);
-	typec_set_data_role(u->port, (pd1 & PD1_DATAROLE) ? TYPEC_HOST : TYPEC_DEVICE);
+	typec_set_data_role(u->port, u->otg.want == USB_ROLE_HOST ? TYPEC_HOST : TYPEC_DEVICE);
 	typec_set_vconn_role(u->port, (cc0 & CC0_CCVCNSTAT) ? TYPEC_SOURCE : TYPEC_SINK);
 	switch (FIELD_GET(CC0_CCPINSTAT, cc0)) {
 	case 1:
@@ -3039,6 +3082,213 @@ static void usbc_orient_log(struct max77705_usbc *u)
 		 ccpin_name[pin], usbc_orient_sense(u));
 }
 
+/* ---- USB OTG: host role and VBUS out ------------------------------------ */
+
+/*
+ * Stock (max77705_cc.c:517-698, max77705_pd.c:152-240, :712-790): on
+ * CCStat = SOURCE (the partner presents Rd: a sink) the AP turns VBUS on
+ * through the charger's "otg" supply (CHGIN boost, max77705_set_otg); on
+ * CCStat = SINK or no connection it turns it off; the firmware's own VBUS
+ * control is off from probe (0x54 = 0, max77705_usbc.c:2962). The data role
+ * follows PD_STATUS1.DataRole on the DataRole interrupt (DFP = host,
+ * max77705_notify_dr_status), and the MUIC puts D+/D- on the AP for an OTG
+ * attach. Here VBUS is the DT's vbus-supply and the role the DT's
+ * usb-role-switch (dwc3); without either, that half is simply not done.
+ *
+ * The DataRole bit is not cleared on detach (0x87 read with nothing
+ * attached), so it is believed only after a DataRole interrupt in this
+ * attach, or with a PD contract (PSRDY). Without either the Type-C default
+ * holds: source = host, sink = device.
+ *
+ * Safety: VBUS goes on only for CCStat = SOURCE, only with no VBUS on the
+ * connector already (VBUSDET), and the charger refuses on its side if CHGIN
+ * or WCIN has an input. It goes off on any other CC state, on a regulator
+ * error or over-current (until the next detach), at remove and at shutdown.
+ */
+static int usbc_otg_vbus_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	struct max77705_usbc *u = container_of(nb, struct max77705_usbc, otg.nb);
+
+	if (!(event & (REGULATOR_EVENT_OVER_CURRENT | REGULATOR_EVENT_FAIL)))
+		return NOTIFY_DONE;
+	WRITE_ONCE(u->otg.vbus_fault, true);
+	if (!READ_ONCE(u->stopping))
+		queue_work(u->wq, &u->event_work);
+	return NOTIFY_OK;
+}
+
+static void usbc_otg_get(struct max77705_usbc *u)
+{
+	struct usbc_otg *o = &u->otg;
+
+	if (!o->vbus && !o->vbus_absent) {
+		struct regulator *r = regulator_get_optional(u->dev, "vbus");
+
+		if (!IS_ERR(r)) {
+			o->vbus = r;
+			o->nb.notifier_call = usbc_otg_vbus_event;
+			if (regulator_register_notifier(r, &o->nb))
+				o->nb.notifier_call = NULL;
+		} else if (PTR_ERR(r) != -EPROBE_DEFER) {
+			o->vbus_absent = true;
+			dev_info(u->dev, "OTG: no vbus-supply (%ld): no VBUS out\n", PTR_ERR(r));
+		}
+	}
+	if (!o->sw && !o->sw_absent) {
+		struct usb_role_switch *sw = usb_role_switch_get(u->dev);
+
+		if (IS_ERR(sw)) {
+			if (PTR_ERR(sw) != -EPROBE_DEFER) {
+				o->sw_absent = true;
+				dev_warn(u->dev, "OTG: usb-role-switch: %ld\n", PTR_ERR(sw));
+			} else if (!o->sw_waiting) {
+				o->sw_waiting = true;
+				dev_info(u->dev, "OTG: waiting for the USB controller's role switch\n");
+			}
+		} else if (!sw) {
+			o->sw_absent = true;
+			dev_info(u->dev, "OTG: no usb-role-switch: USB stays in device mode\n");
+		} else {
+			o->sw = sw;
+		}
+	}
+}
+
+static void usbc_otg_set_vbus(struct max77705_usbc *u, bool on)
+{
+	struct usbc_otg *o = &u->otg;
+	int ret;
+
+	if (on == o->vbus_on || !o->vbus)
+		return;
+	if (on) {
+		ret = regulator_enable(o->vbus);
+		if (ret) {
+			o->vbus_fault = true;
+			dev_warn(u->dev, "OTG: VBUS out refused (%d): not again until detach\n", ret);
+			return;
+		}
+		o->vbus_on = true;
+		dev_info(u->dev, "OTG: VBUS out on (sink partner)\n");
+	} else {
+		ret = regulator_disable(o->vbus);
+		if (ret)
+			dev_err(u->dev, "OTG: VBUS out off failed: %d\n", ret);
+		o->vbus_on = false;
+		dev_info(u->dev, "OTG: VBUS out off\n");
+	}
+}
+
+static void usbc_otg_set_role(struct max77705_usbc *u, enum usb_role role)
+{
+	struct usbc_otg *o = &u->otg;
+	int ret;
+
+	if (!o->sw || role == o->role)
+		return;
+	ret = usb_role_switch_set_role(o->sw, role);
+	if (ret) {
+		dev_warn(u->dev, "OTG: USB role %s: %d\n", usb_role_string(role), ret);
+		return;
+	}
+	o->role = role;
+	dev_info(u->dev, "OTG: USB role %s\n", usb_role_string(role));
+}
+
+static void usbc_otg_update(struct max77705_usbc *u, u8 pd_int)
+{
+	struct usbc_otg *o = &u->otg;
+	u8 cc0 = u->st[ST(REG_CC_STATUS0)], pd1 = u->st[ST(REG_PD_STATUS1)];
+	u8 ccstat = FIELD_GET(CC0_CCSTAT, cc0);
+	bool attached = ccstat == CCSTAT_SINK || ccstat == CCSTAT_SOURCE;
+	bool dfp = pd1 & PD1_DATAROLE;
+	bool want_vbus;
+	enum usb_role role;
+
+	if (ccstat != o->ccstat) {
+		dev_info(u->dev, "CC: %s (cc0 %02x pd1 %02x bc %02x)\n",
+			 ccstat == CCSTAT_NONE ? "detached" :
+			 ccstat == CCSTAT_SINK ? "attached as sink (Rp partner)" :
+			 ccstat == CCSTAT_SOURCE ? "attached as source (Rd partner)" :
+			 ccstat == 3 ? "audio accessory" : ccstat == 4 ? "debug accessory" :
+			 "error/disabled", cc0, pd1, u->st[ST(REG_BC_STATUS)]);
+		o->ccstat = ccstat;
+	}
+	if (!attached) {
+		o->dr_seen = false;
+		o->vbus_fault = false;
+		o->vbus_ext_warned = false;
+	} else if (pd_int & PD_DATAROLE) {
+		o->dr_seen = true;
+	}
+
+	if (!attached)
+		role = USB_ROLE_NONE;
+	else if (ccstat == CCSTAT_SOURCE)
+		role = o->dr_seen && !dfp ? USB_ROLE_DEVICE : USB_ROLE_HOST;
+	else
+		role = dfp && (o->dr_seen || (pd1 & PD1_PSRDY)) ? USB_ROLE_HOST : USB_ROLE_DEVICE;
+	o->want = role;
+	if (!otg && role == USB_ROLE_HOST)
+		role = USB_ROLE_NONE;
+
+	if (otg && (attached || o->vbus_on || o->role != USB_ROLE_NONE))
+		usbc_otg_get(u);
+
+	/* stock's probe-time 0x54 = 0: the firmware leaves VBUS out to us */
+	if (otg && !o->autovbus_sent && u->mbox_allowed && !u->mbox_dead) {
+		u8 v = AUTO_VBUS_OFF, r = 0;
+		int ret;
+
+		o->autovbus_sent = true;
+		ret = usbc_cmd(u, OP_AUTO_VBUS, &v, 1, &r, 1);
+		if (ret)
+			dev_warn(u->dev, "OTG: auto VBUS off (0x54 = 0): %d\n", ret);
+		else
+			dev_info(u->dev, "OTG: auto VBUS off (0x54 = 0)\n");
+	}
+
+	want_vbus = otg && ccstat == CCSTAT_SOURCE && !o->vbus_fault && o->autovbus_sent &&
+		    u->mbox_allowed && !READ_ONCE(u->stopping);
+	if (want_vbus && !o->vbus_on && (u->st[ST(REG_BC_STATUS)] & BC_VBUSDET)) {
+		/* someone else's VBUS on the connector: never boost into it */
+		if (!o->vbus_ext_warned)
+			dev_warn(u->dev, "OTG: VBUS already present as source (bc %02x): no VBUS out\n",
+				 u->st[ST(REG_BC_STATUS)]);
+		o->vbus_ext_warned = true;
+		want_vbus = false;
+	}
+
+	if (!want_vbus)
+		usbc_otg_set_vbus(u, false);
+	if (role == USB_ROLE_HOST && u->path != COM_USB)
+		usbc_set_path(u, COM_USB);	/* stock MUIC: an OTG attach is USB */
+	usbc_otg_set_role(u, role);
+	if (want_vbus)
+		usbc_otg_set_vbus(u, true);
+}
+
+/* remove (put too) and shutdown: VBUS out off, the role back to the default */
+static void usbc_otg_stop(struct max77705_usbc *u, bool put)
+{
+	struct usbc_otg *o = &u->otg;
+
+	usbc_otg_set_vbus(u, false);
+	usbc_otg_set_role(u, USB_ROLE_NONE);
+	if (!put)
+		return;
+	if (o->vbus) {
+		if (o->nb.notifier_call)
+			regulator_unregister_notifier(o->vbus, &o->nb);
+		regulator_put(o->vbus);
+		o->vbus = NULL;
+	}
+	if (o->sw) {
+		usb_role_switch_put(o->sw);
+		o->sw = NULL;
+	}
+}
+
 /* ---- events --------------------------------------------------------------- */
 
 /* SYSMsg: log it; after an MCU (re)boot re-apply the masks and forget what
@@ -3056,6 +3306,7 @@ static void usbc_handle_sysmsg(struct max77705_usbc *u, u8 msg)
 		u->path_tried = 0;
 		u->autoibus_sent = false;
 		u->altmode_sent = false;
+		u->otg.autovbus_sent = false;
 		break;
 	case SYSMSG_CC_5V_SHORT:
 	case SYSMSG_SBU_GND_SHORT:
@@ -3095,8 +3346,9 @@ static void usbc_event_work(struct work_struct *work)
 	dcp_was_open = usbc_dcp_attached(u);
 	if (usbc_read_status(u))
 		return;
-	vbus = u->st[ST(REG_BC_STATUS)] & BC_VBUSDET;
 	ccstat = FIELD_GET(CC0_CCSTAT, u->st[ST(REG_CC_STATUS0)]);
+	/* as the source, VBUS is our own: not an input */
+	vbus = (u->st[ST(REG_BC_STATUS)] & BC_VBUSDET) && ccstat != CCSTAT_SOURCE;
 
 	/* detach: PD per CC attach, AFC/QC2 per VBUS */
 	if (ccstat != CCSTAT_SINK && (u->pd.have_first || u->pd.pos))
@@ -3123,6 +3375,7 @@ static void usbc_event_work(struct work_struct *work)
 	if (pend[2] & PD_PSRDY)
 		psrdy = true;
 
+	usbc_otg_update(u, pend[2]);
 	usbc_route(u);
 	if (!vbus)
 		u->path_tried = 0;	/* the next attach writes it again */
@@ -3584,6 +3837,7 @@ static void usbc_stop_work(void *data)
 	cancel_delayed_work_sync(&u->dp_work);
 	if (IS_ENABLED(CONFIG_TYPEC))
 		cancel_delayed_work_sync(&u->typec_work);
+	usbc_otg_stop(u, true);
 }
 
 static void usbc_destroy_wq(void *data)
@@ -3732,6 +3986,7 @@ static void max77705_usbc_shutdown(struct i2c_client *client)
 		 u->pd.pos, u->mbox_allowed && !u->mbox_dead ? "on" : "off");
 	cancel_delayed_work_sync(&u->hv_work);
 	cancel_work_sync(&u->event_work);
+	usbc_otg_stop(u, false);	/* VBUS out off before anything else */
 	if (u->mbox_allowed && !u->mbox_dead) {
 		if (u->hv_mode != HV_NONE) {
 			usbc_dcp_5v(u);

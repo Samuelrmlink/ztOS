@@ -361,6 +361,40 @@ if args.dp_altmode:
     s += ROOT_NODES
 # ---- end USB-C connector and DisplayPort Alt Mode ---------------------------
 
+# ---- USB OTG (otg agent): the board's host-mode wiring ----------------------
+# Stock wires it the same way: dwc3 dr_mode "otg" (usbdrd_dwc3), VBUS out
+# from the MAX77705 charger's CHGIN boost ("otg" power supply, stock
+# max77705_set_otg), the role from the USB-C MCU (ccic notifier -> dwc3).
+# Here: the charger's usb-otg-vbus child is the boost as a regulator
+# (kernel/patch-max77705-otg.py), the USB-C controller takes it as its
+# vbus-supply and drives dwc3's role switch (kernel/max77705-usbc.c).
+# Device mode stays the default, so the gadget is there whenever nothing
+# asks for host. Needs --power: without the USB-C driver nothing would ever
+# switch the role.
+if args.power:
+    sub("""			max77705_wireless: wireless {
+			};""", """			max77705_wireless: wireless {
+			};
+
+			max77705_otg: usb-otg-vbus {
+				regulator-name = "max77705-otg";
+				regulator-min-microvolt = <5000000>;
+				regulator-max-microvolt = <5000000>;
+			};""")
+    sub("""			compatible = "maxim,max77705-usbc";
+			reg = <0x25>;
+			interrupt-parent = <&max77705>;
+			interrupts = <3>;""", """			compatible = "maxim,max77705-usbc";
+			reg = <0x25>;
+			interrupt-parent = <&max77705>;
+			interrupts = <3>;
+			vbus-supply = <&max77705_otg>;
+			usb-role-switch = <&usb>;""")
+    sub("""		dr_mode = "peripheral";""", """		dr_mode = "otg";
+		usb-role-switch;
+		role-switch-default-mode = "peripheral";""")
+# ---- end USB OTG ------------------------------------------------------------
+
 if not args.touch:
     disable("			touchscreen-size-y = <4096>;")
 
