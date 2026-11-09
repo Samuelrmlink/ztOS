@@ -2225,7 +2225,7 @@ static void draw_icon_vector(cairo_t *cr, const char *name, double cx, double cy
 	} else if (strcmp(name, "bluetooth") == 0) {
 		cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
 		cairo_set_line_join(cr, CAIRO_LINE_JOIN_MITER);
-		cairo_set_line_width(cr, fmax(1.3, s * 0.085));
+		cairo_set_line_width(cr, fmax(1.3, s * 0.11));	/* as heavy as the fan's bands */
 		cairo_move_to(cr, 0, -u * 0.8);
 		cairo_line_to(cr, 0, u * 0.8);
 		cairo_stroke(cr);
@@ -5848,6 +5848,54 @@ static bool on_charger(void) {
  * action centre has it: the charge in per cent under the battery and the date
  * under the clock.
  */
+/* A vector glyph (draw_icon) in the status row: scaled so that its ink, as
+ * drawn, is `h` high, standing on `base` from `x`. Each glyph's ink box is
+ * measured once (a recording surface), so glyphs drawn to different
+ * proportions all come out the same height. Returns its width. */
+static double status_glyph(cairo_t *cr, const char *name, double x, double base, double h) {
+	static struct { const char *name; double x0, y0, w, h; } ink[8];
+	static int n_ink;
+	int i = 0;
+	while (i < n_ink && strcmp(ink[i].name, name) != 0) i++;
+	if (i == n_ink) {
+		cairo_surface_t *rec = cairo_recording_surface_create(CAIRO_CONTENT_COLOR_ALPHA, NULL);
+		cairo_t *rc = cairo_create(rec);
+		cairo_set_source_rgb(rc, 1, 1, 1);
+		draw_icon(rc, name, 0, 0, 100);
+		cairo_destroy(rc);
+		cairo_recording_surface_ink_extents(rec, &ink[i].x0, &ink[i].y0, &ink[i].w, &ink[i].h);
+		cairo_surface_destroy(rec);
+		if (ink[i].h <= 0) ink[i].h = 100;
+		ink[i].name = name;
+		if (n_ink < 8) n_ink++;
+	}
+	double k = h / ink[i].h;
+	cairo_save(cr);
+	cairo_translate(cr, x - ink[i].x0 * k, base - (ink[i].y0 + ink[i].h) * k);
+	cairo_scale(cr, k, k);
+	draw_icon(cr, name, 0, 0, 100);
+	cairo_restore(cr);
+	return ink[i].w * k;
+}
+
+/* The ink height of `text`'s capitals or digits in `font` at `size`. */
+static double ink_height(const char *text, const char *font, double size) {
+	cairo_surface_t *scratch = cairo_image_surface_create(CAIRO_FORMAT_A8, 1, 1);
+	cairo_t *m = cairo_create(scratch);
+	PangoLayout *layout = pango_cairo_create_layout(m);
+	PangoFontDescription *desc = pango_font_description_from_string(font);
+	pango_font_description_set_absolute_size(desc, size * PANGO_SCALE);
+	pango_layout_set_font_description(layout, desc);
+	pango_layout_set_text(layout, text, -1);
+	PangoRectangle ink;
+	pango_layout_get_extents(layout, &ink, NULL);
+	pango_font_description_free(desc);
+	g_object_unref(layout);
+	cairo_destroy(m);
+	cairo_surface_destroy(scratch);
+	return ink.height / (double)PANGO_SCALE;
+}
+
 static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool live) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	/* Sized against the screen, off photos of the real thing: the battery is
@@ -5862,34 +5910,43 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	 * bars, and beside them what kind of data there is (4G, H+, H, 3G, E, G).
 	 * Whichever of the two networks carries the data has a small arrow at its
 	 * top; with Wi-Fi up that is the fan, and the bars stand alone. */
+	/* One height for every icon on the left, the clock's digits' (measured),
+	 * all standing on the clock's baseline, and one gap between each two. Colour: white is on and working; a whole icon dimmed is on but
+	 * not connected (Bluetooth with no device); the bars and the fan's bands a
+	 * signal does not reach are dimmed too, which is its strength. */
+	const double icon_h = round(ink_height("0", FONT_REGULAR, cell * 1.3) * 2) / 2;	/* the clock's digits */
+	const double icon_gap = round(icon_h * 0.5);
+	double bt_right = x;	/* where Bluetooth's own mark ends */
 	if (server->cell_airplane) {
-		draw_icon(cr, "airplane", x + cell * 0.8, base - cell * 0.55, cell * 1.5);
-		x += cell * 1.75 + 8;
+		x += status_glyph(cr, "airplane", x, base, icon_h) + icon_gap;
 	} else {
 		bool there = server->cell_known && cell_registered(server);
 		bool searching = cell_searching(server);
-		draw_signal(cr, x, base, cell * 1.75, cell * 1.15, there ? server->cell_bars : 0,
+		double bars_w = round(icon_h * 1.5);
+		draw_signal(cr, x, base, bars_w, icon_h, there ? server->cell_bars : 0,
 			searching ? server->signal_sweep % 5 : -1);
 		if (searching) signal_sweep_kick(server);
 		if (server->st_arrow_at == 1 && server->st_arrow > 0.001f) {
-			status_pop(cr, x + arrow / 2, base - cell * 1.15 + arrow / 2, server->st_arrow);
-			draw_data_arrow(cr, x, base - cell * 1.15, arrow);
+			status_pop(cr, x + arrow / 2, base - icon_h + arrow / 2, server->st_arrow);
+			draw_data_arrow(cr, x, base - icon_h, arrow);
 			status_pop_end(cr, server->st_arrow);
 		}
-		x += cell * 1.75 + 5;
-		double size = cell * 1.0;
+		x += bars_w;
+		/* the kind of data beside them (4G, H+...), its capitals the icons' height */
+		double size = icon_h * icon_h / ink_height("H", FONT_SEMIBOLD, icon_h);
 		double tw = text_width(server->st_tech_text, FONT_SEMIBOLD, size);
 		if (server->st_tech > 0.001f) {
-			status_pop(cr, x + tw / 2, base - size * 0.5, server->st_tech);
+			double tx = x + icon_gap * 0.5;
+			status_pop(cr, tx + tw / 2, base - icon_h / 2, server->st_tech);
 			cairo_set_source_rgb(cr, 1, 1, 1);
-			draw_text(cr, server->st_tech_text, FONT_SEMIBOLD, size, x, base - size * 1.12, 0, 0, false);
+			draw_text(cr, server->st_tech_text, FONT_SEMIBOLD, size, tx, base - size * 1.08 - 1.0, 0, 0, false);
 			status_pop_end(cr, server->st_tech);
 		}
 		/* what stands to the right of it moves over as it comes and goes */
-		x += 3 + (tw + 3) * server->st_tech;
+		x += (icon_gap * 0.5 + tw) * server->st_tech + icon_gap;
 	}
 	if (server->st_wifi > 0.001f) {
-		double s = cell * 1.15;
+		double s = icon_h;
 		status_pop(cr, x + s / 2, base - s / 2, server->st_wifi);
 		cairo_set_source_rgb(cr, 1, 1, 1);
 		draw_wifi(cr, x, base, s, server->st_wifi_bars);
@@ -5904,18 +5961,22 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 			status_pop_end(cr, server->st_arrow);
 		}
 		status_pop_end(cr, server->st_wifi);
-		x += s + 8;
+		/* (it comes and goes: what follows slides with it) */
+		x += (s + icon_gap) * server->st_wifi;
 	}
-	/* Bluetooth: white with a device connected, grey only on; it blinks
-	 * (one second each) while sound streams to the device */
-	if (server->bt_on && !(server->bt_streaming && server->bt_blink)) {
-		double s = cell * 1.25;
-		if (server->bt_name[0]) {
-			cairo_set_source_rgb(cr, 1, 1, 1);
+	/* Bluetooth: white with a device connected, dimmed when only on; it
+	 * blinks (one second each) while sound streams to the device */
+	if (server->bt_on) {
+		if (!(server->bt_streaming && server->bt_blink)) {
+			if (server->bt_name[0]) {
+				cairo_set_source_rgb(cr, 1, 1, 1);
+			} else {
+				cairo_set_source_rgb(cr, 0.55, 0.55, 0.55);
+			}
+			bt_right = x + status_glyph(cr, "bluetooth", x, base, icon_h);
 		} else {
-			cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+			bt_right = x + icon_h * 0.55;	/* (blinking: its place, kept) */
 		}
-		draw_icon(cr, "bluetooth", x + s * 0.35, base - s / 2, s);
 	}
 	cairo_set_source_rgb(cr, 1, 1, 1);
 
@@ -5954,11 +6015,11 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	 * Left out rather than run into the battery on a screen too narrow for it. */
 	if (server->bt_on && server->bt_name[0] && server->pods_bar.link) {
 		/* its own icon: clear of Bluetooth's, not hard against it as the meter below is */
-		pods_bar_draw(cr, &server->pods_bar, x + cell * 1.25 * 0.55 + cell * 0.55, base, cell, bx - cell * 0.5);
+		pods_bar_draw(cr, &server->pods_bar, bt_right + icon_gap, base, cell, bx - cell * 0.5);
 	} else if (server->bt_on && server->bt_name[0] && !server->bt_apple &&
 	    server->bt_battery >= 0 && server->bt_battery <= 100) {
-		double bar_w = cell * 0.2, bar_h = cell * 1.05;
-		double bar_x = x + cell * 1.25 * 0.55 + 1.5, bar_y = base - bar_h;
+		double bar_w = cell * 0.2, bar_h = icon_h;
+		double bar_x = bt_right + round(cell * 0.2), bar_y = base - bar_h;
 		if (bar_x + bar_w < bx - cell * 0.5) {
 			double fill = bar_h * server->bt_battery / 100.0;
 			if (server->bt_battery > 0 && fill < 1.0) fill = 1.0;	/* some charge is never an empty bar */
