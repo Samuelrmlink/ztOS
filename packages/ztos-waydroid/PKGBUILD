@@ -10,7 +10,7 @@
 # without it the package installs, fetches its images and waits.
 pkgname=ztos-waydroid
 pkgver=1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='ztOS: Android apps through Waydroid (optional; LineageOS 20 image fetched at set-up)'
 arch=(aarch64)
 url='https://github.com/ztos/ztos'
