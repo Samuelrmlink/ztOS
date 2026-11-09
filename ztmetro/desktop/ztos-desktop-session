@@ -1,0 +1,79 @@
+#!/bin/sh
+# XFCE on ztMETRO's desktop output (ztmetro/desktop/DESIGN.md).
+#
+# The shell starts this (the control pipe's "desktop start", or a monitor
+# coming when Settings' "Start the desktop automatically" is on), with
+# ZT_DESKTOP=1 (so every window of the session opens on the desktop),
+# XDG_CURRENT_DESKTOP=XFCE, WAYLAND_DISPLAY and DISPLAY (Xwayland) set.
+#
+#   ztos-desktop-session            the panel, the desktop and the settings
+#                                   daemon, each started again if it dies
+#   ztos-desktop-session --refresh  the desktop moved to another output: the
+#                                   panel and the desktop are put up again there
+#
+# There is no xfwm4 (X11 only): the shell is the window manager. There is no
+# xfce4-session either; the pieces are started here, as labwc's XFCE does.
+set -u
+log=${XDG_STATE_HOME:-$HOME/.local/state}/ztos-desktop.log
+mkdir -p "$(dirname "$log")"
+
+if [ "${1:-}" = --refresh ]; then
+	xfce4-panel -r >/dev/null 2>&1 || true
+	pkill -u "$(id -u)" -x xfdesktop || true	# its loop starts it again
+	exit 0
+fi
+
+[ -f "$log" ] && mv "$log" "$log.1"
+exec >"$log" 2>&1
+echo "desktop session on ${ZT_DESKTOP_OUTPUT:-?} (WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-} DISPLAY=${DISPLAY:-})"
+
+export ZT_DESKTOP=1 XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=xfce DESKTOP_SESSION=xfce
+export GDK_BACKEND=wayland,x11 QT_QPA_PLATFORM=wayland\;xcb MOZ_ENABLE_WAYLAND=1
+# the phone's own variables are not for desktop apps
+unset ZTMETRO_SCALE ZTRF_SHELL_STYLE
+
+# The panel's first start asks which layout to use, in a dialog: give it
+# XFCE's default instead (the user's own, once there is one, is left alone).
+conf=${XDG_CONFIG_HOME:-$HOME/.config}/xfce4/xfconf/xfce-perchannel-xml
+if [ ! -f "$conf/xfce4-panel.xml" ]; then
+	for d in /usr/share/ztos-desktop /etc/xdg/xfce4/panel; do
+		if [ -f "$d/xfce4-panel.xml" ]; then
+			mkdir -p "$conf" && cp "$d/xfce4-panel.xml" "$conf/xfce4-panel.xml"; break
+		elif [ -f "$d/default.xml" ]; then
+			mkdir -p "$conf" && cp "$d/default.xml" "$conf/xfce4-panel.xml"; break
+		fi
+	done
+fi
+
+# one program, started again when it dies, not more than 5 times a minute
+keep() {
+	name=$1; shift
+	command -v "$1" >/dev/null 2>&1 || { echo "$name: not installed"; return; }
+	(
+		n=0; t0=$(date +%s)
+		while :; do
+			echo "$name: start"
+			"$@"
+			echo "$name: exited $?"
+			now=$(date +%s)
+			if [ $((now - t0)) -gt 60 ]; then n=0; t0=$now; fi
+			n=$((n + 1))
+			[ $n -ge 5 ] && { echo "$name: given up"; exit 0; }
+			sleep 1
+		done
+	) &
+}
+
+keep xfsettingsd xfsettingsd --no-daemon --replace
+keep xfdesktop xfdesktop
+keep xfce4-panel xfce4-panel
+# anything the user wants with it (one command per line)
+auto=${XDG_CONFIG_HOME:-$HOME/.config}/ztmetro/desktop-autostart
+[ -f "$auto" ] && while IFS= read -r line; do
+	case "$line" in ''|\#*) continue ;; esac
+	sh -c "$line" &
+done < "$auto"
+
+# the shell stops the session with SIGTERM to its process group
+trap 'kill 0; exit 0' TERM INT
+wait
