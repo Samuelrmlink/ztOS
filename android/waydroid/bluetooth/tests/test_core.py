@@ -330,6 +330,16 @@ class Gatt(unittest.TestCase):
         be.timers[-1][1]()
         self.assertEqual(c.reply(rid, "GATT_DISCOVER")[0], P.ST_TIMEOUT)
 
+    def test_discover_ends_when_the_link_drops(self):
+        # RM_2685, 9 Nov: dropped 1 s after connecting; discovery waited the full 30 s
+        be, store, br, c, link = self.connected()
+        rid = c.request("GATT_DISCOVER", link)
+        br.device_changed(SENSOR, {"Connected": False})
+        self.assertEqual(c.reply(rid, "GATT_DISCOVER")[0], P.ST_NOT_READY)
+        for _s, fn in list(be.timers):
+            fn()                                    # the timeout later: nothing more
+        self.assertEqual(len([p for p, _ in c.out if P.decode_raw(p)[2] == rid]), 1)
+
     def test_read_value_and_att_error(self):
         be, store, br, c, link = self.connected()
         rid = c.request("GATT_READ", link, 3, 0)

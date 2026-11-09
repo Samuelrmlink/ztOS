@@ -567,6 +567,8 @@ class Bridge(GattServerMixin):
     def _connected_changed(self, addr, connected):
         if not connected:
             self.server_peer_gone(addr)
+            for cb in self.resolving.pop(addr, []):    # a discovery can't finish now
+                cb("gone")
         if not connected and addr in self.releasing:
             self.be.cancel(self.releasing.pop(addr))
         hold = self.holds.get(addr)
@@ -739,7 +741,10 @@ class Bridge(GattServerMixin):
         started = time.monotonic()
 
         def resolved(ok):
-            if not ok:
+            if ok == "gone":
+                self.log("gatt", addr, "discovery ended: the link dropped")
+                answer(P.ST_NOT_READY)
+            elif not ok:
                 self.log("gatt", addr, "services not resolved after %d s" % DISCOVER_SECONDS)
                 answer(P.ST_TIMEOUT)
             elif self.links.get(link_id) is not link:
