@@ -1167,7 +1167,7 @@ static void installed_draw_icon(cairo_t *cr, struct settings_app *a, double y) {
 
 static double draw_installed_apps(cairo_t *cr) {
 	double y = zmc_header(cr, "apps");
-	y = zmc_entry(cr, y, "app scaling", "make one app larger or smaller", ACT_OPEN_PAGE, PAGE_APP_SCALE);
+	y = zmc_entry(cr, y, "app scaling", "Make one app larger or smaller", ACT_OPEN_PAGE, PAGE_APP_SCALE);
 	if (!installed_count) {
 		cairo_set_source_rgb(cr, .6, .6, .6);
 		return y + zmc_text(cr, "No installed apps found. The app list is still being prepared.",
@@ -1713,7 +1713,7 @@ static double draw_wall_grid(cairo_t *cr, double y) {
 			cairo_rectangle(cr, x, ty, tw, th);
 			cairo_fill(cr);
 			cairo_set_source_rgb(cr, 0.75, 0.75, 0.75);
-			zmc_text(cr, "none", FONT_SEMILIGHT, 18, x + 10, ty + th - 32, 0);
+			zmc_text(cr, "None", FONT_SEMILIGHT, 18, x + 10, ty + th - 32, 0);
 			chosen = !current[0];
 			zmc_add_hit(x, ty, tw, th, ACT_WALL, 0);
 		} else {
@@ -1887,11 +1887,11 @@ static double restart_warning(cairo_t *cr, double y, bool differs, int action) {
 	y += zmc_text(cr, "Applying this restarts the whole shell. Every open app closes, and anything "
 		"unsaved in them is lost.", FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 18;
 	if (differs) {
-		return zmc_entry(cr, y, "apply and restart", "close everything and start again", action, 0);
+		return zmc_entry(cr, y, "apply and restart", "Close everything and start again", action, 0);
 	}
 	cairo_set_source_rgb(cr, 0.35, 0.35, 0.35);
 	zmc_text(cr, "apply and restart", FONT_SEMILIGHT, 25.5, MARGIN, y, 0);
-	zmc_text(cr, "this one is already in use", FONT_REGULAR, 12, MARGIN, y + 31, 0);
+	zmc_text(cr, "This one is already in use", FONT_REGULAR, 12, MARGIN, y + 31, 0);
 	return y + 59;
 }
 
@@ -1948,10 +1948,10 @@ static double draw_theme(cairo_t *cr) {
 	y = zmc_entry(cr, y, "shell style", styles[app.style], ACT_OPEN_PAGE, PAGE_STYLE);
 	y += 4;
 	snprintf(detail, sizeof(detail), "%d columns", app.columns);
-	y = zmc_entry(cr, y, "Tiles Shell", detail, ACT_OPEN_PAGE, PAGE_TILES);
-	y = zmc_entry(cr, y, "Lock Screen", app.dev_lock ? "locks when the screen wakes" : "wakes without locking",
+	y = zmc_entry(cr, y, "tiles shell", detail, ACT_OPEN_PAGE, PAGE_TILES);
+	y = zmc_entry(cr, y, "lock screen", app.dev_lock ? "Locks when the screen wakes" : "Wakes without locking",
 		ACT_OPEN_PAGE, PAGE_LOCK);
-	y = zmc_entry(cr, y, "navigation bar", "choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
+	y = zmc_entry(cr, y, "navigation bar", "Choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
 	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
 		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
 	y = zmc_entry(cr, y, "quick tiles", detail, ACT_OPEN_PAGE, PAGE_QUICK);
@@ -1961,7 +1961,7 @@ static double draw_theme(cairo_t *cr) {
 /* What the start screen looks like. Going through its photos on the home
  * screen itself is still to come (ROADMAP 7.8): this opens the picker. */
 static double draw_tiles(cairo_t *cr) {
-	double y = zmc_header(cr, "Tiles Shell");
+	double y = zmc_header(cr, "tiles shell");
 	double gap = 8;
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Start screen columns", FONT_REGULAR, 13.5, MARGIN, y, 0);
@@ -2097,7 +2097,7 @@ static void aod_pick_ready(int fd, void *data) {
 }
 
 static double draw_aod(cairo_t *cr) {
-	double y = zmc_header(cr, "always-on");
+	double y = zmc_header(cr, "always-on display");
 	static const char *const modes[] = { "Off", "Always", "Only while charging" };
 	y = picker(cr, y, "Always-on display", modes, 3, !app.aod ? 0 : app.aod_charging ? 2 : 1, ACT_AOD_MODE);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
@@ -2119,7 +2119,7 @@ static double draw_aod(cairo_t *cr) {
 }
 
 static double draw_lock(cairo_t *cr) {
-	double y = zmc_header(cr, "Lock Screen");
+	double y = zmc_header(cr, "lock screen");
 	y = draw_wall_row(cr, y, "background photo", app.lock_wall, WALL_TARGET_LOCK);
 	y = zmc_switch(cr, y + 6, "Lock screen on wake", app.dev_lock, ACT_DEV_LOCK);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
@@ -2210,7 +2210,7 @@ static double draw_display(cairo_t *cr) {
 	{
 		char detail[64];
 		snprintf(detail, sizeof(detail), "%s, %s", !app.aod ? "Off" : app.aod_charging ?
-			"only while charging" : "always", clock_theme_name(app.aod_theme));
+			"Only while charging" : "Always", clock_theme_name(app.aod_theme));
 		y = zmc_entry(cr, y, "always-on display", detail, ACT_OPEN_PAGE, PAGE_AOD);
 	}
 	/* the shell sizes itself to the panel (360 points across); this is a step either side */
@@ -2492,7 +2492,7 @@ static double draw_bluetooth(cairo_t *cr) {
 		}
 		zmc_text(cr, line, FONT_REGULAR, 14, MARGIN, y + 34, 0);
 		/* first: the first hit under a finger takes it, and the row's would disconnect */
-		if (is_pods) zmc_button(cr, zmc.width - MARGIN - BT_PODS_W, y + 6, BT_PODS_W, "settings", ACT_BT_PODS, i);
+		if (is_pods) zmc_button(cr, zmc.width - MARGIN - BT_PODS_W, y + 6, BT_PODS_W, "Settings", ACT_BT_PODS, i);
 		zmc_add_hit(0, y - 4, zmc.width, 64, ACT_BT_DEVICE, i);
 		if (i == bt_menu) {
 			menu_at = list_top + i * BT_ROW_H + 60;
@@ -2573,7 +2573,7 @@ static void bt_tick(void) {
 }
 
 static double draw_wifi(cairo_t *cr) {
-	double y = zmc_header(cr, "Wi-Fi");
+	double y = zmc_header(cr, "wi-fi");
 	y = zmc_switch(cr, y, "Wi-Fi networking", app.wifi_on, ACT_WIFI_RADIO);
 	/* off by default, as Android: Wi-Fi stays connected with the screen off, the
 	 * chip in power save, so the phone is reachable and push arrives */
@@ -2589,7 +2589,7 @@ static double draw_wifi(cairo_t *cr) {
 	}
 	if (app.wifi_loading && app.n_networks == 0) {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-		zmc_text(cr, "looking for networks…", FONT_REGULAR, 13.5, MARGIN, y, 0);
+		zmc_text(cr, "Looking for networks…", FONT_REGULAR, 13.5, MARGIN, y, 0);
 		return y + 40;
 	}
 
@@ -2700,7 +2700,7 @@ static double draw_wifi_join(cairo_t *cr) {
 	y = zmc_textbox(cr, y, "Password", shown, wifi_typing, ACT_WIFI_PASSWORD, 0);
 	y = zmc_switch(cr, y, "Show password", wifi_show_password, ACT_WIFI_SHOW);
 	bool enough = strlen(wifi_password) >= 8;
-	y = zmc_entry(cr, y, "done", enough ? "connect to this network" : "at least 8 characters",
+	y = zmc_entry(cr, y, "done", enough ? "Connect to this network" : "At least 8 characters",
 		enough ? ACT_WIFI_JOIN : ACT_NONE, 0);
 	return y + 20;
 }
@@ -2750,8 +2750,8 @@ static double draw_mobile(cairo_t *cr) {
 	/* Off stops the data and leaves calls and texts be. Airplane mode is its own
 	 * thing: the switch stays as it was set, the connection is just not there. */
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Mobile Data", FONT_REGULAR, 13, MARGIN, y, 0);
-	y = zmc_switch(cr, y + 22, "Mobile Data", app.mobile_data, ACT_MOBILE_DATA) - 18;
+	zmc_text(cr, "Mobile data", FONT_REGULAR, 13, MARGIN, y, 0);
+	y = zmc_switch(cr, y + 22, "Mobile data", app.mobile_data, ACT_MOBILE_DATA) - 18;
 	snprintf(value, sizeof(value), "%s", !app.mobile_data ? "Off" : cell.airplane ? "Not active in airplane mode" :
 		cell.data ? "Connected" : "Connecting, or no connection yet");
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -2780,7 +2780,7 @@ static double draw_apn(cairo_t *cr) {
 		y = zmc_textbox(cr, y, captions[i], apn_field[i], apn_focus == i, ACT_APN_FIELD, i);
 	}
 	y = picker(cr, y, "Authentication", auths, 3, apn_auth, ACT_APN_AUTH);
-	y = zmc_entry(cr, y, "save", apn_note[0] ? apn_note : "write it and connect again", ACT_APN_SAVE, 0);
+	y = zmc_entry(cr, y, "save", apn_note[0] ? apn_note : "Write it and connect again", ACT_APN_SAVE, 0);
 	return y + 20;
 }
 
@@ -3106,8 +3106,8 @@ static double draw_audio(cairo_t *cr) {
 	zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.ring_vol, "Ringer + Notifications", ACT_RING_VOL_STEP);
 	y += 74;
 
-	y = zmc_entry(cr, y, "equalizer + effects", "presets, surround, crossfade", ACT_OPEN_PAGE, PAGE_SOUND_EQ);
-	y = zmc_entry(cr, y, "app volume + output", "set for each app", ACT_OPEN_PAGE, PAGE_SOUND_APPS);
+	y = zmc_entry(cr, y, "equalizer + effects", "Presets, surround, crossfade", ACT_OPEN_PAGE, PAGE_SOUND_EQ);
+	y = zmc_entry(cr, y, "app volume + output", "Set for each app", ACT_OPEN_PAGE, PAGE_SOUND_APPS);
 	y += 10;
 
 	/* the ringtone: one box that opens into the list, not the list itself */
@@ -3129,7 +3129,7 @@ static double draw_audio(cairo_t *cr) {
 		y = picker(cr, y, "Ringtone", names, n_ringtones, current, ACT_RINGTONE);
 	} else {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-		zmc_text(cr, "no ringtones installed", FONT_REGULAR, 14, MARGIN, y, 0);
+		zmc_text(cr, "No ringtones installed", FONT_REGULAR, 14, MARGIN, y, 0);
 		y += 40;
 	}
 	y += 14;
@@ -3209,13 +3209,13 @@ static double draw_cpu(cairo_t *cr) {
 	double f4 = p4_f[0] ? atoi(p4_f) / 1000.0 : 2704.0;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "SoC Architecture", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "SoC architecture", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	zmc_text(cr, "Samsung Exynos 9810 (10nm LPP)", FONT_SEMILIGHT, 20, MARGIN, y + 18, 0);
 	y += 56;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "LITTLE Cluster (Cores 0-3, Cortex-A55)", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "LITTLE cluster (cores 0-3, Cortex-A55)", FONT_REGULAR, 13, MARGIN, y, 0);
 	char c0_str[64];
 	snprintf(c0_str, sizeof(c0_str), "%.0f MHz (350 - 1794 MHz)", f0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -3223,7 +3223,7 @@ static double draw_cpu(cairo_t *cr) {
 	y += 52;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "BIG Cluster (Cores 4-7, M3 Cheetah)", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "Big cluster (cores 4-7, M3 Cheetah)", FONT_REGULAR, 13, MARGIN, y, 0);
 	char c4_str[64];
 	snprintf(c4_str, sizeof(c4_str), "%.0f MHz (400 - 2704 MHz)", f4);
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -3231,14 +3231,14 @@ static double draw_cpu(cairo_t *cr) {
 	y += 52;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "CPU Governor (tap to switch)", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "CPU governor (tap to switch)", FONT_REGULAR, 13, MARGIN, y, 0);
 	zmc_set_rgb(cr, ACCENTS[app.accent].color);
 	zmc_text(cr, app.cpu_gov, FONT_SEMILIGHT, 22, MARGIN, y + 20, 0);
 	zmc_add_hit(0, y - 4, zmc.width, 54, ACT_CPU_GOVERNOR, 0);
 	y += 62;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "System Load Average", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "System load average", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	zmc_text(cr, load[0] ? load : "0.05 0.10 0.08", FONT_REGULAR, 14, MARGIN, y + 20, 0);
 
@@ -3255,7 +3255,7 @@ static double draw_vm(cairo_t *cr) {
 	double used_ram = total_ram - free_ram;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Physical Memory (LPDDR4X)", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "Physical memory (LPDDR4X)", FONT_REGULAR, 13, MARGIN, y, 0);
 	char ram_str[64];
 	snprintf(ram_str, sizeof(ram_str), "%.2f GB used of %.2f GB", used_ram, total_ram);
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -3270,7 +3270,7 @@ static double draw_vm(cairo_t *cr) {
 		double total_disk = (double)fs.f_blocks * fs.f_frsize / 1e9;
 		double free_disk = (double)fs.f_bavail * fs.f_frsize / 1e9;
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-		zmc_text(cr, "UFS 2.1 Storage", FONT_REGULAR, 13, MARGIN, y, 0);
+		zmc_text(cr, "UFS 2.1 storage", FONT_REGULAR, 13, MARGIN, y, 0);
 		char disk_str[64];
 		snprintf(disk_str, sizeof(disk_str), "%.1f GB free of %.1f GB", free_disk, total_disk);
 		cairo_set_source_rgb(cr, 1, 1, 1);
@@ -3289,7 +3289,7 @@ static double draw_gpu(cairo_t *cr) {
 	double mhz = cur_f[0] ? atoi(cur_f) / 1000000.0 : 260.0;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "GPU Engine", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "GPU engine", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	zmc_text(cr, "ARM Mali-G72 MP18 (Bifrost)", FONT_SEMILIGHT, 21, MARGIN, y + 18, 0);
 	y += 56;
@@ -3303,20 +3303,20 @@ static double draw_gpu(cairo_t *cr) {
 	y += 52;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Devfreq Governor (tap to switch)", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "Devfreq governor (tap to switch)", FONT_REGULAR, 13, MARGIN, y, 0);
 	zmc_set_rgb(cr, ACCENTS[app.accent].color);
 	zmc_text(cr, app.gpu_gov, FONT_SEMILIGHT, 22, MARGIN, y + 20, 0);
 	zmc_add_hit(0, y - 4, zmc.width, 54, ACT_GPU_GOVERNOR, 0);
 	y += 62;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Display Hardware", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "Display hardware", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	zmc_text(cr, "Super AMOLED 1440x2960 @ 60.00 Hz", FONT_REGULAR, 15, MARGIN, y + 20, 0);
 	y += 52;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Display Compositor", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "Display compositor", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	zmc_text(cr, "Wayland / wlroots 0.20 + OpenGL ES 2.0", FONT_REGULAR, 15, MARGIN, y + 20, 0);
 
@@ -3332,8 +3332,8 @@ static double draw_keyboard(cairo_t *cr) {
     y += 76;
     y = zmc_switch(cr, y, "Keyboard sounds", app.key_sound, ACT_KEY_SOUND);
 	/* the same switch as haptics': a way there, not a second one */
-	y = zmc_entry(cr, y, "haptics", app.haptics ? "vibrate on touch and typing: on" :
-		"vibrate on touch and typing: off", ACT_OPEN_PAGE, PAGE_HAPTICS);
+	y = zmc_entry(cr, y, "haptics", app.haptics ? "Vibrate on touch and typing: on" :
+		"Vibrate on touch and typing: off", ACT_OPEN_PAGE, PAGE_HAPTICS);
 	y += 9;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
@@ -3350,7 +3350,7 @@ static double draw_keyboard(cairo_t *cr) {
  * buzzes for force_ms, on its own setting: not touched by the switches above. */
 static double draw_force_press(cairo_t *cr, double y) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "Force press", FONT_SEMILIGHT, 26, MARGIN, y + 6, 0);
+	zmc_text(cr, "force press", FONT_SEMILIGHT, 26, MARGIN, y + 6, 0);
 	y += 50;
 	y = zmc_switch(cr, y, "Press hard at the bottom for Start", app.force_press, ACT_FORCE_PRESS);
 	if (!app.force_press) {
@@ -3464,7 +3464,7 @@ static double draw_about(cairo_t *cr) {
 	y += zmc_text(cr, value, FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Operating System", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "Operating system", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	y += zmc_text(cr, "ztOS Mobile (Arch Linux ARM)", FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
 
@@ -3494,7 +3494,7 @@ static double draw_about(cairo_t *cr) {
 
 	double start_y = y;
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "a project by", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, "A project by", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	y += zmc_text(cr, "Zerone Brianstorm AKA Ometh Abeyrathne", FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 26;
 
@@ -3555,9 +3555,9 @@ static double draw_dev(cairo_t *cr) {
 	y = zmc_switch(cr, y, "Show touches", app.dev_touches, ACT_DEV_TOUCHES);
 	char demo_flag[256];
 	bool demoloop = access(runtime_file(demo_flag, sizeof(demo_flag), "ztos-demoloop.active"), F_OK) == 0;
-	y = zmc_entry(cr, y, "DemoLoop", demoloop ? "running: tap to stop" : "start the repeating demo", ACT_DEV_DEMOLOOP, 0);
-	y = zmc_entry(cr, y, "Stop DemoLoop", demoloop ? "stop and restore normal policies" : "stop a running demo", ACT_DEV_DEMOLOOP_STOP, 0);
-	y = zmc_entry(cr, y, "ZrnDevTest", "logs, sensors and system state", ACT_OPEN_PAGE, PAGE_DEVTEST);
+	y = zmc_entry(cr, y, "demoloop", demoloop ? "Running: tap to stop" : "Start the repeating demo", ACT_DEV_DEMOLOOP, 0);
+	y = zmc_entry(cr, y, "stop demoloop", demoloop ? "Stop and restore normal policies" : "Stop a running demo", ACT_DEV_DEMOLOOP_STOP, 0);
+	y = zmc_entry(cr, y, "zrndevtest", "Logs, sensors and system state", ACT_OPEN_PAGE, PAGE_DEVTEST);
 	return y + 20;
 }
 
@@ -3570,17 +3570,28 @@ static void connections_line(char *out, size_t size) {
 	snprintf(out, size, "%s%s, Bluetooth %s", named ? "" : "Wi-Fi ", wifi, bt.on ? "on" : "off");
 }
 
+/* A status line's first word with its capital (STYLE.md: details are in
+ * Sentence case); `name` is a network's or device's own name at its start,
+ * which keeps its spelling. */
+static char *sentence(char *s, const char *name) {
+	if (s[0] >= 'a' && s[0] <= 'z' && !(name && name[0] && strncmp(s, name, strlen(name)) == 0)) {
+		s[0] = (char)(s[0] - 'a' + 'A');
+	}
+	return s;
+}
+
 static double draw_connections(cairo_t *cr) {
 	double y = zmc_header(cr, "connections");
 	char detail[128];
 	wifi_summary(detail, sizeof(detail));
-	y = zmc_entry(cr, y, "Wi-Fi", detail, ACT_OPEN_PAGE, PAGE_WIFI);
+	bool named = strcmp(detail, "off") && strcmp(detail, "not connected") && strcmp(detail, "\u2026");
+	y = zmc_entry(cr, y, "wi-fi", named ? detail : sentence(detail, NULL), ACT_OPEN_PAGE, PAGE_WIFI);
 
 	bt_summary(detail, sizeof(detail));
-	y = zmc_entry(cr, y, "Bluetooth", detail, ACT_OPEN_PAGE, PAGE_BLUETOOTH);
+	y = zmc_entry(cr, y, "bluetooth", sentence(detail, NULL), ACT_OPEN_PAGE, PAGE_BLUETOOTH);
 
 	cell_load();
-	snprintf(detail, sizeof(detail), "%s%s%s%s", cell.operator[0] ? cell.operator : "no service",
+	snprintf(detail, sizeof(detail), "%s%s%s%s", cell.operator[0] ? cell.operator : "No service",
 		cell.tech[0] ? ", " : "", cell.tech, !cell.data_on ? ", data off" : cell.data ?
 		", data connected" : ", data on");
 	y = zmc_entry(cr, y, "cellular + SIM", detail, ACT_OPEN_PAGE, PAGE_MOBILE);
@@ -3590,15 +3601,15 @@ static double draw_connections(cairo_t *cr) {
 static double draw_sound_touch(cairo_t *cr) {
 	double y = zmc_header(cr, "sound + touch");
 	char detail[128];
-	snprintf(detail, sizeof(detail), "media %d%%, ring %d%%", app.media_vol, app.ring_vol);
+	snprintf(detail, sizeof(detail), "Media %d%%, ring %d%%", app.media_vol, app.ring_vol);
 	y = zmc_entry(cr, y, "ringtones + sounds", detail, ACT_OPEN_PAGE, PAGE_AUDIO);
 
 	if (!app.haptics) {
-		snprintf(detail, sizeof(detail), "off");
+		snprintf(detail, sizeof(detail), "Off");
 	} else {
 		int on = 0;
 		for (int g = 0; g < N_HAPTIC_GROUPS; g++) on += app.haptic_group[g] > 0;
-		snprintf(detail, sizeof(detail), "on, strength %d%%, %d of %d kinds", app.haptic_strength,
+		snprintf(detail, sizeof(detail), "On, strength %d%%, %d of %d kinds", app.haptic_strength,
 			on, N_HAPTIC_GROUPS);
 	}
 	y = zmc_entry(cr, y, "haptics", detail, ACT_OPEN_PAGE, PAGE_HAPTICS);
@@ -3606,8 +3617,8 @@ static double draw_sound_touch(cairo_t *cr) {
 	if (access(LED_SYS_DIR "/red:status", F_OK) == 0) {
 		int on = 0;
 		for (int i = 0; i < N_LED_SOURCES; i++) on += app.led.on[i];
-		if (app.led.enabled) snprintf(detail, sizeof(detail), "on, %d of %d kinds", on, N_LED_SOURCES);
-		else snprintf(detail, sizeof(detail), "off");
+		if (app.led.enabled) snprintf(detail, sizeof(detail), "On, %d of %d kinds", on, N_LED_SOURCES);
+		else snprintf(detail, sizeof(detail), "Off");
 		y = zmc_entry(cr, y, "notification light", detail, ACT_OPEN_PAGE, PAGE_LED);
 	}
 	return y + 20;
@@ -3676,7 +3687,7 @@ static double draw_power(cairo_t *cr) {
 	snprintf(detail, sizeof(detail), "%s, low power when off: %s", profiles[app.perf_profile],
 		app.perf_deepsleep ? "on" : "off");
 	y = zmc_entry(cr, y, "performance", detail, ACT_OPEN_PAGE, PAGE_PERF);
-	y = zmc_entry(cr, y, "Dynamic Boost System", "RapidBoost and IntelligentBoost: what they do, live",
+	y = zmc_entry(cr, y, "dynamic boost system", "RapidBoost and IntelligentBoost: what they do, live",
 		ACT_OPEN_PAGE, PAGE_BOOST);
 	y += 10;
 
@@ -3695,10 +3706,10 @@ static double draw_power(cairo_t *cr) {
 static double draw_system(cairo_t *cr) {
 	double y = zmc_header(cr, "system");
 	char detail[128];
-	y = zmc_entry(cr, y, "date + region", "date, time, 24-hour clock, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
-	snprintf(detail, sizeof(detail), "key height %d, keyboard sounds %s", app.key_height, app.key_sound ? "on" : "off");
+	y = zmc_entry(cr, y, "date + region", "Date, time, 24-hour clock, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
+	snprintf(detail, sizeof(detail), "Key height %d, keyboard sounds %s", app.key_height, app.key_sound ? "on" : "off");
 	y = zmc_entry(cr, y, "keyboard", detail, ACT_OPEN_PAGE, PAGE_KEYBOARD);
-	y = zmc_entry(cr, y, "developer", "demo tiles, show touches, ZrnDevTest", ACT_OPEN_PAGE, PAGE_DEV);
+	y = zmc_entry(cr, y, "developer", "Demo tiles, show touches, ZrnDevTest", ACT_OPEN_PAGE, PAGE_DEV);
 	y = zmc_entry(cr, y, "about", "Samsung Galaxy S9, ztOS Mobile", ACT_OPEN_PAGE, PAGE_ABOUT);
 	return y + 20;
 }
@@ -3713,9 +3724,9 @@ static double draw_main(cairo_t *cr) {
 	y = zmc_entry(cr, y, "connections", detail, ACT_OPEN_PAGE, PAGE_CONNECTIONS);
 
 	if (app.style) {
-		snprintf(detail, sizeof(detail), "palette: %s, DotMatrix", dm_palette_names[app.palette]);
+		snprintf(detail, sizeof(detail), "Palette: %s, DotMatrix", dm_palette_names[app.palette]);
 	} else {
-		snprintf(detail, sizeof(detail), "accent: %s, Metro", ACCENTS[app.accent].name);
+		snprintf(detail, sizeof(detail), "Accent: %s, Metro", ACCENTS[app.accent].name);
 	}
 	y = zmc_entry(cr, y, "customization", detail, ACT_OPEN_PAGE, PAGE_THEME);
 
@@ -3727,7 +3738,7 @@ static double draw_main(cairo_t *cr) {
 		timeout_text(timeout, sizeof(timeout), app.timeout_s));
 	y = zmc_entry(cr, y, "display", detail, ACT_OPEN_PAGE, PAGE_DISPLAY);
 
-	snprintf(detail, sizeof(detail), "media %d%%, ring %d%%", app.media_vol, app.ring_vol);
+	snprintf(detail, sizeof(detail), "Media %d%%, ring %d%%", app.media_vol, app.ring_vol);
 	y = zmc_entry(cr, y, "sound + touch", detail, ACT_OPEN_PAGE, PAGE_SOUND_TOUCH);
 
 	static const char *const profiles[] = { "Power saver", "Balanced", "Performance" };
@@ -3737,8 +3748,8 @@ static double draw_main(cairo_t *cr) {
 	else snprintf(detail, sizeof(detail), "%s", profiles[app.perf_profile]);
 	y = zmc_entry(cr, y, "battery + performance", detail, ACT_OPEN_PAGE, PAGE_POWER);
 
-	y = zmc_entry(cr, y, "apps", "choose apps that run in the background", ACT_OPEN_PAGE, PAGE_INSTALLED_APPS);
-	y = zmc_entry(cr, y, "system", "date, keyboard, developer, about", ACT_OPEN_PAGE, PAGE_SYSTEM);
+	y = zmc_entry(cr, y, "apps", "Choose apps that run in the background", ACT_OPEN_PAGE, PAGE_INSTALLED_APPS);
+	y = zmc_entry(cr, y, "system", "Date, keyboard, developer, about", ACT_OPEN_PAGE, PAGE_SYSTEM);
 
 	return y + 20;
 }
