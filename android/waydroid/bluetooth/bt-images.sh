@@ -5,9 +5,12 @@
 #
 #   prepare   system.img.bt and vendor.img.bt: patched copies of the live
 #             images. Android may keep running; the live images aren't touched.
-#   swap      the copies become the images; the old ones are kept as
-#             *.pre-bt. Android must be stopped (the container STOPPED).
-#   rollback  the *.pre-bt images back. Android must be stopped.
+#   swap      the copies become the images. The first swap keeps the images
+#             without Bluetooth as *.pre-bt, and later swaps never overwrite
+#             them: the images they replace become *.bt-prev. Android must be
+#             stopped (the container STOPPED).
+#   rollback  the *.pre-bt images (no Bluetooth) back. Android must be stopped.
+#   back      the *.bt-prev images (the previous Bluetooth build) back.
 #
 # PATCHER is patch-bluetooth.py and PREBUILTS its prebuilts (defaults: the
 # package's, else next to this checkout).
@@ -62,17 +65,32 @@ swap)
 	stopped
 	for n in system vendor; do [[ -f $images/$n.img.bt ]] || { echo "no $n.img.bt: prepare first" >&2; exit 1; }; done
 	for n in system vendor; do
-		mv -T "$images/$n.img" "$images/$n.img.pre-bt"
+		if [[ -f $images/$n.img.pre-bt ]]; then
+			mv -T "$images/$n.img" "$images/$n.img.bt-prev"   # never over the images without Bluetooth
+		else
+			mv -T "$images/$n.img" "$images/$n.img.pre-bt"
+		fi
 		mv -T "$images/$n.img.bt" "$images/$n.img"
 	done
 	echo 'swapped: start Android again'
 	;;
 rollback)
 	stopped
+	for n in system vendor; do [[ -f $images/$n.img.pre-bt ]] || { echo "no $n.img.pre-bt" >&2; exit 1; }; done
 	for n in system vendor; do
-		[[ -f $images/$n.img.pre-bt ]] && mv -T "$images/$n.img.pre-bt" "$images/$n.img"
+		mv -T "$images/$n.img" "$images/$n.img.bt-prev"
+		mv -T "$images/$n.img.pre-bt" "$images/$n.img"
 	done
-	echo 'rolled back'
+	echo 'rolled back (the Bluetooth images are kept as *.bt-prev)'
+	;;
+back)
+	stopped
+	for n in system vendor; do [[ -f $images/$n.img.bt-prev ]] || { echo "no $n.img.bt-prev" >&2; exit 1; }; done
+	for n in system vendor; do
+		mv -T "$images/$n.img" "$images/$n.img.bt"
+		mv -T "$images/$n.img.bt-prev" "$images/$n.img"
+	done
+	echo 'back to the previous Bluetooth build (the newer one is *.bt again)'
 	;;
 *)
 	sed -n '2,13p' "$0" >&2
