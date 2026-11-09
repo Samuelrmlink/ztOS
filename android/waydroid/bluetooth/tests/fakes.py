@@ -28,6 +28,7 @@ class FakeBackend:
         self.peers = []          # connected LE centrals (server_peers)
         self.ifaces = {}         # address -> extra BlueZ interfaces (Linux profiles on it)
         self.powered = True
+        self.notify_later = False
         self.devs = {
             AIRPODS: {"Address": AIRPODS, "AddressType": "public", "Name": "AirPods", "Alias": "AirPods",
                       "Class": 0x240418, "Paired": True, "Bonded": True, "Connected": True,
@@ -90,6 +91,9 @@ class FakeBackend:
         self._later("write", [addr, handle, value, wtype, offset], ok, err)
 
     def notify(self, addr, handle, on, ok, err):
+        if self.notify_later:          # the test answers StartNotify/StopNotify
+            self._later("notify", [addr, handle, on], ok, err)
+            return
         self.calls.append(("notify", addr, handle, on))
         ok()
 

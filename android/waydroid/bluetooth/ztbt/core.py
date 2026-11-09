@@ -41,6 +41,8 @@ CONNECT_SECONDS = 35
 RELEASE_SECONDS = 10    # how long a device we let go may still show Connected
 LINGER_SECONDS = 4      # a device we connected stays up this long after Android's last use
 EXPECT_SECONDS = 60     # how long ztos-bt-agent takes an expected address on trust (refreshed)
+SILENT_SECONDS = 2      # how often a connected, unused LE device is reported to a scan
+SLOW_SECONDS = 5        # a GATT op BlueZ hasn't answered by then is logged
 # BlueZ interfaces that mean a Linux profile uses a device (on it or its children)
 LINUX_USE = {"org.bluez.Input1", "org.bluez.MediaControl1", "org.bluez.MediaTransport1",
              "org.bluez.MediaPlayer1", "org.bluez.Network1"}
@@ -83,6 +85,7 @@ class Link:
         self.addr = addr
         self.notify = set()       # characteristic value handles this link enabled
         self.cccd = {}            # descriptor handle -> last value written
+        self.heard = set()        # characteristics a notification came from (for the log)
 
 
 class Bridge(GattServerMixin):
@@ -98,6 +101,7 @@ class Bridge(GattServerMixin):
         self.frozen = False
         self.discovering = None   # the transport BlueZ discovery runs with for us, or None
         self.pairing = {}         # addr -> client
+        self.removing = set()     # bonds Android asked BlueZ to remove, under way
         self.resolving = {}       # addr -> [callbacks waiting for ServicesResolved]
         self.notifying = {}       # (addr, char handle) -> count of links
         self.le_seen = set()      # addresses reported by an LE scan
@@ -106,6 +110,8 @@ class Bridge(GattServerMixin):
         self.next_stream = 1
         self.advs = {}            # advertiser id -> Adv (Android's advertising sets)
         self.expected = set()     # addresses ztos-bt-agent may ask about (see _update_expected)
+        self.reported = set()     # devices reported to Android in this discovery (for the log)
+        self.silent_timer = None
         self.expect_timer = None
         self._gatts_init()
 
@@ -167,6 +173,8 @@ class Bridge(GattServerMixin):
         was_bonded = self.bonded(old) if old else False
         d = self.devs.setdefault(addr, {"Address": addr})
         d.update(changed)
+        if "RSSI" in changed:
+            d["LastRSSI"] = changed["RSSI"]     # BlueZ drops RSSI when discovery ends
 
         if "Connected" in changed and bool(changed["Connected"]) != was_connected:
             self._connected_changed(addr, bool(changed["Connected"]))
@@ -182,10 +190,18 @@ class Bridge(GattServerMixin):
             self._report_found(addr)
 
     def device_removed(self, addr):
+        """BlueZ dropped the device: removed in Settings (bluetoothctl remove)
+        or, unbonded, aged out. A bond removal never shows as Paired going
+        false - the object just goes - so Android hears of it only here; on
+        BOND_NONE Android drops it from its bonded devices itself."""
         if addr in self.holds:
             self._drop_hold(addr, P.ST_FAIL)
-        self.devs.pop(addr, None)
+        old = self.devs.pop(addr, None)
         self.le_seen.discard(addr)
+        if old and self.bonded(old) and addr not in self.pairing and addr not in self.removing:
+            self.log("bond gone on Linux:", addr)
+            self.store.forget_android_bond(addr)
+            self._event_all("EV_BOND_STATE", [addr, P.BOND_NONE, P.ST_OK])
 
     def adapter_changed(self, changed):
         if "Powered" in changed or "Name" in changed or "Alias" in changed:
@@ -203,6 +219,9 @@ class Bridge(GattServerMixin):
     def value_changed(self, addr, handle, value):
         for link in list(self.links.values()):
             if link.addr == addr and handle in link.notify:
+                if handle not in link.heard:
+                    link.heard.add(handle)
+                    self.log("gatt", addr, "first notification from 0x%04x (%d bytes)" % (handle, len(value)))
                 self._event(link.client, "EV_GATT_VALUE", [link.id, handle, value], droppable=False)
 
     def set_frozen(self, frozen):
@@ -395,10 +414,14 @@ class Bridge(GattServerMixin):
         def ok():
             if answer:
                 answer(P.ST_OK)
+            self.reported = set()
+            self.log("scan for Android:", {P.T_LE: "LE", P.T_BREDR: "Classic", P.T_AUTO: "LE and Classic",
+                                           None: "stopped"}[want])
             if want is not None:   # devices already known show at once
                 for addr in list(self.devs):
                     if self.visible(addr) and "RSSI" in self.devs[addr]:
                         self._report_found(addr)
+            self._silent_ticker(want in (P.T_LE, P.T_AUTO))
 
         def err(name, msg):
             self.log("discovery", want, "failed:", name, msg)
@@ -418,11 +441,49 @@ class Bridge(GattServerMixin):
                 d.get("AddressType") == "random" or "AdvertisingFlags" in d
                 or "ManufacturerData" in d or "ServiceData" in d or "AdvertisingData" in d):
             self.le_seen.add(addr)
+        self._send_found(addr, int(d["RSSI"]))
+
+    def _send_found(self, addr, rssi, silent=False):
+        d = self.devs[addr]
         tx = int(d["TxPower"]) if "TxPower" in d else 127
-        values = [self.dev_tuple(addr), int(d["RSSI"]), tx, build_ad(d)]
+        values = [self.dev_tuple(addr), rssi, tx, build_ad(d)]
+        if addr not in self.reported:
+            self.reported.add(addr)
+            self.log("scan: reported", addr, repr(d.get("Name", "")),
+                     "(connected to Linux, not advertising)" if silent else "")
         for c, st in list(self.clients.items()):   # a send may drop a client
             if st["enabled"] and st["scans"]:
                 self._event(c, "EV_DEVICE_FOUND", values, droppable=True)
+
+    def _connected_unused_le(self, addr):
+        """An LE device Linux is connected to but not using: Android may use
+        it (visible), but being connected it doesn't advertise, so no scan
+        would ever see it - an app that scans for it first finds nothing
+        (RM_2685 after a pairing in Settings, 8 Nov)."""
+        d = self.devs.get(addr, {})
+        le = d.get("AddressType") == "random" or "Class" not in d
+        return (le and d.get("Connected") and addr not in self.holds and not d.get("Blocked")
+                and not self.linux_uses(addr))
+
+    def _silent_ticker(self, on):
+        """While Android scans LE, report the connected, unused LE devices as
+        seen, every SILENT_SECONDS (as an advertiser would be), with the
+        last signal strength heard."""
+        if self.silent_timer is not None:
+            self.be.cancel(self.silent_timer)
+            self.silent_timer = None
+        if not on:
+            return
+        for addr in list(self.devs):
+            if self._connected_unused_le(addr):
+                d = self.devs[addr]
+                self._send_found(addr, int(d.get("RSSI", d.get("LastRSSI", -60))), silent=True)
+
+        def tick():
+            self.silent_timer = None
+            if self.discovering in (P.T_LE, P.T_AUTO):
+                self._silent_ticker(True)
+        self.silent_timer = self.be.after(SILENT_SECONDS, tick)
 
     # ---- ops: GATT client -------------------------------------------------
 
@@ -462,6 +523,12 @@ class Bridge(GattServerMixin):
                 return
             if name.endswith("AlreadyConnected"):   # taken back while BlueZ was letting go
                 self._connected(addr, hold)
+                return
+            if hold.state == "connected" and self.devs.get(addr, {}).get("Connected"):
+                # BlueZ said Connected first, then failed the call (seen on 8 Nov:
+                # le-connection-abort-by-local after the link was up): the link is
+                # there, and tearing it down broke the app's session
+                self.log("connect", addr, "call failed after the link came up (kept):", name, msg)
                 return
             self.log("connect", addr, "failed:", name, msg)
             self._drop_hold(addr, P.ST_TIMEOUT if "Timeout" in name or "timeout" in msg.lower() else P.ST_FAIL)
@@ -662,13 +729,18 @@ class Bridge(GattServerMixin):
             return
         addr = link.addr
 
+        started = time.monotonic()
+
         def resolved(ok):
             if not ok:
+                self.log("gatt", addr, "services not resolved after %d s" % DISCOVER_SECONDS)
                 answer(P.ST_TIMEOUT)
             elif self.links.get(link_id) is not link:
                 answer(P.ST_NOT_READY)
             else:
-                answer(P.ST_OK, [self.be.gatt_db(addr)])
+                db = self.be.gatt_db(addr)
+                self.log("gatt", addr, "database: %d entries (waited %.1f s)" % (len(db), time.monotonic() - started))
+                answer(P.ST_OK, [db])
         if self.devs[addr].get("ServicesResolved"):
             resolved(True)
             return
@@ -680,6 +752,33 @@ class Bridge(GattServerMixin):
                 self.resolving[addr].remove(resolved)
                 resolved(False)
         self.be.after(DISCOVER_SECONDS, timeout)
+
+    def _logged(self, answer, addr, what):
+        """answer(), logging each GATT op's result and how long BlueZ took;
+        if BlueZ hasn't answered after SLOW_SECONDS, say so (an app may give up
+        before BlueZ's own 30 s timeout)."""
+        started = time.monotonic()
+        state = {"timer": None}
+
+        def slow():
+            state["timer"] = None
+            self.log("gatt", addr, what, "still waiting for BlueZ after %d s" % SLOW_SECONDS)
+        state["timer"] = self.be.after(SLOW_SECONDS, slow)
+
+        def done(status, values=()):
+            if state["timer"] is not None:
+                self.be.cancel(state["timer"])
+                state["timer"] = None
+            ms = (time.monotonic() - started) * 1000
+            if status == P.ST_OK:
+                extra = " %d bytes" % len(values[0]) if values and isinstance(values[0], bytes) else ""
+                self.log("gatt", addr, what, "ok%s in %.0f ms" % (extra, ms))
+            elif status == P.ST_ATT:
+                self.log("gatt", addr, what, "ATT error 0x%02x in %.0f ms" % (values[0], ms))
+            else:
+                self.log("gatt", addr, what, "failed (status %d) in %.0f ms" % (status, ms))
+            answer(status, values)
+        return done
 
     def _att_answer(self, answer):
         def err(name, msg):
@@ -705,6 +804,7 @@ class Bridge(GattServerMixin):
         if attr[0] == "desc" and P.full_uuid(attr[1]) == CCCD:
             answer(P.ST_OK, [link.cccd.get(handle, b"\x00\x00")[offset:]])
             return
+        answer = self._logged(answer, link.addr, "read %s 0x%04x" % (attr[0], handle))
         self.be.read(link.addr, handle, offset, lambda v: answer(P.ST_OK, [bytes(v)]), self._att_answer(answer))
 
     def op_gatt_write(self, client, answer, link_id, handle, wtype, offset, value):
@@ -719,11 +819,15 @@ class Bridge(GattServerMixin):
             answer(P.ST_UNSUPPORTED)           # reliable writes: not yet
             return
         if attr[0] == "desc" and P.full_uuid(attr[1]) == CCCD:
-            self._write_cccd(link, handle, attr[2], value, answer)
+            self._write_cccd(link, handle, attr[2], value,
+                             self._logged(answer, link.addr, "CCCD 0x%04x (characteristic 0x%04x) = %s"
+                                          % (handle, attr[2] or 0, bytes(value).hex())))
             return
         if wtype not in (P.W_NO_RSP, P.W_DEFAULT):
             answer(P.ST_INVALID)
             return
+        answer = self._logged(answer, link.addr, "write %s 0x%04x %d bytes %s" % (
+            attr[0], handle, len(value), "without response" if wtype == P.W_NO_RSP else "with response"))
         self.be.write(link.addr, handle, bytes(value), wtype, offset,
                       lambda: answer(P.ST_OK), self._att_answer(answer))
 
@@ -751,7 +855,9 @@ class Bridge(GattServerMixin):
     def op_gatt_mtu(self, client, answer, link_id):
         link = self._link(client, answer, link_id)
         if link is not None:
-            answer(P.ST_OK, [self.be.mtu(link.addr)])
+            mtu = self.be.mtu(link.addr)
+            self.log("gatt", link.addr, "MTU", mtu)
+            answer(P.ST_OK, [mtu])
 
     # ---- ops: bonds -------------------------------------------------------
 
@@ -824,10 +930,18 @@ class Bridge(GattServerMixin):
             return
 
         def ok():
+            self.removing.discard(addr)
             self.store.forget_android_bond(addr)
+            if addr in self.devs:     # its InterfacesRemoved may come after this reply
+                self.devs[addr].update({"Paired": False, "Bonded": False})
             answer(P.ST_OK)
             self._event_all("EV_BOND_STATE", [addr, P.BOND_NONE, P.ST_OK])
-        self.be.remove(addr, ok, lambda n, m: answer(P.ST_FAIL))
+
+        def err(name, msg):
+            self.removing.discard(addr)
+            answer(P.ST_FAIL)
+        self.removing.add(addr)    # its BOND_NONE goes out with the reply, not from device_removed
+        self.be.remove(addr, ok, err)
 
 
     # ---- ops: Classic RFCOMM ----------------------------------------------
