@@ -986,7 +986,7 @@ static double draw_top(cairo_t *cr) {
 			"system (Flatpak). Adding it lets the App Store show and install them. It adds Flathub's address "
 			"and signing key (flathub.org's official file) to the phone's Flatpak, for everyone on it.",
 			FONT_REGULAR, 13.5, MARGIN, y, bw) + 12;
-		y = button(cr, MARGIN, y, bw, "add Flathub", ACT_ADD_FLATHUB, 0) + 26;
+		y = button(cr, MARGIN, y, bw, "Add Flathub", ACT_ADD_FLATHUB, 0) + 26;
 	}
 	if (!sections.n) {
 		if (!loading) {
@@ -1137,7 +1137,7 @@ static double draw_installed(cairo_t *cr) {
 			zmc_text(cr, more, FONT_REGULAR, 13, MARGIN, y, 0);
 			y += 20;
 		}
-		y = button(cr, MARGIN, y + 10, zmc.width - 2 * MARGIN, "update all", ACT_UPDATE_ALL, 0) + 18;
+		y = button(cr, MARGIN, y + 10, zmc.width - 2 * MARGIN, "Update all", ACT_UPDATE_ALL, 0) + 18;
 	} else {
 		const char *say = "Not checked yet.";
 		char buf[200];
@@ -1155,7 +1155,7 @@ static double draw_installed(cairo_t *cr) {
 		}
 		y = note(cr, y, say);
 		if (!starts_with(s, "checking") && !starts_with(s, "downloading") && !starts_with(s, "installing")) {
-			y = button(cr, MARGIN, y, zmc.width - 2 * MARGIN, "check for updates", ACT_CHECK_UPDATES, 0) + 18;
+			y = button(cr, MARGIN, y, zmc.width - 2 * MARGIN, "Check for updates", ACT_CHECK_UPDATES, 0) + 18;
 		}
 	}
 	if (aur_updates.n || aur_updates_loading) {
@@ -1180,7 +1180,7 @@ static double draw_installed(cairo_t *cr) {
 			y = row(cr, y, fh_updates.v[i]);
 		}
 		if (fh_updates.n > 1 && inst.state != INST_RUNNING) {
-			y = button(cr, MARGIN, y, zmc.width - 2 * MARGIN, "update them all", ACT_FH_UPDATE_ALL, 0) + 18;
+			y = button(cr, MARGIN, y, zmc.width - 2 * MARGIN, "Update them all", ACT_FH_UPDATE_ALL, 0) + 18;
 		}
 		y += 10;
 	}
@@ -1395,21 +1395,21 @@ static double draw_detail_flathub(cairo_t *cr, struct pkg *p) {
 			FLATHUB_ARCH " build, which its makers have not published.", p->arch);
 		y += zmc_text(cr, line, FONT_REGULAR, 15, MARGIN, y, bw) + 18;
 	} else if (!fh_remote) {
-		y = button(cr, MARGIN, y, bw, "add Flathub first", ACT_ADD_FLATHUB, 0);
+		y = button(cr, MARGIN, y, bw, "Add Flathub first", ACT_ADD_FLATHUB, 0);
 	} else if (inst.state == INST_RUNNING && !strcmp(inst.name, p->name)) {
-		y = button(cr, MARGIN, y, bw, inst.removing ? "removing…" : "installing…", ACT_PROGRESS, 0);
+		y = button(cr, MARGIN, y, bw, inst.removing ? "Removing…" : "Installing…", ACT_PROGRESS, 0);
 	} else if (p->installed) {
 		if (has_update(p)) {
-			y = button(cr, MARGIN, y, bw, "update", ACT_UPDATE, 0) + 12;
+			y = button(cr, MARGIN, y, bw, "Update", ACT_UPDATE, 0) + 12;
 		}
 		if (p->desktop) {
-			button(cr, MARGIN, y, half, "open", ACT_OPEN, 0);
-			y = button(cr, MARGIN + half + 12, y, half, "remove", ACT_REMOVE, 0);
+			button(cr, MARGIN, y, half, "Open", ACT_OPEN, 0);
+			y = button(cr, MARGIN + half + 12, y, half, "Remove", ACT_REMOVE, 0);
 		} else {
-			y = button(cr, MARGIN, y, bw, "remove", ACT_REMOVE, 0);
+			y = button(cr, MARGIN, y, bw, "Remove", ACT_REMOVE, 0);
 		}
 	} else {
-		y = button(cr, MARGIN, y, bw, "install", ACT_INSTALL, 0);
+		y = button(cr, MARGIN, y, bw, "Install", ACT_INSTALL, 0);
 		if (d && d->x11_only) {
 			amber(cr);
 			y += zmc_text(cr, "⚠ It draws only through X11, which this phone does not run: it would not open.",
@@ -1454,7 +1454,7 @@ static double draw_detail_flathub(cairo_t *cr, struct pkg *p) {
 			grey(cr);
 			y += zmc_text(cr, "On mobile data, screenshots are not fetched by themselves.", FONT_REGULAR, 13.5,
 				MARGIN, y, bw) + 10;
-			y = button(cr, MARGIN, y, bw, "show screenshots", ACT_SHOTS_LOAD, 0) + 20;
+			y = button(cr, MARGIN, y, bw, "Show screenshots", ACT_SHOTS_LOAD, 0) + 20;
 		} else {
 			double gap = 10, cw = (bw - gap) / 2;
 			for (int i = 0; i < d->shots.n; i += 2) {
@@ -1613,7 +1613,7 @@ static double draw_shot_page(cairo_t *cr, int page) {
 	snprintf(of, sizeof(of), "%d of %d · swipe for the next", k + 1, d->shots.n);
 	y += zmc_text(cr, of, FONT_REGULAR, 12.5, MARGIN, y, bw) + 16;
 	if (page - P_SHOT == n - 1 && shot_base + n < d->shots.n) {
-		y = button(cr, MARGIN, y, bw, "the next screenshots", ACT_SHOTS_PAGE, 0) + 12;
+		y = button(cr, MARGIN, y, bw, "The next screenshots", ACT_SHOTS_PAGE, 0) + 12;
 	}
 	return y + 20;
 }
@@ -1649,27 +1649,27 @@ static double draw_detail(cairo_t *cr) {
 	/* what can be done with it */
 	double bw = zmc.width - 2 * MARGIN, half = (bw - 12) / 2;
 	if (inst.state == INST_RUNNING && !strcmp(inst.name, p->name)) {
-		y = button(cr, MARGIN, y, bw, inst.removing ? "removing…" : "installing…", ACT_PROGRESS, 0);
+		y = button(cr, MARGIN, y, bw, inst.removing ? "Removing…" : "Installing…", ACT_PROGRESS, 0);
 	} else if (p->installed) {
 		if (has_update(p) && pkg_is_aur(p)) {
-			y = button(cr, MARGIN, y, bw, "update", ACT_UPDATE, 0) + 12;
+			y = button(cr, MARGIN, y, bw, "Update", ACT_UPDATE, 0) + 12;
 		}
 		if (p->desktop) {
-			button(cr, MARGIN, y, half, "open", ACT_OPEN, 0);
-			y = button(cr, MARGIN + half + 12, y, half, "remove", ACT_REMOVE, 0);
+			button(cr, MARGIN, y, half, "Open", ACT_OPEN, 0);
+			y = button(cr, MARGIN + half + 12, y, half, "Remove", ACT_REMOVE, 0);
 		} else {
-			y = button(cr, MARGIN, y, bw, "remove", ACT_REMOVE, 0);
+			y = button(cr, MARGIN, y, bw, "Remove", ACT_REMOVE, 0);
 		}
 	} else {
 		char built[4096];
 		if (pkg_is_aur(p) && inst_built(p->name, p->version, built, sizeof(built))) {
 			/* built here already, but it never went in: no need to build again */
-			y = button(cr, MARGIN, y, bw, "install it now", ACT_INSTALL_BUILT, 0);
+			y = button(cr, MARGIN, y, bw, "Install it now", ACT_INSTALL_BUILT, 0);
 			grey(cr);
 			y += zmc_text(cr, "Built on this phone already. Installing asks your password.", FONT_REGULAR, 13,
 				MARGIN, y + 8, bw) + 8;
 		} else {
-			y = button(cr, MARGIN, y, bw, "install", ACT_INSTALL, 0);
+			y = button(cr, MARGIN, y, bw, "Install", ACT_INSTALL, 0);
 		}
 	}
 	y += 22;
@@ -1755,7 +1755,7 @@ static double draw_progress(cairo_t *cr) {
 			y = button(cr, MARGIN, y, bw, label, ACT_FIND, 0) + 12;
 		}
 		if (inst.can_retry) {
-			y = button(cr, MARGIN, y, bw, "install it now", ACT_RETRY, 0) + 12;
+			y = button(cr, MARGIN, y, bw, "Install it now", ACT_RETRY, 0) + 12;
 		}
 	} else {
 		white(cr);
@@ -1790,13 +1790,13 @@ static double draw_progress(cairo_t *cr) {
 	}
 	if (inst.state == INST_RUNNING) {
 		if (inst.cancellable) {
-			y = button(cr, MARGIN, y, bw, "cancel", ACT_CANCEL, 0);
+			y = button(cr, MARGIN, y, bw, "Cancel", ACT_CANCEL, 0);
 		}
 	} else {
 		if (inst.state == INST_DONE && !inst.removing && shown && shown->desktop) {
-			y = button(cr, MARGIN, y, bw, "open", ACT_OPEN, 0) + 12;
+			y = button(cr, MARGIN, y, bw, "Open", ACT_OPEN, 0) + 12;
 		}
-		y = button(cr, MARGIN, y, bw, "done", ACT_DONE, 0);
+		y = button(cr, MARGIN, y, bw, "Done", ACT_DONE, 0);
 	}
 	return y + 30;
 }

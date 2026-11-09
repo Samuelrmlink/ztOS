@@ -436,7 +436,7 @@ static double connect_row(cairo_t *cr, double y) {
 	}
 	const char *state = js(dev, "connect", "idle");
 	if (!strcmp(state, "busy")) return note(cr, y, "Connecting…");
-	y = zmc_button(cr, MARGIN, y, 150, "connect here", A_CONNECT, 0) + 10;
+	y = zmc_button(cr, MARGIN, y, 150, "Connect here", A_CONNECT, 0) + 10;
 	if (!strcmp(state, "failed")) {
 		y = note(cr, y, "That didn't work. They may be in their closed case, out of range, or holding on to another device.");
 	}
@@ -638,7 +638,7 @@ static double draw_about(cairo_t *cr) {
 	if (!dev) return note(cr, y, "No AirPods yet.");
 	if (ready()) {
 		y = zmc_textbox(cr, y + 24, "Name", name_edited ? name_edit : js(dev, "name", ""), editing, A_NAME, 0) + 6;
-		if (editing) y = zmc_button(cr, MARGIN, y, 120, "save", A_NAME_SAVE, 0) + 8;
+		if (editing) y = zmc_button(cr, MARGIN, y, 120, "Save", A_NAME_SAVE, 0) + 8;
 		y = note(cr, y, "Saved on the AirPods. This phone's Bluetooth list changes at their next connection, "
 			"and Apple devices keep their own name for them.");
 	} else {
@@ -665,7 +665,7 @@ static double draw_about(cairo_t *cr) {
 			"what they do comes from other projects' notes.");
 	}
 	if (!jb(dev, "ready") && jb(dev, "has_keys")) {
-		y = zmc_button(cr, MARGIN, y + 4, forget_asked ? 180 : 120, forget_asked ? "really forget" : "forget",
+		y = zmc_button(cr, MARGIN, y + 4, forget_asked ? 180 : 120, forget_asked ? "Really forget" : "Forget",
 			forget_asked ? A_FORGET_YES : A_FORGET, 0) + 8;
 		y = note(cr, y, "Removes what this phone keeps to read their broadcasts, and their last readings. "
 			"It doesn't unpair them; that's on the Bluetooth page.");

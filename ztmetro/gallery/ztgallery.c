@@ -1753,8 +1753,8 @@ static void dialog_paint(void) {
 	v.dlg_del_x = ZMC_MARGIN;
 	v.dlg_cancel_x = ZMC_MARGIN + v.dlg_btn_w + 12;
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_button(cr, v.dlg_del_x, v.dlg_btn_y, v.dlg_btn_w, "delete", 0, 0);
-	zmc_button(cr, v.dlg_cancel_x, v.dlg_btn_y, v.dlg_btn_w, "cancel", 0, 0);
+	zmc_button(cr, v.dlg_del_x, v.dlg_btn_y, v.dlg_btn_w, "Delete", 0, 0);
+	zmc_button(cr, v.dlg_cancel_x, v.dlg_btn_y, v.dlg_btn_w, "Cancel", 0, 0);
 	zmc.n_hits = hits;
 	cairo_destroy(cr);
 	cairo_surface_flush(v.dialog);

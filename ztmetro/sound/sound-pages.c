@@ -626,7 +626,7 @@ static double draw_eq(cairo_t *cr) {
 	double w3 = (zmc.width - 2 * MARGIN - 16) / 3;
 	zmc_button(cr, MARGIN, y, w3, "Q  -", A_QDOWN, 0);
 	zmc_button(cr, MARGIN + w3 + 8, y, w3, "Q  +", A_QUP, 0);
-	zmc_button(cr, MARGIN + 2 * (w3 + 8), y, w3, "reset band", A_BAND_RESET, 0);
+	zmc_button(cr, MARGIN + 2 * (w3 + 8), y, w3, "Reset band", A_BAND_RESET, 0);
 	y += 54;
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	snprintf(line, sizeof(line), "preamp   %+.1f dB", p->preamp);
@@ -651,7 +651,7 @@ static double draw_eq(cairo_t *cr) {
 	y += (slot / 4 + 1) * 46 + 8;
 	if (saving) {
 		y = zmc_textbox(cr, y, "Name this preset", save_name, true, A_SAVE_NAME, 0) + 6;
-		y = zmc_button(cr, MARGIN, y, zmc.width - 2 * MARGIN, "save", A_SAVE_DO, 0);
+		y = zmc_button(cr, MARGIN, y, zmc.width - 2 * MARGIN, "Save", A_SAVE_DO, 0);
 	} else if (strcmp(p->preset, "Custom") && S.n_custom) {
 		for (int i = 0; i < S.n_custom; i++) {
 			if (!strcmp(p->preset, S.custom[i])) {

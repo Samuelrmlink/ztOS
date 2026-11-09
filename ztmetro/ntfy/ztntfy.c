@@ -246,7 +246,7 @@ static double draw_list(cairo_t *cr) {
 		y += 59;
 	}
 	if (n_confs < NTFY_SUBS_MAX) {
-		y = zmc_button(cr, MARGIN, y + 8, 150, "add topic", A_NEW, 0) + 8;
+		y = zmc_button(cr, MARGIN, y + 8, 150, "Add topic", A_NEW, 0) + 8;
 	}
 	return y;
 }
@@ -286,7 +286,7 @@ static double draw_add(cairo_t *cr) {
 		y = warning(cr, y, "Plain http: anyone on the way can read these messages, and any sign-in below.");
 	}
 	y = field_box(cr, y, "Topic", F_TOPIC, false);
-	y = zmc_button(cr, MARGIN, y + 2, 170, "random name", A_RANDOM, 0) + 8;
+	y = zmc_button(cr, MARGIN, y + 2, 170, "Random name", A_RANDOM, 0) + 8;
 	char host[80] = "";
 	if (known) {
 		ntfy_server_host(server, host, sizeof(host));
@@ -305,7 +305,7 @@ static double draw_add(cairo_t *cr) {
 	if (add_error[0]) {
 		y = warning(cr, y + 4, add_error);
 	}
-	y = zmc_button(cr, MARGIN, y + 4, 120, "add", A_SAVE, 0) + 8;
+	y = zmc_button(cr, MARGIN, y + 4, 120, "Add", A_SAVE, 0) + 8;
 	return y;
 }
 
@@ -333,13 +333,13 @@ static double draw_topic(cairo_t *cr) {
 	} else {
 		y = zmc_field(cr, y, "Last message", "none yet");
 	}
-	y = zmc_button(cr, MARGIN, y + 4, 150, test_pid > 0 ? "sending..." : "send a test", A_TEST, 0) + 8;
+	y = zmc_button(cr, MARGIN, y + 4, 150, test_pid > 0 ? "Sending..." : "Send a test", A_TEST, 0) + 8;
 	if (test_result) {
 		y = note(cr, y, test_result);
 	}
 	snprintf(line, sizeof(line), "From anywhere:\ncurl -d \"hello\" %s/%s", ntfy_server_is_https(c->server) ? host : c->server, c->topic);
 	y = note(cr, y + 6, line);
-	y = zmc_button(cr, MARGIN, y + 6, remove_asked ? 180 : 120, remove_asked ? "really remove" : "remove",
+	y = zmc_button(cr, MARGIN, y + 6, remove_asked ? 180 : 120, remove_asked ? "Really remove" : "Remove",
 		remove_asked ? A_REMOVE_YES : A_REMOVE, 0) + 8;
 	return y;
 }

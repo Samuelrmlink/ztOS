@@ -363,7 +363,7 @@ static double draw_down(cairo_t *cr, double y) {
 	y = note(cr, y, daemon_error[0] ? daemon_error : "ztos-iald did not answer.", 12.5);
 	y = note(cr, y, "Apps fall back to looking for the hardware themselves while it is down.", 13.5);
 	y += 8;
-	return zmc_button(cr, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN, "restart ztOSIAL",
+	return zmc_button(cr, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN, "Restart ztOSIAL",
 		job.pid > 0 ? 0 : ACT_RESTART, 0) + 10;
 }
 
@@ -412,7 +412,7 @@ static double draw_interfaces(cairo_t *cr) {
 		}
 	}
 	y += 8;
-	y = zmc_button(cr, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN, "test every interface", job.pid > 0 ? 0 : ACT_TEST, 0);
+	y = zmc_button(cr, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN, "Test every interface", job.pid > 0 ? 0 : ACT_TEST, 0);
 	if (job_result[0]) {
 		zmc_accent(cr);
 		y += zmc_text(cr, job_result, FONT_REGULAR, 13, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN) + 10;

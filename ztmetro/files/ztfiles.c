@@ -293,7 +293,7 @@ static double render(cairo_t *cr, int page) {
 		if (job_done) {
 			cairo_set_source_rgb(cr, 1, 1, 1);
 			zmc_text(cr, job_ok ? "installed" : "installation failed", FONT_REGULAR, 18, 16, 250, 0);
-			zmc_button(cr, 16, 300, zmc.width - 32, "done", ACT_INSTALL_DONE, 0);
+			zmc_button(cr, 16, 300, zmc.width - 32, "Done", ACT_INSTALL_DONE, 0);
 		}
 		return 360;
 	}
@@ -306,7 +306,7 @@ static double render(cairo_t *cr, int page) {
 		for (int i = 0; i < 6; i++) {
 			char path[PATH_SIZE]; struct stat st;
 			if (snprintf(path, sizeof(path), "%s/%s", home, dirs[i]) < (int)sizeof(path) && stat(path, &st) == 0 && S_ISDIR(st.st_mode))
-				y = zmc_entry(cr, y, dirs[i], i == 5 ? "Android apps' storage" : "folder", ACT_SHORTCUT, i);
+				y = zmc_entry(cr, y, dirs[i], i == 5 ? "Android apps' storage" : "Folder", ACT_SHORTCUT, i);
 		}
 	}
 	int end = file_offset + 100;
