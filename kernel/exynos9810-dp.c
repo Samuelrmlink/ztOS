@@ -87,6 +87,7 @@
 #include <linux/bitfield.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -109,6 +110,7 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_fourcc.h>
+#include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_managed.h>
@@ -308,6 +310,8 @@ MODULE_PARM_DESC(pma_early, "power the combo PMA up when a DP state is set (befo
 
 enum { ORIENT_NORMAL, ORIENT_REVERSE };
 
+struct x9dp_mode;
+
 struct x9dp {
 	struct device *dev;
 	void __iomem *link;		/* DP link controller */
@@ -361,7 +365,15 @@ struct x9dp {
 	struct platform_device *drm_pdev;
 	bool drm_on;			/* its pipe is enabled: HPD rises restart it */
 	dma_addr_t scan_addr;		/* its framebuffer, 0: the test image */
-	struct work_struct hp_work;	/* connector hotplug event */		/* the DMA common QoS LUT is not 0x44444444 (experiment) */		/* HPD rose: the next m4up trains the link first */
+	u32 scan_w;			/* its line pitch in pixels */
+	struct {
+		u32 khz, ha, hfp, hs, hbp, va, vfp, vs, vbp;
+		bool nhsync, nvsync;
+	} vmode;			/* the timing the link and DECON2 run (default 1080p60) */
+	struct work_struct hp_work;	/* connector hotplug event */
+	struct drm_crtc *crtc;		/* the DRM device's, for the VSYNC interrupt */
+	int irq;			/* the link's interrupt (DT), with vsync_irq */
+	bool vsync_en;			/* VSYNC_DET unmasked: vblank from the link */		/* the DMA common QoS LUT is not 0x44444444 (experiment) */		/* HPD rose: the next m4up trains the link first */
 	bool decon2_on;
 	void *fb_cpu;			/* the dma step's test image */
 	dma_addr_t fb_dma;
@@ -1029,9 +1041,12 @@ static int x9dp_train(struct x9dp *d)
  * V4L2_DV_BT_CEA_1920X1080P60): 148.5 MHz, h 1920+88+44+148, v 1080+4+5+36,
  * positive syncs. A test mode; the mode list comes from the EDID with DECON2.
  */
-static const struct {
+struct x9dp_mode {
 	u32 khz, ha, hfp, hs, hbp, va, vfp, vs, vbp;
-} x9dp_1080p60 = { 148500, 1920, 88, 44, 148, 1080, 4, 5, 36 };
+	bool nhsync, nvsync;		/* negative sync polarity */
+};
+
+static const struct x9dp_mode x9dp_1080p60 = { 148500, 1920, 88, 44, 148, 1080, 4, 5, 36 };
 
 /*
  * Diagnostic: refresh 30 gives CEA VIC 34, 1080p30 (the same 2200x1125
@@ -1061,9 +1076,9 @@ MODULE_PARM_DESC(refresh, "1080p refresh: 60 (default) or 30 (diagnostic, VIC 34
  */
 static int x9dp_video_cfg(struct x9dp *d, u32 *ipp, u32 *fpp)
 {
-	const typeof(x9dp_1080p60) *m = &x9dp_1080p60;
+	const typeof(d->vmode) *m = &d->vmode;
 	u32 ls = x9dp_ls_khz(d->rate), bpp = 24, ip, fp, thr;
-	u32 khz = refresh == 30 ? 74250 : m->khz;
+	u32 khz = refresh == 30 && m->khz == 148500 ? 74250 : m->khz;
 	u64 tu;
 
 	if (!d->rate)
@@ -1074,7 +1089,8 @@ static int x9dp_video_cfg(struct x9dp *d, u32 *ipp, u32 *fpp)
 	 * (dp14: a retrain fell back to RBR x2 and started 1080p60 at TU 45).
 	 */
 	if ((u64)khz * bpp >= (u64)d->nlanes * ls * 8) {
-		dev_warn(d->dev, "1080p60 does not fit rate %02x x%u\n", d->rate, d->nlanes);
+		dev_warn(d->dev, "%ux%u at %u kHz does not fit rate %02x x%u\n", m->ha, m->va, khz,
+			 d->rate, d->nlanes);
 		return -ERANGE;
 	}
 	/* the SST1 video function, as stock's function_enable does at init (:432-437) */
@@ -1090,7 +1106,7 @@ static int x9dp_video_cfg(struct x9dp *d, u32 *ipp, u32 *fpp)
 	writel(m->hfp, d->link + SST1_VIDEO_HORIZONTAL_FRONT_PORCH);
 	writel(m->hbp, d->link + SST1_VIDEO_HORIZONTAL_BACK_PORCH);
 	link_rmw(d, SST1_VIDEO_CONTROL, VSYNC_POLARITY | HSYNC_POLARITY,
-		 VSYNC_POLARITY | HSYNC_POLARITY);	/* stock writes SYNC_POSITIVE */
+		 (m->nvsync ? 0 : VSYNC_POLARITY) | (m->nhsync ? 0 : HSYNC_POLARITY));
 
 	/* Mvid/Nvid master mode, kHz (displayport_reg.c:636-656) */
 	writel(khz >> 1, d->link + SST1_MVID_MASTER_MODE);
@@ -1142,8 +1158,8 @@ static int x9dp_bist(struct x9dp *d)
 	link_rmw(d, SST1_VIDEO_ENABLE, VIDEO_EN, VIDEO_EN);
 	d->video_on = true;
 	d->vsrc_decon = false;
-	scnprintf(d->last, sizeof(d->last), "bist: 1080p60 colour bars on, TU %u.%09u, Mvid %u Nvid %u",
-		  ip, fp, (refresh == 30 ? 74250 : x9dp_1080p60.khz) >> 1, x9dp_ls_khz(d->rate));
+	scnprintf(d->last, sizeof(d->last), "bist: colour bars on, TU %u.%09u, Mvid %u Nvid %u",
+		  ip, fp, d->vmode.khz >> 1, x9dp_ls_khz(d->rate));
 	return 0;
 }
 
@@ -1170,8 +1186,8 @@ static int x9dp_video(struct x9dp *d)
 	d->video_on = true;
 	d->vsrc_decon = true;
 	scnprintf(d->last, sizeof(d->last),
-		  "video: 1080p60 from DECON2 on, TU %u.%09u; video_ctl %08x bist %08x video_en %08x",
-		  ip, fp, readl(d->link + SST1_VIDEO_CONTROL),
+		  "video: %ux%u from DECON2 on, TU %u.%09u; video_ctl %08x bist %08x video_en %08x",
+		  d->vmode.ha, d->vmode.va, ip, fp, readl(d->link + SST1_VIDEO_CONTROL),
 		  readl(d->link + SST1_VIDEO_BIST_CONTROL), readl(d->link + SST1_VIDEO_ENABLE));
 	return 0;
 }
@@ -1484,7 +1500,7 @@ MODULE_PARM_DESC(trig_unmask, "decon2: clear HW_TRIG_MASK_DECON (experiment; def
 
 static int x9dp_decon2(struct x9dp *d)
 {
-	const u32 w = x9dp_1080p60.ha, h = x9dp_1080p60.va;
+	const u32 w = d->vmode.ha, h = d->vmode.va;
 	u32 r = (bg_rgb >> 16) & 0xff, g = (bg_rgb >> 8) & 0xff, b = bg_rgb & 0xff;
 	int ret = x9dp_m4_ok(d, false);
 
@@ -1740,10 +1756,10 @@ static int x9dp_ch(struct x9dp *d, void __iomem **dma, void __iomem **dpp, u32 *
 	return *dma && *dpp ? 0 : -ENODEV;
 }
 
-static void x9dp_win_size(u32 *w, u32 *h)
+static void x9dp_win_size(struct x9dp *d, u32 *w, u32 *h)
 {
-	*w = clamp_t(u32, win_w, 16, x9dp_1080p60.ha);
-	*h = clamp_t(u32, win_h, 16, x9dp_1080p60.va);
+	*w = clamp_t(u32, win_w, 16, d->vmode.ha);
+	*h = clamp_t(u32, win_h, 16, d->vmode.va);
 }
 
 /*
@@ -1760,8 +1776,9 @@ static void x9dp_win_size(u32 *w, u32 *h)
  */
 static int x9dp_dma(struct x9dp *d)
 {
+	/* the test image is 1920x1080 (cropped to the mode); a DRM fb has its own pitch */
 	const u32 w = x9dp_1080p60.ha, h = x9dp_1080p60.va;
-	u32 size = h << 16 | w;
+	u32 size = d->scan_addr ? d->vmode.va << 16 | d->scan_w : h << 16 | w;
 	void __iomem *dma, *dpp;
 	u32 blend;
 	int ret = x9dp_m4_ok(d, false);
@@ -1815,7 +1832,7 @@ static int x9dp_dma(struct x9dp *d)
 	{
 		u32 cw, ch;
 
-		x9dp_win_size(&cw, &ch);
+		x9dp_win_size(d, &cw, &ch);
 		writel(ch << 16 | cw, dma + IDMA_IMG_SIZE);
 		writel(ch << 16 | cw, dpp + DPP_IMG_SIZE);
 	}
@@ -1887,7 +1904,7 @@ MODULE_PARM_DESC(win_rgb, "colour of the win step's colour-map window, 0xRRGGBB 
 
 static int x9dp_win_set(struct x9dp *d, bool dma)
 {
-	const u32 w = x9dp_1080p60.ha, h = x9dp_1080p60.va;
+	const u32 w = d->vmode.ha, h = d->vmode.va;
 	u32 r = (win_rgb >> 16) & 0xff, g = (win_rgb >> 8) & 0xff, b = win_rgb & 0xff;
 	u32 en = DECON_WIN_EN(X9DP_WIN) | (dma ? 0 : DECON_WIN_MAPCOLOR_EN(X9DP_WIN));
 	int ret = x9dp_m4_ok(d, false);
@@ -1904,7 +1921,7 @@ static int x9dp_win_set(struct x9dp *d, bool dma)
 		u32 cw = w, ch = h;
 
 		if (dma)
-			x9dp_win_size(&cw, &ch);
+			x9dp_win_size(d, &cw, &ch);
 		writel((ch - 1) << 16 | (cw - 1), d->d0win + WIN_END_POSITION);
 	}
 	writel(0xff << 16 | x9dp_c10(r), d->d0win + WIN_COLORMAP_0);
@@ -2137,6 +2154,8 @@ static uint m4_vresets;
 module_param(m4_vresets, uint, 0644);
 MODULE_PARM_DESC(m4_vresets, "m4up: on an underflowing start, restart only the link's video this many times before a full restart (default 0: dp27, the link then shows no VSYNC, its video stays stopped)");
 
+static void x9dp_vsync_mask(struct x9dp *d);
+
 static int x9dp_m4up(struct x9dp *d)
 {
 	u32 tries = clamp_t(u32, m4_tries, 1, 10), i, st = 0;
@@ -2179,6 +2198,8 @@ static int x9dp_m4up(struct x9dp *d)
 			}
 		}
 	}
+	if (d->irq > 0)
+		x9dp_vsync_mask(d);
 	scnprintf(d->last, sizeof(d->last), "m4up: %s after %u tries (int0 %08x)",
 		  st & BIT(8) ? "UNDERFLOWING" : "running", min(i, tries), st);
 	return st & BIT(8) ? -EIO : 0;
@@ -2238,25 +2259,76 @@ static int x9dp_drm_get_modes(struct drm_connector *conn)
 	struct x9dp *d = to_x9dp_drm(conn->dev)->d;
 	struct drm_display_mode *mode;
 	const struct drm_edid *edid = NULL;
+	int n;
 
 	mutex_lock(&d->lock);
 	if (d->edid_ok)
 		edid = drm_edid_alloc(d->edid, EDID_LENGTH);
 	mutex_unlock(&d->lock);
-	drm_edid_connector_update(conn, edid);	/* name, size, ELD; the modes are ours */
+	drm_edid_connector_update(conn, edid);
+	n = drm_edid_connector_add_modes(conn);	/* the sink's modes; mode_valid picks */
 	drm_edid_free(edid);
-	mode = drm_mode_duplicate(conn->dev, &x9dp_drm_mode);
+	if (n) {
+		/* and CEA 1080p30 (VIC 34: 1080p60's timing at half the clock) when the
+		 * EDID does not list it: half the fetch and link rate of 1080p60 */
+		bool has30 = false;
+
+		list_for_each_entry(mode, &conn->probed_modes, head)
+			if (mode->hdisplay == 1920 && mode->vdisplay == 1080 &&
+			    drm_mode_vrefresh(mode) == 30)
+				has30 = true;
+		if (!has30) {
+			mode = drm_mode_duplicate(conn->dev, &x9dp_drm_mode);
+			if (mode) {
+				mode->clock = 74250;
+				mode->type = DRM_MODE_TYPE_DRIVER;
+				drm_mode_set_name(mode);
+				drm_mode_probed_add(conn, mode);
+				n++;
+			}
+		}
+		return n;
+	}
+	mode = drm_mode_duplicate(conn->dev, &x9dp_drm_mode);	/* no EDID: 1080p60 */
 	if (!mode)
 		return 0;
 	drm_mode_probed_add(conn, mode);
 	return 1;
 }
 
+/*
+ * What DECON2 and the link can carry: progressive, at most 1920x1080 (the
+ * size DECON2's 12K of line SRAM is set up for, stock's DP limit without
+ * UHD), and a pixel rate the link fits at link_rate on 2 lanes (24 bpp:
+ * rate * 24 < lanes * link symbol rate * 8, the TU check of x9dp_video_cfg).
+ */
 static enum drm_mode_status x9dp_drm_mode_valid(struct drm_connector *conn,
 						 const struct drm_display_mode *mode)
 {
-	return drm_mode_match(mode, &x9dp_drm_mode, DRM_MODE_MATCH_TIMINGS |
-			      DRM_MODE_MATCH_CLOCK | DRM_MODE_MATCH_FLAGS) ? MODE_OK : MODE_BAD;
+	if (mode->flags & (DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_DBLSCAN | DRM_MODE_FLAG_DBLCLK))
+		return MODE_NO_INTERLACE;
+	if (mode->hdisplay > 1920 || mode->vdisplay > 1080)
+		return MODE_BAD_HVALUE;
+	if (mode->hdisplay < 640 || mode->vdisplay < 480)
+		return MODE_BAD_VVALUE;
+	if ((u64)mode->clock * 24 >= (u64)2 * x9dp_ls_khz(link_rate) * 8)
+		return MODE_CLOCK_HIGH;
+	return MODE_OK;
+}
+
+static void x9dp_mode_from_drm(struct x9dp *d, const struct drm_display_mode *m)
+{
+	d->vmode.khz = m->clock;
+	d->vmode.ha = m->hdisplay;
+	d->vmode.hfp = m->hsync_start - m->hdisplay;
+	d->vmode.hs = m->hsync_end - m->hsync_start;
+	d->vmode.hbp = m->htotal - m->hsync_end;
+	d->vmode.va = m->vdisplay;
+	d->vmode.vfp = m->vsync_start - m->vdisplay;
+	d->vmode.vs = m->vsync_end - m->vsync_start;
+	d->vmode.vbp = m->vtotal - m->vsync_end;
+	d->vmode.nhsync = m->flags & DRM_MODE_FLAG_NHSYNC;
+	d->vmode.nvsync = m->flags & DRM_MODE_FLAG_NVSYNC;
 }
 
 static int x9dp_drm_detect(struct drm_connector *conn, struct drm_modeset_acquire_ctx *ctx,
@@ -2316,14 +2388,63 @@ static void x9dp_drm_send_event(struct drm_crtc *crtc)
 	spin_unlock_irq(&crtc->dev->event_lock);
 }
 
+/*
+ * Vblank: with vsync_irq the link's own VSYNC_DET interrupt (SST1 interrupt
+ * status bit 7, unmasked by SST1_INTERRUPT_MASK_SET0 bit 7: stock's
+ * displayport_irq_handler counts frames on it, displayport_drv.c:1794-1806,
+ * displayport_reg.c:439-507), on the link's SPI from the DT; otherwise a
+ * 60 Hz timer. Both registers are the link controller's own.
+ */
+#define SST1_INTERRUPT_MASK_SET0	0x502c
+#define  VSYNC_DET			BIT(7)
+
+static bool vsync_irq;
+module_param(vsync_irq, bool, 0644);
+MODULE_PARM_DESC(vsync_irq, "DRM vblank from the link's VSYNC interrupt, taken when the DRM device registers (default 0: a 60 Hz timer)");
+
+static void x9dp_vsync_mask(struct x9dp *d)
+{
+	if (d->ctrl_on)
+		link_rmw(d, SST1_INTERRUPT_MASK_SET0, VSYNC_DET, d->vsync_en ? VSYNC_DET : 0);
+}
+
+static irqreturn_t x9dp_irq(int irq, void *data)
+{
+	struct x9dp *d = data;
+	u32 st;
+
+	if (!d->ctrl_on)
+		return IRQ_NONE;
+	st = readl(d->link + SST1_INTERRUPT_STATUS_SET0);
+	if (!(st & VSYNC_DET))
+		return IRQ_NONE;
+	writel(VSYNC_DET, d->link + SST1_INTERRUPT_STATUS_SET0);	/* write 1 to clear */
+	if (d->crtc && d->vsync_en)
+		drm_crtc_handle_vblank(d->crtc);
+	return IRQ_HANDLED;
+}
+
 static int x9dp_drm_enable_vblank(struct drm_simple_display_pipe *pipe)
 {
-	return drm_crtc_vblank_start_timer(&pipe->crtc);
+	struct x9dp *d = to_x9dp_drm(pipe->crtc.dev)->d;
+
+	if (d->irq <= 0)
+		return drm_crtc_vblank_start_timer(&pipe->crtc);
+	d->vsync_en = true;
+	x9dp_vsync_mask(d);
+	return 0;
 }
 
 static void x9dp_drm_disable_vblank(struct drm_simple_display_pipe *pipe)
 {
-	drm_crtc_vblank_cancel_timer(&pipe->crtc);
+	struct x9dp *d = to_x9dp_drm(pipe->crtc.dev)->d;
+
+	if (d->irq <= 0) {
+		drm_crtc_vblank_cancel_timer(&pipe->crtc);
+		return;
+	}
+	d->vsync_en = false;
+	x9dp_vsync_mask(d);
 }
 
 static void x9dp_drm_enable(struct drm_simple_display_pipe *pipe,
@@ -2334,6 +2455,14 @@ static void x9dp_drm_enable(struct drm_simple_display_pipe *pipe,
 
 	mutex_lock(&d->lock);
 	d->scan_addr = drm_fb_dma_get_gem_addr(pstate->fb, pstate, 0);
+	d->scan_w = pstate->fb->pitches[0] / 4;
+	x9dp_mode_from_drm(d, &cstate->adjusted_mode);
+	{
+		const struct drm_display_mode *am = &cstate->adjusted_mode;
+
+		dev_info(d->dev, "drm: mode %ux%u, %u kHz, totals %ux%u\n", am->hdisplay,
+			 am->vdisplay, am->clock, am->htotal, am->vtotal);
+	}
 	d->drm_on = true;
 	if ((d->dp_status & DP_STATUS_HPD_STATE) && x9dp_lanes(d)) {
 		if ((!d->id_done && x9dp_run(d, "id")) || (!d->pma_on && x9dp_run(d, "pma")) ||
@@ -2359,6 +2488,7 @@ static void x9dp_drm_disable(struct drm_simple_display_pipe *pipe)
 	if (d->decon2_on)
 		x9dp_decon2_stop(d);
 	d->scan_addr = 0;
+	memcpy(&d->vmode, &x9dp_1080p60, sizeof(d->vmode));
 	dev_info(d->dev, "drm: disable\n");
 	mutex_unlock(&d->lock);
 	drm_crtc_vblank_off(&pipe->crtc);
@@ -2374,6 +2504,7 @@ static void x9dp_drm_update(struct drm_simple_display_pipe *pipe,
 	if (state->fb && state->fb != old->fb && pipe->crtc.state->active) {
 		mutex_lock(&d->lock);
 		d->scan_addr = drm_fb_dma_get_gem_addr(state->fb, state, 0);
+		d->scan_w = state->fb->pitches[0] / 4;
 		x9dp_drm_flip(d, d->scan_addr);
 		mutex_unlock(&d->lock);
 	}
@@ -2458,9 +2589,9 @@ static int x9dp_drm_register(struct x9dp *d)
 	ret = drm_vblank_init(drm, 1);
 	if (ret)
 		return ret;
-	drm->mode_config.min_width = 1920;
+	drm->mode_config.min_width = 640;
 	drm->mode_config.max_width = 1920;
-	drm->mode_config.min_height = 1080;
+	drm->mode_config.min_height = 480;
 	drm->mode_config.max_height = 1080;
 	drm->mode_config.funcs = &x9dp_mode_config_funcs;
 	drm->mode_config.preferred_depth = 24;
@@ -2474,6 +2605,14 @@ static int x9dp_drm_register(struct x9dp *d)
 	if (ret)
 		return ret;
 	drm_mode_config_reset(drm);
+	d->crtc = &xd->pipe.crtc;
+	if (vsync_irq && d->irq <= 0) {
+		int irq = platform_get_irq(to_platform_device(d->dev), 0);
+
+		if (irq > 0 && !devm_request_irq(d->dev, irq, x9dp_irq, 0, "exynos9810-dp", d))
+			d->irq = irq;
+		dev_info(d->dev, "drm: vblank from %s\n", d->irq > 0 ? "the link's VSYNC" : "a timer");
+	}
 	ret = drm_dev_register(drm, 0);
 	if (ret)
 		return ret;
@@ -2807,6 +2946,7 @@ static int x9dp_probe(struct platform_device *pdev)
 	INIT_WORK(&d->hpd_work, x9dp_hpd_work);
 	INIT_WORK(&d->hp_work, x9dp_hp_work);
 	d->orient = TYPEC_ORIENTATION_NORMAL;
+	memcpy(&d->vmode, &x9dp_1080p60, sizeof(d->vmode));
 	d->mode = TYPEC_STATE_SAFE;
 
 	d->link = devm_platform_ioremap_resource_byname(pdev, "link");

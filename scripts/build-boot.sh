@@ -25,13 +25,18 @@
 #     --dp-altmode               DisplayPort Alt Mode in the typec class (needs --power):
 #                                the typec_displayport altmode driver built in; the
 #                                MAX77705 side stays off until max77705_usbc.dp_altmode=1.
+#                                --dp-altmode puts max77705_usbc.dp_altmode=1 on the
+#                                command line.
 #                                Its own release (-dp suffix) and module set. Only in a
 #                                private kernel tree (KSRC=, e.g. a reflink copy of
 #                                build/linux-7.1): the shared tree's out/.config is what
 #                                every other build's module ABI check reads
 #     --dp-tx                    with --dp-altmode: the DP TX bring-up driver
 #                                (kernel/exynos9810-dp.c, combo PHY DP mode + AUX by
-#                                hand through debugfs) and its DT node
+#                                hand through debugfs) and its DT node; on the command
+#                                line exynos9810_dp.hpd_read=1 drm_auto=1: at HPD high the
+#                                link comes up and the DP-1 DRM card registers, which the
+#                                shell takes as a second output (docs/dp-altmode.md)
 #     --release-suffix -TAG      replaces --dp-altmode's -dp in the release
 #                                (-dp2: 7.1.0-zboot-wd-dp2): a test kernel whose ABI
 #                                differs from one on the phone gets its own release and
@@ -410,7 +415,10 @@ cfg --set-val CMA_SIZE_MBYTES 128
 # taken over by s3c2410_wdt (tmr_atboot). The kernel pets it until userspace
 # opens /dev/watchdog, so a wedged kernel resets into the fallback target.
 # Firmware roaming stays on: kernel/patch-brcmfmac-roam.py reports its roams (ROADMAP 1.7)
-CMDLINE="console=tty0 console=ramoops-1 loglevel=7 panic=5 keep_bootcon maxcpus=8 s9p_vendor_m3_defaults s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60${EXTRA:+ $EXTRA}"
+DPCMD=
+[ -z "$DPALT" ] || DPCMD+=" max77705_usbc.dp_altmode=1"
+[ -z "$DPTX" ] || DPCMD+=" exynos9810_dp.hpd_read=1 exynos9810_dp.drm_auto=1"
+CMDLINE="console=tty0 console=ramoops-1 loglevel=7 panic=5 keep_bootcon maxcpus=8 s9p_vendor_m3_defaults s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60${EXTRA:+ $EXTRA}$DPCMD"
 cfg --set-str CMDLINE "$CMDLINE"
 make -s O=out olddefconfig
 grep -E '^CONFIG_(CMDLINE|SCSI_UFS_EXYNOS9810|USB_CONFIGFS_NCM|S3C2410_WATCHDOG|PSTORE_RAM|DRM_EXYNOS_BOOTFB|PHY_EXYNOS5_USBDRD|USB_DWC3_GADGET|USB_DWC3_MODE)' out/.config ||
