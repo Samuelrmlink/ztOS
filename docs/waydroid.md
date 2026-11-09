@@ -40,6 +40,13 @@ image builds no modules, so those `=m` options are missing on the phone too.
 - `ANDROID_BINDER_IPC`, `ANDROID_BINDERFS`, `ANDROID_BINDER_DEVICES=""`.
   Waydroid mounts `/dev/binderfs` itself and allocates its binder, hwbinder and
   vndbinder there. No static devices.
+- `COMPAT`, for 32-bit processes. The vendor image's audio HAL service is
+  32-bit ARM only, and so are media.omx, cas, the external camera provider
+  and system's mediaserver. Without `COMPAT` they fail with "Exec format
+  error", audioserver waits forever for `IDevicesFactory@4.0`, and Android
+  never finishes booting (chg9). This adds 192 KiB to the image. After the
+  flash, check that `dmesg | grep -i '32-bit EL0'` shows support on all CPUs
+  (Exynos M3 and Cortex-A55).
 - `PSI`, for Android's lmkd (`ro.lmk.use_psi`) and ztos-memory-policy. It is
   also listed in ztOSIAL's kernel contract.
 - `VETH`, `BRIDGE`. The container's eth0 is attached to the `waydroid0` bridge.
