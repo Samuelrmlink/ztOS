@@ -171,13 +171,13 @@ class FakeBackend:
 
 class FakeStore:
     def __init__(self):
-        self.hint = None
-        self.hints = []
+        self.expect = set()      # what ztos-bt-agent may ask about now
+        self.writes = []
         self.android = set()
 
-    def pairing_hint(self, addr):
-        self.hint = addr
-        self.hints.append(addr)
+    def expected(self, addrs, seconds):
+        self.expect = set(addrs)
+        self.writes.append((tuple(addrs), seconds))
 
     def add_android_bond(self, addr):
         self.android.add(addr)

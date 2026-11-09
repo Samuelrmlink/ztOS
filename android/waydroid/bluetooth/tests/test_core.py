@@ -177,8 +177,8 @@ class Gatt(unittest.TestCase):
 
     def test_connect_timeout_disconnects(self):
         be, store, br, c, link = self.open()
-        (secs, fire), = be.timers
-        fire()
+        from ztbt.core import CONNECT_SECONDS
+        self.assertEqual(be.fire(CONNECT_SECONDS), 1)
         self.assertEqual(c.events("EV_LINK"), [[link, P.ST_TIMEOUT, False, 0]])
         self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])
 
@@ -361,24 +361,68 @@ class Gatt(unittest.TestCase):
         self.assertEqual(c.events("EV_LINK")[-1], [link, P.ST_NOT_READY, False, 0])
 
 
+class Expected(unittest.TestCase):
+    """Which devices ztos-bt-agent may ask the person about (RM_2685, 8 Nov:
+    a passkey device that asks for pairing when an app reads it)."""
+
+    def test_a_device_connected_for_android_is_expected(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        self.assertEqual(store.expect, {SENSOR})
+        self.assertEqual(store.writes[-1][1], 60)
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        c.request("GATT_CLOSE", link)
+        be.linger()
+        self.assertEqual(store.expect, set())
+
+    def test_refreshed_while_held(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        c.request("GATT_OPEN", SENSOR, 1, P.T_LE)
+        n = len(store.writes)
+        self.assertEqual(be.fire(30), 1)
+        self.assertEqual(len(store.writes), n + 1)
+        self.assertEqual(store.expect, {SENSOR})
+
+    def test_linux_s_devices_never_expected(self):
+        be, store, br, c = make()
+        c.request("GATT_OPEN", AIRPODS, 0, P.T_LE)          # busy: refused
+        self.assertEqual(store.expect, set())
+
+    def test_freeze_and_client_gone_clear_it(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        c.request("GATT_OPEN", SENSOR, 1, P.T_LE)
+        br.set_frozen(True)
+        self.assertEqual(store.expect, set())
+        br.set_frozen(False)
+        c.request("GATT_OPEN", SENSOR, 1, P.T_LE)
+        c.close()
+        self.assertEqual(store.expect, set())
+        self.assertEqual(be.timers, [t for t in be.timers if t[0] != 30])   # no refresh left
+
+
 class Bonds(unittest.TestCase):
     def test_pair_goes_through_bluez_with_the_agent_hint(self):
         be, store, br, c = make()
         br.device_changed(SENSOR, {"RSSI": -60})
         rid = c.request("BOND_CREATE", SENSOR, P.T_LE)
         self.assertEqual(c.reply(rid, "BOND_CREATE")[0], P.ST_OK)
-        self.assertEqual(store.hint, SENSOR)
+        self.assertEqual(store.expect, {SENSOR})            # the agent may ask about it
         self.assertEqual(c.events("EV_BOND_STATE"), [[SENSOR, P.BOND_BONDING, P.ST_OK]])
         br.device_changed(SENSOR, {"Connected": True})      # Pair() connects: ours
         br.device_changed(SENSOR, {"Paired": True, "Bonded": True})
         be.answer("pair")
-        self.assertIsNone(store.hint)
+        self.assertEqual(store.expect, {SENSOR})            # still held (lingers)
         self.assertEqual(c.events("EV_BOND_STATE")[-1], [SENSOR, P.BOND_BONDED, P.ST_OK])
         self.assertEqual(len(c.events("EV_BOND_STATE")), 2)
         self.assertIn(SENSOR, store.android)
         self.assertEqual(be.called("disconnect"), [])       # the app may connect now: it lingers
         be.linger()
         self.assertEqual(be.called("disconnect"), [("disconnect", SENSOR)])  # we connected it for Pair()
+        self.assertEqual(store.expect, set())
 
     def test_pair_kept_connected_for_a_link(self):
         be, store, br, c = make()
@@ -398,7 +442,7 @@ class Bonds(unittest.TestCase):
         be.answer("pair", error=("org.bluez.Error.AuthenticationRejected", ""))
         self.assertEqual(c.events("EV_BOND_STATE")[-1], [SENSOR, P.BOND_NONE, P.ST_AUTH_FAILED])
         self.assertNotIn(SENSOR, store.android)
-        self.assertIsNone(store.hint)
+        self.assertEqual(store.expect, set())
 
     def test_pair_twice(self):
         be, store, br, c = make()

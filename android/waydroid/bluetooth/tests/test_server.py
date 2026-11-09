@@ -3,6 +3,7 @@ import os
 import socket
 import struct
 import tempfile
+import time
 import unittest
 
 from fakes import P  # noqa: F401  (sets sys.path)
@@ -132,17 +133,39 @@ class ServerTests(unittest.TestCase):
         b.close()
         c.close()
 
+    def test_the_agent_reads_what_the_store_writes(self):
+        import importlib.machinery
+        import importlib.util
+        from pathlib import Path
+        src = Path(__file__).resolve().parents[4] / "rootfs/overlay/usr/local/bin/ztos-bt-agent"
+        loader = importlib.machinery.SourceFileLoader("ztos_bt_agent", str(src))
+        agent = importlib.util.module_from_spec(importlib.util.spec_from_loader("ztos_bt_agent", loader))
+        loader.exec_module(agent)
+        st = S.Store(os.path.join(self.dir.name, "run"), os.path.join(self.dir.name, "state"))
+        st.expected(["b0:e8:e8:92:bb:fd"], 60)
+        self.assertTrue(agent.expected(st.expected_path, "B0:E8:E8:92:BB:FD"))
+        self.assertFalse(agent.expected(st.expected_path, "C0:00:00:00:00:02"))
+        self.assertFalse(agent.expected(st.expected_path, "B0:E8:E8:92:BB:FD", now=time.time() + 61))
+        st.expected([], 60)
+        self.assertFalse(agent.expected(st.expected_path, "B0:E8:E8:92:BB:FD"))
+
     def test_in_container(self):
         self.assertFalse(S.in_container(os.getpid()))
 
     def test_store(self):
-        st = S.Store(os.path.join(self.dir.name, "run"), os.path.join(self.dir.name, "state"))
-        st.pairing_hint("AA:BB:CC:DD:EE:FF")
-        with open(st.hint_path) as f:
-            self.assertEqual(f.read(), "AA:BB:CC:DD:EE:FF\n")
-        self.assertEqual(os.stat(st.hint_path).st_mode & 0o777, 0o600)
-        st.pairing_hint(None)
-        self.assertFalse(os.path.exists(st.hint_path))
+        old = os.path.join(self.dir.name, "run", "ztos-btbridge", "pairing")
+        os.makedirs(os.path.dirname(old))
+        open(old, "w").close()
+        st = S.Store(os.path.join(self.dir.name, "run"), os.path.join(self.dir.name, "state"),
+                     clock=lambda: 1000.4)
+        self.assertFalse(os.path.exists(old))                  # the older note goes
+        st.expected(["aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"], 60)
+        with open(st.expected_path) as f:
+            self.assertEqual(f.read(), "AA:BB:CC:DD:EE:FF 1060\n11:22:33:44:55:66 1060\n")
+        self.assertEqual(os.stat(st.expected_path).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(os.path.dirname(st.expected_path)).st_mode & 0o777, 0o700)
+        st.expected([], 60)
+        self.assertFalse(os.path.exists(st.expected_path))
         st.add_android_bond("aa:bb:cc:dd:ee:ff")
         self.assertTrue(st.is_android_bond("AA:BB:CC:DD:EE:FF"))
         st.forget_android_bond("AA:BB:CC:DD:EE:FF")

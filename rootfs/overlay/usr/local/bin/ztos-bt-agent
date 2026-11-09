@@ -16,15 +16,23 @@ and again whenever bluetoothd restarts. It asks through a sheet in the shell:
 
 ztmetro/auth/btpair-proto.h reads these, and ztmetro/auth/README.md says more.
 
-WHAT IT WILL ASK: only while the phone is discoverable, which Settings keeps on
-for as long as its Bluetooth page is open. BlueZ doesn't say which side started
-a pairing, so outside that it refuses everything, without a sheet: a stranger
-can't make a phone that isn't looking put questions on its screen. (Pairing with
-bluetoothctl from a terminal therefore needs "discoverable on".) One exception:
-an Android app in Waydroid pairing a device through ztos-btbridge. The bridge
-names that device in $XDG_RUNTIME_DIR/ztos-btbridge/pairing for as long as its
-Pair() runs; for that device, and while the file is fresh (ANDROID_PAIR_SECONDS),
-the agent asks as if the phone were discoverable. It still only asks.
+WHAT IT WILL ASK: while the phone is discoverable, which Settings keeps on for
+as long as its Bluetooth page is open, about any device; otherwise only about a
+device this phone is itself dealing with. BlueZ doesn't say which side started a
+pairing, so the agent refuses everything else, without a sheet: a stranger can't
+make a phone that isn't looking put questions on its screen. (Pairing with
+bluetoothctl from a terminal therefore needs "discoverable on".)
+
+"A device this phone is dealing with": an Android app in Waydroid connected to
+it, or pairs it, through ztos-btbridge. The bridge lists those devices in
+$XDG_RUNTIME_DIR/ztos-btbridge/expected, one "ADDRESS EXPIRY" line each (EXPIRY
+in Unix seconds, about a minute ahead, refreshed while the app holds the
+device). Devices often ask for pairing themselves when an app reads something
+encrypted (a security request: a passkey device, RM_2685, on 8 Nov), so a
+connection counts, not just the bridge's own Pair(). The file counts only if it
+is a regular file of this agent's own user that nobody else can write
+(expected()). For those devices the agent asks as if the phone were
+discoverable. It still only asks.
 
 It never says yes by itself. The one thing that goes through without a sheet is
 AuthorizeService for a device someone trusted: see Broker._service_look.
@@ -56,7 +64,7 @@ ANSWER_SECONDS = 55
 SHOW_SECONDS = 60       # a number on the screen: nothing tells us about a failure for sure
 TRUST_WAIT_SECONDS = 1.5
 NAME_BYTES = 96
-ANDROID_PAIR_SECONDS = 90   # ztos-btbridge's Pair() lasts at most 90 s
+EXPECT_MAX_SECONDS = 300    # an expiry further ahead than this is not believed
 
 SERVICES = {
     "1101": "a serial port",
@@ -163,7 +171,7 @@ class Broker:
     io.show(line) -> bool       a line for the shell: False if it isn't there
     io.device(path, cb)         cb(dict of Device1's properties, or None)
     io.discoverable(path, cb)   cb(bool) for that adapter
-    io.android_pairing(address) True while ztos-btbridge pairs this device for Android
+    io.expected(address)        True while ztos-btbridge deals with this device for Android
     io.after(seconds, fn)       -> a handle for io.stop(handle)
     io.abort(device)            end the pairing in progress with this device
 
@@ -260,8 +268,8 @@ class Broker:
 
     def _gate(self, req):
         address = req.props.get("Address") or address_of(req.device)
-        if self.io.android_pairing(address):
-            log(req.mode, address, "asking: an Android app pairs it")
+        if self.io.expected(address):
+            log(req.mode, address, "asking: an Android app is using it")
             self._gated(req, True)
             return
         self.io.discoverable(adapter_of(req.device), lambda on: self._gated(req, on))
@@ -346,22 +354,34 @@ class Broker:
             self.io.show("bt-pair-close %s\n" % req.id)
 
 
-def android_pairing(path, address, now=None):
-    """ztos-btbridge's note that it pairs `address` for an Android app: ours,
-    nobody else's to write, fresh, and naming that device."""
+def expected(path, address, now=None):
+    """Is `address` in ztos-btbridge's list of devices it deals with for
+    Android, and not expired? The list counts only if it is a regular file
+    (no symlink) of our own user that nobody else can write."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return False
     try:
         st = os.fstat(fd)
-        if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022
-                or abs((now if now is not None else time.time()) - st.st_mtime) > ANDROID_PAIR_SECONDS):
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
             return False
-        named = os.read(fd, 64).decode("ascii", "replace").strip().upper()
+        text = os.read(fd, 4096).decode("ascii", "replace")
     finally:
         os.close(fd)
-    return bool(named) and named == str(address).upper()
+    now = time.time() if now is None else now
+    want = str(address).upper()
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or parts[0].upper() != want:
+            continue
+        try:
+            until = int(parts[1])
+        except ValueError:
+            continue
+        if now <= until <= now + EXPECT_MAX_SECONDS:
+            return True
+    return False
 
 
 def write_ctl(path, line):
@@ -451,8 +471,8 @@ def main():
         def stop(self, handle):
             GLib.source_remove(handle)
 
-        def android_pairing(self, address):
-            return android_pairing(os.path.join(run, "ztos-btbridge", "pairing"), address)
+        def expected(self, address):
+            return expected(os.path.join(run, "ztos-btbridge", "expected"), address)
 
         def abort(self, device):
             # on a pairing started from there, there's nothing of ours to cancel:

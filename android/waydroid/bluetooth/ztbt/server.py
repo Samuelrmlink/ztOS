@@ -218,26 +218,40 @@ class Server:
 
 
 class Store:
-    """The pairing hint for ztos-bt-agent, and the bonds Android made."""
+    """What ztos-bt-agent may ask about, and the bonds Android made.
 
-    def __init__(self, runtime_dir, state_dir, log=None):
-        self.hint_path = os.path.join(runtime_dir, "ztos-btbridge", "pairing")
+    $XDG_RUNTIME_DIR/ztos-btbridge/expected: the devices this phone is
+    dealing with for Android, one "ADDRESS EXPIRY" line each (EXPIRY: Unix
+    seconds). ztos-bt-agent asks the person about pairing requests from
+    these while they haven't expired; it takes the file only if it is a
+    regular file of its own user, writable by nobody else."""
+
+    def __init__(self, runtime_dir, state_dir, log=None, clock=None):
+        self.expected_path = os.path.join(runtime_dir, "ztos-btbridge", "expected")
         self.bonds_path = os.path.join(state_dir, "ztos-btbridge", "android-bonds")
         self.log = log or (lambda *a: None)
-        os.makedirs(os.path.dirname(self.hint_path), mode=0o700, exist_ok=True)
-        self.pairing_hint(None)
+        self.clock = clock or time.time
+        os.makedirs(os.path.dirname(self.expected_path), mode=0o700, exist_ok=True)
+        os.chmod(os.path.dirname(self.expected_path), 0o700)   # even if it was there already
+        # the older single-address note, if an earlier bridge left one
+        try:
+            os.unlink(os.path.join(runtime_dir, "ztos-btbridge", "pairing"))
+        except FileNotFoundError:
+            pass
+        self.expected([], 0)
 
-    def pairing_hint(self, addr):
-        if addr is None:
+    def expected(self, addrs, seconds):
+        if not addrs:
             try:
-                os.unlink(self.hint_path)
+                os.unlink(self.expected_path)
             except FileNotFoundError:
                 pass
             return
-        tmp = self.hint_path + ".tmp"
+        until = int(self.clock()) + int(seconds)
+        tmp = self.expected_path + ".tmp"
         with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-            f.write(addr + "\n")
-        os.replace(tmp, self.hint_path)
+            f.write("".join("%s %d\n" % (a.upper(), until) for a in addrs))
+        os.replace(tmp, self.expected_path)
 
     def _bonds(self):
         try:

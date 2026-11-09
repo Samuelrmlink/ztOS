@@ -27,10 +27,9 @@ class Rfcomm(unittest.TestCase):
         st, (sid,) = c.reply(rid, "RFCOMM_CONNECT")
         self.assertEqual(st, P.ST_OK)
         self.assertEqual(be.called("rfcomm"), [("rfcomm", PRINTER, SPP, -1, True)])
-        self.assertEqual(store.hint, PRINTER)          # not bonded: BlueZ's agent may ask
+        self.assertEqual(store.expect, {PRINTER})       # BlueZ's agent may ask about it
         printer, rfd = pair()
         be.answer("rfcomm", values=(rfd, 1))
-        self.assertIsNone(store.hint)
         (name, a, b, prefix), = be.called("relay")
         self.assertEqual(b, rfd)
         chan, = struct.unpack("<i", prefix[:4])
@@ -80,7 +79,7 @@ class Rfcomm(unittest.TestCase):
         be.answer("rfcomm", error=("org.bluez.Error.Failed", "Host is down"))
         android.settimeout(1)
         self.assertEqual(android.recv(10), b"")     # EOF: Android throws IOException
-        self.assertIsNone(store.hint)
+        self.assertEqual(store.expect, set())
         self.assertNotIn(PRINTER, br.holds)
         android.close()
 
@@ -103,9 +102,10 @@ class Rfcomm(unittest.TestCase):
         self.assertEqual(be.called("rfcomm"), [])
         android.close()
 
-    def test_bonded_device_no_hint(self):
+    def test_bonded_device_expected_too(self):
+        # a bonded device may need pairing again (lost keys): the person decides
         be, store, br, c, android, rid = self.connect(addr=SPEAKER)
-        self.assertIsNone(store.hint)
+        self.assertEqual(store.expect, {SPEAKER})
         android.close()
 
     def test_unknown_device_by_uuid(self):

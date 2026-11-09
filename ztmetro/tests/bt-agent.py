@@ -37,7 +37,7 @@ class FakeIO:
     def discoverable(self, path, cb):
         cb(self.on)
 
-    def android_pairing(self, address):
+    def expected(self, address):
         return address == self.android
 
     def after(self, seconds, fn):
@@ -352,10 +352,10 @@ class Logs(Base):
 
 
 class AndroidPairing(Base):
-    """ztos-btbridge pairs a device for an Android app: the agent asks, even
-    though the phone isn't discoverable; for that device only."""
+    """A device ztos-btbridge deals with for an Android app: the agent asks,
+    even though the phone isn't discoverable; for that device only."""
 
-    def test_asks_for_the_device_the_bridge_pairs(self):
+    def test_asks_for_the_device_the_bridge_expects(self):
         self.io.on = False
         self.io.android = "AA:BB:CC:DD:EE:FF"
         self.ask("confirm", "123456")
@@ -364,6 +364,15 @@ class AndroidPairing(Base):
         self.answered(True)
         self.assertEqual(len(self.reply.oks), 1)
 
+    def test_a_passkey_device_asking_by_itself(self):
+        # RM_2685 (8 Nov): connected for an app, it asks for a passkey on its own
+        self.io.on = False
+        self.io.android = "AA:BB:CC:DD:EE:FF"
+        self.ask("passkey")
+        self.assertEqual(len(self.io.lines), 1)
+        self.assertIn("|passkey|", self.io.lines[0])
+        self.assertEqual(self.reply.oks + self.reply.errs, [])
+
     def test_another_device_is_refused(self):
         self.io.on = False
         self.io.android = "11:22:33:44:55:66"
@@ -371,25 +380,30 @@ class AndroidPairing(Base):
         self.assertEqual(self.reply.errs, ["Rejected"])
         self.assertEqual(self.io.lines, [])
 
-    def test_the_note(self):
+    def test_the_list(self):
         import os
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "pairing")
-            self.assertFalse(agent.android_pairing(path, "AA:BB:CC:DD:EE:FF"))
+            path = os.path.join(d, "expected")
+            A, B = "AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"
+            self.assertFalse(agent.expected(path, A, now=1000))
             with open(path, "w") as f:
-                f.write("AA:BB:CC:DD:EE:FF\n")
+                f.write("%s 1060\n%s 1030\nnonsense\nCC:CC:CC:CC:CC:CC x\n" % (A, B))
             os.chmod(path, 0o600)
-            self.assertTrue(agent.android_pairing(path, "aa:bb:cc:dd:ee:ff"))
-            self.assertFalse(agent.android_pairing(path, "AA:BB:CC:DD:EE:00"))
-            mtime = os.stat(path).st_mtime
-            self.assertFalse(agent.android_pairing(path, "AA:BB:CC:DD:EE:FF", now=mtime + 91))
-            os.chmod(path, 0o622)
-            self.assertFalse(agent.android_pairing(path, "AA:BB:CC:DD:EE:FF"))
+            self.assertTrue(agent.expected(path, A.lower(), now=1000))
+            self.assertTrue(agent.expected(path, B, now=1000))
+            self.assertFalse(agent.expected(path, B, now=1031))          # expired
+            self.assertTrue(agent.expected(path, A, now=1060))
+            self.assertFalse(agent.expected(path, A, now=1061))
+            self.assertFalse(agent.expected(path, "AA:BB:CC:DD:EE:00", now=1000))
+            self.assertFalse(agent.expected(path, "CC:CC:CC:CC:CC:CC", now=1000))
+            self.assertFalse(agent.expected(path, A, now=1060 - agent.EXPECT_MAX_SECONDS - 1))  # too far ahead
+            os.chmod(path, 0o620)                                         # someone else could write it
+            self.assertFalse(agent.expected(path, A, now=1000))
             os.chmod(path, 0o600)
             link = os.path.join(d, "link")
             os.symlink(path, link)
-            self.assertFalse(agent.android_pairing(link, "AA:BB:CC:DD:EE:FF"))
+            self.assertFalse(agent.expected(link, A, now=1000))
 
 
 if __name__ == "__main__":

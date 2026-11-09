@@ -437,13 +437,24 @@ The policy lives in the host daemon, so Android can't get around it.
   passes keys into Android. Android's `bt_config.conf` holds addresses and
   names only, and the shim rebuilds it from BlueZ at every start.
 - **Pairing UI is ztOS's.** All pairing goes through BlueZ's registered agent
-  (`ztos-bt-agent`). Today the agent accepts only while the phone is
-  discoverable, so a request that started from an Android app needs one
-  rule: ask (with the usual sheet) while the bridge has a `Pair()`
-  outstanding for that device. The bridge writes the address to
-  `$XDG_RUNTIME_DIR/ztos-btbridge/pairing` for as long as the `Pair()` call
-  runs (at most 60 s). The agent asks about that device while the file is
-  younger than 90 s and names it. The agent still never says yes by itself.
+  (`ztos-bt-agent`, the default agent; the bridge's `Pair()` uses it too,
+  since BlueZ falls back to the default agent for a caller without one).
+  The agent asks about any device only while the phone is discoverable.
+  Otherwise it asks only about the devices this phone is dealing with for
+  Android:
+  - those the bridge holds (connected for an app);
+  - those in the bridge's own `Pair()`.
+
+  The bridge lists them in `$XDG_RUNTIME_DIR/ztos-btbridge/expected`, one
+  `ADDRESS EXPIRY` line each (60 s ahead, refreshed every 30 s while held,
+  cleared when let go). The agent takes the file only if it is a regular
+  file of its own user that nobody else can write. Counting connections, not
+  just `Pair()`, matters: a device that needs a PIN or passkey often asks for
+  pairing itself when an app reads something encrypted (a security request).
+  The RM_2685 did that on 8 Nov, and the old rule refused it without a sheet
+  ("not discoverable"), four times. All other requests are still refused
+  without a sheet, and the agent never says yes by itself. LE "Just Works"
+  pairing started from the phone asks nobody: the kernel runs it alone.
 - **Bonded list.** The list Android gets at start leaves out bonded devices
   that Linux is connected to. If Linux connects one later, Android keeps it
   as bonded (a bond state change would make apps think it was unpaired), but

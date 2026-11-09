@@ -40,6 +40,7 @@ from .gatts import GattServerMixin
 CONNECT_SECONDS = 35
 RELEASE_SECONDS = 10    # how long a device we let go may still show Connected
 LINGER_SECONDS = 4      # a device we connected stays up this long after Android's last use
+EXPECT_SECONDS = 60     # how long ztos-bt-agent takes an expected address on trust (refreshed)
 DISCOVER_SECONDS = 30
 CCCD = "00002902-0000-1000-8000-00805f9b34fb"
 AD_FIELDS = ("RSSI", "ManufacturerData", "ServiceData", "AdvertisingData",
@@ -59,7 +60,6 @@ class Stream:
         self.addr = addr
         self.fd = fd              # ours until the relay takes it
         self.relay = None
-        self.hint = False
 
 
 class Hold:
@@ -102,6 +102,8 @@ class Bridge(GattServerMixin):
         self.streams = {}         # stream id -> Stream (RFCOMM)
         self.next_stream = 1
         self.advs = {}            # advertiser id -> Adv (Android's advertising sets)
+        self.expected = set()     # addresses ztos-bt-agent may ask about (see _update_expected)
+        self.expect_timer = None
         self._gatts_init()
 
     # ---- state from the backend -------------------------------------------
@@ -422,6 +424,7 @@ class Bridge(GattServerMixin):
         if hold is None:
             hold = self.holds[addr] = Hold(made=self._taken_back(addr) or not self.devs[addr].get("Connected"))
             hold.tokens.add(link.id)
+            self._update_expected()
             self._connect(addr, hold)
         else:
             self._use(hold)
@@ -500,6 +503,7 @@ class Bridge(GattServerMixin):
         if hold.timer is not None:
             self.be.cancel(hold.timer)
         self._use(hold)
+        self._update_expected()
         for token in list(hold.tokens):
             self._end_link(token, status)
         if disconnect and hold.made:
@@ -560,6 +564,30 @@ class Bridge(GattServerMixin):
         if hold.linger is not None:
             self.be.cancel(hold.linger)
         hold.linger = self.be.after(LINGER_SECONDS, linger_over)
+
+    def _update_expected(self):
+        """Tell ztos-bt-agent which devices this phone is dealing with for
+        Android: those the bridge holds (connected for an app) and those in
+        its own Pair(). The agent asks the person (its usual sheet) about
+        pairing requests from these, as it does while the phone is
+        discoverable, and keeps refusing all others. A device that asks for
+        pairing when an app touches an encrypted attribute (a security
+        request; RM_2685 on 8 Nov) is one the bridge holds. Each address
+        carries an expiry (EXPECT_SECONDS), refreshed while it stays."""
+        want = set(self.holds) | set(self.pairing)
+        if want == self.expected:
+            return
+        self.expected = want
+        self.store.expected(sorted(want), EXPECT_SECONDS)
+        if self.expect_timer is not None:
+            self.be.cancel(self.expect_timer)
+            self.expect_timer = None
+        if want:
+            def refresh():
+                self.expect_timer = None
+                self.expected = set()           # forces the rewrite
+                self._update_expected()
+            self.expect_timer = self.be.after(EXPECT_SECONDS // 2, refresh)
 
     def _flush_lingers(self):
         for addr, hold in list(self.holds.items()):
@@ -734,12 +762,12 @@ class Bridge(GattServerMixin):
         self._use(hold)
         hold.tokens.add(PAIR)
         self._event(client, "EV_BOND_STATE", [addr, P.BOND_BONDING, P.ST_OK])
-        self.store.pairing_hint(addr)
+        self._update_expected()
         self.log("pair", addr, "for Android (through BlueZ's agent)")
 
         def finish(state, status):
-            self.store.pairing_hint(None)
             owner = self.pairing.pop(addr, None)
+            self._update_expected()
             if state == P.BOND_BONDED:
                 self.store.add_android_bond(addr)
             if owner in self.clients:
@@ -820,10 +848,7 @@ class Bridge(GattServerMixin):
         token = (RFCOMM, stream.id)
         self._use(hold)
         hold.tokens.add(token)
-        if not (d and self.bonded(d)):
-            # BlueZ may pair on the way (SSP): its agent asks, for this device
-            self.store.pairing_hint(addr)
-            stream.hint = True
+        self._update_expected()     # BlueZ may pair on the way (SSP): its agent may ask
         secure = bool(flags & (SEC_ENCRYPT | SEC_AUTH | SEC_AUTH_MITM))
         self.log("rfcomm", stream.id, addr, "uuid" if by_uuid else "channel",
                  uuid_ if by_uuid else channel, "for Android")
@@ -836,7 +861,6 @@ class Bridge(GattServerMixin):
             if self.streams.get(stream.id) is not stream:
                 os.close(rfd)
                 return
-            self._unhint(stream)
             h = self.holds.get(addr)
             if h is not None and h.state == "connecting":
                 h.state = "connected"
@@ -846,21 +870,14 @@ class Bridge(GattServerMixin):
 
         def err(name, msg):
             self.log("rfcomm", stream.id, addr, "failed after %.1f s:" % (time.monotonic() - started), name, msg)
-            self._unhint(stream)
             self._stream_gone(stream.id)
         self.be.rfcomm_connect(addr, P.full_uuid(uuid_) if by_uuid else None, channel, secure, ok, err)
-
-    def _unhint(self, stream):
-        if stream.hint:
-            stream.hint = False
-            self.store.pairing_hint(None)
 
     def _end_stream(self, sid):
         """Close a stream (its hold token is being dropped by the caller)."""
         stream = self.streams.pop(sid, None)
         if stream is None:
             return
-        self._unhint(stream)
         if stream.relay is not None:
             self.be.unrelay(stream.relay)
         elif stream.fd is not None:
