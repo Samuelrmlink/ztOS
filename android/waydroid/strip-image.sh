@@ -49,6 +49,16 @@ if (( rc == 3 )); then
 elif (( rc != 0 )); then
     exit "$rc"
 fi
+# Bluetooth for Android apps through BlueZ: the shim's wrapper and the
+# Bluetooth app in the btservices APEX (docs/waydroid.md). Another image
+# (exit 3) builds without Bluetooth rather than failing.
+rc=0
+python3 "$(dirname "$(readlink -f "$0")")/patch-bluetooth.py" system "$root" || rc=$?
+if (( rc == 3 )); then
+    echo 'Warning: unknown btservices APEX; Android gets no Bluetooth with this image.' >&2
+elif (( rc != 0 )); then
+    exit "$rc"
+fi
 # HOME is com.android.launcher3/.uioverrides.QuickstepLauncher on the tested image.
 # Keep Launcher3: disabling it leaves HOME unresolved. Keep SystemUI too: hiding
 # its bars in multi-window mode does not prove its framework services are unused.

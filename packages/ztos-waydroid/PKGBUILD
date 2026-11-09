@@ -59,6 +59,10 @@ package() {
 	done
 	install -Dm644 "$bt/ztos-btbridge.socket" "$pkgdir/usr/lib/systemd/user/ztos-btbridge.socket"
 	install -Dm644 "$bt/ztos-btbridge.service" "$pkgdir/usr/lib/systemd/user/ztos-btbridge.service"
+	# what patch-bluetooth.py puts into the images (pinned there by sha256)
+	for f in Bluetooth.apk libbluetooth_jni.so SOURCES; do
+		install -Dm644 "$src/prebuilts/waydroid-bt/$f" "$pkgdir/usr/share/ztos-waydroid/bt/$f"
+	done
 
 	# the recipe for the image: strip, patch, config, microG (ztos-waydroid-images
 	# runs install.sh from here; PACKAGED tells it the files above are in place)
