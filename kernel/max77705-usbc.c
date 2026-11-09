@@ -531,6 +531,10 @@ struct max77705_usbc {
 	bool dp_mode_found;		/* Discover Modes ACK for 0xff01 */
 	u32 dp_mode_vdo;
 	bool dp_was_dfp;		/* data role at the last look: DFP edges */
+	bool dp_id_pending;		/* our Discover Identity still to be ACKed */
+	unsigned int dp_id_tries;
+	unsigned long dp_id_next;	/* jiffies: not before (retry backoff) */
+	struct delayed_work dp_id_work;
 	bool dp_entered;		/* Enter Mode ACKed, this attach */
 	u32 dp_status;			/* the partner's last DP Status VDO */
 	bool dp_status_valid;
@@ -2431,6 +2435,8 @@ static void usbc_dp_forget(struct max77705_usbc *u)
 	u->dp_mode_found = false;
 	u->dp_mode_vdo = 0;
 	u->dp_was_dfp = false;
+	u->dp_id_pending = false;
+	u->dp_id_tries = 0;
 	u->dp_entered = false;
 	u->dp_status = 0;
 	u->dp_status_valid = false;
@@ -2504,6 +2510,71 @@ static void usbc_dp_status(struct max77705_usbc *u, const char *what, u32 vdo)
 		usbc_dp_queue(u, 0, vdo, 1, true);
 }
 
+#define DP_ID_TRIES		4		/* the first and three retries */
+static const unsigned int dp_id_backoff_ms[DP_ID_TRIES - 1] = { 300, 700, 1000 };
+
+/*
+ * Our Discover Identity as a sink made DFP (stock max77705_pd.c:772). Stock
+ * sends it on the data-role event and does not look at the contract; on the
+ * powered Belkin dock that collided with our own 9 V Request (dp8: no reply,
+ * all-ff, and no discovery after it). So: only while no Request of ours is
+ * outstanding and PS_RDY is in, and anything but an ACK (no reply, NAK,
+ * BUSY, a mailbox error) is retried after 300 ms, 700 ms, 1 s. The firmware's
+ * SVIDs/Modes discovery follows the ACK by itself. On u->wq only.
+ */
+static void usbc_dp_disc_id(struct max77705_usbc *u)
+{
+	u8 w[5] = { 1 | 1 << 3 }, rep[10] = {};
+	bool ack;
+	u32 hdr;
+	int ret;
+
+	if (!u->dp_id_pending)
+		return;
+	if (u->dp_svid0 || u->dp_partner || !u->mbox_allowed || u->mbox_dead) {
+		u->dp_id_pending = false;	/* discovery is under way, or cannot be */
+		return;
+	}
+	if (u->pd.req_pos || !(u->st[ST(REG_PD_STATUS1)] & PD1_PSRDY) ||
+	    time_before(jiffies, u->dp_id_next)) {
+		unsigned long wait = time_before(jiffies, u->dp_id_next) ?
+				     u->dp_id_next - jiffies : msecs_to_jiffies(200);
+
+		mod_delayed_work(u->wq, &u->dp_id_work, wait);
+		return;
+	}
+
+	put_unaligned_le32(DP_VDM_DISC_ID, &w[1]);
+	ret = usbc_cmd(u, OP_SET_VDM_REQ, w, sizeof(w), rep, sizeof(rep));
+	hdr = get_unaligned_le32(&rep[1]);
+	ack = !ret && rep[0] != 0xff && VDM_HDR_CMDTYPE(hdr) == CMDT_RSP_ACK;
+	u->dp_id_tries++;
+	dev_info(u->dev, "DP: sink and DFP: Discover Identity (try %u) %s, reply %*phN\n",
+		 u->dp_id_tries, ack ? "ACK" : ret ? "failed" : "not ACKed", (int)sizeof(rep), rep);
+	if (ack) {
+		u->dp_id_pending = false;
+		return;
+	}
+	if (u->dp_id_tries >= DP_ID_TRIES) {
+		dev_warn(u->dev, "DP: Discover Identity not ACKed after %u tries; replug to retry\n",
+			 u->dp_id_tries);
+		u->dp_id_pending = false;
+		return;
+	}
+	u->dp_id_next = jiffies + msecs_to_jiffies(dp_id_backoff_ms[u->dp_id_tries - 1]);
+	mod_delayed_work(u->wq, &u->dp_id_work, u->dp_id_next - jiffies);
+}
+
+static void usbc_dp_id_work(struct work_struct *work)
+{
+	struct max77705_usbc *u = container_of(to_delayed_work(work),
+					       struct max77705_usbc, dp_id_work);
+
+	if (READ_ONCE(u->stopping) || usbc_read_status(u))
+		return;
+	usbc_dp_disc_id(u);
+}
+
 /*
  * The firmware's DP interrupts and results. Called from event_work after the
  * VDM flags; vdm_int b0-b2 (discovery) are usbc_vdm_events()'s.
@@ -2519,21 +2590,21 @@ static void usbc_dp_events(struct max77705_usbc *u, u8 pd_int, u8 vdm_int)
 
 	/*
 	 * A sink that the partner has just made DFP (DR_Swap): stock's Discover
-	 * Identity, sent when the data role changes to DFP while we sink
+	 * Identity, due when the data role changes to DFP while we sink
 	 * (max77705_pd.c:756-775). Only on that edge: a PR_Swap that leaves us
-	 * DFP and makes us the sink is not one (the mode stays entered).
+	 * DFP and makes us the sink is not one (the mode stays entered). Sent
+	 * by usbc_dp_disc_id() once the contract is settled, retried until ACKed.
 	 */
 	if (FIELD_GET(CC0_CCSTAT, cc0) == CCSTAT_SINK && (pd1 & PD1_DATAROLE) &&
 	    !u->dp_was_dfp && u->altmode_sent) {
-		u8 w[5] = { 1 | 1 << 3 };
-		u8 rep[10];
-
-		put_unaligned_le32(DP_VDM_DISC_ID, &w[1]);
-		if (!usbc_cmd(u, OP_SET_VDM_REQ, w, sizeof(w), rep, sizeof(rep)))
-			dev_info(u->dev, "DP: sink and DFP: Discover Identity sent, reply %*phN\n",
-				 (int)sizeof(rep), rep);
+		u->dp_id_pending = true;
+		u->dp_id_tries = 0;
+		u->dp_id_next = jiffies;
 	}
+	if (FIELD_GET(CC0_CCSTAT, cc0) != CCSTAT_SINK || !(pd1 & PD1_DATAROLE))
+		u->dp_id_pending = false;
 	u->dp_was_dfp = pd1 & PD1_DATAROLE;
+	usbc_dp_disc_id(u);
 
 	if ((vdm_int & BIT(3)) && !usbc_vdm_get(u, VDM_SUB_ENTER, r, 7, &hdr)) {
 		bool ack = VDM_HDR_CMDTYPE(hdr) == CMDT_RSP_ACK;
@@ -3087,6 +3158,7 @@ static void usbc_dp_discovered(struct max77705_usbc *u, u8 sub, const u8 *r) { }
 static void usbc_dp_update(struct max77705_usbc *u) { }
 static void usbc_dp_work(struct work_struct *work) { }
 static void usbc_dp_gate_work(struct work_struct *work) { }
+static void usbc_dp_id_work(struct work_struct *work) { }
 #endif
 
 /* ---- VDM results (vdm_discovery) ------------------------------------------ */
@@ -4072,6 +4144,7 @@ static void usbc_stop_work(void *data)
 	cancel_delayed_work_sync(&u->hv_work);
 	cancel_delayed_work_sync(&u->dp_work);
 	cancel_delayed_work_sync(&u->dp_gate_work);
+	cancel_delayed_work_sync(&u->dp_id_work);
 	if (IS_ENABLED(CONFIG_TYPEC))
 		cancel_delayed_work_sync(&u->typec_work);
 	usbc_otg_stop(u, true);
@@ -4111,6 +4184,7 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	INIT_DELAYED_WORK(&u->otg.recheck, usbc_otg_recheck);
 	INIT_DELAYED_WORK(&u->dp_work, usbc_dp_work);
 	INIT_DELAYED_WORK(&u->dp_gate_work, usbc_dp_gate_work);
+	INIT_DELAYED_WORK(&u->dp_id_work, usbc_dp_id_work);
 	spin_lock_init(&u->dp_lock);
 	i2c_set_clientdata(client, u);
 	u->log = devm_kcalloc(dev, LOG_N, sizeof(*u->log), GFP_KERNEL);
