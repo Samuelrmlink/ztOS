@@ -15,10 +15,16 @@ log() { echo "ztos-waydroid-location: $*"; }
 in_android() {
 	nsenter -e -t "$Z" -m -p -r -w -- /system/bin/sh -c "export PATH=/system/bin:/system/xbin; $1"
 }
+backoff=5
 while :; do
 	Z=$(pgrep -f '^zygote64$' | head -1)
-	# a frozen container blocks binder calls: time out and look again later
-	if [ -z "$Z" ] || ! timeout 5 nsenter -e -t "$Z" -m -p -r -w -- /system/bin/service check location 2>/dev/null | grep -q ': found$'; then
+	# A frozen container blocks binder calls: time out and look again later.
+	# Only after boot completes: before that LocationManagerService has no
+	# providers yet and addTestProvider throws IllegalStateException (the
+	# bridge crashed every 6 s while Android's boot was stuck, 9 Nov).
+	if [ -z "$Z" ] ||
+	   [ "$(timeout 5 nsenter -e -t "$Z" -m -p -r -w -- /system/bin/getprop sys.boot_completed 2>/dev/null)" != 1 ] ||
+	   ! timeout 5 nsenter -e -t "$Z" -m -p -r -w -- /system/bin/service check location 2>/dev/null | grep -q ': found$'; then
 		sleep 15
 		continue
 	fi
@@ -32,8 +38,18 @@ while :; do
 	# (ztos-waydroid-power) and android.conf's keep_awake list
 	if [ -d "$ZTOS_RUNTIME_DIR" ]; then exec 3<"$ZTOS_RUNTIME_DIR"; else exec 3</dev/null; fi
 	if [ -d "$ZTOS_HOME/.config/ztos" ]; then exec 4<"$ZTOS_HOME/.config/ztos"; else exec 4</dev/null; fi
+	started=$(date +%s)
 	in_android 'CLASSPATH=/data/local/tmp/ztos-waydroid-location.dex exec app_process /system/bin org.ztos.location.Bridge --package com.android.shell'
+	rc=$?
 	exec 3<&- 4<&-
-	log "bridge exited ($?)"
-	sleep 5
+	# A bridge that ran a while ended with Android (a new zygote): at once.
+	# One that died at start fails again the same way: wait longer each
+	# time, up to 5 min, said once per wait.
+	if [ $(( $(date +%s) - started )) -ge 60 ]; then
+		backoff=5
+	elif [ $backoff -lt 300 ]; then
+		backoff=$(( backoff * 2 > 300 ? 300 : backoff * 2 ))
+	fi
+	log "bridge exited ($rc); again in ${backoff} s"
+	sleep "$backoff"
 done
