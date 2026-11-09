@@ -190,6 +190,21 @@ card would have come first). A 60 Hz vblank timer paces the page flips.
 - The desktop-mode shell (feature/desktop-mode, merged into
   feature/desktop-dp) puts its desktop on DP-1; `desktop start` on its
   control pipe (or the setting "start automatically") starts XFCE there.
+- Modes (dp37): the sink's EDID modes that DECON2 and the link carry
+  (progressive, 640x480 to 1920x1080, a pixel rate below what 2 HBR lanes
+  carry), plus CEA 1080p30 when the EDID lacks it. The shell picks one with
+  `monitor_mode = WxH[@HZ]` in `~/.config/ztmetro/desktop`, or now with
+  `desktop mode WxH[@HZ]|preferred` on its control pipe; 1280x720@60 and
+  1920x1080@30 tested live.
+- `exynos9810_dp.vsync_irq=1` (before the card registers) gives DRM vblank
+  from the link's VSYNC_DET interrupt instead of a 60 Hz timer (tested:
+  the interrupt counts, the desktop shows).
+- `scripts/build-boot.sh --dp-altmode --dp-tx` alone gives the command line
+  the desktop needs (`max77705_usbc.dp_altmode=1 exynos9810_dp.hpd_read=1
+  exynos9810_dp.drm_auto=1`).
+- The Belkin dock's Ethernet (RTL8153, 0bda:8153) enumerates but has no
+  driver: CONFIG_USB_NET_DRIVERS is off; it needs CONFIG_USB_NET_DRIVERS=y
+  and CONFIG_USB_RTL8152 (a new module set).
 
 **Fallback: the PMA up before Enter Mode.** Stock's USB3 bring-up powers the
 combo PHY's PMA before the dock is asked to enter DP. If HPD stays low even
