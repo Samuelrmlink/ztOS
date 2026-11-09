@@ -1,7 +1,7 @@
 """ztos-btbridge's policy and its BLE central ops, against a fake BlueZ."""
 import unittest
 
-from fakes import AIRPODS, CCCD, HR, LOCK, SENSOR, SPEAKER, FakeClient, P, make
+from fakes import AIRPODS, CCCD, HR, HRM, LOCK, SENSOR, SPEAKER, FakeClient, P, make
 from ztbt.core import att_code, build_ad
 
 
@@ -640,8 +640,8 @@ class PluginSequence(unittest.TestCase):
         br.value_changed(SENSOR, 3, b"\x5b")
         self.assertEqual(c.events("EV_GATT_VALUE"), [[link, 3, b"\x5a"], [link, 3, b"\x5b"]])
         text = "\n".join(lines)
-        for want in ("database: 3 entries", "MTU 247", "CCCD 0x0004 (characteristic 0x0003) = 0100 ok",
-                     "write char 0x0003 2 bytes with response ok", "first notification from 0x0003 (1 bytes)"):
+        for want in ("database: 3 entries", "MTU 247", "CCCD 0x0004 (characteristic 0x0003 " + HRM + ") = 0100 ok",
+                     "write char 0x0003 " + HRM + " 2 bytes with response ok", "first notification from 0x0003 (1 bytes)"):
             self.assertIn(want, text)
         self.assertEqual(text.count("first notification"), 1)
 
@@ -663,7 +663,7 @@ class PluginSequence(unittest.TestCase):
         link = up(be, br, c)
         c.request("GATT_READ", link, 3, 0)
         be.answer("read", value=b"\x01\x02\x03")
-        self.assertTrue(any("read char 0x0003 ok 3 bytes" in x for x in lines))
+        self.assertTrue(any("read char 0x0003 " + HRM + " ok 3 bytes" in x for x in lines))
         self.assertEqual(be.fire(SLOW_SECONDS), 0)      # the slow timer went with the answer
 
 

@@ -804,7 +804,7 @@ class Bridge(GattServerMixin):
         if attr[0] == "desc" and P.full_uuid(attr[1]) == CCCD:
             answer(P.ST_OK, [link.cccd.get(handle, b"\x00\x00")[offset:]])
             return
-        answer = self._logged(answer, link.addr, "read %s 0x%04x" % (attr[0], handle))
+        answer = self._logged(answer, link.addr, "read %s 0x%04x %s" % (attr[0], handle, P.full_uuid(attr[1])))
         self.be.read(link.addr, handle, offset, lambda v: answer(P.ST_OK, [bytes(v)]), self._att_answer(answer))
 
     def op_gatt_write(self, client, answer, link_id, handle, wtype, offset, value):
@@ -820,16 +820,22 @@ class Bridge(GattServerMixin):
             return
         if attr[0] == "desc" and P.full_uuid(attr[1]) == CCCD:
             self._write_cccd(link, handle, attr[2], value,
-                             self._logged(answer, link.addr, "CCCD 0x%04x (characteristic 0x%04x) = %s"
-                                          % (handle, attr[2] or 0, bytes(value).hex())))
+                             self._logged(answer, link.addr, "CCCD 0x%04x (characteristic 0x%04x %s) = %s"
+                                          % (handle, attr[2] or 0, self._uuid_of(link.addr, attr[2]),
+                                             bytes(value).hex())))
             return
         if wtype not in (P.W_NO_RSP, P.W_DEFAULT):
             answer(P.ST_INVALID)
             return
-        answer = self._logged(answer, link.addr, "write %s 0x%04x %d bytes %s" % (
-            attr[0], handle, len(value), "without response" if wtype == P.W_NO_RSP else "with response"))
+        answer = self._logged(answer, link.addr, "write %s 0x%04x %s %d bytes %s" % (
+            attr[0], handle, P.full_uuid(attr[1]), len(value),
+            "without response" if wtype == P.W_NO_RSP else "with response"))
         self.be.write(link.addr, handle, bytes(value), wtype, offset,
                       lambda: answer(P.ST_OK), self._att_answer(answer))
+
+    def _uuid_of(self, addr, handle):
+        attr = self.be.attribute(addr, handle) if handle is not None else None
+        return P.full_uuid(attr[1]) if attr else "?"
 
     def _write_cccd(self, link, handle, char_handle, value, answer):
         if len(value) != 2 or char_handle is None:
