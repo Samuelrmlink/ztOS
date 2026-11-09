@@ -25,7 +25,10 @@
 #     --dp-altmode               DisplayPort Alt Mode in the typec class (needs --power):
 #                                the typec_displayport altmode driver built in; the
 #                                MAX77705 side stays off until max77705_usbc.dp_altmode=1.
-#                                Its own release (-dp suffix) and module set
+#                                Its own release (-dp suffix) and module set. Only in a
+#                                private kernel tree (KSRC=, e.g. a reflink copy of
+#                                build/linux-7.1): the shared tree's out/.config is what
+#                                every other build's module ABI check reads
 #     --cmdline "..."            extra kernel command line (zboot.rescue=1 ...)
 #     --config-only              stop after the configuration: out/<name>.config,
 #                                to build the modules for it first (below)
@@ -57,7 +60,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 B=$ROOT/build
-SRC=$B/linux-7.1
+SRC=$(realpath -m "${KSRC:-$B/linux-7.1}")	# KSRC=<tree>: a private copy (--dp-altmode needs one)
 PORT=$ROOT/third_party/s9plus
 TC=$B/toolchain/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu/bin
 REF=$ROOT/stock/RECOVERY.img    # TWRP for starlte: a header and DTBH sboot accepts
@@ -83,7 +86,7 @@ while [ $# -gt 0 ]; do
 	--pm-debug) PMDEBUG=1 ;;
 	--lockup) LOCKUP=1 ;;
 	--waydroid) WAYDROID=1 ;;
-	--dp-altmode) DPALT=1 ;;
+	--dp-altmode) DTS_FLAGS+=(--dp-altmode); DPALT=1 ;;
 	--config-only) CONFIG_ONLY=1 ;;
 	--modules) MODULES=$(realpath -m "$2"); shift ;;
 	--no-module-check) MODCHECK= ;;
@@ -96,6 +99,11 @@ while [ $# -gt 0 ]; do
 	shift
 done
 [ -n "$UFS" ] && DTS_FLAGS+=(--ufs)
+if [ -n "$DPALT" ] && [ "$SRC" = "$(realpath -m "$B/linux-7.1")" ]; then
+	echo "--dp-altmode builds in a private tree, not the shared $SRC:" >&2
+	echo "  cp -a --reflink=always $B/linux-7.1 $B/linux-7.1-dp; KSRC=$B/linux-7.1-dp $0 ..." >&2
+	exit 1
+fi
 case "$FALLBACK" in
 boot) INFORM3=0x12345670 ;;
 recovery) INFORM3=0x12345674 ;;
@@ -290,12 +298,15 @@ else
 	cfg --disable TYPEC
 	[ -z "$DPALT" ] || { echo "--dp-altmode needs --power (the USB-C controller)" >&2; exit 1; }
 fi
-# DisplayPort Alt Mode: the class's DP altmode driver, built in (no module to
-# ship); max77705_usbc.dp_altmode=1 on the command line turns the chip side on
+# DisplayPort Alt Mode: the class's DP altmode driver and the GPIO SBU switch,
+# built in (no module to ship); max77705_usbc.dp_altmode=1 on the command
+# line turns the chip side on. The board wiring is in the DT (make-dts.py).
 if [ -n "$DPALT" ]; then
 	cfg --enable TYPEC_DP_ALTMODE
+	cfg --enable TYPEC_MUX_GPIO_SBU
 else
 	cfg --disable TYPEC_DP_ALTMODE
+	cfg --disable TYPEC_MUX_GPIO_SBU
 fi
 if [ -n "$GPU" ]; then
 	cfg --enable DRM_PANFROST

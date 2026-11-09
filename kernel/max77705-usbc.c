@@ -246,10 +246,6 @@ module_param(dp_altmode, bool, 0444);
 MODULE_PARM_DESC(dp_altmode,
 		 "DisplayPort Alt Mode: firmware discovery, Enter Mode/Configure via the typec DP altmode driver, HPD to the typec class (default 0)");
 
-static bool usbc_discovery(void)
-{
-	return vdm_discovery || dp_altmode;
-}
 
 /*
  * test_cmds: debugfs pd_request (ask for one fixed PDO by hand) and probe
@@ -478,6 +474,11 @@ struct max77705_usbc {
 	unsigned long vdm_sent;		/* jiffies */
 
 	/* DisplayPort Alt Mode (dp_altmode); all but dp_lock'd fields on u->wq */
+	bool dp_on;			/* dp_altmode and the DT describes the DP altmode */
+	u32 dp_port_vdo;		/* the port's DP capabilities, from the DT */
+	struct fwnode_handle *conn;	/* the usb-c-connector child, if the DT has one */
+	struct delayed_work typec_work;	/* typec port registration, while its switches defer */
+	unsigned int typec_tries;
 	u16 dp_svid0;			/* first SVID of Discover SVIDs, this attach */
 	bool dp_mode_found;		/* Discover Modes ACK for 0xff01 */
 	u32 dp_mode_vdo;
@@ -509,6 +510,11 @@ struct max77705_usbc {
 	unsigned int log_head, log_count;
 	struct dentry *debugfs;
 };
+
+static bool usbc_discovery(struct max77705_usbc *u)
+{
+	return vdm_discovery || u->dp_on;
+}
 
 /* ---- event log (debugfs) ------------------------------------------------ */
 
@@ -766,9 +772,9 @@ static int usbc_set_masks(struct max77705_usbc *u)
 
 	/* Samsung's alt-mode values: Discover ID/SVIDs/Modes/Enter Mode open,
 	 * and with DP the DP Status/Configure/Attention bits of PD_INT too */
-	if (usbc_discovery())
+	if (usbc_discovery(u))
 		m[3] = VDM_INT_M_DISCOVERY;
-	if (dp_altmode)
+	if (u->dp_on)
 		m[2] = PD_INT_M_DP;
 	ret = usbc_write(u, REG_UIC_INT_M, m, 4);
 
@@ -875,37 +881,101 @@ static bool usbc_vdm_allowed(const u8 *w, int wlen)
 #define DP_VDM_DISC_ID		0xff008001
 #define DP_VDM_ENTER		0xff018104
 #define DP_VDM_CONFIGURE	0xff018111
-#define DP_PORT_PINS		(BIT(DP_PIN_ASSIGN_C) | BIT(DP_PIN_ASSIGN_D) | BIT(DP_PIN_ASSIGN_E))
 
 /*
  * Only "configure the partner as UFP_D (we are the DP source), DP signalling,
- * exactly one of pins C/D/E", reserved bits clear. Stock sends the same
- * shape (SEL 2, Select_DP_V1p3, one pin bit in byte 1). Never USB
- * configuration (0): stock never sends it and the firmware's reaction is
- * unknown.
+ * exactly one pin assignment the board's port supports" (the DT's DFP_D pin
+ * mask), reserved bits clear. Stock sends the same shape (SEL 2,
+ * Select_DP_V1p3, one pin bit in byte 1). Never USB configuration (0): stock
+ * never sends it and the firmware's reaction is unknown.
  */
-static bool usbc_dp_conf_ok(u32 conf)
+static bool usbc_dp_conf_ok(struct max77705_usbc *u, u32 conf)
 {
 	u32 pins = DP_CONF_GET_PIN_ASSIGN(conf);
 
 	return DP_CONF_CURRENTLY(conf) == DP_CONF_UFP_U_AS_UFP_D &&
 	       FIELD_GET(DP_CONF_SIGNALLING_MASK, conf) == DP_CONF_SIGNALLING_HBR3 &&
-	       hweight32(pins) == 1 && (pins & DP_PORT_PINS) &&
+	       hweight32(pins) == 1 && (pins & DP_CAP_PIN_ASSIGN_DFP_D(u->dp_port_vdo)) &&
 	       !(conf & ~(GENMASK(5, 0) | GENMASK(15, 8)));
 }
 
-static bool usbc_dp_vdm_allowed(const u8 *w, int wlen)
+static bool usbc_dp_vdm_allowed(struct max77705_usbc *u, const u8 *w, int wlen)
 {
 	u32 h;
 
-	if (!dp_altmode || wlen < 5)
+	if (!u->dp_on || wlen < 5)
 		return false;
 	h = get_unaligned_le32(&w[1]);
 	if (wlen == 5 && w[0] == (1 | 1 << 3))
 		return h == DP_VDM_DISC_ID || h == DP_VDM_ENTER;
 	if (wlen == 9 && w[0] == (2 | 1 << 3))
-		return h == DP_VDM_CONFIGURE && usbc_dp_conf_ok(get_unaligned_le32(&w[5]));
+		return h == DP_VDM_CONFIGURE && usbc_dp_conf_ok(u, get_unaligned_le32(&w[5]));
 	return false;
+}
+
+static void usbc_put_conn(void *data)
+{
+	fwnode_handle_put(data);
+}
+
+/*
+ * Board data, at probe. The connector: a usb-c-connector child node of ours
+ * (the typec port is registered on it, so its graph reaches the orientation
+ * and mode switches). DP: with dp_altmode=1 the connector must carry the
+ * standard altmodes/displayport node (svid 0xff01, vdo = the port's DP
+ * capabilities: DFP_D, DP signalling, the pin assignments the board's lanes
+ * and switches carry). Without it DP stays off and nothing DP-related is
+ * written to the chip: no guessing at another board's wiring.
+ */
+static void usbc_dp_from_dt(struct max77705_usbc *u)
+{
+	struct fwnode_handle *conn, *alt, *dp;
+	const char *why = NULL;
+	u16 svid = 0;
+	u32 vdo = 0;
+
+	conn = device_get_named_child_node(u->dev, "connector");
+	if (conn && !fwnode_device_is_compatible(conn, "usb-c-connector")) {
+		fwnode_handle_put(conn);
+		conn = NULL;
+	}
+	if (conn && !devm_add_action_or_reset(u->dev, usbc_put_conn, conn))
+		u->conn = conn;
+	if (!dp_altmode)
+		return;
+
+	alt = u->conn ? fwnode_get_named_child_node(u->conn, "altmodes") : NULL;
+	dp = alt ? fwnode_get_named_child_node(alt, "displayport") : NULL;
+	if (!u->conn)
+		why = "no usb-c-connector child node";
+	else if (!dp)
+		why = "no connector/altmodes/displayport node";
+	else if (fwnode_property_read_u16(dp, "svid", &svid) || svid != USB_TYPEC_DP_SID)
+		why = "displayport: svid is not 0xff01";
+	else if (fwnode_property_read_u32(dp, "vdo", &vdo))
+		why = "displayport: no vdo";
+	else if (!(DP_CAP_CAPABILITY(vdo) & DP_CAP_DFP_D))
+		why = "displayport vdo: not DFP_D capable";
+	else if (!(DP_CAP_DP_SIGNALLING(vdo) & DP_CAP_SIGNALLING_HBR3))
+		why = "displayport vdo: no DP signalling";
+	else if (!DP_CAP_PIN_ASSIGN_DFP_D(vdo) ||
+		 (DP_CAP_PIN_ASSIGN_DFP_D(vdo) &
+		  ~(BIT(DP_PIN_ASSIGN_C) | BIT(DP_PIN_ASSIGN_D) | BIT(DP_PIN_ASSIGN_E))))
+		why = "displayport vdo: DFP_D pins must be a non-empty set of C/D/E";
+	fwnode_handle_put(dp);
+	fwnode_handle_put(alt);
+	if (why) {
+		dev_err(u->dev, "dp_altmode=1, but the device tree does not describe DP (%s): DP off\n",
+			why);
+		return;
+	}
+	if (!IS_ENABLED(CONFIG_TYPEC)) {
+		dev_err(u->dev, "dp_altmode=1 without CONFIG_TYPEC: DP off\n");
+		return;
+	}
+	u->dp_port_vdo = vdo;
+	u->dp_on = true;
+	dev_info(u->dev, "DP Alt Mode on: port vdo %08x from the device tree\n", vdo);
 }
 
 /* ---- mailbox ------------------------------------------------------------ */
@@ -945,14 +1015,14 @@ static bool usbc_op_allowed(struct max77705_usbc *u, u8 op, const u8 *w, int wle
 		return wlen == 1 && usbc_pdo_allowed(u, w[0]);
 	case OP_SET_ALTMODE:
 		/* stock's ALTERNATE_MODE_START, and only when asked for */
-		return usbc_discovery() && wlen == 1 && w[0] == ALTMODE_SRC_VDM;
+		return usbc_discovery(u) && wlen == 1 && w[0] == ALTMODE_SRC_VDM;
 	case OP_GET_VDM_RESP:
 		/* reads of what the firmware received; Samsung's sub-ids */
 		return wlen == 1 && (w[0] == 1 || w[0] == 2 || w[0] == 3 ||
 				     w[0] == 4 || w[0] == 6 || w[0] == 0x10 ||
 				     w[0] == 0x11);
 	case OP_SET_VDM_REQ:
-		return usbc_vdm_allowed(w, wlen) || usbc_dp_vdm_allowed(w, wlen);
+		return usbc_vdm_allowed(w, wlen) || usbc_dp_vdm_allowed(u, w, wlen);
 	default:
 		return false;
 	}
@@ -2364,7 +2434,7 @@ static void usbc_dp_events(struct max77705_usbc *u, u8 pd_int, u8 vdm_int)
 	u8 r[VDM_RESP_LEN];
 	u32 hdr;
 
-	if (!dp_altmode || !u->mbox_allowed || u->mbox_dead)
+	if (!u->dp_on || !u->mbox_allowed || u->mbox_dead)
 		return;
 
 	/* sink, and the partner swapped us to DFP: stock's Discover Identity */
@@ -2415,7 +2485,7 @@ static void usbc_dp_discovered(struct max77705_usbc *u, u8 sub, const u8 *r)
 	u32 hdr = get_unaligned_le32(&r[3]);
 	unsigned int nobj = (get_unaligned_le16(&r[1]) >> 12) & 0x7;
 
-	if (!dp_altmode || VDM_HDR_CMDTYPE(hdr) != CMDT_RSP_ACK || nobj < 2)
+	if (!u->dp_on || VDM_HDR_CMDTYPE(hdr) != CMDT_RSP_ACK || nobj < 2)
 		return;
 	if (sub == VDM_SUB_SVIDS) {
 		/* the firmware looks at the first SVID only, as stock does */
@@ -2458,7 +2528,7 @@ static void usbc_dp_send_configure(struct max77705_usbc *u, u32 conf)
 
 	put_unaligned_le32(DP_VDM_CONFIGURE, &w[1]);
 	put_unaligned_le32(conf, &w[5]);
-	if (usbc_dp_conf_ok(conf))
+	if (usbc_dp_conf_ok(u, conf))
 		ret = usbc_cmd(u, OP_SET_VDM_REQ, w, sizeof(w), r, sizeof(r));
 	if (ret) {
 		dev_warn(u->dev, "DP: Configure %08x not sent: %d\n", conf, ret);
@@ -2584,31 +2654,35 @@ static const struct typec_altmode_ops usbc_dp_ops = {
 };
 
 /*
- * The port: DFP_D on a receptacle, DP signalling, pins C, D and E (stock
- * picks among A-F; A, B and F are gone from DP Alt Mode 1.0b on).
+ * The port's DP altmode, as the DT describes it (connector/altmodes/displayport,
+ * the usb-c-connector binding: svid 0xff01 and the DP capabilities VDO with
+ * the pin assignments this board's wiring carries). usbc_dp_from_dt() has
+ * checked it at probe. -EPROBE_DEFER while the connector's mode switch has
+ * no driver yet.
  */
-static void usbc_dp_register_port(struct max77705_usbc *u)
+static int usbc_dp_register_port(struct max77705_usbc *u)
 {
 	struct typec_altmode_desc desc = {
 		.svid = USB_TYPEC_DP_SID,
 		.mode = USB_TYPEC_DP_MODE,
-		.vdo = DP_CAP_DFP_D | DP_CAP_RECEPTACLE |
-		       FIELD_PREP(GENMASK(5, 2), DP_CAP_SIGNALLING_HBR3) |
-		       FIELD_PREP(GENMASK(15, 8), DP_PORT_PINS),
+		.vdo = u->dp_port_vdo,
 		.roles = TYPEC_PORT_DRD,
 	};
+	int ret;
 
-	if (!dp_altmode)
-		return;
+	if (!u->dp_on || u->dp_port)
+		return 0;
 	u->dp_port = typec_port_register_altmode(u->port, &desc);
 	if (IS_ERR(u->dp_port)) {
-		dev_warn(u->dev, "DP: port altmode: %ld\n", PTR_ERR(u->dp_port));
+		ret = PTR_ERR(u->dp_port);
 		u->dp_port = NULL;
-		return;
+		return ret;
 	}
 	typec_altmode_set_drvdata(u->dp_port, u);
 	typec_altmode_set_ops(u->dp_port, &usbc_dp_ops);
-	dev_info(u->dev, "DP: port altmode registered (DFP_D, pins C/D/E)\n");
+	dev_info(u->dev, "DP: port altmode registered (vdo %08x: DFP_D pins %02lx)\n",
+		 u->dp_port_vdo, DP_CAP_PIN_ASSIGN_DFP_D(u->dp_port_vdo));
+	return 0;
 }
 
 /*
@@ -2753,6 +2827,9 @@ static void usbc_typec_remove(void *data)
 {
 	struct max77705_usbc *u = data;
 
+	cancel_delayed_work_sync(&u->typec_work);
+	if (!u->port)
+		return;
 	usbc_typec_detach(u);
 	if (u->dp_port)
 		typec_unregister_altmode(u->dp_port);
@@ -2761,7 +2838,16 @@ static void usbc_typec_remove(void *data)
 	u->port = NULL;
 }
 
-static void usbc_typec_init(struct max77705_usbc *u)
+#define TYPEC_RETRY_MS		1000
+#define TYPEC_RETRIES		120	/* the switches' bus is a module: give it 2 min */
+
+/*
+ * The port, on the DT's usb-c-connector child when there is one (its graph
+ * names the orientation and mode switches, e.g. the SBU mux), else on our
+ * own node. While a switch has no driver the class defers; charging does
+ * not wait for that, the port is retried from the workqueue.
+ */
+static int usbc_typec_try(struct max77705_usbc *u)
 {
 	struct typec_capability cap = {
 		.type = TYPEC_PORT_DRP,
@@ -2772,20 +2858,60 @@ static void usbc_typec_init(struct max77705_usbc *u)
 		.accessory = { TYPEC_ACCESSORY_AUDIO, TYPEC_ACCESSORY_DEBUG },
 		.orientation_aware = 1,
 	};
+	struct typec_port *port;
 
-	cap.fwnode = dev_fwnode(u->dev);
-	u->port = typec_register_port(u->dev, &cap);
-	if (IS_ERR(u->port)) {
-		dev_warn(u->dev, "typec port: %ld (power_supply only)\n", PTR_ERR(u->port));
-		u->port = NULL;
+	if (!u->port) {
+		cap.fwnode = u->conn ?: dev_fwnode(u->dev);
+		port = typec_register_port(u->dev, &cap);
+		if (IS_ERR(port))
+			return PTR_ERR(port);
+		typec_set_pwr_role(port, TYPEC_SINK);
+		typec_set_data_role(port, TYPEC_DEVICE);
+		u->port = port;
+	}
+	return usbc_dp_register_port(u);
+}
+
+static void usbc_typec_work(struct work_struct *work)
+{
+	struct max77705_usbc *u = container_of(to_delayed_work(work),
+					       struct max77705_usbc, typec_work);
+	int ret;
+
+	if (READ_ONCE(u->stopping))
+		return;
+	ret = usbc_typec_try(u);
+	if (ret == -EPROBE_DEFER && ++u->typec_tries < TYPEC_RETRIES) {
+		queue_delayed_work(u->wq, &u->typec_work, msecs_to_jiffies(TYPEC_RETRY_MS));
 		return;
 	}
-	typec_set_pwr_role(u->port, TYPEC_SINK);
-	typec_set_data_role(u->port, TYPEC_DEVICE);
-	usbc_dp_register_port(u);
-	if (devm_add_action_or_reset(u->dev, usbc_typec_remove, u))
-		u->port = NULL;
+	if (ret)
+		dev_warn(u->dev, "typec %s: %d after %u tries; %s\n",
+			 u->port ? "DP altmode" : "port", ret, u->typec_tries,
+			 u->port ? "no DP" : "power_supply only");
+	else
+		dev_info(u->dev, "typec port registered after %u tries\n", u->typec_tries);
+	queue_work(u->wq, &u->event_work);	/* the partner, if one is there */
 }
+
+static void usbc_typec_init(struct max77705_usbc *u)
+{
+	int ret;
+
+	INIT_DELAYED_WORK(&u->typec_work, usbc_typec_work);
+	if (devm_add_action_or_reset(u->dev, usbc_typec_remove, u))
+		return;
+	ret = usbc_typec_try(u);
+	if (ret == -EPROBE_DEFER) {
+		dev_info(u->dev, "typec %s: a switch is not there yet, retrying\n",
+			 u->port ? "DP altmode" : "port");
+		queue_delayed_work(u->wq, &u->typec_work, msecs_to_jiffies(TYPEC_RETRY_MS));
+	} else if (ret) {
+		dev_warn(u->dev, "typec %s: %d (%s)\n", u->port ? "DP altmode" : "port", ret,
+			 u->port ? "no DP" : "power_supply only");
+	}
+}
+
 static void usbc_typec_identity(struct max77705_usbc *u)
 {
 	if (u->partner)
@@ -2855,7 +2981,7 @@ static void usbc_vdm_read(struct max77705_usbc *u, u8 sub)
 
 static void usbc_vdm_events(struct max77705_usbc *u, u8 vdm_int)
 {
-	if (!usbc_discovery())
+	if (!usbc_discovery(u))
 		return;
 	if (!u->altmode_sent && u->mbox_allowed && !u->mbox_dead) {
 		u8 v = ALTMODE_SRC_VDM;
@@ -3178,7 +3304,7 @@ static int usbc_vdm_show(struct seq_file *s, void *unused)
 		if (u->vdm_resp_ok[i])
 			seq_printf(s, "0x4b %s: %*phN\n", what[i], VDM_RESP_LEN, u->vdm_resp[i]);
 	/* racy snapshot of wq-owned state: for reading by eye only */
-	if (dp_altmode)
+	if (u->dp_on)
 		seq_printf(s, "dp: port altmode %s, first svid %04x, mode %s%08x, partner altmode %s, entered %d, status %s%08x (HPD %s), queued %u\n",
 			   u->dp_port ? "yes" : "no", u->dp_svid0,
 			   u->dp_mode_found ? "" : "none ", u->dp_mode_vdo,
@@ -3383,7 +3509,7 @@ static void usbc_debugfs_init(struct max77705_usbc *u)
 		debugfs_create_file("pd_request", 0600, u->debugfs, u, &usbc_pd_request_fops);
 		debugfs_create_file("probe", 0600, u->debugfs, u, &usbc_probe_fops);
 	}
-	if (vdm_debugfs > 0 || usbc_discovery())
+	if (vdm_debugfs > 0 || usbc_discovery(u))
 		debugfs_create_file("vdm", vdm_debugfs > 0 ? 0600 : 0400,
 				    u->debugfs, u, &usbc_vdm_fops);
 }
@@ -3401,6 +3527,8 @@ static void usbc_stop_work(void *data)
 	cancel_work_sync(&u->event_work);
 	cancel_delayed_work_sync(&u->hv_work);
 	cancel_delayed_work_sync(&u->dp_work);
+	if (IS_ENABLED(CONFIG_TYPEC))
+		cancel_delayed_work_sync(&u->typec_work);
 }
 
 static void usbc_destroy_wq(void *data)
@@ -3469,6 +3597,7 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	if (!usbc_read(u, REG_UIC_INT_M, mask, 4))
 		dev_info(dev, "masks were %02x %02x %02x %02x\n",
 			 mask[0], mask[1], mask[2], mask[3]);
+	usbc_dp_from_dt(u);	/* before the masks: DP opens PD_INT's DP bits */
 	ret = usbc_set_masks(u);
 	if (ret)
 		return dev_err_probe(dev, ret, "mask write failed\n");

@@ -23,6 +23,12 @@ block on this SoC is a silent bus hang rather than an error:
   --gpu      Mali-G72, its power domain and the G3D clock provider
   --decon    DECON scanout, taking the display from the bootloader framebuffer
   --wlan     the PCIe root complex the BCM4361 sits on
+  --dp-altmode  (with --power) the USB-C connector and what DisplayPort Alt
+             Mode needs of the board: the PCAL6524 expander on its bit-banged
+             bus as a gpiochip (shared with zrn-bt's BT_EN), the SBU/AUX
+             switch on two of its pins, the connector's DP altmode and graph.
+             docs/dp-altmode.md has the binding notes and where each value
+             comes from
 """
 import argparse
 import sys
@@ -37,6 +43,7 @@ ap.add_argument("--touch", action="store_true")
 ap.add_argument("--gpu", action="store_true")
 ap.add_argument("--decon", action="store_true")
 ap.add_argument("--wlan", action="store_true")
+ap.add_argument("--dp-altmode", action="store_true")
 ap.add_argument("--fallback", choices=("boot", "recovery"), default="boot")
 args = ap.parse_args()
 
@@ -232,6 +239,111 @@ if args.power:
 			interrupts = <3>;
 		};""")
 # ---- end MAX77705 USB-C controller -----------------------------------------
+USBC_OLD = """		max77705_usbc: usb-c@25 {
+			compatible = "maxim,max77705-usbc";
+			reg = <0x25>;
+			interrupt-parent = <&max77705>;
+			interrupts = <3>;
+		};"""
+USBC_NEW = """		max77705_usbc: usb-c@25 {
+			compatible = "maxim,max77705-usbc";
+			reg = <0x25>;
+			interrupt-parent = <&max77705>;
+			interrupts = <3>;
+
+			usbc_connector: connector {
+				compatible = "usb-c-connector";
+				label = "USB-C";
+				power-role = "dual";
+				data-role = "dual";
+
+				altmodes {
+					displayport {
+						svid = /bits/ 16 <0xff01>;
+						vdo = <0x00001c46>;
+					};
+				};
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					port@2 {	/* SBU */
+						reg = <2>;
+						usbc_sbu: endpoint {
+							remote-endpoint = <&sbu_mux_in>;
+						};
+					};
+				};
+			};
+		};"""
+ROOT_NODES = """
+/* ---- USB-C SBU switch and the PCAL6524 expander (make-dts.py --dp-altmode) ---- */
+/ {
+	aliases {
+		i2c96 = &expander_i2c;
+	};
+
+	expander_i2c: i2c-expander {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpp6 3 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpp6 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		expander: gpio@22 {
+			compatible = "nxp,pcal6524";
+			reg = <0x22>;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+	};
+
+	bluetooth-board {
+		compatible = "ztos,zrn-bt";
+		bt-en-gpios = <&expander 7 GPIO_ACTIVE_HIGH>;
+	};
+
+	usb-sbu-mux {
+		compatible = "gpio-sbu-mux";
+		enable-gpios = <&expander 4 GPIO_ACTIVE_LOW>;	/* AUX_SW_OE */
+		select-gpios = <&expander 1 GPIO_ACTIVE_HIGH>;	/* SBU_SW_SEL: polarity unverified */
+		orientation-switch;
+		mode-switch;
+
+		port {
+			sbu_mux_in: endpoint {
+				remote-endpoint = <&usbc_sbu>;
+			};
+		};
+	};
+};
+"""
+
+# ---- USB-C connector and DisplayPort Alt Mode (--dp-altmode) ----------------
+# Board wiring, all of it here and none in the drivers (docs/dp-altmode.md):
+#   PCAL6524 at 0x22: stock hsi2c@10930000 (hsi2c_25), which this kernel does
+#     not bring up; zrn-bt has reached it by bit-banging gpp6-3 SDA / gpp6-2
+#     SCL since the Bluetooth work, so the bus is the same i2c-gpio, now from
+#     the DT (alias i2c96: the number tools used so far). Pin 7 BT_EN (zrn-bt),
+#     pin 1 SBU_SW_SEL (stock dp,sbu_sw_sel), pin 4 AUX_SW_OE (stock
+#     dp,aux_sw_oe; stock drives 1 = switch off at probe and on detach, 0 =
+#     on, after selecting: active low). Pin 8 WPC_EN must stay an input: no
+#     consumer here, and gpio-pca953x leaves unclaimed pins as they are.
+#   SBU switch: mainline gpio-sbu-mux (enable = AUX_SW_OE, select = the CC
+#     orientation). Which select level goes with which orientation is not
+#     verified yet (stock derives it from gpg0-4, not from the CC chip).
+#   connector: the usb-c-connector binding under the MAX77705 USB-C node; the
+#     typec port is registered on it. altmodes/displayport is the port's DP
+#     capability VDO: DFP_D (2) | DP signalling (bit 2) | receptacle (bit 6) |
+#     DFP_D pin assignments C, D, E (bits 10-12) = 0x1c46.
+if args.dp_altmode:
+    if not args.power:
+        sys.exit("make-dts: --dp-altmode needs --power (the MAX77705 USB-C node)")
+    sub(USBC_OLD, USBC_NEW)
+    s += ROOT_NODES
+# ---- end USB-C connector and DisplayPort Alt Mode ---------------------------
 
 if not args.touch:
     disable("			touchscreen-size-y = <4096>;")
@@ -247,5 +359,6 @@ if not args.gpu:
 		status = "disabled";""")
 
 Path(args.out).write_text(s)
-print("make-dts: {} (ufs={} power={} touch={} gpu={} decon={} wlan={} fallback={})".format(
-    args.out, args.ufs, args.power, args.touch, args.gpu, args.decon, args.wlan, args.fallback))
+print("make-dts: {} (ufs={} power={} touch={} gpu={} decon={} wlan={} dp_altmode={} fallback={})".format(
+    args.out, args.ufs, args.power, args.touch, args.gpu, args.decon, args.wlan, args.dp_altmode,
+    args.fallback))
