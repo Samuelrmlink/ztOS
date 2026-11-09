@@ -22,13 +22,21 @@ the wireless-receiver and CPU-frequency hooks:
   off: CNFG_00 &= ~(OTG | BOOST) (:850-852), 50 ms (:854), interrupts back,
        1.5 MHz (:862-865), auto skip (:867-868).
 
-Safety, beyond stock: enable is refused while CHGIN or WCIN has a valid input
-(INT_OK), so the boost is never turned on against an external supply. A
+Safety, beyond stock: enable is refused while CHGIN has a valid input
+(INT_OK), so the boost is never turned on against a wired supply.
+
+Wireless (WCIN) keeps charging under the boost, as on stock
+(max77705_check_wcin_before_otg_on(), :766-797): before the boost the WCIN
+limit is held at or below 900 mA (stock wireless_otg_input_current,
+sec_battery.c:208-221) and max77705-wireless reports input_voltage_limit
+5 V, which the P9320 driver takes as "no 10 V" (stock WPC_VOUT_LOCK,
+sec_battery.c:4853-4893); both are released when the boost ends. Under the
+boost CHGIN_OK is our own 5 V, so WCIN alone counts as an input then. A
 bypass over-current (BYP_I with DETAILS_02 BYP_DTLS bit 0, stock's
 max77705_bypass_irq(), :1855-1890) turns the boost off at once and tells the
 consumer (REGULATOR_EVENT_OVER_CURRENT). Removal and shutdown turn it off.
-While boosting, the charger's own inputs read as offline (CHGIN sees our own
-5 V), so no input ramp, AICL back-off or "online" comes from it.
+While boosting, CHGIN reads as offline (it sees our own 5 V), so no input
+ramp, AICL back-off or "online" comes from it; WCIN works as usual.
 """
 from pathlib import Path
 import sys
@@ -51,6 +59,17 @@ def patch(path, edits):
     path.write_text(s)
 
 
+# The header is not reinstalled between builds: one patched by an older
+# version of this script lacks the later fields; add them.
+_h = HFILE.read_text()
+if MARK in _h and 'otg_wc_lock' not in _h:
+    _old = '''	bool			otg_on;		/* boost on, under lock */
+'''
+    if _h.count(_old) != 1:
+        sys.exit('patch-max77705-otg: header: otg_on anchor changed')
+    HFILE.write_text(_h.replace(_old, _old + '''	bool			otg_wc_lock;	/* WCIN at 5 V, 900 mA: stock WPC_VOUT_LOCK */
+'''))
+
 patch(HFILE, [(
     '''	int			trip_vbus_uv;
 	/* } zboot */
@@ -60,6 +79,7 @@ patch(HFILE, [(
 	/* zboot: OTG boost { */
 	struct regulator_dev	*otg_rdev;
 	bool			otg_on;		/* boost on, under lock */
+	bool			otg_wc_lock;	/* WCIN at 5 V, 900 mA: stock WPC_VOUT_LOCK */
 	int			chgin_irq;
 	int			byp_irq;
 	/* } */
@@ -67,6 +87,35 @@ patch(HFILE, [(
 
 OTG_CODE = r'''
 /* ---- zboot: OTG boost (USB-C VBUS out) ---------------------------------- */
+
+/*
+ * The wireless side of OTG (stock sec_battery CHARGE_OTG_CONTROL on the
+ * "wireless" supply, sec_battery.c:4853-4893, and the OTG branch of
+ * sec_bat_get_wireless_current(), :208-221): while the boost runs, WCIN's
+ * limit is held at or below 900 mA and max77705-wireless reports an input
+ * voltage limit of 5 V, which the receiver driver (p9320) takes as "no fast
+ * wireless": a 10 V pad steps down to 5 V. Released when the boost ends.
+ * With chg->lock held.
+ */
+static void max77705_otg_wc_set(struct max77705_charger_data *chg, bool lock)
+{
+	struct max77705_input_state *st = &chg->in[MAX77705_IN_WCIN];
+	int cur;
+
+	if (chg->otg_wc_lock == lock)
+		return;
+	chg->otg_wc_lock = lock;
+	if (lock) {
+		if (st->online == 1 && !max77705_ilim_read(chg, MAX77705_IN_WCIN, &cur) &&
+		    cur > MAX77705_OTG_WCIN_UA) {
+			cancel_delayed_work(&st->ramp_work);
+			max77705_ilim_write(chg, MAX77705_IN_WCIN, MAX77705_OTG_WCIN_UA);
+		}
+	} else if (st->online == 1) {
+		max77705_ramp_restart(chg, MAX77705_IN_WCIN);
+	}
+	power_supply_changed(chg->psy_wc);
+}
 
 /* Samsung max77705_set_otg(); call with chg->lock held */
 static int max77705_otg_set(struct max77705_charger_data *chg, bool on)
@@ -82,10 +131,24 @@ static int max77705_otg_set(struct max77705_charger_data *chg, bool on)
 		ret = regmap_read(regmap, MAX77705_CHG_REG_INT_OK, &ok);
 		if (ret)
 			return ret;
-		if ((ok & MAX77705_CHGIN_OK) || max77705_wc_valid(ok)) {
-			dev_warn(chg->dev, "OTG: an input is present (INT_OK %02x): no boost\n", ok);
+		/* never against a wired source; CHGIN is where the boost goes */
+		if (ok & MAX77705_CHGIN_OK) {
+			dev_warn(chg->dev, "OTG: a wired input is present (INT_OK %02x): no boost\n", ok);
 			return -EBUSY;
 		}
+		/*
+		 * Wireless (WCIN) is a separate input and keeps charging, as on
+		 * stock (max77705_check_wcin_before_otg_on(), :766-797, lets
+		 * OTG on with the pad online). Before the boost, stock locks
+		 * the receiver at 5 V (set_otg :820-823 -> sec_battery
+		 * CHARGE_OTG_CONTROL, WPC_VOUT_LOCK, sec_battery.c:4853-4893)
+		 * and caps WCIN at wireless_otg_input_current, 900 mA
+		 * (sec_battery.c:208-221, sec_battery.h:120).
+		 */
+		max77705_otg_wc_set(chg, true);
+		if (max77705_wc_valid(ok))
+			dev_info(chg->dev, "OTG: with wireless charging (WCIN %d mA max, receiver at 5 V)\n",
+				 MAX77705_OTG_WCIN_UA / 1000);
 		disable_irq_nosync(chg->chgin_irq);
 		ret = regmap_field_write(chg->rfield[MAX77705_OTG_ILIM], MAX77705_OTG_ILIM_900);
 		if (!ret)
@@ -109,6 +172,7 @@ static int max77705_otg_set(struct max77705_charger_data *chg, bool on)
 			regmap_field_write(chg->rfield[MAX77705_REG_DISKIP],
 					   MAX77705_AUTO_SKIP);
 			enable_irq(chg->chgin_irq);
+			max77705_otg_wc_set(chg, false);
 			return ret;
 		}
 		enable_irq(chg->byp_irq);
@@ -126,6 +190,7 @@ static int max77705_otg_set(struct max77705_charger_data *chg, bool on)
 	regmap_field_write(chg->rfield[MAX77705_REG_FSW], MAX77705_CHG_FSW_1_5MHz);
 	regmap_field_write(chg->rfield[MAX77705_REG_DISKIP], MAX77705_AUTO_SKIP);
 	dev_info(chg->dev, "OTG: boost off\n");
+	max77705_otg_wc_set(chg, false);	/* stock: Vout lock released */
 	/* look at the inputs again: CHGIN was ignored while boosting */
 	queue_work(chg->wqueue, &chg->chgin_work);
 	return ret;
@@ -282,16 +347,70 @@ patch(CFILE, [
     # the charger's own inputs are not inputs while we drive VBUS
     ('''	on[MAX77705_IN_WCIN] = max77705_wc_valid(ok);
 ''', '''	on[MAX77705_IN_WCIN] = max77705_wc_valid(ok);
-	if (chg->otg_on)	/* zboot: OTG boost: that 5 V is ours */
-		on[MAX77705_IN_CHGIN] = on[MAX77705_IN_WCIN] = 0;
+	if (chg->otg_on) {	/* zboot: OTG boost: CHGIN's 5 V is ours */
+		on[MAX77705_IN_CHGIN] = 0;
+		/* WCIN_OK reads 0 under the boost without a pad (INT_OK 5f) */
+		on[MAX77705_IN_WCIN] = !!(ok & MAX77705_WCIN_OK);
+	}
 '''),
     ('''	if (regmap_read(chg->regmap, MAX77705_CHG_REG_INT_OK, &ok))
 		goto unmask;
-	if (ok & MAX77705_CHGIN_OK)''', '''	if (regmap_read(chg->regmap, MAX77705_CHG_REG_INT_OK, &ok))
+	if (ok & MAX77705_CHGIN_OK)
+		in = MAX77705_IN_CHGIN;
+	else if''', '''	if (regmap_read(chg->regmap, MAX77705_CHG_REG_INT_OK, &ok))
 		goto unmask;
-	if (chg->otg_on)	/* zboot: OTG boost */
-		goto unmask;
-	if (ok & MAX77705_CHGIN_OK)'''),
+	if (chg->otg_on) {	/* zboot: OTG boost: only WCIN is an input */
+		if (!(ok & MAX77705_WCIN_OK))
+			goto unmask;
+		in = MAX77705_IN_WCIN;
+	} else if (ok & MAX77705_CHGIN_OK)
+		in = MAX77705_IN_CHGIN;
+	else if'''),
+    # WCIN under OTG: at most 900 mA (stock wireless_otg_input_current)
+    ('''static int max77705_ramp_target(struct max77705_input_state *st)
+{
+	int hold = max77705_hold_ua(st);
+
+	return hold ? min(hold, st->ceil_ua) : st->ceil_ua;
+}''', '''/* zboot: OTG boost: stock wireless_otg_input_current (sec_battery.h:120) */
+#define MAX77705_OTG_WCIN_UA	900000
+
+static int max77705_ramp_target(struct max77705_input_state *st)
+{
+	int hold = max77705_hold_ua(st);
+	int t = hold ? min(hold, st->ceil_ua) : st->ceil_ua;
+
+	if (st->index == MAX77705_IN_WCIN && st->chg->otg_wc_lock)
+		t = min(t, MAX77705_OTG_WCIN_UA);
+	return t;
+}'''),
+    ('''static enum power_supply_property max77705_wc_props[] = {
+	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+};''', '''static enum power_supply_property max77705_wc_props[] = {
+	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+	POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT,	/* zboot: OTG boost: 5 V lock */
+};'''),
+    ('''	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+		val->intval = READ_ONCE(chg->in[MAX77705_IN_WCIN].ceil_ua);
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}''', '''	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+		val->intval = READ_ONCE(chg->in[MAX77705_IN_WCIN].ceil_ua);
+		return 0;
+	case POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT:
+		/* zboot: OTG boost: the receiver stays at 5 V (stock WPC_VOUT_LOCK) */
+		if (!READ_ONCE(chg->otg_wc_lock))
+			return -ENODATA;
+		val->intval = 5000000;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}'''),
     ('''	case POWER_SUPPLY_PROP_ONLINE:
 		return max77705_get_online(regmap, &val->intval);''',
      '''	case POWER_SUPPLY_PROP_ONLINE:
@@ -301,7 +420,9 @@ patch(CFILE, [
 		}
 		return max77705_get_online(regmap, &val->intval);'''),
     ('''		val->intval = max77705_wc_valid(ok);
-		return 0;''', '''		val->intval = max77705_wc_valid(ok) && !READ_ONCE(chg->otg_on);
+		return 0;''', '''		/* zboot: OTG boost: CHGIN_OK is our boost then, WCIN_OK the pad */
+		val->intval = READ_ONCE(chg->otg_on) ? !!(ok & MAX77705_WCIN_OK) :
+			      max77705_wc_valid(ok);
 		return 0;'''),
     ('''static void max77705_put_fwnode(void *fwnode)''',
      OTG_CODE.lstrip('\n') + '''

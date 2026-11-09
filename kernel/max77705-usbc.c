@@ -365,6 +365,8 @@ struct pd_caps {
 	u32 pdo[PD_MAX_PDO];
 };
 
+#define OTG_VBUS_RETRY_MS	2000	/* charger refused (an input there): again */
+
 /* USB OTG: host role and VBUS out; all in the ordered work */
 struct usbc_otg {
 	struct regulator *vbus;		/* vbus-supply, got on first need */
@@ -387,6 +389,8 @@ struct usbc_otg {
 	bool vbus_held;
 	unsigned long hold_until;	/* jiffies; 0 = none */
 	bool path_due;			/* write CONTROL1 = USB on this run */
+	bool path_again;		/* the recheck is the 1 s CONTROL1 one */
+	bool vbus_retry_logged;		/* charger refused (an input): retrying */
 	bool off;			/* shutdown/remove: nothing turns back on */
 	struct delayed_work recheck;	/* a later look: hold end, path again */
 };
@@ -3265,11 +3269,23 @@ static void usbc_otg_set_vbus(struct max77705_usbc *u, bool on)
 		return;
 	if (on) {
 		ret = regulator_enable(o->vbus);
+		if (ret == -EBUSY || ret == -EAGAIN) {
+			/* the charger has an input in the way: look again */
+			if (!o->vbus_retry_logged)
+				dev_warn(u->dev, "OTG: VBUS out refused (%d): trying again every %d ms\n",
+					 ret, OTG_VBUS_RETRY_MS);
+			o->vbus_retry_logged = true;
+			mod_delayed_work(u->wq, &o->recheck, msecs_to_jiffies(OTG_VBUS_RETRY_MS));
+			return;
+		}
 		if (ret) {
 			o->vbus_fault = true;
 			dev_warn(u->dev, "OTG: VBUS out refused (%d): not again until detach\n", ret);
 			return;
 		}
+		if (o->vbus_retry_logged)
+			dev_info(u->dev, "OTG: VBUS out allowed now\n");
+		o->vbus_retry_logged = false;
 		o->vbus_on = true;
 		dev_info(u->dev, "OTG: VBUS out on (sink partner)\n");
 	} else {
@@ -3352,7 +3368,8 @@ static void usbc_otg_recheck(struct work_struct *work)
 	struct usbc_otg *o = container_of(to_delayed_work(work), struct usbc_otg, recheck);
 	struct max77705_usbc *u = container_of(o, struct max77705_usbc, otg);
 
-	o->path_due = o->role == USB_ROLE_HOST;
+	o->path_due = o->path_again && o->role == USB_ROLE_HOST;
+	o->path_again = false;
 	if (!READ_ONCE(u->stopping))
 		queue_work(u->wq, &u->event_work);
 }
@@ -3406,6 +3423,7 @@ static void usbc_otg_update(struct max77705_usbc *u, u8 pd_int, u8 uic_int)
 		o->hold_until = 0;
 	if (!attached) {
 		o->dr_seen = false;
+		o->vbus_retry_logged = false;
 		o->vbus_fault = false;
 		o->vbus_ext_warned = false;
 	} else if (pd_int & PD_DATAROLE) {
@@ -3455,6 +3473,7 @@ static void usbc_otg_update(struct max77705_usbc *u, u8 pd_int, u8 uic_int)
 	if (role == USB_ROLE_HOST) {
 		if (o->role != USB_ROLE_HOST) {
 			usbc_otg_path(u, "host attach");
+			o->path_again = true;
 			mod_delayed_work(u->wq, &o->recheck,
 					 msecs_to_jiffies(OTG_PATH_AGAIN_MS));
 		} else if (uic_int & (UIC_CHGTYP | UIC_DCDTMO | UIC_VBUSDET)) {
