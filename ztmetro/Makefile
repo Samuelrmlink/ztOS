@@ -38,8 +38,13 @@ RETRO_DEPS = $(RETRO) core/zrnboard.h retro/dotmatrix.h retro/dm-launcher.h retr
 DM_WRAP = retro/dm-wrap.c
 DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
 
-ztmetro: ztmetro.c core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+# desktop mode (desktop/): the outputs after the panel, in the same session
+DESK_DEPS = desktop/desktop.c desktop/desktop.h desktop/wlr-layer-shell-unstable-v1-protocol.h
+desktop/wlr-layer-shell-unstable-v1-protocol.h: desktop/protocols/wlr-layer-shell-unstable-v1.xml
+	wayland-scanner server-header $< $@
+
+ztmetro: ztmetro.c core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
 # the DotMatrix screens rendered offscreen to PNG files, to check them without a phone
@@ -72,6 +77,34 @@ mirror/ztmirror: mirror/ztmirror.c mirror/wlr-screencopy.c mirror/wlr-screencopy
 	$(CC) $(CFLAGS) $(WARN) -Imirror $(shell pkg-config --cflags wayland-client libturbojpeg) -o $@ mirror/ztmirror.c mirror/wlr-screencopy.c \
 		$(shell pkg-config --libs wayland-client libturbojpeg) -lpthread
 
+# ztdesk: the desktop (desktop mode) seen and driven from the phone. Not in
+# `all`: it goes with the optional ztos-desktop package (install-desktop).
+DESK_PROTO = desktop/wlr-screencopy-unstable-v1 desktop/wlr-virtual-pointer-unstable-v1 \
+	desktop/virtual-keyboard-unstable-v1 desktop/linux-dmabuf-v1
+desktop/linux-dmabuf-v1.xml:
+	cp $(WP)/stable/linux-dmabuf/linux-dmabuf-v1.xml $@
+desktop/wlr-screencopy-unstable-v1.xml: mirror/wlr-screencopy-unstable-v1.xml
+	cp $< $@
+desktop/%.xml: desktop/protocols/%.xml
+	cp $< $@
+desktop/%-client-protocol.h: desktop/%.xml
+	wayland-scanner client-header $< $@
+desktop/%-protocol.c: desktop/%.xml
+	wayland-scanner private-code $< $@
+DESK_CLIENT = $(addsuffix -protocol.c,$(DESK_PROTO))
+DESK_CLIENT_H = $(addsuffix -client-protocol.h,$(DESK_PROTO))
+desktop/ztdesk: desktop/ztdesk.c $(DESK_CLIENT) $(DESK_CLIENT_H) $(CORE_DEPS)
+	$(APP_BUILD) -Idesktop $(shell pkg-config --cflags gbm) -o $@ desktop/ztdesk.c $(DESK_CLIENT) $(CORE) $(APP_LIBS) \
+		$(shell pkg-config --libs gbm)
+
+.PHONY: install-desktop
+install-desktop: desktop/ztdesk
+	install -Dm755 desktop/ztdesk /usr/local/bin/ztdesk
+	install -Dm644 desktop/ztdesk.desktop /usr/local/share/applications/ztdesk.desktop
+	install -Dm644 desktop/ztdesk.svg /usr/local/share/icons/hicolor/scalable/apps/ztdesk.svg
+	install -Dm755 desktop/ztos-desktop-session /usr/local/bin/ztos-desktop-session
+	install -Dm755 desktop/ztos-desktop-hotplug /usr/local/bin/ztos-desktop-hotplug
+
 # ztCamera: the camera, in the Lumia Camera look (see camera/CAMERA-DRIVERS.md
 # for why its viewfinder runs against a source that is not a sensor)
 camera/ztcamera: camera/ztcamera.c $(CORE_DEPS)
@@ -86,8 +119,8 @@ gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 	$(APP_BUILD) $(JPEG_FLAGS) -o $@ gallery/ztgallery.c $(CORE) $(APP_LIBS) $(JPEG_LIBS) -lpthread
 
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
-EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c
-EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h audio-apps.h audio-state.h audio-sync.h
+EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c desktop/desktop-page.c
+EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
 settings/ztsettings: settings/ztsettings.c pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 

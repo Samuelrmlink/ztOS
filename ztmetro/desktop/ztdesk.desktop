@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Desktop
+Comment=See and use the desktop on a monitor or a virtual screen
+Exec=ztdesk
+Terminal=false
+Type=Application
+Icon=ztdesk
+Categories=System;

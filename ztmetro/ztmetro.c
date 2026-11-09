@@ -43,6 +43,7 @@
 #include "pods/pods-bar.h"
 #include "osk-numeric.h"
 #include "note-logic.h"
+#include "desktop/desktop.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -416,6 +417,8 @@ struct zt_toplevel {
 	float zoom;		/* its own scale from Settings; 0 until looked up */
 	bool suspended_sent;	/* told it can't be seen (xdg_shell's suspended) */
 	bool fullscreen;	/* it asked for the whole screen, and has it */
+	bool desk;		/* on the desktop (desktop/desktop.c), off Metro's list */
+	struct desk_view *view;	/* and its window there */
 	struct wl_listener request_fullscreen;
 	struct wl_listener map, unmap, commit, destroy;
 };
@@ -578,6 +581,7 @@ struct zt_server {
 	struct wl_display *wl_display;
 	struct wl_event_loop *loop;
 	struct wlr_backend *backend;
+	struct zt_desk *desk;	/* desktop mode: the outputs after the panel (desktop/) */
 	struct wlr_renderer *renderer;
 	struct wlr_allocator *allocator;
 	struct wlr_output_layout *output_layout;
@@ -5708,6 +5712,29 @@ static void draw_signal(cairo_t *cr, double x, double base, double w, double h, 
 	}
 }
 
+/* The status row's Bluetooth rune, standing on `base` with its ink `h` tall
+ * and its left edge at x; returns its width. Drawn here rather than through
+ * draw_icon, whose hairline stroke (7 % of the icon) came out thin and
+ * narrow beside the solid Wi-Fi fan: the stroke is the fan's band width. */
+static double draw_status_bt(cairo_t *cr, double x, double base, double h) {
+	double lw = fmax(1.0, round(h * 0.115 * 2) / 2);
+	double u = (h - lw) / 1.8;	/* the rune is 1.8 u tall and 0.85 u wide */
+	double cx = x + lw / 2 + 0.45 * u, cy = base - lw / 2 - 0.9 * u;
+	cairo_save(cr);
+	cairo_set_line_width(cr, lw);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_BEVEL);	/* no miter spikes past the ink */
+	cairo_move_to(cr, cx - u * 0.45, cy - u * 0.42);
+	cairo_line_to(cr, cx + u * 0.4, cy + u * 0.42);
+	cairo_line_to(cr, cx, cy + u * 0.9);
+	cairo_line_to(cr, cx, cy - u * 0.9);
+	cairo_line_to(cr, cx + u * 0.4, cy - u * 0.42);
+	cairo_line_to(cr, cx - u * 0.45, cy + u * 0.42);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+	return 0.85 * u + lw;
+}
+
 static void draw_wifi(cairo_t *cr, double x, double base, double s, int bars) {
 	/* A quarter fan whose corner is the glyph's bottom right. Measured off
 	 * the Windows Phone 8.1 glyph, as fractions of its size: three bands
@@ -5993,9 +6020,13 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 			} else {
 				cairo_set_source_rgb(cr, 0.55, 0.55, 0.55);
 			}
-			bt_right = x + status_glyph(cr, "bluetooth", x, base, icon_h);
+			/* a little more room than the other gaps: the fan's dot sits
+			 * in its bottom right corner, hard against what follows */
+			x += round(icon_gap * 0.4);
+			bt_right = x + draw_status_bt(cr, x, base, icon_h * 1.08);
 		} else {
-			bt_right = x + icon_h * 0.55;	/* (blinking: its place, kept) */
+			x += round(icon_gap * 0.4);
+			bt_right = x + icon_h * 0.6;	/* (blinking: its place, kept) */
 		}
 	}
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -8110,6 +8141,9 @@ static void fs_apply(struct zt_server *server, struct zt_toplevel *toplevel, boo
 static void xdg_toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, request_fullscreen);
+	if (desk_toplevel_fullscreen(toplevel)) {
+		return;
+	}
 	fs_apply(toplevel->server, toplevel, toplevel->xdg_toplevel->requested.fullscreen);
 }
 
@@ -8494,6 +8528,7 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 	wlr_seat_set_keyboard(server->seat, &server->vkbd);
 	wlr_seat_keyboard_notify_enter(server->seat, surface, NULL, 0, &server->vkbd.modifiers);
 	text_inputs_focus(server, surface);
+	desk_app_shown(server, toplevel);	/* ztdesk: the keyboard types on the desktop */
 	/* Start swings away if it has not already, and the app arrives */
 	server->leaving = NULL;
 	bool start_was_visible = server->start_t < 0.5f;
@@ -9778,6 +9813,9 @@ static void apps_running_write(struct zt_server *server) {
 
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, map);
+	if (desk_toplevel_map(toplevel)) {
+		return;
+	}
 	char proc[64], executable[512];
 	snprintf(proc, sizeof(proc), "/proc/%d/exe", toplevel_pid(toplevel));
 	ssize_t length = readlink(proc, executable, sizeof(executable) - 1);
@@ -9891,6 +9929,9 @@ static bool waydroid_rewake(struct zt_server *server, struct zt_toplevel *toplev
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
 	struct zt_server *server = toplevel->server;
+	if (desk_toplevel_unmap(toplevel)) {
+		return;
+	}
 	if (server->shown == toplevel && toplevel->xdg_toplevel->app_id &&
 			!strcmp(toplevel->xdg_toplevel->app_id, "ztphone")) {
 		server->call_over_lock = false;
@@ -9935,6 +9976,9 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, commit);
 	struct zt_server *server = toplevel->server;
 	struct wlr_xdg_surface *xdg = toplevel->xdg_toplevel->base;
+	if (desk_toplevel_commit(toplevel)) {
+		return;	/* a window on the desktop */
+	}
 	(void)xdg;
 	const char *app_id = toplevel->xdg_toplevel->app_id;
 	if (toplevel->waydroid_boot && app_id && !strncmp(app_id, "waydroid.", 9) &&
@@ -9970,6 +10014,7 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, destroy);
 	struct zt_server *server = toplevel->server;
+	desk_toplevel_destroy(toplevel);
 	if (server->shown == toplevel) {
 		show_toplevel(server, NULL);
 	}
@@ -9992,6 +10037,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = calloc(1, sizeof(*toplevel));
 	toplevel->server = server;
 	toplevel->xdg_toplevel = xdg_toplevel;
+	xdg_toplevel->base->data = toplevel;	/* (the desktop finds it from its surface) */
 	wl_list_insert(server->toplevels.prev, &toplevel->link);
 
 	toplevel->map.notify = xdg_toplevel_map;
@@ -10022,6 +10068,8 @@ static void xdg_popup_destroy(struct wl_listener *listener, void *data) {
 
 static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 	struct wlr_xdg_popup *xdg_popup = data;
+	struct zt_server *server = wl_container_of(listener, server, new_xdg_popup);
+	desk_new_popup(server, xdg_popup);	/* the desktop's are in its scene as well */
 	/* popups are drawn and hit-tested with their toplevel's surface tree */
 	struct zt_popup *popup = calloc(1, sizeof(*popup));
 	popup->xdg_popup = xdg_popup;
@@ -14006,6 +14054,7 @@ static bool retro_home_shown(struct zt_server *server) {
 }
 
 static void touch_begin(struct zt_server *server, int32_t id, double x, double y, uint32_t time) {
+	desk_phone_touched(server);	/* the phone's app has the keyboard again */
 	if (server->boot_logo_stage) {
 		server->boot_logo_stage = 0;
 		server->start_t = 1.0f;
@@ -14510,8 +14559,10 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 			server->switch_x = to < 0 ? to * 0.35f : to > last ? last + (to - last) * 0.35f : to;
 		} else {
 			server->drop_card = p->index;
-			/* up with the finger; down it only gives a little */
-			server->drop = y < p->y0 ? (float)(y - p->y0) : (float)(y - p->y0) * 0.15f;
+			/* up with the finger; down it only gives a little, unless there
+			 * is a desktop to pull it down to (desktop/DESIGN.md) */
+			server->drop = y < p->y0 ? (float)(y - p->y0) :
+				(float)(y - p->y0) * (desk_available(server) ? 0.6f : 0.15f);
 		}
 		damage(server);
 		break;
@@ -14808,6 +14859,10 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 				uint32_t ms = (uint32_t)(((float)server->height + server->drop) / speed);
 				animate(server, &server->drop, (float)-server->height, ms < 90 ? 90 : ms > 240 ? 240 : ms,
 					0, true);
+			} else if (!cancelled && server->drop > 110.0f && desk_available(server) &&
+					desk_take_from_phone(server, server->cards[server->drop_card])) {
+				/* pulled down: the app goes to the desktop, and its card with it */
+				hap(server, HAP_CLICK, HG_NAV);
 			} else {
 				animate(server, &server->drop, 0.0f, 260, 0, false);
 			}
@@ -15141,6 +15196,9 @@ static void pointer_motion(struct wl_listener *listener, void *data) {
 	struct zt_pointer_device *device = wl_container_of(listener, device, motion);
 	struct wlr_pointer_motion_event *event = data;
 	struct zt_server *server = device->server;
+	if (desk_owns_pointers(server)) {
+		return;	/* with a desktop, a mouse is its pointer */
+	}
 	server->pointer_x += event->delta_x / server->scale;
 	server->pointer_y += event->delta_y / server->scale;
 	pointer_moved(server, event->time_msec);
@@ -15150,6 +15208,9 @@ static void pointer_motion_absolute(struct wl_listener *listener, void *data) {
 	struct zt_pointer_device *device = wl_container_of(listener, device, motion_absolute);
 	struct wlr_pointer_motion_absolute_event *event = data;
 	struct zt_server *server = device->server;
+	if (desk_owns_pointers(server)) {
+		return;
+	}
 	server->pointer_x = event->x * server->width;
 	server->pointer_y = event->y * server->height;
 	pointer_moved(server, event->time_msec);
@@ -15159,6 +15220,9 @@ static void pointer_button(struct wl_listener *listener, void *data) {
 	struct zt_pointer_device *device = wl_container_of(listener, device, button);
 	struct wlr_pointer_button_event *event = data;
 	struct zt_server *server = device->server;
+	if (desk_owns_pointers(server) && !server->pointer_down) {
+		return;
+	}
 	if (event->button != BTN_LEFT) {
 		return;
 	}
@@ -15316,6 +15380,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 		touch_end(server, 1999, t + 30, false);
 	} else if (sscanf(line, "key %u %7s", &code, how) == 2) {
 		ctl_key(server, code, how);
+	} else if (strncmp(line, "desktop", 7) == 0 && (line[7] == ' ' || line[7] == 0)) {
+		desk_ctl(server, line + 7);	/* desktop mode: see desk_ctl */
 	} else if (strncmp(line, "modem", 5) == 0) {
 		/* ztoscorenetworkingd: the SIM, the signal or the network changed */
 		modem_read(server);
@@ -16131,6 +16197,9 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
         }
         return;
     }
+	if (desk_key(server, keyboard->wlr_keyboard, event)) {
+		return;	/* the desktop's window manager took it */
+	}
 	wlr_seat_set_keyboard(server->seat, keyboard->wlr_keyboard);
 	wlr_seat_keyboard_notify_key(server->seat, event->time_msec, event->keycode, event->state);
 }
@@ -16205,6 +16274,7 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 		pointer->destroy.notify = pointer_destroy;
 		wl_signal_add(&device->events.destroy, &pointer->destroy);
 		wlr_log(WLR_INFO, "pointer, used as a finger: %s", device->name);
+		desk_new_input(server, device);	/* and the desktop's pointer, when there is one */
 	} else if (device->type == WLR_INPUT_DEVICE_KEYBOARD) {
 		struct wlr_keyboard *wlr_keyboard = wlr_keyboard_from_input_device(device);
 		struct zt_keyboard *keyboard = calloc(1, sizeof(*keyboard));
@@ -17647,7 +17717,8 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	struct zt_server *server = wl_container_of(listener, server, new_output);
 	struct wlr_output *wlr_output = data;
 	if (server->output) {
-		return;	/* a phone has one screen */
+		desk_new_output(server, wlr_output);	/* a phone has one screen: the rest are a desktop */
+		return;
 	}
 	wlr_output_init_render(wlr_output, server->allocator, server->renderer);
 
@@ -17765,7 +17836,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 
 static void surface_commit(struct wl_listener *listener, void *data) {
 	struct zt_surface *zs = wl_container_of(listener, zs, commit);
-	if (zs->server->shown || zs->server->leaving) {
+	if ((zs->server->shown || zs->server->leaving) && !desk_surface(zs->server, zs->surface)) {
 		zs->server->app_live_until = now_ms() + 50;
 		damage(zs->server);
 	}
@@ -17841,6 +17912,7 @@ static int reload(int signal_number, void *data) {
 	int force_level = server->force_press_level;
 	int ring_before = server->ring_volume;
 	reload_config(server);
+	desk_reload(server);
 	if (force_level != server->force_press_level) {
 		force_level_apply(server);
 	}
@@ -18309,10 +18381,17 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	return 0;
 }
 
+/* desktop mode: the outputs after the panel (uses the helpers above) */
+#include "desktop/desktop.c"
+
 int main(int argc, char *argv[]) {
 	wlr_log_init(getenv("ZTMETRO_DEBUG") ? WLR_DEBUG : WLR_INFO, NULL);
-	/* children are reaped by the kernel; nothing here waits for them */
-	signal(SIGCHLD, SIG_IGN);
+	/* children are reaped by the kernel; nothing here waits for them. Not
+	 * SIG_IGN, which programs started from here would inherit through exec:
+	 * Xwayland (desktop mode) then can't wait for its xkbcomp and dies. */
+	struct sigaction chld = { .sa_handler = SIG_DFL, .sa_flags = SA_NOCLDWAIT };
+	sigemptyset(&chld.sa_mask);
+	sigaction(SIGCHLD, &chld, NULL);
 
 	struct zt_server server = {0};
 	server.nav_pressed = -1;
@@ -18542,6 +18621,7 @@ int main(int argc, char *argv[]) {
 	wl_signal_add(&server.deco_mgr->events.new_toplevel_decoration, &server.new_decoration);
 	/* screenshots (grim): how the shell's look is checked on the phone */
 	server.screencopy = wlr_screencopy_manager_v1_create(server.wl_display);
+	desk_init(&server, compositor);	/* desktop mode: outputs after the panel */
 	wlr_xdg_output_manager_v1_create(server.wl_display, server.output_layout);
 	server.text_input_mgr = wlr_text_input_manager_v3_create(server.wl_display);
 	server.new_text_input.notify = server_new_text_input;
@@ -18584,6 +18664,7 @@ int main(int argc, char *argv[]) {
 
     setenv("SUDO_ASKPASS", "/usr/local/bin/ztos-askpass", 1);
 	ctl_init(&server);
+	desk_session_ready(&server);
     auth_init(&server);
     run_detached("ztos-polkit-agent", NULL, NULL, NULL);
 	run_detached("/usr/local/bin/ztos-sounds", NULL, NULL, NULL);

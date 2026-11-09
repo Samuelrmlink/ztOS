@@ -1,0 +1,46 @@
+# ztos-desktop: desktop mode, as an optional ztOS application. XFCE's
+# Wayland pieces on a monitor (or a virtual screen) beside the phone's Metro
+# shell, in the same session; ztdesk to see and drive it from the phone. The
+# window manager is the shell itself (ztmetro/desktop/desktop.c, in the base
+# image, idle until a second output exists); this package adds what runs on
+# it. See ztmetro/desktop/DESIGN.md.
+#
+# Built from the ztOS checkout (no download): makepkg in this directory, with
+# ztmetro two levels up, or ZTOS_SRC=/path/to/checkout makepkg.
+pkgname=ztos-desktop
+pkgver=1.0
+pkgrel=1
+pkgdesc='ztOS: desktop mode (XFCE on a monitor or a virtual screen, beside the phone)'
+arch=(aarch64)
+url='https://github.com/ztos/ztos'
+license=('GPL-3.0-or-later')
+# the panel, the desktop, settings, files, a terminal; X11 apps through
+# Xwayland; the rest of XFCE (mousepad, ristretto, ...) is the user's choice
+depends=(xfce4-panel xfdesktop xfce4-settings xfconf thunar xfce4-terminal garcon tumbler
+         gtk-layer-shell adwaita-icon-theme xorg-xwayland mesa gtk3 libxkbcommon wayland)
+makedepends=(gcc make pkgconf wayland-protocols)
+optdepends=('mesa-utils: glxinfo and eglinfo, to check the GPU'
+            'glmark2: the GPU benchmark (wayland and x11)'
+            'vulkan-panfrost: Vulkan on the Mali GPU'
+            'wayvnc: the desktop from a computer, over VNC')
+options=(!debug !strip)
+
+_src() { echo "${ZTOS_SRC:-$startdir/../..}"; }
+
+build() {
+	cd "$(_src)/ztmetro"
+	make desktop/ztdesk
+}
+
+package() {
+	local z
+	z=$(_src)/ztmetro
+	[[ -f $z/desktop/ztdesk.c ]] || { echo "no ztmetro/desktop under $(_src) (set ZTOS_SRC)" >&2; return 1; }
+	install -Dm755 "$z/desktop/ztdesk" "$pkgdir/usr/local/bin/ztdesk"
+	install -Dm644 "$z/desktop/ztdesk.desktop" "$pkgdir/usr/local/share/applications/ztdesk.desktop"
+	install -Dm644 "$z/desktop/ztdesk.svg" "$pkgdir/usr/local/share/icons/hicolor/scalable/apps/ztdesk.svg"
+	install -Dm755 "$z/desktop/ztos-desktop-session" "$pkgdir/usr/local/bin/ztos-desktop-session"
+	install -Dm755 "$z/desktop/ztos-desktop-hotplug" "$pkgdir/usr/local/bin/ztos-desktop-hotplug"
+	install -dm755 "$pkgdir/usr/lib/ztos/desktop-hotplug.d"
+	install -Dm644 "$z/desktop/DESIGN.md" "$pkgdir/usr/share/doc/ztos-desktop/DESIGN.md"
+}
