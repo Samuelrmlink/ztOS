@@ -621,6 +621,9 @@ static int x9dp_ctrl(struct x9dp *d)
 	link_rmw(d, SYSTEM_COMMON_FUNCTION_ENABLE, PCS_FUNC_EN | AUX_FUNC_EN,
 		 PCS_FUNC_EN | AUX_FUNC_EN);
 	link_rmw(d, SYSTEM_SW_FUNCTION_ENABLE, SW_FUNC_EN, SW_FUNC_EN);
+	/* stale SST1 interrupt status cleared (write 1), as displayport_reg_set_interrupt (:509-516) */
+	writel(~0, d->link + SST1_INTERRUPT_STATUS_SET0);
+	writel(~0, d->link + SST1_INTERRUPT_STATUS_SET1);
 	link_rmw(d, PCS_LANE_CONTROL, 0x3333,
 		 m[0] | m[1] << 4 | m[2] << 8 | m[3] << 12);
 	d->ctrl_on = true;
@@ -1408,7 +1411,7 @@ static int x9dp_sram(struct x9dp *d)
 
 static u32 x9dp_c10(u32 c8)
 {
-	return (c8 << 2) | (c8 >> 6);	/* 8 to 10 bits, 0xff -> 0x3ff */
+	return c8 & 0xff;	/* 8 bpc: the fields' low 8 bits, as stock writes them (decon_reg.c:2075-2093) */
 }
 
 /*
@@ -1547,6 +1550,26 @@ static void x9dp_fb_fill(u32 *fb, u32 w, u32 h)
 }
 
 /*
+ * Bandwidth experiments (dp16: the DMA-fed window underflowed the link's
+ * MAPI FIFO after ~150 lines): win_w/win_h crop the image the DMA reads and
+ * the window shows (top left, the background around it), dma_icmax sets
+ * the channel's outstanding-read limit (IDMA_IN_CON IC_MAX, stock 64).
+ */
+static uint win_w = 1920, win_h = 1080, dma_icmax = 64;
+module_param(win_w, uint, 0644);
+MODULE_PARM_DESC(win_w, "window 4 width in pixels, also the DMA crop (default 1920)");
+module_param(win_h, uint, 0644);
+MODULE_PARM_DESC(win_h, "window 4 height in lines, also the DMA crop (default 1080)");
+module_param(dma_icmax, uint, 0644);
+MODULE_PARM_DESC(dma_icmax, "DMA channel 1 IC_MAX, outstanding reads 1-255 (default 64, stock)");
+
+static void x9dp_win_size(u32 *w, u32 *h)
+{
+	*w = clamp_t(u32, win_w, 16, x9dp_1080p60.ha);
+	*h = clamp_t(u32, win_h, 16, x9dp_1080p60.va);
+}
+
+/*
  * W6: DMA/DPP channel 1 (IDMA_G1, stock idma_g1) reading the test image,
  * 1920x1080 XRGB8888. dpp_reg_init + dpp_reg_configure_params for G1
  * (dpp_reg.c:1310-1328, :1500-1510): DMA SRAM clock gating off (:160-166),
@@ -1582,13 +1605,20 @@ static int x9dp_dma(struct x9dp *d)
 	       FIELD_PREP(IDMA_OUT_FRAME_ALPHA, 0xff), d->dma1 + IDMA_OUT_CON);
 	writel(0, d->dma1 + IDMA_SRC_OFFSET);
 	writel(size, d->dma1 + IDMA_SRC_SIZE);
-	writel(size, d->dma1 + IDMA_IMG_SIZE);
+	{
+		u32 cw, ch;
+
+		x9dp_win_size(&cw, &ch);
+		writel(ch << 16 | cw, d->dma1 + IDMA_IMG_SIZE);
+		writel(ch << 16 | cw, d->dpp1 + DPP_IMG_SIZE);
+	}
 	writel((u32)d->fb_dma, d->dma1 + IDMA_IN_BASE_ADDR_Y);
 	writel((u32)d->fb_dma, d->dma1 + IDMA_IN_BASE_ADDR_C);
 	writel((readl(d->dma1 + IDMA_IN_CON) &
 		~(IDMA_IMG_FORMAT | IDMA_ROTATION | IDMA_AFBC_EN | IDMA_BLOCK_EN)) |
 	       FIELD_PREP(IDMA_IMG_FORMAT, IDMA_FMT_XRGB8888), d->dma1 + IDMA_IN_CON);
-	writel(size, d->dpp1 + DPP_IMG_SIZE);
+	writel((readl(d->dma1 + IDMA_IN_CON) & ~GENMASK(26, 19)) |
+	       FIELD_PREP(GENMASK(26, 19), clamp_t(u32, dma_icmax, 1, 255)), d->dma1 + IDMA_IN_CON);
 	writel(readl(d->dpp1 + DPP_IN_CON) & ~(DPP_ALPHA_SEL | DPP_IMG_FORMAT),
 	       d->dpp1 + DPP_IN_CON);
 	writel((readl(d->dpp1 + DPP_MAIN_H_RATIO) & ~GENMASK(23, 0)) | DPP_RATIO_1,
@@ -1655,7 +1685,13 @@ static int x9dp_win_set(struct x9dp *d, bool dma)
 		return -EAGAIN;		/* dma first */
 	writel(WIN_FUNC_COPY_MULT_AF, d->d0win + WIN_CONTROL_0);
 	writel(0, d->d0win + WIN_START_POSITION);
-	writel((h - 1) << 16 | (w - 1), d->d0win + WIN_END_POSITION);
+	{
+		u32 cw = w, ch = h;
+
+		if (dma)
+			x9dp_win_size(&cw, &ch);
+		writel((ch - 1) << 16 | (cw - 1), d->d0win + WIN_END_POSITION);
+	}
 	writel(0xff << 16 | x9dp_c10(r), d->d0win + WIN_COLORMAP_0);
 	writel(x9dp_c10(g) << 16 | x9dp_c10(b), d->d0win + WIN_COLORMAP_1);
 	writel(0, d->d0win + WIN_START_TIME_CONTROL);
@@ -1710,6 +1746,8 @@ static int x9dp_frames(struct x9dp *d)
 		  d->ctrl_on ? readl(d->link + SST1_VIDEO_DEBUG_FSM_STATE) : 0,
 		  d->ctrl_on ? readl(d->link + SST1_VIDEO_DEBUG_MAPI) : 0,
 		  d->ctrl_on ? readl(d->link + SST1_INTERRUPT_STATUS_SET0) : 0);
+	if (d->ctrl_on)		/* the next frames step shows what happened since */
+		writel(~0, d->link + SST1_INTERRUPT_STATUS_SET0);
 	return 0;
 }
 
@@ -1722,11 +1760,19 @@ static uint m4_src;
 module_param(m4_src, uint, 0644);
 MODULE_PARM_DESC(m4_src, "m4up's window source: 0 colour map (win_rgb), 1 DMA channel 1 test image (default 0)");
 
+static uint m4_order;
+module_param(m4_order, uint, 0644);
+MODULE_PARM_DESC(m4_order, "m4up order: 0 stock (link video on, LH, DECON2 start), 1 DECON2 first (LH, DECON2 start, then link video on)");
+
+static uint m4_tries = 3;
+module_param(m4_tries, uint, 0644);
+MODULE_PARM_DESC(m4_tries, "m4up attempts while the link's MAPI FIFO underflows in the first 100 ms of video (default 3)");
+
 static bool hpd_m4;
 module_param(hpd_m4, bool, 0644);
 MODULE_PARM_DESC(hpd_m4, "with hpd_read and hpd_bist: on HPD high train and run m4up (DECON2) instead of the colour bars (default 0)");
 
-static int x9dp_m4up(struct x9dp *d)
+static int x9dp_m4up_once(struct x9dp *d)
 {
 	static const struct {
 		const char *name;
@@ -1735,21 +1781,43 @@ static int x9dp_m4up(struct x9dp *d)
 		{ "route", x9dp_route }, { "sram", x9dp_sram }, { "decon2", x9dp_decon2 },
 		{ "dma", x9dp_dma }, { "win", x9dp_win }, { "win_dma", x9dp_win_dma },
 		{ "video_off", x9dp_video_off }, { "video", x9dp_video }, { "lh", x9dp_lh },
-		{ "decon2_start", x9dp_decon2_start },
+		{ "decon2_start", x9dp_decon2_start }, { "video", x9dp_video },
 	};
+	bool video_done = false;
 	int i, ret;
 
-	if (!d->rate)
-		return -EAGAIN;		/* train first */
+	if (!d->phy_on)
+		return -EAGAIN;
+	/*
+	 * From whatever state: the link's video off before DECON2 stops
+	 * feeding it, then a link controller reset and a new training. dp15:
+	 * once the SST1 MAPI FIFO has underflowed (DECON2 stopped or late
+	 * under a running stream) the stream stays broken (MAPI underflow
+	 * status stuck at 1, no picture) until the controller is reset.
+	 */
+	if (d->video_on)
+		x9dp_video_off(d);
 	if (d->decon2_on) {
 		ret = x9dp_decon2_stop(d);
 		if (ret)
 			return ret;
 	}
+	ret = x9dp_ctrl(d);
+	ret = ret ?: x9dp_train(d);
+	if (ret) {
+		scnprintf(d->last, sizeof(d->last), "m4up: reset/train failed %d", ret);
+		return ret;
+	}
 	for (i = 0; i < ARRAY_SIZE(seq); i++) {
 		if ((m4_src && seq[i].fn == x9dp_win) ||
 		    (!m4_src && (seq[i].fn == x9dp_dma || seq[i].fn == x9dp_win_dma)))
 			continue;
+		/* order 0: the first video entry (before lh); order 1: the last */
+		if (seq[i].fn == x9dp_video) {
+			if (video_done || (m4_order && i < ARRAY_SIZE(seq) - 1))
+				continue;
+			video_done = true;
+		}
 		ret = seq[i].fn(d);
 		dev_info(d->dev, "m4up: %s\n", d->last);
 		if (ret) {
@@ -1758,6 +1826,35 @@ static int x9dp_m4up(struct x9dp *d)
 		}
 	}
 	return 0;
+}
+
+/*
+ * dp17: with DMA channel 1 feeding window 4 the link's MAPI FIFO sometimes
+ * underflows (2 of 3 starts of the same 960x540 crop worked), and an
+ * underflow leaves the stream dead (no picture, the sink drops HPD) until
+ * the controller is reset. m4up checks the SST1 underflow status over the
+ * first 100 ms of video and starts again, up to m4_tries times.
+ */
+static int x9dp_m4up(struct x9dp *d)
+{
+	u32 tries = clamp_t(u32, m4_tries, 1, 10), i, st = 0;
+	int ret = 0;
+
+	for (i = 1; i <= tries; i++) {
+		ret = x9dp_m4up_once(d);
+		if (ret)
+			return ret;
+		writel(~0, d->link + SST1_INTERRUPT_STATUS_SET0);
+		msleep(100);
+		st = readl(d->link + SST1_INTERRUPT_STATUS_SET0);
+		dev_info(d->dev, "m4up: try %u, SST1 int0 %08x over 100 ms, DECON2 frames %u\n", i, st,
+			 readl(d->decon2 + DECON_FRAME_COUNT));
+		if (!(st & BIT(8)))		/* MAPI_FIFO_UNDER_FLOW */
+			break;
+	}
+	scnprintf(d->last, sizeof(d->last), "m4up: %s after %u tries (int0 %08x)",
+		  st & BIT(8) ? "UNDERFLOWING" : "running", min(i, tries), st);
+	return st & BIT(8) ? -EIO : 0;
 }
 
 static int x9dp_m4regs_show(struct seq_file *s, void *unused)
@@ -1859,14 +1956,17 @@ static void x9dp_hpd_work(struct work_struct *work)
 	 */
 	if (hpd_bist) {
 		bool decon = hpd_m4 || d->decon2_on;
+		int ret;
 
-		/* DECON2 stops before the link goes down under it (stock: decon
-		 * disable before displayport_disable on HPD low) */
-		if (d->decon2_on)
-			x9dp_run(d, "decon2_stop");
-		if (d->video_on)
-			x9dp_run(d, "video_off");
-		if (x9dp_run(d, "train") == 0 && x9dp_run(d, decon ? "m4up" : "bist") == 0) {
+		/* m4up stops, resets and trains itself */
+		if (decon) {
+			ret = x9dp_run(d, "m4up");
+		} else {
+			if (d->video_on)
+				x9dp_run(d, "video_off");
+			ret = x9dp_run(d, "train") ?: x9dp_run(d, "bist");
+		}
+		if (ret == 0) {
 			mutex_unlock(&d->lock);
 			msleep(100);
 			mutex_lock(&d->lock);
