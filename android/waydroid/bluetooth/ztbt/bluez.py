@@ -686,6 +686,18 @@ class BlueZ:
                 out.append(addr)
         return out
 
+    def device_interfaces(self, addr):
+        """The BlueZ interfaces on a device's object and its children (media
+        transports, players): what Linux has on it."""
+        base = self.dev_path.get(addr)
+        out = set()
+        if base is None:
+            return out
+        for path, ifaces in self.objs.items():
+            if path == base or path.startswith(base + "/"):
+                out.update(ifaces)
+        return out
+
     def address_of(self, path):
         d = self.objs.get(path, {}).get(DEVICE, {})
         return d.get("Address")

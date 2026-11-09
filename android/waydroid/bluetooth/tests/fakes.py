@@ -26,6 +26,7 @@ class FakeBackend:
         self.timers = []
         self.relays = []
         self.peers = []          # connected LE centrals (server_peers)
+        self.ifaces = {}         # address -> extra BlueZ interfaces (Linux profiles on it)
         self.powered = True
         self.devs = {
             AIRPODS: {"Address": AIRPODS, "AddressType": "public", "Name": "AirPods", "Alias": "AirPods",
@@ -107,6 +108,9 @@ class FakeBackend:
 
     def server_peers(self):
         return list(self.peers)
+
+    def device_interfaces(self, addr):
+        return set(self.ifaces.get(addr, ())) | {"org.bluez.Device1"}
 
     def advertise(self, adv_id, props, ok, err):
         self._later("advertise", [adv_id, props], ok, err)

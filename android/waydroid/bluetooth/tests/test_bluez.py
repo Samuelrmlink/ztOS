@@ -250,6 +250,15 @@ class BlueZTests(unittest.TestCase):
         ae3c = next(e for e in db if e[4] == u("ae3c"))
         self.assertEqual(ae3c[1], 0x13)
 
+    def test_device_interfaces(self):
+        b = backend()
+        self.assertIn(B.DEVICE, b.device_interfaces(SENSOR))
+        self.assertIn(B.CHAR, b.device_interfaces(SENSOR))             # its GATT objects
+        self.assertNotIn("org.bluez.MediaTransport1", b.device_interfaces(SENSOR))
+        b._added(DEV + "/fd0", {"org.bluez.MediaTransport1": {"State": "active"}}, quiet=True)
+        self.assertIn("org.bluez.MediaTransport1", b.device_interfaces(SENSOR))
+        self.assertEqual(b.device_interfaces("00:00:00:00:00:00"), set())
+
     def test_other_adapters_devices_ignored(self):
         b = backend()
         b._on_added(dbus.ObjectPath("/org/bluez/hci1/dev_11_22_33_44_55_66"),

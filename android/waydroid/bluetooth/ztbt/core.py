@@ -41,6 +41,9 @@ CONNECT_SECONDS = 35
 RELEASE_SECONDS = 10    # how long a device we let go may still show Connected
 LINGER_SECONDS = 4      # a device we connected stays up this long after Android's last use
 EXPECT_SECONDS = 60     # how long ztos-bt-agent takes an expected address on trust (refreshed)
+# BlueZ interfaces that mean a Linux profile uses a device (on it or its children)
+LINUX_USE = {"org.bluez.Input1", "org.bluez.MediaControl1", "org.bluez.MediaTransport1",
+             "org.bluez.MediaPlayer1", "org.bluez.Network1"}
 DISCOVER_SECONDS = 30
 CCCD = "00002902-0000-1000-8000-00805f9b34fb"
 AD_FIELDS = ("RSSI", "ManufacturerData", "ServiceData", "AdvertisingData",
@@ -115,9 +118,25 @@ class Bridge(GattServerMixin):
         d = self.devs.get(addr)
         if d is None or d.get("Blocked"):
             return False
-        # connected and not ours: Linux uses it. A device we just let go still
-        # shows Connected until BlueZ is done; it is not Linux's for that.
-        return not (d.get("Connected") and addr not in self.holds and addr not in self.releasing)
+        # connected, not ours, and Linux uses it: hidden. A device we just let
+        # go still shows Connected until BlueZ is done; it is not Linux's for that.
+        return not (d.get("Connected") and addr not in self.holds and addr not in self.releasing
+                    and self.linux_uses(addr))
+
+    def linux_uses(self, addr):
+        """Is Linux using this connected device, so Android must keep off it?
+
+        A Classic (BR/EDR) device, yes: its profiles are Linux's (audio,
+        calls, input; the AirPods, the Fold6). An LE device only when a
+        Linux profile sits on it: input (HID over GATT), audio, network.
+        An LE device that is connected with none of those (left connected by
+        a pairing in Settings, GATT only: RM_2685 on 8 Nov) is not in use,
+        and an Android app may connect to it: it shares the link, and the
+        bridge never disconnects a link it didn't make."""
+        d = self.devs.get(addr, {})
+        if "Class" in d and d.get("AddressType") != "random":
+            return True
+        return bool(set(self.be.device_interfaces(addr)) & LINUX_USE)
 
     def bonded(self, d):
         return bool(d.get("Bonded", d.get("Paired")))

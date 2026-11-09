@@ -69,6 +69,7 @@ class Hidden(unittest.TestCase):
 
     def test_linux_connecting_later_blocks_new_links(self):
         be, store, br, c = make()
+        be.ifaces[LOCK] = {"org.bluez.Input1"}             # a BLE keyboard: Linux's input
         br.device_changed(LOCK, {"Connected": True})
         rid = c.request("GATT_OPEN", LOCK, 0, P.T_LE)
         self.assertEqual(c.reply(rid, "GATT_OPEN")[0], P.ST_BUSY)
@@ -79,6 +80,47 @@ class Hidden(unittest.TestCase):
         br.device_changed(LOCK, {"Blocked": True})
         st, (devs,) = c.reply(c.request("BONDED_LIST"), "BONDED_LIST")
         self.assertNotIn(LOCK, [d[0] for d in devs])
+
+
+class Handoff(unittest.TestCase):
+    """An LE device Linux is connected to but not using (RM_2685, 8 Nov:
+    paired in Settings, left connected, GATT only) is Android's to use."""
+
+    def test_paired_in_settings_then_an_app_connects(self):
+        be, store, br, c = make()
+        br.device_changed(LOCK, {"Connected": True})        # Settings paired it; nothing uses it
+        st, (devs,) = c.reply(c.request("BONDED_LIST"), "BONDED_LIST")
+        self.assertIn(LOCK, [x[0] for x in devs])
+        st, (link,) = c.reply(c.request("GATT_OPEN", LOCK, 0, P.T_LE), "GATT_OPEN")
+        self.assertEqual(st, P.ST_OK)
+        self.assertFalse(br.holds[LOCK].made)              # not our connection
+        be.answer("connect", error=("org.bluez.Error.AlreadyConnected", ""))
+        self.assertEqual(c.events("EV_LINK"), [[link, P.ST_OK, True, 247]])
+        c.request("GATT_CLOSE", link)
+        be.linger()
+        self.assertEqual(be.called("disconnect"), [])      # Linux's link stays as it was
+        self.assertNotIn(LOCK, br.holds)
+
+    def test_a_linux_profile_keeps_it_linux_s(self):
+        be, store, br, c = make()
+        for iface in ("org.bluez.Input1", "org.bluez.MediaTransport1", "org.bluez.Network1"):
+            be.ifaces[LOCK] = {iface}
+            br.device_changed(LOCK, {"Connected": True})
+            rid = c.request("GATT_OPEN", LOCK, 0, P.T_LE)
+            self.assertEqual(c.reply(rid, "GATT_OPEN")[0], P.ST_BUSY, iface)
+        self.assertEqual(be.called("connect"), [])
+
+    def test_classic_devices_stay_linux_s(self):
+        be, store, br, c = make()
+        br.device_changed(SPEAKER, {"Connected": True})     # BR/EDR, no profile seen: still Linux's
+        rid = c.request("RSSI", SPEAKER)
+        self.assertEqual(c.reply(rid, "RSSI")[0], P.ST_BUSY)
+
+    def test_shown_in_scans(self):
+        be, store, br, c = make()
+        c.request("SCAN_START", P.T_LE)
+        br.device_changed(LOCK, {"Connected": True, "RSSI": -55})
+        self.assertEqual([e[0][0] for e in c.events("EV_DEVICE_FOUND")], [LOCK])
 
 
 class Scanning(unittest.TestCase):
@@ -239,6 +281,7 @@ class Gatt(unittest.TestCase):
 
     def test_release_window_ends(self):
         be, store, br, c, link = self.connected()
+        be.ifaces[SENSOR] = {"org.bluez.Input1"}           # Linux took it up meanwhile
         c.request("GATT_CLOSE", link)
         be.linger()
         be.timers[-1][1]()                     # BlueZ never said Disconnected: after 10 s

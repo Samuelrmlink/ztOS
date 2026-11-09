@@ -421,12 +421,22 @@ match its op's signature.
 
 The policy lives in the host daemon, so Android can't get around it.
 
-- **Hidden while Linux uses it.** A device with `Connected=true` that the
-  bridge did not connect for Android (the AirPods, the Fold6) is left out of
+- **Hidden while Linux uses it.** A device that Linux is connected to and
+  using, and that the bridge did not connect for Android, is left out of
   scan and discovery results and the bonded list. Android's `connect`,
   `connectGatt` and `createBond` to it fail with "device busy" (GATT 0x85).
-  When Linux disconnects it, a bonded device shows again as bonded and
-  disconnected and can be used.
+  "Using" means:
+  - any Classic (BR/EDR) device: its profiles are Linux's (the AirPods,
+    the Fold6);
+  - an LE device with a Linux profile on it: input (HID over GATT), audio or
+    network (BlueZ's `Input1`, `MediaControl1`, `MediaTransport1`,
+    `MediaPlayer1`, `Network1` on the device or its children).
+
+  An LE device that is merely connected, for example left connected after a
+  pairing in Settings with only GATT on it (RM_2685, 8 Nov), is not in use.
+  An Android app may connect to it and shares the link, and the bridge never
+  disconnects a link it didn't make. When Linux disconnects a hidden device,
+  a bonded one shows again as bonded and disconnected and can be used.
 - **Connected on both sides.** The bridge's `Device1.Connect()` makes BlueZ
   show the device as connected. The shell's Bluetooth page marks it "in use
   by Android". The bridge keeps a reference per Android client. When the
