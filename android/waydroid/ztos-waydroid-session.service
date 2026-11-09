@@ -11,6 +11,12 @@ Environment=WAYLAND_DISPLAY=wayland-0
 # notifications stay off for the whole session (5 boots of 5, 30 Oct). Wait
 # for the name; after 60 s start anyway, without notifications.
 ExecStartPre=-/usr/bin/gdbus wait --session --timeout 60 org.freedesktop.Notifications
+# The compositor this session binds into the container (config_session rbinds
+# %t/wayland-0): a shell restart makes a new socket, and the composer keeps
+# the old one ("Couldn't open Wayland display"). ztos-waydroid-launch compares
+# this record with the socket and replaces a stale session before it launches,
+# whoever started the session (the boot unit, a push thaw, the launcher).
+ExecStartPre=-/bin/sh -c 'stat -Lc "%%d:%%i:%%z" "%t/$${WAYLAND_DISPLAY:-wayland-0}" > "%t/ztos-waydroid-compositor"'
 ExecStart=/usr/bin/waydroid session start
 KillMode=control-group
 TimeoutStopSec=20
