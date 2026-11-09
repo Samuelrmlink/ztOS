@@ -783,9 +783,9 @@ static double render(cairo_t *cr, int page) {
 	}
 	double y = zmc_header(cr, "desktop");
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	y = zmc_text(cr, "No desktop is running.", FONT_SEMILIGHT, 20, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN);
+	y += zmc_text(cr, "No desktop is running.", FONT_SEMILIGHT, 20, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	y = zmc_text(cr, "Plug in a monitor, or start one here on a virtual screen and use it from this app.",
+	y += 12 + zmc_text(cr, "Plug in a monitor, or start one here on a virtual screen and use it from this app.",
 		FONT_REGULAR, 15, ZMC_MARGIN, y + 12, zmc.width - 2 * ZMC_MARGIN);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	y = zmc_button(cr, ZMC_MARGIN, y + 24, zmc.width - 2 * ZMC_MARGIN, "Start a virtual desktop", ACT_START, 0);

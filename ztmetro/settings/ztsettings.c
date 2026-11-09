@@ -51,6 +51,7 @@
 #include "../sound/sound-pages.h"
 #include "../pods/pods-pages.h"
 #include "../devtest/devtest-pages.h"
+#include "../desktop/desktop-page.h"
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -2213,6 +2214,8 @@ static double draw_display(cairo_t *cr) {
 			"Only while charging" : "Always", clock_theme_name(app.aod_theme));
 		y = zmc_entry(cr, y, "always-on display", detail, ACT_OPEN_PAGE, PAGE_AOD);
 	}
+	/* XFCE on a monitor, beside the phone (ztmetro/desktop) */
+	y = zmc_entry(cr, y, "desktop mode", desktop_page_summary(), ACT_OPEN_PAGE, PAGE_DESKTOP);
 	/* the shell sizes itself to the panel (360 points across); this is a step either side */
 	static const char *const scales[] = { "Compact", "Standard", "Large" };
 	y = picker(cr, y, "Display scaling", scales, 3, app.scale_pending, ACT_SCALE_CYCLE);
@@ -3782,6 +3785,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_TILES: return draw_tiles(cr);
 	case PAGE_LOCK: return draw_lock(cr);
 	case PAGE_AOD: return draw_aod(cr);
+	case PAGE_DESKTOP: return desktop_page_render(cr);
 	case PAGE_ACCENTS: return draw_accents(cr);
 	case PAGE_WALLS: return draw_wallpapers(cr);
 	case PAGE_NAVIGATION: {
@@ -3876,6 +3880,7 @@ static void activate(int action, int arg) {
 	if (action >= SOUND_ACTIONS && action < SOUND_ACTIONS_END) { sound_activate(action, arg); return; }
 	if (action >= PODS_ACTIONS && action < PODS_ACTIONS_END) { pods_activate(action, arg); return; }
 	if (action >= DEVTEST_ACTIONS && action < DEVTEST_ACTIONS_END) { devtest_activate(action, arg); return; }
+	if (action >= DESKTOP_ACTIONS && action < DESKTOP_ACTIONS_END) { desktop_page_activate(action, arg); return; }
 	/* a picker's box opens or closes it; one of its options is the choice */
 	if (is_picker(action) && arg < 0) {
 		open_picker = open_picker == action ? 0 : action;
@@ -4841,6 +4846,7 @@ static void arrived(int page) {
 	if (page_is_sound(page)) sound_arrived(page);
 	if (page_is_pods(page)) pods_arrived(page);
 	if (page_is_devtest(page)) devtest_arrived(page);
+	if (page == PAGE_DESKTOP) desktop_page_arrived();
 	if (page != PAGE_AUDIO) ringtone_stop();
 	if (page != PAGE_BLUETOOTH && bt_discoverable) {
 		bt_discoverable = false;
