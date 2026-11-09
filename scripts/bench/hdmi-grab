@@ -1,0 +1,52 @@
+#!/bin/bash
+# hdmi-grab: is there a picture on the HDMI capture card, and what is it?
+#
+#   hdmi-grab [OUT.png] [SECONDS]     default /tmp/hdmi-grab.png, 4 s
+#
+# Opens the card (a MacroSilicon MS2109, 534d:2109, as /dev/video*), skips its
+# warm-up, and saves the last frame, scaled to 960x540. Exit 0 with "signal" if
+# the last frames have a picture, 1 with "no signal" otherwise, 2 if no card.
+#
+# The MS2109 sends ~1.5 s of flat frames (every pixel Y=7) after the stream
+# opens, before any video, and the same flat frame when it has no signal at
+# all: so only frames after the warm-up tell. MJPEG at 1920x1080@60 is the
+# card's native mode; its YUYV mode is slow and gains nothing here.
+set -u
+OUT=${1:-/tmp/hdmi-grab.png}
+SECS=${2:-4}
+DEV=${HDMI_DEV:-}
+if [ -z "$DEV" ]; then
+	for d in /sys/class/video4linux/video*; do
+		[ -e "$d" ] || continue
+		v=$(cat "$d/device/../idVendor" 2>/dev/null) p=$(cat "$d/device/../idProduct" 2>/dev/null)
+		# the card's first node is the capture node (the second is metadata)
+		if [ "$v:$p" = 534d:2109 ] && [ "$(cat "$d/index" 2>/dev/null)" = 0 ]; then DEV=/dev/$(basename "$d"); break; fi
+	done
+fi
+[ -n "$DEV" ] || { echo "no capture card"; exit 2; }
+T=$(mktemp -d)
+trap 'rm -rf "$T"' EXIT
+n=$((SECS * 60))
+timeout $((SECS + 15)) gst-launch-1.0 -q v4l2src device="$DEV" num-buffers=$n ! \
+	image/jpeg,width=1920,height=1080,framerate=60/1 ! jpegdec ! videoconvert ! \
+	videoscale ! video/x-raw,width=960,height=540,format=GRAY8 ! \
+	multifilesink location="$T/f%04d.gray" >/dev/null 2>&1
+last=$(ls "$T"/f*.gray 2>/dev/null | tail -1)
+[ -n "$last" ] || { echo "$DEV: no frames"; exit 2; }
+# a picture has spread; the no-signal frame is one flat value
+read -r lo hi mean < <(python3 -I -c '
+import sys; y = open(sys.argv[1], "rb").read()
+print(min(y), max(y), round(sum(y) / len(y), 1))' "$last")
+# the colour frame, for looking at
+timeout $((SECS + 15)) gst-launch-1.0 -q v4l2src device="$DEV" num-buffers=$n ! \
+	image/jpeg,width=1920,height=1080,framerate=60/1 ! jpegdec ! videoconvert ! \
+	videoscale ! video/x-raw,width=960,height=540 ! pngenc snapshot=false ! \
+	multifilesink location="$T/c%04d.png" >/dev/null 2>&1
+cl=$(ls "$T"/c*.png 2>/dev/null | tail -1)
+[ -n "$cl" ] && cp "$cl" "$OUT"
+if [ $((hi - lo)) -gt 8 ]; then
+	echo "signal: $DEV, luma $lo..$hi mean $mean, frame $OUT"
+	exit 0
+fi
+echo "no signal: $DEV, flat luma $lo (frame $OUT)"
+exit 1

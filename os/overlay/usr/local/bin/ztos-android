@@ -344,8 +344,17 @@ def atomic_write(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix='.ztos-', dir=path.parent)
     try:
-        with os.fdopen(fd, 'w') as stream: stream.write(data)
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(data)
+            # on disk before the rename: a hard reset (the deadman's sysrq-b
+            # skips the sync) otherwise keeps the rename and loses the data,
+            # leaving an empty launcher entry
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(name, path)
+        dirfd = os.open(path.parent, os.O_RDONLY)
+        try: os.fsync(dirfd)
+        finally: os.close(dirfd)
     finally:
         if os.path.exists(name): os.unlink(name)
 

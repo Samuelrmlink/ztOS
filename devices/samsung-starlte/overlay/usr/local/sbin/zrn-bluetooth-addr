@@ -12,7 +12,9 @@ mkdir -p "$(dirname "$KEEP")"
 # log: the last thing setup prints here is the transmit power quirk.
 setup_done() {	# $1: how many setups to wait for
 	i=0
-	until [ "$(dmesg | grep -c "hci0: HCI Read Transmit Power Level command is advertised")" -ge "$1" ]; do
+	# the journal keeps the whole boot's kernel log: dmesg's ring wraps, and a
+	# restart of bluetooth an hour in would otherwise never see the line
+	until [ "$( { journalctl -k -b -o cat 2>/dev/null || dmesg; } | grep -c "hci0: HCI Read Transmit Power Level command is advertised")" -ge "$1" ]; do
 		i=$((i + 1)); [ $i -gt 90 ] && return 1; sleep 1
 	done
 }
