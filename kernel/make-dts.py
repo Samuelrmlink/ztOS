@@ -324,9 +324,12 @@ DP_TX_NODE = """
 		      <0x16072000 0x1000>,	/* DPU_DMA channel 1 (stock idma_g1 reg[1]) */
 		      <0x16022000 0x1000>,	/* DPP channel 1 (stock idma_g1 reg[0]) */
 		      <0x16070000 0x110>,	/* DPU_DMA common (stock idma_g* reg[2]) */
-		      <0x16000000 0x4000>;	/* CMU_DPU: gates and Q-channels, read only */
+		      <0x16000000 0x4000>,	/* CMU_DPU: gates and Q-channels, read only */
+		      <0x16030270 0x4>,		/* DECON0 DP_CONNECTION_CONTROL (M4 W1) */
+		      <0x16037270 0x4>,		/* its shadow copy (SHD_DECON), read only */
+		      <0x16011010 0x4>;		/* disp sysreg DISP_DPU_TE_QACTIVE_PLL_EN (W2) */
 		reg-names = "link", "phy", "link-qch", "decon2", "dma1", "dpp1", "dma-common",
-			    "dpu-cmu";
+			    "dpu-cmu", "decon0-dp-conn", "decon0-dp-conn-shadow", "disp-sysreg-te";
 		interrupts = <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
 		samsung,usb-phy = <&usbdrd_phy>;
 		samsung,pmu-syscon = <&pmu_system_controller>;

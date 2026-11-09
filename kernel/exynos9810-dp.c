@@ -46,7 +46,19 @@
  *          DECON2's APB clock and the DPU/DMA/DPP Q-channels read on;
  *          debugfs m4regs shows it. Ranges from the DT (optional: without
  *          them the step says so and touches nothing)
- *   off    AUX/PCS off, PHY reset, PMA back to low power and reset
+ *   off    (decon2_stop if DECON2 was started), AUX/PCS off, PHY reset,
+ *          PMA back to low power and reset
+ *
+ * M4, the approved writes (see the M4 section below), by hand only:
+ *   route  W1 DECON0 DP_CONNECTION_CONTROL[2:0] := 2, W2 disp sysreg
+ *          TE_QACTIVE_PLL_EN := 1; read back
+ *   sram   W4 DECON2 SRAM1-3 (12K)
+ *   decon2 DECON2 set up for 1080p video to DP, blender background bg_rgb
+ *   video  the link's video from DECON2 (no BIST); after video_off
+ *   decon2_start  DECON2 on, RUN_STATUS (needs lh, route, sram)
+ *   decon2_stop   DECON2 off, LH off, DECON2 soft reset
+ *   dma    W6 DMA/DPP channel 1 on a 1920x1080 test image (no window
+ *          maps it to DECON2 yet)
  *
  * auto=1 runs pma..edid itself when the class enters a DP pin state, and
  * off when it leaves; default 0.
@@ -71,6 +83,7 @@
 #include <linux/bitfield.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/math64.h>
@@ -299,7 +312,7 @@ struct x9dp {
 	struct work_struct hpd_work;
 	bool id_done;
 	struct dentry *dbg;
-	char last[160];
+	char last[320];
 	u8 dpcd[16];
 	bool dpcd_ok;
 	u8 edid[EDID_LENGTH];
@@ -313,6 +326,14 @@ struct x9dp {
 	u32 decon2_sz, dma1_sz, dpp1_sz, dma_com_sz;
 	char *m4buf;
 	size_t m4len;
+	/* M4 writes: DECON0's DP_CONNECTION_CONTROL (and its shadow, read
+	 * only), the disp sysreg's TE_QACTIVE_PLL_EN; mapped, not requested */
+	void __iomem *d0conn, *d0conn_shd, *dsys;
+	bool vsrc_decon;		/* video_on with DECON2's pixels, not BIST */
+	bool decon2_on;
+	void *fb_cpu;			/* the dma step's test image */
+	dma_addr_t fb_dma;
+	size_t fb_sz;
 };
 
 /* ---- register access ----------------------------------------------------------- */
@@ -706,9 +727,12 @@ static int x9dp_edid(struct x9dp *d)
 
 /* back down: displayport_reg_deinit / phy_disable (:1320-1346), PMA as found */
 static int x9dp_video_off(struct x9dp *d);
+static int x9dp_decon2_stop(struct x9dp *d);
 
 static int x9dp_off(struct x9dp *d)
 {
+	if (d->decon2_on)
+		x9dp_decon2_stop(d);
 	if (d->video_on)
 		x9dp_video_off(d);
 	d->rate = 0;
@@ -978,7 +1002,7 @@ static const struct {
  * transfer unit's active symbols, the link as timing master, BIST colour
  * bars, VIDEO_EN.
  */
-static int x9dp_bist(struct x9dp *d)
+static int x9dp_video_cfg(struct x9dp *d, u32 *ipp, u32 *fpp)
 {
 	const typeof(x9dp_1080p60) *m = &x9dp_1080p60;
 	u32 ls = x9dp_ls_khz(d->rate), bpp = 24, ip, fp, thr;
@@ -1029,6 +1053,18 @@ static int x9dp_bist(struct x9dp *d)
 
 	link_rmw(d, SST1_VIDEO_MASTER_TIMING_GEN, BIT(0), BIT(0));
 	link_rmw(d, SST1_MAIN_CONTROL, VIDEO_MODE, 0);
+	*ipp = ip;
+	*fpp = fp;
+	return 0;
+}
+
+static int x9dp_bist(struct x9dp *d)
+{
+	u32 ip, fp;
+	int ret = x9dp_video_cfg(d, &ip, &fp);
+
+	if (ret)
+		return ret;
 	/* BIST colour bars, stream valid forced (:554-560) */
 	link_rmw(d, SST1_VIDEO_BIST_CONTROL, BIST_TYPE, 0);
 	link_rmw(d, SST1_VIDEO_CONTROL, STRM_VALID_FORCE | STRM_VALID_CTRL,
@@ -1036,8 +1072,38 @@ static int x9dp_bist(struct x9dp *d)
 	link_rmw(d, SST1_VIDEO_BIST_CONTROL, BIST_EN, BIST_EN);
 	link_rmw(d, SST1_VIDEO_ENABLE, VIDEO_EN, VIDEO_EN);
 	d->video_on = true;
+	d->vsrc_decon = false;
 	scnprintf(d->last, sizeof(d->last), "bist: 1080p60 colour bars on, TU %u.%09u, Mvid %u Nvid %u",
-		  ip, fp, m->khz >> 1, ls);
+		  ip, fp, x9dp_1080p60.khz >> 1, x9dp_ls_khz(d->rate));
+	return 0;
+}
+
+/*
+ * The same video configuration with the pixels from DECON2 instead of the
+ * pattern generator: displayport_enable (displayport_drv.c:2352-2403) is
+ * set_video_configuration + displayport_reg_start, no BIST and no forced
+ * stream valid. Stock runs it (the DP subdev's s_stream) before
+ * decon_reg_init and decon_reg_start (decon_core.c:631-648, :1848).
+ */
+static int x9dp_video(struct x9dp *d)
+{
+	u32 ip, fp;
+	int ret;
+
+	if (d->video_on)
+		return -EBUSY;		/* video_off first */
+	ret = x9dp_video_cfg(d, &ip, &fp);
+	if (ret)
+		return ret;
+	link_rmw(d, SST1_VIDEO_BIST_CONTROL, BIST_EN, 0);
+	link_rmw(d, SST1_VIDEO_CONTROL, STRM_VALID_FORCE | STRM_VALID_CTRL, 0);
+	link_rmw(d, SST1_VIDEO_ENABLE, VIDEO_EN, VIDEO_EN);
+	d->video_on = true;
+	d->vsrc_decon = true;
+	scnprintf(d->last, sizeof(d->last),
+		  "video: 1080p60 from DECON2 on, TU %u.%09u; video_ctl %08x bist %08x video_en %08x",
+		  ip, fp, readl(d->link + SST1_VIDEO_CONTROL),
+		  readl(d->link + SST1_VIDEO_BIST_CONTROL), readl(d->link + SST1_VIDEO_ENABLE));
 	return 0;
 }
 
@@ -1050,6 +1116,7 @@ static int x9dp_video_off(struct x9dp *d)
 		link_rmw(d, SYSTEM_SST1_FUNCTION_ENABLE, SST1_VIDEO_FUNC_EN, 0);
 	}
 	d->video_on = false;
+	d->vsrc_decon = false;
 	scnprintf(d->last, sizeof(d->last), "video_off");
 	return 0;
 }
@@ -1183,6 +1250,347 @@ static int x9dp_m4dump(struct x9dp *d)
 	return 0;
 }
 
+/* ---- M4: the approved writes, one debugfs step each --------------------------------- */
+
+/*
+ * Stock DECON2 bring-up for DP (decon_reg.c, regs-decon.h, dpp_reg.c,
+ * regs-dpp.h; dpu_9810, tw10-android-4.9-q). Only these registers are
+ * written:
+ *
+ *   W1 route  DECON0 DP_CONNECTION_CONTROL (+0x270) [2:0] := 2, RMW
+ *             (decon_reg_set_interface, decon_reg.c:609-611)
+ *   W2 route  disp sysreg DISP_DPU_TE_QACTIVE_PLL_EN (+0x10) bit 0
+ *             (dpu_reg_set_qactive_pll, decon_reg.c:17-25)
+ *   W4 sram   DECON2 SRAM_SHARE_ENABLE (+0x30) := SRAM1|2|3, 12K
+ *             (decon_reg_set_sram_share, decon_reg.c:219-259, :1815-1816)
+ *   W5 lh     the SST1 LH power handshake (x9dp_lh), and its release in
+ *             decon2_stop (decon_reg_stop_inst, decon_reg.c:1937-1964)
+ *   W6 dma    DPU_DMA channel 1 (IDMA_G1) and DPP channel 1, per-channel
+ *             registers only: nothing in the DMA common block
+ *   DECON2's own block: decon2, decon2_start, decon2_stop
+ *
+ * Not written: DECON0's CLOCK_CONTROL_0 TE_QACTIVE_PLL_ON (W3,
+ * decon_reg.c:198-206), DECON0's blender windows (0x1000 + 0x30 * w,
+ * decon_reg_set_window_control, decon_reg.c:2221-2242), the DMA common
+ * QoS LUT (already 0x44444444). Without a window DECON2's blender sends
+ * its background colour, which is the visible test here.
+ */
+#define DECON_GLOBAL_CONTROL		0x0000
+#define  DECON_SRESET			BIT(28)
+#define  DECON_TEN_BPC			BIT(20)
+#define  DECON_OPERATION_MODE_CMD	BIT(8)
+#define  DECON_RUN_STATUS		BIT(4)
+#define  DECON_EN			BIT(1)
+#define  DECON_EN_F			BIT(0)
+#define DECON_SRAM_SHARE_ENABLE		0x0030
+#define  DECON2_SRAM_12K		(BIT(16) | BIT(20) | BIT(24))	/* SRAM1-3 */
+#define DECON_INTERRUPT_PENDING		0x004c
+#define DECON_EXTRA_INTERRUPT_PENDING	0x0050
+#define DECON_SHADOW_REG_UPDATE_REQ	0x0060
+#define  DECON_SHADOW_GLOBAL		BIT(31)
+#define DECON_HW_SW_TRIG_CONTROL	0x0070
+#define  DECON_HW_TRIG_EN		BIT(0)
+#define DECON_SCALED_SIZE_CONTROL_0	0x00a0
+#define DECON_CLOCK_CONTROL_0		0x00f0
+#define  DECON_CLOCK_CG_QACTIVE		(BIT(0) | BIT(8) | BIT(12) | BIT(16) | BIT(24) | BIT(28))
+#define DECON_OUTFIFO_SIZE_CONTROL_0	0x0120
+#define DECON_OUTFIFO_TH_CONTROL_0	0x012c
+#define  DECON_OUTFIFO_TH_1H		5
+#define DECON_OUTFIFO_DATA_ORDER	0x0130
+#define  DECON_PIXEL_ORDER_SWAP		GENMASK(6, 4)	/* 0 RGB */
+#define DECON_BLENDER_BG_IMAGE_SIZE_0	0x0200
+#define DECON_BLENDER_BG_COLOR_0	0x0208		/* A [23:16], R [9:0] */
+#define DECON_BLENDER_BG_COLOR_1	0x020c		/* G [25:16], B [9:0] */
+#define DECON_DATA_PATH_CONTROL_0	0x0214
+#define DECON_DATA_PATH_CONTROL_2	0x0230
+#define  DECON_SCALER_PATH		GENMASK(25, 24)
+#define  DECON_COMP_OUTIF_PATH		GENMASK(7, 0)
+#define  DECON2_NOCOMP_OUTFIFO0_DPIF	0x008		/* decon.h:362 */
+#define DECON_FRAME_COUNT		0x02a0
+#define DECON_SHADOW			0x7000		/* SHD_DECON */
+#define DECON_DP_CONN_SEL_DP0		GENMASK(2, 0)
+#define DISP_TE_QACTIVE_PLL_EN		BIT(0)
+
+#define IDMA_ENABLE			0x0000
+#define  IDMA_SRAM_CLOCK_GATE_EN	BIT(9)
+#define IDMA_IN_CON			0x0008
+#define  IDMA_IMG_FORMAT		GENMASK(15, 11)
+#define  IDMA_FMT_XRGB8888		4
+#define  IDMA_ROTATION			GENMASK(10, 8)
+#define  IDMA_AFBC_EN			BIT(7)
+#define  IDMA_BLOCK_EN			BIT(3)
+#define IDMA_OUT_CON			0x000c
+#define  IDMA_OUT_FRAME_ALPHA		GENMASK(31, 24)
+#define IDMA_SRC_SIZE			0x0010
+#define IDMA_SRC_OFFSET			0x0014
+#define IDMA_IMG_SIZE			0x0018
+#define IDMA_IN_BASE_ADDR_Y		0x0040
+#define IDMA_IN_BASE_ADDR_C		0x0044
+#define IDMA_CFG_ERR_STATE		0x0870
+#define DPP_IN_CON			0x0008
+#define  DPP_ALPHA_SEL			BIT(3)
+#define  DPP_IMG_FORMAT			GENMASK(2, 0)	/* 0 ARGB8888 */
+#define DPP_IMG_SIZE			0x0018
+#define DPP_MAIN_H_RATIO		0x0044
+#define DPP_MAIN_V_RATIO		0x0048
+#define  DPP_RATIO_1			(1 << 20)
+
+static uint bg_rgb = 0xff8000;
+module_param(bg_rgb, uint, 0644);
+MODULE_PARM_DESC(bg_rgb, "DECON2 blender background for the decon2 step, 0xRRGGBB (default 0xff8000 orange; red and blue swapped would show azure)");
+
+/* the M4 ranges the step needs, and the DPU powered and clocked */
+static int x9dp_m4_ok(struct x9dp *d, bool route)
+{
+	if (!d->decon2 || !d->dma1 || !d->dpp1 || !d->dpu_cmu ||
+	    (route && (!d->d0conn || !d->dsys)))
+		return -ENODEV;
+	return x9dp_dpu_ok(d) ? 0 : -EIO;
+}
+
+static void x9dp_d2_rmw(struct x9dp *d, u32 reg, u32 mask, u32 val)
+{
+	u32 v = readl(d->decon2 + reg);
+
+	writel((v & ~mask) | (val & mask), d->decon2 + reg);
+}
+
+/* W1 + W2: DECON2's output to the DP link, the TE/QACTIVE PLL enable */
+static int x9dp_route(struct x9dp *d)
+{
+	u32 c0, c1, s0, s1;
+	int ret = x9dp_m4_ok(d, true);
+
+	if (ret)
+		return ret;
+	c0 = readl(d->d0conn);
+	writel((c0 & ~DECON_DP_CONN_SEL_DP0) | 2, d->d0conn);
+	c1 = readl(d->d0conn);
+	s0 = readl(d->dsys);
+	writel(s0 | DISP_TE_QACTIVE_PLL_EN, d->dsys);
+	s1 = readl(d->dsys);
+	scnprintf(d->last, sizeof(d->last),
+		  "route: DP_CONNECTION %08x -> %08x (DECON0 shadow %08x), TE_QACTIVE_PLL_EN %08x -> %08x",
+		  c0, c1, d->d0conn_shd ? readl(d->d0conn_shd) : 0xdeadbeef, s0, s1);
+	return (c1 & DECON_DP_CONN_SEL_DP0) == 2 && (s1 & DISP_TE_QACTIVE_PLL_EN) ? 0 : -EIO;
+}
+
+/* W4: DECON2's 12K of line SRAM (SRAM1-3; DECON0 keeps SRAM0) */
+static int x9dp_sram(struct x9dp *d)
+{
+	u32 v;
+	int ret = x9dp_m4_ok(d, false);
+
+	if (ret)
+		return ret;
+	if (readl(d->decon2 + DECON_GLOBAL_CONTROL) & DECON_RUN_STATUS)
+		return -EBUSY;
+	writel(DECON2_SRAM_12K, d->decon2 + DECON_SRAM_SHARE_ENABLE);
+	v = readl(d->decon2 + DECON_SRAM_SHARE_ENABLE);
+	scnprintf(d->last, sizeof(d->last), "sram: SRAM_SHARE_ENABLE %08x (shadow %08x)", v,
+		  readl(d->decon2 + DECON_SHADOW + DECON_SRAM_SHARE_ENABLE));
+	return v == DECON2_SRAM_12K ? 0 : -EIO;
+}
+
+static u32 x9dp_c10(u32 c8)
+{
+	return (c8 << 2) | (c8 >> 6);	/* 8 to 10 bits, 0xff -> 0x3ff */
+}
+
+/*
+ * DECON2's own block, decon_reg_init for id 2 out_type DP (decon_reg.c:
+ * 1789-1842) without the writes outside it: clock gating and QACTIVE
+ * off (:188-196), video mode (:73-83), blender and scaled size 1920x1080
+ * (:347-361, :261-270), HW trigger (:754-766), RGB order (DP, :1686-1691),
+ * data path NOCOMP_OUTFIFO0_DPIF (:397-405), OUTFIFO size and 1H threshold
+ * (:298-312), 8 bpc (:640-650), per-frame off (:94-97), interrupts
+ * cleared (:2023-2034). Then the blender background colour (bg_rgb) and
+ * no window enabled on DECON2.
+ */
+static int x9dp_decon2(struct x9dp *d)
+{
+	const u32 w = x9dp_1080p60.ha, h = x9dp_1080p60.va;
+	u32 r = (bg_rgb >> 16) & 0xff, g = (bg_rgb >> 8) & 0xff, b = bg_rgb & 0xff;
+	int ret = x9dp_m4_ok(d, false);
+
+	if (ret)
+		return ret;
+	if (readl(d->decon2 + DECON_GLOBAL_CONTROL) & DECON_RUN_STATUS)
+		return -EBUSY;		/* decon2_stop first */
+	x9dp_d2_rmw(d, DECON_CLOCK_CONTROL_0, DECON_CLOCK_CG_QACTIVE, 0);
+	x9dp_d2_rmw(d, DECON_GLOBAL_CONTROL, DECON_OPERATION_MODE_CMD, 0);
+	x9dp_d2_rmw(d, DECON_BLENDER_BG_IMAGE_SIZE_0, GENMASK(29, 16) | GENMASK(13, 0),
+		    h << 16 | w);
+	x9dp_d2_rmw(d, DECON_SCALED_SIZE_CONTROL_0, GENMASK(29, 16) | GENMASK(13, 0), h << 16 | w);
+	x9dp_d2_rmw(d, DECON_HW_SW_TRIG_CONTROL, DECON_HW_TRIG_EN, DECON_HW_TRIG_EN);
+	x9dp_d2_rmw(d, DECON_OUTFIFO_DATA_ORDER, DECON_PIXEL_ORDER_SWAP, 0);
+	x9dp_d2_rmw(d, DECON_DATA_PATH_CONTROL_2, DECON_SCALER_PATH | DECON_COMP_OUTIF_PATH,
+		    DECON2_NOCOMP_OUTFIFO0_DPIF);
+	writel(h << 16 | w, d->decon2 + DECON_OUTFIFO_SIZE_CONTROL_0);
+	x9dp_d2_rmw(d, DECON_OUTFIFO_TH_CONTROL_0, GENMASK(2, 0), DECON_OUTFIFO_TH_1H);
+	x9dp_d2_rmw(d, DECON_GLOBAL_CONTROL, DECON_TEN_BPC | DECON_EN_F, 0);
+	x9dp_d2_rmw(d, DECON_INTERRUPT_PENDING, BIT(12) | BIT(13), ~0);
+	x9dp_d2_rmw(d, DECON_EXTRA_INTERRUPT_PENDING, BIT(4) | BIT(8), ~0);
+	writel(0xff << 16 | x9dp_c10(r), d->decon2 + DECON_BLENDER_BG_COLOR_0);
+	writel(x9dp_c10(g) << 16 | x9dp_c10(b), d->decon2 + DECON_BLENDER_BG_COLOR_1);
+	scnprintf(d->last, sizeof(d->last),
+		  "decon2: global %08x clk %08x trig %08x bg %08x/%08x size %08x path %08x/%08x outfifo %08x th %08x order %08x",
+		  readl(d->decon2 + DECON_GLOBAL_CONTROL), readl(d->decon2 + DECON_CLOCK_CONTROL_0),
+		  readl(d->decon2 + DECON_HW_SW_TRIG_CONTROL),
+		  readl(d->decon2 + DECON_BLENDER_BG_COLOR_0),
+		  readl(d->decon2 + DECON_BLENDER_BG_COLOR_1),
+		  readl(d->decon2 + DECON_BLENDER_BG_IMAGE_SIZE_0),
+		  readl(d->decon2 + DECON_DATA_PATH_CONTROL_0),
+		  readl(d->decon2 + DECON_DATA_PATH_CONTROL_2),
+		  readl(d->decon2 + DECON_OUTFIFO_SIZE_CONTROL_0),
+		  readl(d->decon2 + DECON_OUTFIFO_TH_CONTROL_0),
+		  readl(d->decon2 + DECON_OUTFIFO_DATA_ORDER));
+	return 0;
+}
+
+/*
+ * decon_reg_start for DP (decon_reg.c:1844-1864): the LH channel is up
+ * (the lh step, W5, which stock does first in this function), DECON_EN
+ * and DECON_EN_F, the global shadow update, RUN_STATUS within 20 ms.
+ */
+static int x9dp_decon2_start(struct x9dp *d)
+{
+	u32 v;
+	int ret = x9dp_m4_ok(d, true);
+
+	if (ret)
+		return ret;
+	if (!d->ctrl_on ||
+	    !(readl(d->link + SYSTEM_SST1_FUNCTION_ENABLE) & SST1_LH_PWR_ON_STATUS))
+		return -EAGAIN;		/* lh first */
+	if ((readl(d->d0conn) & DECON_DP_CONN_SEL_DP0) != 2 ||
+	    readl(d->decon2 + DECON_SRAM_SHARE_ENABLE) != DECON2_SRAM_12K)
+		return -EAGAIN;		/* route and sram first */
+	x9dp_d2_rmw(d, DECON_GLOBAL_CONTROL, DECON_EN | DECON_EN_F, ~0);
+	x9dp_d2_rmw(d, DECON_SHADOW_REG_UPDATE_REQ, DECON_SHADOW_GLOBAL, ~0);
+	ret = readl_poll_timeout(d->decon2 + DECON_GLOBAL_CONTROL, v, v & DECON_RUN_STATUS,
+				 10, 20000);
+	d->decon2_on = true;		/* decon2_stop undoes it either way */
+	scnprintf(d->last, sizeof(d->last),
+		  "decon2_start: %s; global %08x (shadow %08x) shadow_req %08x int %08x extra %08x frames %08x",
+		  ret ? "NOT running" : "running", v,
+		  readl(d->decon2 + DECON_SHADOW + DECON_GLOBAL_CONTROL),
+		  readl(d->decon2 + DECON_SHADOW_REG_UPDATE_REQ),
+		  readl(d->decon2 + DECON_INTERRUPT_PENDING),
+		  readl(d->decon2 + DECON_EXTRA_INTERRUPT_PENDING),
+		  readl(d->decon2 + DECON_FRAME_COUNT));
+	return ret;
+}
+
+/*
+ * decon_reg_stop for DP: instant stop (decon_reg.c:1937-1964), the LH
+ * channel released, RUN_STATUS off, then the soft reset (:50-67), all in
+ * DECON2's block and the link's.
+ */
+static int x9dp_decon2_stop(struct x9dp *d)
+{
+	u32 v;
+	int ret;
+
+	if (!d->decon2 || !x9dp_dpu_ok(d))
+		return -EIO;
+	x9dp_d2_rmw(d, DECON_GLOBAL_CONTROL, DECON_EN | DECON_EN_F, 0);
+	x9dp_d2_rmw(d, DECON_SHADOW_REG_UPDATE_REQ, DECON_SHADOW_GLOBAL, ~0);
+	if (d->ctrl_on)
+		link_rmw(d, SYSTEM_SST1_FUNCTION_ENABLE, SST1_LH_PWR_ON, 0);
+	ret = readl_poll_timeout(d->decon2 + DECON_GLOBAL_CONTROL, v, !(v & DECON_RUN_STATUS),
+				 10, 25000);
+	if (!ret) {
+		x9dp_d2_rmw(d, DECON_GLOBAL_CONTROL, DECON_SRESET, ~0);
+		ret = readl_poll_timeout(d->decon2 + DECON_GLOBAL_CONTROL, v, !(v & DECON_SRESET),
+					 10, 20000);
+	}
+	d->decon2_on = false;
+	scnprintf(d->last, sizeof(d->last), "decon2_stop: %s, global %08x, sst1_func %08x",
+		  ret ? "timed out" : "stopped and reset", v,
+		  d->ctrl_on ? readl(d->link + SYSTEM_SST1_FUNCTION_ENABLE) : 0);
+	return ret;
+}
+
+/*
+ * The test image: red rises left to right, green top to bottom, blue
+ * constant at 0x40, a white 16-pixel frame and a white diagonal; nothing
+ * like the BIST bars.
+ */
+static void x9dp_fb_fill(u32 *fb, u32 w, u32 h)
+{
+	u32 x, y;
+
+	for (y = 0; y < h; y++)
+		for (x = 0; x < w; x++) {
+			u32 dy = x * h / w;
+			bool white = x < 16 || y < 16 || x >= w - 16 || y >= h - 16 ||
+				     (dy >= y && dy < y + 4);
+
+			fb[y * w + x] = white ? 0x00ffffff :
+					(x * 255 / (w - 1)) << 16 | (y * 255 / (h - 1)) << 8 | 0x40;
+		}
+}
+
+/*
+ * W6: DMA/DPP channel 1 (IDMA_G1, stock idma_g1) reading the test image,
+ * 1920x1080 XRGB8888. dpp_reg_init + dpp_reg_configure_params for G1
+ * (dpp_reg.c:1310-1328, :1500-1510): DMA SRAM clock gating off (:160-166),
+ * frame alpha 0xff (:1208-1211), no rotation, no block, no AFBC, source
+ * offset/size, image size, base address (:1167-1184, :1113-1165), DMA
+ * XRGB8888 and DPP ARGB8888 without per-pixel alpha (:986-1107), DPP
+ * ratio 1:1 (:746-760). G1 has no CSC (:678-679). Interrupts stay masked
+ * (no handler), the QoS LUT in the common block is left as it is. The
+ * channel fetches only for a DECON window mapped to it (blender channel
+ * 3, helper.c:604-633), which this step does not set up.
+ */
+static int x9dp_dma(struct x9dp *d)
+{
+	const u32 w = x9dp_1080p60.ha, h = x9dp_1080p60.va;
+	u32 size = h << 16 | w;
+	int ret = x9dp_m4_ok(d, false);
+
+	if (ret)
+		return ret;
+	if (!d->fb_cpu) {
+		ret = dma_set_mask_and_coherent(d->dev, DMA_BIT_MASK(32));
+		if (ret)
+			return ret;
+		d->fb_sz = (size_t)w * h * 4;
+		d->fb_cpu = dma_alloc_wc(d->dev, d->fb_sz, &d->fb_dma, GFP_KERNEL);
+		if (!d->fb_cpu)
+			return -ENOMEM;
+		x9dp_fb_fill(d->fb_cpu, w, h);
+		wmb();
+	}
+	writel(readl(d->dma1 + IDMA_ENABLE) & ~IDMA_SRAM_CLOCK_GATE_EN, d->dma1 + IDMA_ENABLE);
+	writel((readl(d->dma1 + IDMA_OUT_CON) & ~IDMA_OUT_FRAME_ALPHA) |
+	       FIELD_PREP(IDMA_OUT_FRAME_ALPHA, 0xff), d->dma1 + IDMA_OUT_CON);
+	writel(0, d->dma1 + IDMA_SRC_OFFSET);
+	writel(size, d->dma1 + IDMA_SRC_SIZE);
+	writel(size, d->dma1 + IDMA_IMG_SIZE);
+	writel((u32)d->fb_dma, d->dma1 + IDMA_IN_BASE_ADDR_Y);
+	writel((u32)d->fb_dma, d->dma1 + IDMA_IN_BASE_ADDR_C);
+	writel((readl(d->dma1 + IDMA_IN_CON) &
+		~(IDMA_IMG_FORMAT | IDMA_ROTATION | IDMA_AFBC_EN | IDMA_BLOCK_EN)) |
+	       FIELD_PREP(IDMA_IMG_FORMAT, IDMA_FMT_XRGB8888), d->dma1 + IDMA_IN_CON);
+	writel(size, d->dpp1 + DPP_IMG_SIZE);
+	writel(readl(d->dpp1 + DPP_IN_CON) & ~(DPP_ALPHA_SEL | DPP_IMG_FORMAT),
+	       d->dpp1 + DPP_IN_CON);
+	writel((readl(d->dpp1 + DPP_MAIN_H_RATIO) & ~GENMASK(23, 0)) | DPP_RATIO_1,
+	       d->dpp1 + DPP_MAIN_H_RATIO);
+	writel((readl(d->dpp1 + DPP_MAIN_V_RATIO) & ~GENMASK(23, 0)) | DPP_RATIO_1,
+	       d->dpp1 + DPP_MAIN_V_RATIO);
+	scnprintf(d->last, sizeof(d->last),
+		  "dma: fb %pad; en %08x in_con %08x out_con %08x src %08x img %08x base %08x err %08x; dpp en %08x in_con %08x img %08x",
+		  &d->fb_dma, readl(d->dma1 + IDMA_ENABLE), readl(d->dma1 + IDMA_IN_CON),
+		  readl(d->dma1 + IDMA_OUT_CON), readl(d->dma1 + IDMA_SRC_SIZE),
+		  readl(d->dma1 + IDMA_IMG_SIZE), readl(d->dma1 + IDMA_IN_BASE_ADDR_Y),
+		  d->dma1_sz >= 0x874 ? readl(d->dma1 + IDMA_CFG_ERR_STATE) : 0,
+		  readl(d->dpp1), readl(d->dpp1 + DPP_IN_CON), readl(d->dpp1 + DPP_IMG_SIZE));
+	return 0;
+}
+
 static int x9dp_m4regs_show(struct seq_file *s, void *unused)
 {
 	struct x9dp *d = s->private;
@@ -1216,6 +1624,9 @@ static const struct {
 	{ "dpcd", x9dp_dpcd }, { "edid", x9dp_edid }, { "train", x9dp_train },
 	{ "bist", x9dp_bist }, { "video_off", x9dp_video_off }, { "status", x9dp_status },
 	{ "lh", x9dp_lh }, { "m4dump", x9dp_m4dump }, { "off", x9dp_off },
+	{ "route", x9dp_route }, { "sram", x9dp_sram }, { "decon2", x9dp_decon2 },
+	{ "video", x9dp_video }, { "decon2_start", x9dp_decon2_start },
+	{ "decon2_stop", x9dp_decon2_stop }, { "dma", x9dp_dma },
 };
 
 static int x9dp_run(struct x9dp *d, const char *name)
@@ -1271,13 +1682,15 @@ static void x9dp_hpd_work(struct work_struct *work)
 			dev_info(d->dev, "EDID %02x: %16ph\n", i, d->edid + i);
 	/*
 	 * Every HPD rise: the sink lost the link while HPD was low, so the
-	 * video stops, the link is trained again and the bars restart; the
-	 * sink's view 100 ms into the video is logged.
+	 * video stops, the link is trained again and the bars restart (or,
+	 * with DECON2 running, its video); the sink's view 100 ms into the
+	 * video is logged.
 	 */
 	if (hpd_bist) {
 		if (d->video_on)
 			x9dp_run(d, "video_off");
-		if (x9dp_run(d, "train") == 0 && x9dp_run(d, "bist") == 0) {
+		if (x9dp_run(d, "train") == 0 &&
+		    x9dp_run(d, d->decon2_on ? "video" : "bist") == 0) {
 			mutex_unlock(&d->lock);
 			msleep(100);
 			mutex_lock(&d->lock);
@@ -1355,8 +1768,10 @@ static int x9dp_state_show(struct seq_file *s, void *unused)
 	seq_printf(s, "id %d pma %d phy %d ctrl %d; PHY %s; link %s\n", d->id_done, d->pma_on,
 		   d->phy_on, d->ctrl_on, x9dp_phy_ok(d) ? "not isolated" : "ISOLATED",
 		   x9dp_link_ok(d) ? "powered and clocked" : "OFF");
-	seq_printf(s, "link: rate %02x x%u, video %s\n", d->rate, d->rate ? d->nlanes : 0,
-		   d->video_on ? "on (colour bars)" : "off");
+	seq_printf(s, "link: rate %02x x%u, video %s; DECON2 %s\n", d->rate,
+		   d->rate ? d->nlanes : 0,
+		   !d->video_on ? "off" : d->vsrc_decon ? "on (DECON2)" : "on (colour bars)",
+		   d->decon2_on ? "started" : "stopped");
 	seq_printf(s, "last: %s\n", d->last);
 	if (d->vstat[0])
 		seq_printf(s, "vstat: %s\n", d->vstat);
@@ -1378,7 +1793,7 @@ static ssize_t x9dp_step_write(struct file *file, const char __user *ubuf, size_
 			       loff_t *ppos)
 {
 	struct x9dp *d = file->private_data;
-	char buf[16];
+	char buf[24];
 	int ret;
 
 	if (len >= sizeof(buf))
@@ -1431,6 +1846,8 @@ static void x9dp_unregister(void *data)
 	debugfs_remove_recursive(d->dbg);
 	mutex_lock(&d->lock);
 	x9dp_off(d);
+	if (d->fb_cpu)
+		dma_free_wc(d->dev, d->fb_sz, d->fb_cpu, d->fb_dma);
 	mutex_unlock(&d->lock);
 	typec_mux_unregister(d->mux);
 	typec_switch_unregister(d->sw);
@@ -1498,6 +1915,9 @@ static int x9dp_probe(struct platform_device *pdev)
 	d->dpp1 = x9dp_map_opt(pdev, "dpp1", &d->dpp1_sz);
 	d->dma_com = x9dp_map_opt(pdev, "dma-common", &d->dma_com_sz);
 	d->dpu_cmu = x9dp_map_opt(pdev, "dpu-cmu", NULL);
+	d->d0conn = x9dp_map_opt(pdev, "decon0-dp-conn", NULL);
+	d->d0conn_shd = x9dp_map_opt(pdev, "decon0-dp-conn-shadow", NULL);
+	d->dsys = x9dp_map_opt(pdev, "disp-sysreg-te", NULL);
 	ret = x9dp_read_pairs(dev, "samsung,link-power-status", iso, 2);
 	if (ret)
 		return ret;

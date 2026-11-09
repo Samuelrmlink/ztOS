@@ -113,9 +113,28 @@ sink drops HPD again about 7 s later if no link training follows.
 - `hpd_bist=1` (with `hpd_read=1`) trains and starts the bars right on HPD
   high.
 
-DECON2/IDMA (a real framebuffer) comes after, and will touch DECON0's
-registers (stock routes DECON2 through a DECON0 register). It will be
-proposed before it is built.
+**M4, DECON2 (dp13, dp14).** `m4dump` reads DECON2, DMA/DPP channel 1 and
+the DMA common block (debugfs `m4regs`) once the DPU power domain, DECON2's
+APB clock and the DPU/DMA/DPP Q-channels read on. dp14 adds the approved
+writes, each a manual step (`exynos9810-dp.c`, "M4: the approved writes"):
+
+| step | writes | stock |
+|---|---|---|
+| `route` | W1 DECON0 0x16030270 `DP_CONNECTION_CONTROL[2:0]` := 2 (RMW); W2 disp sysreg 0x16011010 `TE_QACTIVE_PLL_EN` := 1 | `decon_reg.c:609-611`, `:17-25` |
+| `sram` | W4 DECON2 0x30 := 0x01110000 (SRAM1-3) | `:219-259` |
+| `decon2` | DECON2 only: clock gating off, video mode, 1920x1080 sizes, HW trigger, RGB, path 0x008, OUTFIFO, 8 bpc, background `bg_rgb` | `:1789-1842` |
+| `video` | the link's video from DECON2 (no BIST) | `displayport_drv.c:2352-2403` |
+| `lh` | W5 SST1 LH power | `displayport_reg.c:1240-1258` |
+| `decon2_start` / `decon2_stop` | DECON2 on (RUN_STATUS) / off, LH off, soft reset | `decon_reg.c:1844-1864`, `:1937-1997` |
+| `dma` | W6 DMA/DPP channel 1 (IDMA_G1) on a 1920x1080 XRGB8888 test image | `dpp_reg.c:1310-1328`, `:1500-1510` |
+
+With no window on DECON2 its blender sends the background colour
+(`exynos9810_dp.bg_rgb`, default 0xff8000 orange), which is the visible
+test. Showing the DMA image needs a blender window, and the window
+registers sit in DECON0's space (`decon_reg_set_window_control`,
+`decon_reg.c:2221-2242`, `decon_write(0, ...)`): not in W1-W6, so they are
+proposed separately. Not written at all: W3 (DECON0 `CLOCK_CONTROL_0`
+TE_QACTIVE_PLL_ON) and the DMA common block.
 
 **Fallback: the PMA up before Enter Mode.** Stock's USB3 bring-up powers the
 combo PHY's PMA before the dock is asked to enter DP. If HPD stays low even
