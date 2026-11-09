@@ -53,6 +53,8 @@
 #include <linux/mutex.h>
 #include <linux/mfd/max77705-private.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
@@ -528,6 +530,10 @@ struct max77705_usbc {
 	bool dp_status_given;		/* it has had its Status Update answer */
 	struct typec_altmode *dp_port;	/* port altmode, SVID 0xff01 */
 	struct typec_altmode *dp_partner;
+	bool dp_sbu_early;		/* SBU switch set on at SVID discovery */
+	unsigned long dp_gate_t0;	/* jiffies then: Enter Mode waits from here */
+	bool dp_gate_logged;
+	struct delayed_work dp_gate_work;
 	struct delayed_work dp_work;
 	spinlock_t dp_lock;		/* dp_req, dp_req_conf (the ops' context) */
 	unsigned int dp_req;		/* DP_REQ_*, from the altmode driver */
@@ -2419,6 +2425,10 @@ static void usbc_dp_forget(struct max77705_usbc *u)
 	u->dp_status_valid = false;
 	u->dp_status_wanted = false;
 	u->dp_status_given = false;
+	if (u->dp_sbu_early && u->port)
+		typec_set_mode(u->port, TYPEC_STATE_USB);
+	u->dp_sbu_early = false;
+	u->dp_gate_logged = false;
 	u->dp_q_n = 0;
 	u->dp_tries = 0;
 	spin_lock_irqsave(&u->dp_lock, flags);
@@ -2744,9 +2754,26 @@ static int usbc_dp_register_port(struct max77705_usbc *u)
 	return 0;
 }
 
+static bool usbc_otg_host_up(struct max77705_usbc *u);
+
+#define DP_SBU_SETTLE_MS	100	/* stock: aux_onoff(1), then msleep(100) */
+#define DP_HOST_WAIT_MS		10000	/* stock: host_turn_on_wait_time, 10 s */
+
 /*
- * After usbc_typec_update(): the partner's DP altmode once Discover Modes
- * found it and we are DFP (typec_displayport binds only to a host port).
+ * After usbc_typec_update(), on the workqueue. Stock's order before Enter
+ * Mode (max77705_alternate.c:350-413, displayport_drv.c:2960-2975):
+ *
+ *  1. at Discover SVIDs with 0xff01, the SBU switch on (select from the
+ *     orientation, then output enable) and 100 ms;
+ *  2. the USB host up: stock forces it and blocks up to 10 s for it;
+ *  3. only then Discover Modes' result is acted on: Enter Mode.
+ *
+ * Here: 1 by putting the port's mux in a DP state through the class (the DT
+ * says what that mux is: the gpio-sbu-mux on the SBU port); 2 and 3 by
+ * registering the partner's DP altmode, which is what makes typec_displayport
+ * send Enter Mode, only once 100 ms have passed and the USB host is up
+ * (usbc_otg_host_up), or 10 s have passed without it, as stock goes on then
+ * too. Rechecked from dp_gate_work until then.
  */
 static void usbc_dp_update(struct max77705_usbc *u)
 {
@@ -2754,11 +2781,44 @@ static void usbc_dp_update(struct max77705_usbc *u)
 		.svid = USB_TYPEC_DP_SID,
 		.mode = USB_TYPEC_DP_MODE,
 	};
+	unsigned long settle, waited;
+	bool host;
 
-	if (!u->dp_port || !u->partner || u->dp_partner || !u->dp_mode_found)
+	if (!u->dp_port || !u->partner || u->dp_partner)
 		return;
 	if (!(u->st[ST(REG_PD_STATUS1)] & PD1_DATAROLE))
 		return;
+	if (!u->dp_sbu_early && (u->dp_svid0 == USB_TYPEC_DP_SID || u->dp_mode_found)) {
+		int ret = typec_set_mode(u->port, TYPEC_DP_STATE_D);
+
+		u->dp_sbu_early = true;
+		u->dp_gate_t0 = jiffies;
+		dev_info(u->dev, "DP: SBU switch on at SVID discovery, as stock (%d)\n", ret);
+	}
+	if (!u->dp_mode_found || !u->dp_sbu_early)
+		return;
+
+	settle = u->dp_gate_t0 + msecs_to_jiffies(DP_SBU_SETTLE_MS);
+	if (time_before(jiffies, settle)) {
+		mod_delayed_work(u->wq, &u->dp_gate_work, settle - jiffies);
+		return;
+	}
+	host = usbc_otg_host_up(u);
+	waited = jiffies_to_msecs(jiffies - u->dp_gate_t0);
+	if (!host && waited < DP_HOST_WAIT_MS) {
+		if (!u->dp_gate_logged)
+			dev_info(u->dev, "DP: Enter Mode waits for the USB host (up to %d s, as stock)\n",
+				 DP_HOST_WAIT_MS / 1000);
+		u->dp_gate_logged = true;
+		mod_delayed_work(u->wq, &u->dp_gate_work, msecs_to_jiffies(200));
+		return;
+	}
+	if (host)
+		dev_info(u->dev, "DP: USB host up %lu ms after SVID discovery\n", waited);
+	else
+		dev_warn(u->dev, "DP: no USB host after %lu ms; entering the mode anyway, as stock\n",
+			 waited);
+
 	desc.vdo = u->dp_mode_vdo;
 	u->dp_partner = typec_partner_register_altmode(u->partner, &desc);
 	if (IS_ERR(u->dp_partner)) {
@@ -2767,6 +2827,15 @@ static void usbc_dp_update(struct max77705_usbc *u)
 		return;
 	}
 	dev_info(u->dev, "DP: partner altmode registered (mode %08x)\n", u->dp_mode_vdo);
+}
+
+static void usbc_dp_gate_work(struct work_struct *work)
+{
+	struct max77705_usbc *u = container_of(to_delayed_work(work),
+					       struct max77705_usbc, dp_gate_work);
+
+	if (!READ_ONCE(u->stopping))
+		usbc_dp_update(u);
 }
 
 static void usbc_typec_drop_pd(struct max77705_usbc *u)
@@ -2985,6 +3054,7 @@ static void usbc_dp_events(struct max77705_usbc *u, u8 pd_int, u8 vdm_int) { }
 static void usbc_dp_discovered(struct max77705_usbc *u, u8 sub, const u8 *r) { }
 static void usbc_dp_update(struct max77705_usbc *u) { }
 static void usbc_dp_work(struct work_struct *work) { }
+static void usbc_dp_gate_work(struct work_struct *work) { }
 #endif
 
 /* ---- VDM results (vdm_discovery) ------------------------------------------ */
@@ -3287,6 +3357,37 @@ static void usbc_otg_stop(struct max77705_usbc *u, bool put)
 		usb_role_switch_put(o->sw);
 		o->sw = NULL;
 	}
+}
+
+static int usbc_xhci_bound(struct device *dev, void *unused)
+{
+	return !strncmp(dev_name(dev), "xhci-hcd", 8) && device_is_bound(dev);
+}
+
+/*
+ * The USB host is up: our role is host and the controller's xHCI device
+ * (a child of the dwc3 our usb-role-switch phandle names) has its driver.
+ * What DP's Enter Mode waits on (stock: host_turn_on_event). The OTG work
+ * may refine what "up" means here; callers only need the bool.
+ */
+static bool __maybe_unused usbc_otg_host_up(struct max77705_usbc *u)
+{
+	struct platform_device *pdev;
+	struct device_node *np;
+	bool up;
+
+	if (u->otg.role != USB_ROLE_HOST)
+		return false;
+	np = of_parse_phandle(u->dev->of_node, "usb-role-switch", 0);
+	if (!np)
+		return true;	/* nothing more to look at: the role is set */
+	pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!pdev)
+		return false;
+	up = device_for_each_child(&pdev->dev, NULL, usbc_xhci_bound) > 0;
+	put_device(&pdev->dev);
+	return up;
 }
 
 /* ---- events --------------------------------------------------------------- */
@@ -3835,6 +3936,7 @@ static void usbc_stop_work(void *data)
 	cancel_work_sync(&u->event_work);
 	cancel_delayed_work_sync(&u->hv_work);
 	cancel_delayed_work_sync(&u->dp_work);
+	cancel_delayed_work_sync(&u->dp_gate_work);
 	if (IS_ENABLED(CONFIG_TYPEC))
 		cancel_delayed_work_sync(&u->typec_work);
 	usbc_otg_stop(u, true);
@@ -3872,6 +3974,7 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	INIT_DELAYED_WORK(&u->poll_work, usbc_poll_work);
 	INIT_DELAYED_WORK(&u->hv_work, usbc_hv_work);
 	INIT_DELAYED_WORK(&u->dp_work, usbc_dp_work);
+	INIT_DELAYED_WORK(&u->dp_gate_work, usbc_dp_gate_work);
 	spin_lock_init(&u->dp_lock);
 	i2c_set_clientdata(client, u);
 	u->log = devm_kcalloc(dev, LOG_N, sizeof(*u->log), GFP_KERNEL);

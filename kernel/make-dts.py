@@ -44,6 +44,7 @@ ap.add_argument("--gpu", action="store_true")
 ap.add_argument("--decon", action="store_true")
 ap.add_argument("--wlan", action="store_true")
 ap.add_argument("--dp-altmode", action="store_true")
+ap.add_argument("--dp-tx", action="store_true")
 ap.add_argument("--fallback", choices=("boot", "recovery"), default="boot")
 args = ap.parse_args()
 
@@ -270,7 +271,7 @@ USBC_INSIDE = """
 					#address-cells = <1>;
 					#size-cells = <0>;
 
-					port@2 {	/* SBU */
+@PORT1@					port@2 {	/* SBU */
 						reg = <2>;
 						usbc_sbu: endpoint {
 							remote-endpoint = <&sbu_mux_in>;
@@ -292,6 +293,50 @@ def usbc_append(inside):
     s = s[:close] + "\n" + inside.rstrip("\n") + s[close:]
 
 
+# --dp-tx: the DP TX (kernel/exynos9810-dp.c) as a mode/orientation switch on
+# the connector's SuperSpeed port. Without the driver built the port would
+# wait for that switch for ever, so the two go together.
+DP_TX_PORT = """					port@1 {	/* SuperSpeed lanes: the combo PHY, DP side */
+						reg = <1>;
+						usbc_ss: endpoint {
+							remote-endpoint = <&dp_ss_in>;
+						};
+					};
+
+"""
+DP_TX_NODE = """
+&soc {
+	/*
+	 * DP TX (kernel/exynos9810-dp.c, bring-up). Stock: displayport@0x11090000
+	 * (reg 0x11090000 size 0xffff, SPI 248, pd-dpu), the DP side of the
+	 * combo PHY at 0x110a0000 (usbdrd_phy0 reg[1]), PHY isolation PMU 0x704
+	 * bit 0 (isolation = <0x704>; 1 = not isolated). Lane maps per CC
+	 * orientation, normal first: stock displayport_reg.c:1225-1230 with
+	 * dp_sw_sel = gpg0-4, which reads 1 with CC1 (normal) on this phone; a
+	 * 2-lane assignment (pin D) uses PMA lanes 2+3 normal, 0+1 reverse
+	 * (:189-217).
+	 */
+	displayport@11090000 {
+		compatible = "samsung,exynos9810-dp";
+		reg = <0x11090000 0x10000>, <0x110a0000 0x1000>;
+		reg-names = "link", "phy";
+		interrupts = <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
+		samsung,usb-phy = <&usbdrd_phy>;
+		samsung,pmu-syscon = <&pmu_system_controller>;
+		samsung,phy-isolation = <0x704 0x1>;
+		samsung,lane-map = <3 2 0 1>, <0 1 3 2>;
+		samsung,two-lane-lanes = <2 3>, <0 1>;
+		orientation-switch;
+		mode-switch;
+
+		port {
+			dp_ss_in: endpoint {
+				remote-endpoint = <&usbc_ss>;
+			};
+		};
+	};
+};
+"""
 ROOT_NODES = """
 /* ---- USB-C SBU switch and the PCAL6524 expander (make-dts.py --dp-altmode) ---- */
 / {
@@ -357,8 +402,12 @@ ROOT_NODES = """
 if args.dp_altmode:
     if not args.power:
         sys.exit("make-dts: --dp-altmode needs --power (the MAX77705 USB-C node)")
-    usbc_append(USBC_INSIDE)
+    usbc_append(USBC_INSIDE.replace("@PORT1@", DP_TX_PORT if args.dp_tx else ""))
     s += ROOT_NODES
+    if args.dp_tx:
+        s += DP_TX_NODE
+elif args.dp_tx:
+    sys.exit("make-dts: --dp-tx needs --dp-altmode")
 # ---- end USB-C connector and DisplayPort Alt Mode ---------------------------
 
 # ---- USB OTG (otg agent): the board's host-mode wiring ----------------------

@@ -29,6 +29,9 @@
 #                                private kernel tree (KSRC=, e.g. a reflink copy of
 #                                build/linux-7.1): the shared tree's out/.config is what
 #                                every other build's module ABI check reads
+#     --dp-tx                    with --dp-altmode: the DP TX bring-up driver
+#                                (kernel/exynos9810-dp.c, combo PHY DP mode + AUX by
+#                                hand through debugfs) and its DT node
 #     --release-suffix -TAG      replaces --dp-altmode's -dp in the release
 #                                (-dp2: 7.1.0-zboot-wd-dp2): a test kernel whose ABI
 #                                differs from one on the phone gets its own release and
@@ -76,7 +79,7 @@ FALLBACK=boot
 DTS_FLAGS=()
 EXTRA=
 WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
-UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID= DPALT= RELSUFFIX=
+UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID= DPALT= DPTX= RELSUFFIX=
 CONFIG_ONLY= MODULES= MODCHECK=1
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -92,6 +95,7 @@ while [ $# -gt 0 ]; do
 	--waydroid) WAYDROID=1 ;;
 	--dp-altmode) DTS_FLAGS+=(--dp-altmode); DPALT=1 ;;
 	--release-suffix) RELSUFFIX=$2; shift ;;
+	--dp-tx) DTS_FLAGS+=(--dp-tx); DPTX=1 ;;
 	--config-only) CONFIG_ONLY=1 ;;
 	--modules) MODULES=$(realpath -m "$2"); shift ;;
 	--no-module-check) MODCHECK= ;;
@@ -108,6 +112,7 @@ if [ -n "$RELSUFFIX" ]; then
 	[[ "$RELSUFFIX" =~ ^-[a-z0-9]+$ ]] || { echo "--release-suffix: -[a-z0-9]+, not '$RELSUFFIX'" >&2; exit 1; }
 	[ -n "$DPALT" ] || { echo "--release-suffix is for --dp-altmode test kernels" >&2; exit 1; }
 fi
+[ -z "$DPTX" ] || [ -n "$DPALT" ] || { echo "--dp-tx needs --dp-altmode" >&2; exit 1; }
 if [ -n "$DPALT" ] && [ "$SRC" = "$(realpath -m "$B/linux-7.1")" ]; then
 	echo "--dp-altmode builds in a private tree, not the shared $SRC:" >&2
 	echo "  cp -a --reflink=always $B/linux-7.1 $B/linux-7.1-dp; KSRC=$B/linux-7.1-dp $0 ..." >&2
@@ -181,6 +186,10 @@ python3 "$ROOT/kernel/patch-max77705-usbc.py" "$SRC"
 # --dp-altmode only (its private tree): typec switch/mux lookups defer when the
 # switch is not registered yet, instead of reporting "none" (a mainline bug)
 [ -z "$DPALT" ] || python3 "$ROOT/kernel/patch-typec-mux-defer.py" "$SRC"
+# --dp-altmode: the SBU switch stays on in the USB Safe State, as on stock;
+# --dp-tx: the Exynos 9810 DP TX bring-up driver (combo PHY DP mode, AUX)
+[ -z "$DPALT" ] || python3 "$ROOT/kernel/patch-gpio-sbu-mux-safe.py" "$SRC"
+[ -z "$DPTX" ] || python3 "$ROOT/kernel/patch-exynos9810-dp.py" "$SRC"
 
 echo "=== initramfs ==="
 LIST=$B/initramfs.list
@@ -320,9 +329,15 @@ fi
 if [ -n "$DPALT" ]; then
 	cfg --enable TYPEC_DP_ALTMODE
 	cfg --enable TYPEC_MUX_GPIO_SBU
+	if [ -n "$DPTX" ]; then
+		cfg --enable DRM_EXYNOS9810_DP
+	else
+		cfg --disable DRM_EXYNOS9810_DP
+	fi
 else
 	cfg --disable TYPEC_DP_ALTMODE
 	cfg --disable TYPEC_MUX_GPIO_SBU
+	cfg --disable DRM_EXYNOS9810_DP
 fi
 if [ -n "$GPU" ]; then
 	cfg --enable DRM_PANFROST

@@ -32,6 +32,38 @@ typec_displayport ── drm_connector_oob_hotplug_event(HPD) ──► DP contr
                                                              DECON2 0x16050000 → DP
 ```
 
+### Order before Enter Mode (as stock)
+
+On the S9, a dock raised HPD for stock while ours stayed at HPD low (dp3).
+Stock's DP PHY and AUX are powered only after HPD, so they are not the
+difference. What stock does before Enter Mode is (`max77705_alternate.c:350-413`,
+`displayport_drv.c:2960-2975`):
+
+1. When Discover SVIDs finds 0xff01, it turns the SBU switch on (select
+   from the orientation, then output enable) and waits 100 ms.
+2. It forces the USB host on and waits up to 10 s for it.
+3. Only then does it act on Discover Modes and send Enter Mode.
+
+The SBU switch then stays on through Enter Mode and Configure until unplug.
+
+We do the same:
+
+- At SVID discovery, max77705-usbc puts the port's mux in a DP state through
+  the typec class.
+- It registers the partner's DP altmode, which is what makes
+  typec_displayport send Enter Mode, only once 100 ms have passed and the USB
+  host is up (`usbc_otg_host_up()`: role host and the xHCI bound), or after
+  10 s anyway, as stock.
+- `kernel/patch-gpio-sbu-mux-safe.py` (`--dp-altmode` builds) makes
+  gpio-sbu-mux leave the switch as it is in the USB Safe State, which
+  typec_displayport sets around Enter and Configure.
+
+The DP TX bring-up driver (`kernel/exynos9810-dp.c`: combo PHY DP mode and
+AUX, phases run by hand through debugfs `exynos9810-dp/step`, every PHY
+access behind the PMU isolation check) is built with `--dp-tx` only. With it
+come its DT node and the connector's SuperSpeed port (port@1). That port
+would otherwise wait for a switch that never comes.
+
 The MAX77705 side follows Samsung's S9 code byte for byte
 (`drivers/ccic/max77705_alternate.c`). The firmware runs discovery itself
 once 0x55 = 3. The AP sends Enter Mode and DP Configure with 0x48. The
