@@ -197,14 +197,18 @@ card would have come first). A 60 Hz vblank timer paces the page flips.
   `desktop mode WxH[@HZ]|preferred` on its control pipe; 1280x720@60 and
   1920x1080@30 tested live.
 - `exynos9810_dp.vsync_irq=1` (before the card registers) gives DRM vblank
-  from the link's VSYNC_DET interrupt instead of a 60 Hz timer (tested:
-  the interrupt counts, the desktop shows).
+  from the link's VSYNC_DET interrupt instead of a 60 Hz timer. Stress
+  (dp40): 21 HPD cycles over 1080p60, 720p60 and 1080p30, the interrupts
+  flowing in every one, no flip or vblank timeouts.
 - `scripts/build-boot.sh --dp-altmode --dp-tx` alone gives the command line
   the desktop needs (`max77705_usbc.dp_altmode=1 exynos9810_dp.hpd_read=1
-  exynos9810_dp.drm_auto=1`).
-- The Belkin dock's Ethernet (RTL8153, 0bda:8153) enumerates but has no
-  driver: CONFIG_USB_NET_DRIVERS is off; it needs CONFIG_USB_NET_DRIVERS=y
-  and CONFIG_USB_RTL8152 (a new module set).
+  exynos9810_dp.drm_auto=1 exynos9810_dp.vsync_irq=1`).
+- Settings → display → desktop mode → Monitor resolution writes
+  `monitor_mode` and tells the shell.
+- The dock's Ethernet: `build-boot.sh --usb-net` (its own release, e.g.
+  7.1.0-zboot-wd-dp5 for dp38-dp40) builds usbnet, CDC Ethernet/NCM,
+  RTL8152/8153 and AX88179 as modules into the set; the Belkin's RTL8153
+  comes up as `enu1u4` under NetworkManager.
 
 **Fallback: the PMA up before Enter Mode.** Stock's USB3 bring-up powers the
 combo PHY's PMA before the dock is asked to enter DP. If HPD stays low even
