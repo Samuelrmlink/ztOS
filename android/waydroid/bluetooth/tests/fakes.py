@@ -25,6 +25,7 @@ class FakeBackend:
         self.pending = []      # (name, args, ok, err): answered by the test
         self.timers = []
         self.relays = []
+        self.peers = []          # connected LE centrals (server_peers)
         self.powered = True
         self.devs = {
             AIRPODS: {"Address": AIRPODS, "AddressType": "public", "Name": "AirPods", "Alias": "AirPods",
@@ -93,6 +94,19 @@ class FakeBackend:
 
     def mtu(self, addr):
         return 247
+
+    def serve(self, svc_id, tree, ok, err):
+        self._later("serve", [svc_id, tree], ok, err)
+
+    def unserve(self, svc_id):
+        self.calls.append(("unserve", svc_id))
+
+    def server_value(self, svc_id, handle, value, indicate):
+        self.calls.append(("server_value", svc_id, handle, value, indicate))
+        return True
+
+    def server_peers(self):
+        return list(self.peers)
 
     def advertise(self, adv_id, props, ok, err):
         self._later("advertise", [adv_id, props], ok, err)

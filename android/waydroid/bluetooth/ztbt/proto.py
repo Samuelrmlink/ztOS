@@ -92,6 +92,13 @@ OPS = {
     "ADV_SET_DATA":    (0x0061, "yBb", ""),        # id, scan response?, AD
     "ADV_ENABLE":      (0x0062, "yBq", ""),        # id, on, duration
     "ADV_STOP":        (0x0063, "y", ""),
+    # GATT server (stage 2). A service: its elements in Android's order, each
+    # (type DB_*, UUID, properties, permissions); the reply gives the handles
+    # Android uses for them (the bridge's, not BlueZ's ATT handles).
+    "SERVER_ADD":      (0x0070, "L(yUqq)", "uLq"), # -> service id, handles
+    "SERVER_REMOVE":   (0x0071, "u", ""),          # service id
+    "SERVER_RESPONSE": (0x0072, "uyb", ""),        # request id, ATT status (0: ok), value
+    "SERVER_NOTIFY":   (0x0073, "uqBb", ""),       # conn, handle, confirm (indication), value
     # events, bridge -> shim
     "EV_ADAPTER":      (0x8001, "Bs", None),       # powered, name
     "EV_DEVICE_FOUND": (0x8010, "T(aysuyyBLU)iib", None),  # device, rssi, tx power (127: unknown), AD structures
@@ -101,6 +108,12 @@ OPS = {
     "EV_LINK":         (0x8030, "uuBq", None),     # link, status, connected, mtu
     "EV_GATT_VALUE":   (0x8031, "uqb", None),      # link, handle, value (notification or indication)
     "EV_ADV_STOPPED":  (0x8040, "yu", None),       # advertiser id, why (ST_TIMEOUT: its duration ran out)
+    # a remote central as Android's GATT server sees it: conn, address, connected
+    "EV_SERVER_CONN":  (0x8050, "uaB", None),
+    "EV_SERVER_READ":  (0x8051, "uuqq", None),     # conn, request id, handle, offset
+    # conn, request id (0: no response wanted), handle, offset, need response, value
+    "EV_SERVER_WRITE": (0x8052, "uuqqBb", None),
+    "EV_SERVER_MTU":   (0x8053, "uq", None),       # conn, mtu
 }
 BY_NUMBER = {v[0]: k for k, v in OPS.items()}
 REPLY = OPS["REPLY"][0]

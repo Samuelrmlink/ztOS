@@ -178,6 +178,34 @@ void NotifyCb(int conn, const btgatt_notify_params_t& p) {
 void MtuCb(int, int status, int mtu) { Log("mtu " + std::to_string(mtu)); }
 void RssiCb(int, const RawAddress&, int rssi, int status) { Log("rssi " + std::to_string(rssi)); }
 
+// ---- GATT server callbacks ----
+int server_conn = 0, server_trans = 0;
+void SrvRegCb(int status, int server_if, const bluetooth::Uuid&) {
+  Log("server registered " + std::to_string(server_if) + " " + std::to_string(status));
+}
+void SrvConnCb(int conn, int server_if, int connected, const RawAddress& a) {
+  server_conn = conn;
+  Log("server conn " + A(a) + " " + std::to_string(connected));
+}
+void SrvAddedCb(int status, int server_if, const btgatt_db_element_t* els, size_t n) {
+  std::string s = "service added " + std::to_string(status);
+  for (size_t i = 0; i < n; i++) s += " " + std::to_string(els[i].attribute_handle);
+  Log(s);
+}
+void SrvDeletedCb(int status, int, int handle) { Log("service deleted " + std::to_string(status)); }
+void SrvReadCb(int conn, int trans, const RawAddress& a, int handle, int offset, bool) {
+  server_trans = trans;
+  Log("server read " + std::to_string(handle) + " from " + A(a));
+}
+void SrvWriteDescCb(int conn, int trans, const RawAddress& a, int handle, int, bool need, bool, const uint8_t* v,
+                    size_t n) {
+  char hex[8] = "";
+  if (n >= 2) snprintf(hex, sizeof hex, "%02x%02x", v[0], v[1]);
+  Log("server desc write " + std::to_string(handle) + " " + hex + (need ? " need" : ""));
+}
+void SrvIndSentCb(int conn, int status) { Log("indication sent " + std::to_string(status)); }
+void SrvMtuCb(int conn, int mtu) { Log("server mtu " + std::to_string(mtu)); }
+
 btgatt_client_callbacks_t client_cbs;
 btgatt_server_callbacks_t server_cbs;
 btgatt_callbacks_t gatt_cbs;
@@ -260,6 +288,14 @@ int main() {
   client_cbs.notify_cb = NotifyCb;
   client_cbs.configure_mtu_cb = MtuCb;
   client_cbs.read_remote_rssi_cb = RssiCb;
+  server_cbs.register_server_cb = SrvRegCb;
+  server_cbs.connection_cb = SrvConnCb;
+  server_cbs.service_added_cb = SrvAddedCb;
+  server_cbs.service_deleted_cb = SrvDeletedCb;
+  server_cbs.request_read_characteristic_cb = SrvReadCb;
+  server_cbs.request_write_descriptor_cb = SrvWriteDescCb;
+  server_cbs.indication_sent_cb = SrvIndSentCb;
+  server_cbs.mtu_changed_cb = SrvMtuCb;
   gatt_cbs.size = sizeof gatt_cbs;
   gatt_cbs.client = &client_cbs;
   gatt_cbs.server = &server_cbs;
@@ -337,6 +373,50 @@ int main() {
   RawAddress lock = Addr(LOCK);
   Expect(bt->remove_bond(&lock) == BT_STATUS_FAIL, "remove a Linux bond refused");
   Expect(bt->remove_bond(&sensor) == BT_STATUS_SUCCESS, "remove the bond Android made");
+
+  // ---- GATT server: a heart-rate service; the harness's central reads and subscribes
+  gatt->server->register_server(bluetooth::Uuid::From128BitBE(bluetooth::Uuid::UUID128Bit{}), false);
+  std::string sreg = Wait("server registered ");
+  int server_if = atoi(sreg.c_str() + 18);
+  auto u16 = [](uint16_t s) {
+    bluetooth::Uuid::UUID128Bit b = {0, 0, (uint8_t)(s >> 8), (uint8_t)s, 0, 0, 0x10, 0, 0x80, 0, 0, 0x80, 0x5f, 0x9b, 0x34, 0xfb};
+    return bluetooth::Uuid::From128BitBE(b);
+  };
+  btgatt_db_element_t svc[4];
+  memset(svc, 0, sizeof svc);
+  svc[0].type = BTGATT_DB_PRIMARY_SERVICE;
+  svc[0].uuid = u16(0x180d);
+  svc[1].type = BTGATT_DB_CHARACTERISTIC;
+  svc[1].uuid = u16(0x2a37);
+  svc[1].properties = 0x12;   // read, notify
+  svc[1].permissions = 0x01;
+  svc[2].type = BTGATT_DB_DESCRIPTOR;
+  svc[2].uuid = u16(0x2902);
+  svc[2].permissions = 0x11;
+  svc[3].type = BTGATT_DB_CHARACTERISTIC;
+  svc[3].uuid = u16(0x2a39);
+  svc[3].properties = 0x08;
+  svc[3].permissions = 0x10;
+  gatt->server->add_service(server_if, svc, 4);
+  std::string added = Wait("service added ");
+  Expect(added == "service added 0 1 2 3 4", "service handles");
+  Wait(std::string("server conn ") + SENSOR + " 1");
+  Wait("server mtu 185");
+  Wait("server read 2 from " + std::string(SENSOR));
+  btgatt_response_t rsp;
+  memset(&rsp, 0, sizeof rsp);
+  rsp.attr_value.handle = 2;
+  rsp.attr_value.len = 2;
+  rsp.attr_value.value[0] = 0x00;
+  rsp.attr_value.value[1] = 0x48;
+  gatt->server->send_response(server_conn, server_trans, 0, rsp);
+  Wait("server desc write 3 0100");   // the central subscribed: Android sees its CCCD written
+  uint8_t hr[2] = {0x00, 0x50};
+  gatt->server->send_indication(server_if, 2, server_conn, 0, hr, 2);
+  Wait("indication sent 0");
+  gatt->server->delete_service(server_if, 1);
+  Wait("service deleted 0");
+  gatt->server->unregister_server(server_if);
 
   // ---- Classic RFCOMM: an SPP printer (the harness's printer echoes)
   auto* sock = (const btsock_interface_t*)bt->get_profile_interface(BT_PROFILE_SOCKETS_ID);

@@ -92,6 +92,31 @@ class AutoBackend(FakeBackend):
         GLib.io_add_watch(printer.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, echo)
         GLib.idle_add(lambda: (ok(ours.detach(), 1), False)[-1])
 
+    def serve(self, svc_id, tree, ok, err):
+        """BlueZ takes the application; then a central (the sensor) reads the
+        first characteristic and subscribes to it."""
+        self.calls.append(("serve", svc_id, tree))
+        GLib.idle_add(lambda: (ok(), False)[-1])
+        char = next(n["handle"] for n in tree if n["kind"] == "char")
+
+        def central():
+            self.core.server_read(svc_id, char, SENSOR, 0, 185,
+                                  lambda v: self.calls.append(("served_read", v)),
+                                  lambda e: self.calls.append(("served_error", e)))
+            GLib.timeout_add(50, lambda: (self.core.server_notify_state(svc_id, char, True), False)[-1])
+            return False
+        GLib.timeout_add(50, central)
+
+    def unserve(self, svc_id):
+        self.calls.append(("unserve", svc_id))
+
+    def server_value(self, svc_id, handle, value, indicate):
+        self.calls.append(("server_value", svc_id, handle, value, indicate))
+        return True
+
+    def server_peers(self):
+        return [SENSOR]
+
     def advertise(self, adv_id, props, ok, err):
         self.calls.append(("advertise", adv_id, props))
         GLib.idle_add(lambda: (ok(None), False)[-1])
@@ -156,6 +181,14 @@ class ShimHostTest(unittest.TestCase):
         self.assertIn(("remove", SENSOR), be.calls)
         self.assertNotIn(("remove", LOCK), be.calls)
         self.assertFalse([c for c in be.calls if c[0] == "connect" and c[1] != SENSOR])
+        # GATT server: BlueZ got the service without the CCCD; the central's read
+        # was answered with Android's value; Android's notification went out
+        (_, svc_id, tree), = [c for c in be.calls if c[0] == "serve"]
+        self.assertEqual([n["kind"] for n in tree], ["service", "char", "char"])
+        self.assertIn(("served_read", b"\x00\x48"), be.calls)
+        self.assertIn(("server_value", svc_id, 2, b"\x00\x50", False), be.calls)
+        self.assertIn(("unserve", svc_id), be.calls)
+        self.assertEqual(bridge.services, {})
         # advertising: one set, its fields read back from Android's AD, then stopped
         advs = [c for c in be.calls if c[0] == "advertise"]
         self.assertEqual(len(advs), 2)                     # started, and again after enable off/on

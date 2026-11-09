@@ -664,7 +664,63 @@ broadcast through BlueZ 5.87 (`ActiveInstances` 0 → 1 → 0). The shim's path
 is covered by `test_shim_host.py`. Not tested inside Android yet: the image
 on the phone still has the RFCOMM build of the wrapper.
 
-Next: the GATT server (`GattManager1.RegisterApplication`).
+### GATT server (stage 2, second half)
+
+`BluetoothGattServer.addService` reaches `btgatt_server_interface_t::add_service`.
+
+**Services.** The shim sends `SERVER_ADD` with the service's elements (type,
+UUID, properties, permissions). The bridge (`ztbt/gatts.py`) exports them as
+one BlueZ GATT application (`ztbt/gattapp.py`: an ObjectManager root, a
+`GattService1`, its `GattCharacteristic1`s and `GattDescriptor1`s) and
+registers it with `GattManager1.RegisterApplication`.
+
+- Properties become BlueZ flags. The permissions add `encrypt-read`,
+  `encrypt-write` and the authenticated variants: BlueZ enforces them, and
+  pairs through its own agent if it must.
+- The handles Android sees are the bridge's. The ATT handles on the air are
+  BlueZ's.
+- One service per application; deleting it unregisters it. Included
+  services are refused.
+
+**Requests.** bluetoothd's `ReadValue`/`WriteValue` calls (only taken from
+bluetoothd's bus name) become `request_read_*`/`request_write_*`, carrying a
+request id that the app answers with `sendResponse` (`SERVER_RESPONSE`). An
+ATT status from the app becomes the matching BlueZ error. Unanswered after
+25 s, BlueZ gets "unlikely error". Write-without-response is acknowledged at
+once.
+
+**Notifications.** BlueZ owns every CCCD (it makes one for each
+characteristic that notifies or indicates), so the 0x2902 descriptors Android
+declares aren't exported. BlueZ's `StartNotify`/`StopNotify` (first central
+subscribed, last one left) become the CCCD writes (`01 00`, `02 00`, `00 00`)
+Android apps wait for, attributed to the connected central. With several
+centrals that is a guess: BlueZ doesn't say which one subscribed.
+`notifyCharacteristicChanged` becomes a `Value` change, and BlueZ notifies or
+indicates each subscribed central as it subscribed. The indication-sent
+callback comes when the value is handed to BlueZ, not on each central's
+confirmation.
+
+**Connections.** A remote central becomes a connection of Android's servers
+only when it first touches one of their attributes (`EV_SERVER_CONN`, with
+the MTU). Devices that only use Linux's services, such as the AirPods, never
+show up in Android. Disconnection comes from BlueZ's `Connected`. A server
+can't connect out (`connect` refused); `cancelConnection` does nothing.
+
+**Lifetime.** A freeze or the adapter going off unregisters Android's
+services (centrals see Service Changed), and a thaw registers them again.
+Android's Bluetooth going off or the shim going away removes them.
+
+**Tested on the PC:**
+
+- the core against the fake BlueZ (`tests/test_gatts.py`);
+- the D-Bus objects on a private bus (`tests/test_gattapp.py`): what
+  bluetoothd reads with `GetManagedObjects`, async reads and writes, only
+  bluetoothd's calls taken, the `Value` signal;
+- the shim end to end (`test_shim_host.py`): a heart-rate service added,
+  a central's read answered by the app, its subscription seen as a CCCD
+  write, a notification sent, the service deleted.
+
+Not on the phone yet.
 
 ### Stages
 

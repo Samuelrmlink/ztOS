@@ -4,8 +4,7 @@
 // the host, which uses BlueZ. See docs/waydroid.md, "Bluetooth for Android
 // apps". Stage 1: adapter, bonded devices, LE scan and discovery, GATT client,
 // pairing through BlueZ; Classic RFCOMM client sockets (stage 3); LE
-// advertising sets (stage 2). The GATT server still refuses; no listening
-// sockets yet.
+// advertising sets and GATT servers (stage 2). No listening sockets yet.
 //
 // What this never does: talk HCI (dut_mode_send, le_test_mode refuse), hold
 // or pass link keys, or ask Android for a PIN or a confirmation (pin_request
@@ -52,6 +51,12 @@ constexpr int kGattReqNotSupported = 0x06;
 constexpr int kDiscoveryMs = 12800;   // what Android's inquiry lasts
 
 Uuid UuidFrom(const std::array<uint8_t, 16>& be) { return Uuid::From128BitBE(be); }
+
+std::array<uint8_t, 16> UuidBEOf(const Uuid& u) {
+  std::array<uint8_t, 16> a;
+  memcpy(a.data(), &u, 16);   // Uuid keeps its 128 bits big endian
+  return a;
+}
 
 RawAddress AddrFrom(const Value& v) {
   RawAddress a;
@@ -176,6 +181,14 @@ struct State {
   // advertising sets: what to call when one ends by itself
   std::map<uint8_t, BleAdvertiserInterface::IdStatusCallback> adv_set_timeout;
   std::map<uint8_t, BleAdvertiserInterface::StatusCallback> adv_enable_timeout;
+
+  // GATT servers: Android's server apps, its services (by their first handle),
+  // what kind each handle is, and the centrals the bridge has introduced
+  int next_server = 1;
+  std::set<int> servers;
+  std::map<int, std::pair<int, uint32_t>> services;   // service handle -> (server_if, bridge service id)
+  std::map<int, uint8_t> handle_kind;
+  std::map<uint32_t, RawAddress> server_conns;
 
   // discovery and scanning
   bool le_scan = false;
@@ -411,6 +424,11 @@ void OnLink(const Values& v) {
   }
 }
 
+void OnServerConn(const Values& v);
+void OnServerRead(const Values& v);
+void OnServerWrite(const Values& v);
+void OnServerMtu(const Values& v);
+
 void OnAdvStopped(const Values& v) {
   uint8_t id = (uint8_t)v[0].num();
   // its duration ran out: a normal end (0); taken away (freeze, adapter off): an error
@@ -464,6 +482,10 @@ int Init(bt_callbacks_t* callbacks, bool, bool, int, const char**, bool, const c
   c->OnEvent(ZTBT_OP_EV_LINK, ZTBT_SIG_EV_LINK, OnLink);
   c->OnEvent(ZTBT_OP_EV_GATT_VALUE, ZTBT_SIG_EV_GATT_VALUE, OnValue);
   c->OnEvent(ZTBT_OP_EV_ADV_STOPPED, ZTBT_SIG_EV_ADV_STOPPED, OnAdvStopped);
+  c->OnEvent(ZTBT_OP_EV_SERVER_CONN, ZTBT_SIG_EV_SERVER_CONN, OnServerConn);
+  c->OnEvent(ZTBT_OP_EV_SERVER_READ, ZTBT_SIG_EV_SERVER_READ, OnServerRead);
+  c->OnEvent(ZTBT_OP_EV_SERVER_WRITE, ZTBT_SIG_EV_SERVER_WRITE, OnServerWrite);
+  c->OnEvent(ZTBT_OP_EV_SERVER_MTU, ZTBT_SIG_EV_SERVER_MTU, OnServerMtu);
   c->Start([] { if (g->cb->thread_evt_cb) g->cb->thread_evt_cb(ASSOCIATE_JVM); },
            [] { if (g->cb->thread_evt_cb) g->cb->thread_evt_cb(DISASSOCIATE_JVM); });
   LOGI("ztOS Bluetooth shim: Android's stack through ztos-btbridge (BlueZ)");
@@ -985,22 +1007,169 @@ const btgatt_client_interface_t kClient = {
     GetGattDb,
 };
 
-// ---- GATT server (stage 2: refuses) ------------------------------------------
+// ---- GATT server: Android's services as BlueZ GATT applications -----------------
+//
+// The bridge registers each service with GattManager1 and assigns the handles
+// Android sees. Remote reads and writes come as events with a request id (the
+// trans_id Android answers with sendResponse). A central becomes a connection
+// of Android's servers only once it touches one of their attributes.
 
 bt_status_t RegisterServer(const Uuid& uuid, bool) {
   if (!g) return BT_STATUS_NOT_READY;
   Uuid u = uuid;
-  g->conn->Post([u] { g->gcb->server->register_server_cb(kGattError, 0, u); });
+  g->conn->Post([u] {
+    int id = g->next_server++;
+    g->servers.insert(id);
+    g->gcb->server->register_server_cb(kGattSuccess, id, u);
+  });
   return BT_STATUS_SUCCESS;
 }
-bt_status_t UnregisterServer(int) { return BT_STATUS_SUCCESS; }
+
+void RemoveService(int service_handle, std::function<void(int)> done) {
+  auto it = g->services.find(service_handle);
+  if (it == g->services.end()) {
+    done(kGattError);
+    return;
+  }
+  uint32_t id = it->second.second;
+  g->services.erase(it);
+  g->conn->Request(ZTBT_OP_SERVER_REMOVE, {Value::U32(id)}, ZTBT_SIG_SERVER_REMOVE_REPLY,
+                   [done](uint32_t st, const Values&) { done(st == ZTBT_ST_OK ? kGattSuccess : kGattError); });
+}
+
+bt_status_t UnregisterServer(int server_if) {
+  if (!g) return BT_STATUS_NOT_READY;
+  g->conn->Post([server_if] {
+    g->servers.erase(server_if);
+    std::vector<int> mine;
+    for (auto& [h, s] : g->services)
+      if (s.first == server_if) mine.push_back(h);
+    for (int h : mine) RemoveService(h, [](int) {});
+  });
+  return BT_STATUS_SUCCESS;
+}
+
+// a server can't make BlueZ connect out on its behalf; the central connects
 bt_status_t ServerConnect(int, const RawAddress&, bool, int) { return BT_STATUS_UNSUPPORTED; }
-bt_status_t ServerDisconnect(int, const RawAddress&, int) { return BT_STATUS_UNSUPPORTED; }
-bt_status_t AddService(int, const btgatt_db_element_t*, size_t) { return BT_STATUS_UNSUPPORTED; }
-bt_status_t StopService(int, int) { return BT_STATUS_UNSUPPORTED; }
-bt_status_t DeleteService(int, int) { return BT_STATUS_UNSUPPORTED; }
-bt_status_t SendIndication(int, int, int, int, const uint8_t*, size_t) { return BT_STATUS_UNSUPPORTED; }
-bt_status_t SendResponse(int, int, int, const btgatt_response_t&) { return BT_STATUS_UNSUPPORTED; }
+bt_status_t ServerDisconnect(int, const RawAddress&, int) { return BT_STATUS_SUCCESS; }
+
+bt_status_t AddService(int server_if, const btgatt_db_element_t* service, size_t count) {
+  if (!g || !service || !count) return BT_STATUS_PARM_INVALID;
+  std::vector<btgatt_db_element_t> els(service, service + count);
+  Values list;
+  for (auto& e : els)
+    list.push_back(Value::Tuple({Value::Y((uint8_t)e.type), Value::Uuid(UuidBEOf(e.uuid)), Value::Q(e.properties),
+                                 Value::Q(e.permissions)}));
+  g->conn->Request(ZTBT_OP_SERVER_ADD, {Value::List(list)}, ZTBT_SIG_SERVER_ADD_REPLY,
+                   [server_if, els](uint32_t st, const Values& v) mutable {
+    if (st != ZTBT_ST_OK || v[1].items.size() != els.size()) {
+      LOGW("GATT service: bridge said %u", st);
+      g->gcb->server->service_added_cb(kGattError, server_if, els.data(), els.size());
+      return;
+    }
+    for (size_t i = 0; i < els.size(); i++) {
+      uint16_t h = (uint16_t)v[1].items[i].num();
+      els[i].attribute_handle = h;
+      g->handle_kind[h] = (uint8_t)els[i].type;
+    }
+    els[0].start_handle = els[0].attribute_handle;
+    els[0].end_handle = els.back().attribute_handle;
+    g->services[els[0].attribute_handle] = {server_if, v[0].num()};
+    g->gcb->server->service_added_cb(kGattSuccess, server_if, els.data(), els.size());
+  });
+  return BT_STATUS_SUCCESS;
+}
+
+bt_status_t StopService(int server_if, int service_handle) {
+  if (!g) return BT_STATUS_NOT_READY;
+  g->conn->Post([server_if, service_handle] {
+    RemoveService(service_handle,
+                  [server_if, service_handle](int st) { g->gcb->server->service_stopped_cb(st, server_if, service_handle); });
+  });
+  return BT_STATUS_SUCCESS;
+}
+
+bt_status_t DeleteService(int server_if, int service_handle) {
+  if (!g) return BT_STATUS_NOT_READY;
+  g->conn->Post([server_if, service_handle] {
+    if (!g->services.count(service_handle)) {   // stopped already: gone
+      g->gcb->server->service_deleted_cb(kGattSuccess, server_if, service_handle);
+      return;
+    }
+    RemoveService(service_handle,
+                  [server_if, service_handle](int st) { g->gcb->server->service_deleted_cb(st, server_if, service_handle); });
+  });
+  return BT_STATUS_SUCCESS;
+}
+
+bt_status_t SendIndication(int, int attribute_handle, int conn_id, int confirm, const uint8_t* value,
+                           size_t length) {
+  if (!g) return BT_STATUS_NOT_READY;
+  std::string val((const char*)value, length);
+  g->conn->Request(ZTBT_OP_SERVER_NOTIFY,
+                   {Value::U32((uint32_t)conn_id), Value::Q((uint16_t)attribute_handle), Value::Bool(confirm != 0),
+                    Value::Bytes(val)},
+                   ZTBT_SIG_SERVER_NOTIFY_REPLY, [conn_id](uint32_t st, const Values&) {
+    // BlueZ doesn't report each central's confirmation here: done when sent
+    g->gcb->server->indication_sent_cb(conn_id, st == ZTBT_ST_OK ? kGattSuccess : kGattError);
+  });
+  return BT_STATUS_SUCCESS;
+}
+
+bt_status_t SendResponse(int, int trans_id, int status, const btgatt_response_t& response) {
+  if (!g) return BT_STATUS_NOT_READY;
+  if (trans_id == 0) return BT_STATUS_SUCCESS;   // nobody waits (a write command, a CCCD change)
+  size_t n = std::min<size_t>(response.attr_value.len, sizeof response.attr_value.value);
+  std::string val((const char*)response.attr_value.value, n);
+  g->conn->Request(ZTBT_OP_SERVER_RESPONSE, {Value::U32((uint32_t)trans_id), Value::Y((uint8_t)status), Value::Bytes(val)},
+                   ZTBT_SIG_SERVER_RESPONSE_REPLY, [](uint32_t, const Values&) {});
+  return BT_STATUS_SUCCESS;
+}
+
+RawAddress ServerPeer(uint32_t conn) {
+  auto it = g->server_conns.find(conn);
+  return it == g->server_conns.end() ? RawAddress() : it->second;
+}
+
+void OnServerConn(const Values& v) {
+  uint32_t conn = v[0].num();
+  RawAddress a = AddrFrom(v[1]);
+  bool up = v[2].flag();
+  if (up) g->server_conns[conn] = a;
+  else g->server_conns.erase(conn);
+  if (!g->gcb || !g->gcb->server) return;
+  for (int s : g->servers) g->gcb->server->connection_cb((int)conn, s, up ? 1 : 0, a);
+}
+
+void OnServerRead(const Values& v) {
+  if (!g->gcb || !g->gcb->server) return;
+  uint32_t conn = v[0].num(), req = v[1].num();
+  int handle = (int)v[2].num(), offset = (int)v[3].num();
+  RawAddress a = ServerPeer(conn);
+  if (g->handle_kind[handle] == BTGATT_DB_DESCRIPTOR)
+    g->gcb->server->request_read_descriptor_cb((int)conn, (int)req, a, handle, offset, offset > 0);
+  else
+    g->gcb->server->request_read_characteristic_cb((int)conn, (int)req, a, handle, offset, offset > 0);
+}
+
+void OnServerWrite(const Values& v) {
+  if (!g->gcb || !g->gcb->server) return;
+  uint32_t conn = v[0].num(), req = v[1].num();
+  int handle = (int)v[2].num(), offset = (int)v[3].num();
+  bool need_rsp = v[4].flag();
+  const std::string& val = v[5].s;
+  RawAddress a = ServerPeer(conn);
+  if (g->handle_kind[handle] == BTGATT_DB_DESCRIPTOR)
+    g->gcb->server->request_write_descriptor_cb((int)conn, (int)req, a, handle, offset, need_rsp, false,
+                                                (const uint8_t*)val.data(), val.size());
+  else
+    g->gcb->server->request_write_characteristic_cb((int)conn, (int)req, a, handle, offset, need_rsp, false,
+                                                    (const uint8_t*)val.data(), val.size());
+}
+
+void OnServerMtu(const Values& v) {
+  if (g->gcb && g->gcb->server) g->gcb->server->mtu_changed_cb((int)v[0].num(), (int)v[1].num());
+}
 
 const btgatt_server_interface_t kServer = {
     RegisterServer, UnregisterServer, ServerConnect, ServerDisconnect, AddService, StopService,

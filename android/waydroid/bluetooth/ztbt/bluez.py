@@ -138,6 +138,7 @@ SERVICE = "org.bluez.GattService1"
 CHAR = "org.bluez.GattCharacteristic1"
 DESC = "org.bluez.GattDescriptor1"
 ADV_MANAGER = "org.bluez.LEAdvertisingManager1"
+GATT_MANAGER = "org.bluez.GattManager1"
 
 CONNECT_TIMEOUT = 40
 CALL_TIMEOUT = 30
@@ -200,6 +201,7 @@ class BlueZ:
         self.profiles = {}        # uuid -> _Profile (registered with BlueZ)
         self.rfcomm_pending = {}  # (device path, uuid) -> {"ok", "err", "fd", "replied", "timer"}
         self.advs = {}            # advertiser id -> _Advertisement (registered with BlueZ)
+        self.apps = {}            # GATT server service id -> gattapp.App
 
     # ---- objects ----------------------------------------------------------
 
@@ -630,6 +632,63 @@ class BlueZ:
                                            GLib.IOCondition(int(GLib.IO_OUT) | int(GLib.IO_ERR) | int(GLib.IO_HUP)),
                                            writable)
         state["timer"] = GLib.timeout_add_seconds(RFCOMM_TIMEOUT, timeout)
+
+    # ---- GATT server ---------------------------------------------------------
+
+    def serve(self, svc_id, tree, ok, err):
+        """Register Android's service svc_id as a BlueZ GATT application."""
+        if self.adapter_path is None:
+            err("org.bluez.Error.NotReady", "no adapter")
+            return
+        from .gattapp import App
+        self._drop_app(svc_id)
+        app = App(self, self.core, svc_id, tree)
+        self.apps[svc_id] = app
+
+        def failed(name, msg):
+            if self.apps.get(svc_id) is app:
+                del self.apps[svc_id]
+                app.remove()
+            err(name, msg)
+        self._call(self.adapter_path, GATT_MANAGER, "RegisterApplication",
+                   [dbus.ObjectPath(app.root), dbus.Dictionary({}, signature="sv")], ok, failed)
+
+    def unserve(self, svc_id):
+        app = self.apps.get(svc_id)
+        if app is None:
+            return
+        if self.adapter_path:
+            self._call(self.adapter_path, GATT_MANAGER, "UnregisterApplication", [dbus.ObjectPath(app.root)],
+                       lambda: None, lambda n, m: None)
+        self._drop_app(svc_id)
+
+    def _drop_app(self, svc_id):
+        app = self.apps.pop(svc_id, None)
+        if app is not None:
+            app.remove()
+
+    def server_value(self, svc_id, handle, value, indicate):
+        """A new value for characteristic `handle`: BlueZ notifies (or indicates,
+        as each central subscribed) every central that subscribed."""
+        app = self.apps.get(svc_id)
+        char = app.chars.get(handle) if app else None
+        if char is None:
+            return False
+        char.send(value)
+        return True
+
+    def server_peers(self):
+        """Connected LE centrals, as far as BlueZ's Device1 objects tell."""
+        out = []
+        for addr, path in self.dev_path.items():
+            d = self.objs.get(path, {}).get(DEVICE, {})
+            if d.get("Connected"):
+                out.append(addr)
+        return out
+
+    def address_of(self, path):
+        d = self.objs.get(path, {}).get(DEVICE, {})
+        return d.get("Address")
 
     # ---- LE advertising ----------------------------------------------------
 

@@ -34,6 +34,7 @@ import re
 import uuid
 
 from . import proto as P
+from .gatts import GattServerMixin
 
 CONNECT_SECONDS = 35
 RELEASE_SECONDS = 10    # how long a device we let go may still show Connected
@@ -78,7 +79,7 @@ class Link:
         self.cccd = {}            # descriptor handle -> last value written
 
 
-class Bridge:
+class Bridge(GattServerMixin):
     def __init__(self, backend, store, log=None):
         self.be = backend
         self.store = store
@@ -98,6 +99,7 @@ class Bridge:
         self.streams = {}         # stream id -> Stream (RFCOMM)
         self.next_stream = 1
         self.advs = {}            # advertiser id -> Adv (Android's advertising sets)
+        self._gatts_init()
 
     # ---- state from the backend -------------------------------------------
 
@@ -170,6 +172,9 @@ class Bridge:
             for addr in list(self.holds):
                 self._drop_hold(addr, P.ST_NOT_READY)
             self._stop_advs()
+            self._servers_pause()
+        elif changed.get("Powered"):
+            self._servers_resume()
 
     def value_changed(self, addr, handle, value):
         for link in list(self.links.values()):
@@ -186,6 +191,9 @@ class Bridge:
             for addr in list(self.holds):
                 self._drop_hold(addr, P.ST_NOT_READY, keep_pair=True)
             self._stop_advs()
+            self._servers_pause()
+        else:
+            self._servers_resume()
         self._update_discovery()
 
     # ---- clients ----------------------------------------------------------
@@ -198,6 +206,7 @@ class Bridge:
             return
         del self.clients[client]
         self._stop_advs(client, forget=True)
+        self._servers_forget(client)
         for link in [l for l in self.links.values() if l.client is client]:
             self._close_link(link)
         for addr, c in list(self.pairing.items()):
@@ -288,6 +297,7 @@ class Bridge:
             for link in [l for l in self.links.values() if l.client is client]:
                 self._close_link(link)
             self._stop_advs(client, forget=True)
+            self._servers_forget(client)
             self._update_discovery()
         answer(P.ST_OK)
 
@@ -452,6 +462,8 @@ class Bridge:
         self._event_all("EV_ACL", [addr, True, P.T_LE if addr in self.le_seen or "Class" not in self.devs[addr] else P.T_BREDR])
 
     def _connected_changed(self, addr, connected):
+        if not connected:
+            self.server_peer_gone(addr)
         if not connected and addr in self.releasing:
             self.be.cancel(self.releasing.pop(addr))
         hold = self.holds.get(addr)
