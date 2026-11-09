@@ -34,7 +34,7 @@
 #     --dp-tx                    with --dp-altmode: the DP TX bring-up driver
 #                                (kernel/exynos9810-dp.c, combo PHY DP mode + AUX by
 #                                hand through debugfs) and its DT node; on the command
-#                                line exynos9810_dp.hpd_read=1 drm_auto=1: at HPD high the
+#                                line exynos9810_dp.hpd_read=1 drm_auto=1 vsync_irq=1: at HPD high the
 #                                link comes up and the DP-1 DRM card registers, which the
 #                                shell takes as a second output (docs/dp-altmode.md)
 #     --release-suffix -TAG      replaces --dp-altmode's -dp in the release
@@ -423,7 +423,7 @@ cfg --set-val CMA_SIZE_MBYTES 128
 # Firmware roaming stays on: kernel/patch-brcmfmac-roam.py reports its roams (ROADMAP 1.7)
 DPCMD=
 [ -z "$DPALT" ] || DPCMD+=" max77705_usbc.dp_altmode=1"
-[ -z "$DPTX" ] || DPCMD+=" exynos9810_dp.hpd_read=1 exynos9810_dp.drm_auto=1"
+[ -z "$DPTX" ] || DPCMD+=" exynos9810_dp.hpd_read=1 exynos9810_dp.drm_auto=1 exynos9810_dp.vsync_irq=1"
 CMDLINE="console=tty0 console=ramoops-1 loglevel=7 panic=5 keep_bootcon maxcpus=8 s9p_vendor_m3_defaults s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60${EXTRA:+ $EXTRA}$DPCMD"
 cfg --set-str CMDLINE "$CMDLINE"
 make -s O=out olddefconfig

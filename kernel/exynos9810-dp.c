@@ -373,7 +373,8 @@ struct x9dp {
 	struct work_struct hp_work;	/* connector hotplug event */
 	struct drm_crtc *crtc;		/* the DRM device's, for the VSYNC interrupt */
 	int irq;			/* the link's interrupt (DT), with vsync_irq */
-	bool vsync_en;			/* VSYNC_DET unmasked: vblank from the link */		/* the DMA common QoS LUT is not 0x44444444 (experiment) */		/* HPD rose: the next m4up trains the link first */
+	bool vsync_en;			/* VSYNC_DET unmasked: vblank from the link */
+	u32 vs_line, vs_seq;		/* the DPP's line count at the last link VSYNC (IRQ) */		/* the DMA common QoS LUT is not 0x44444444 (experiment) */		/* HPD rose: the next m4up trains the link first */
 	bool decon2_on;
 	void *fb_cpu;			/* the dma step's test image */
 	dma_addr_t fb_dma;
@@ -1418,6 +1419,8 @@ static int x9dp_m4dump(struct x9dp *d)
 #define  DPP_ALPHA_SEL			BIT(3)
 #define  DPP_IMG_FORMAT			GENMASK(2, 0)	/* 0 ARGB8888 */
 #define DPP_IMG_SIZE			0x0018
+#define DPP_LINECNT_CON			0x0d00	/* ENABLE b0, CAPTURE b2 (regs-dpp.h) */
+#define DPP_LINECNT_VAL			0x0d04	/* COUNTER [12:0] */
 #define DPP_MAIN_H_RATIO		0x0044
 #define DPP_MAIN_V_RATIO		0x0048
 #define  DPP_RATIO_1			(1 << 20)
@@ -1600,6 +1603,14 @@ static int x9dp_decon2_start(struct x9dp *d)
 	if ((readl(d->d0conn) & DECON_DP_CONN_SEL_DP0) != 2 ||
 	    readl(d->decon2 + DECON_SRAM_SHARE_ENABLE) != DECON2_SRAM_12K)
 		return -EAGAIN;		/* route and sram first */
+	/*
+	 * dp38/vsync_irq: with the VSYNC interrupt unmasked its handler (on
+	 * another CPU, maybe) clears VSYNC_DET before this poll sees it, the
+	 * wait times out and DECON2 starts anywhere in the link's frame (3 of 7
+	 * 720p starts broken). The interrupt is masked for the wait.
+	 */
+	if (d->irq > 0)
+		link_rmw(d, 0x502c, BIT(7), 0);		/* SST1_INTERRUPT_MASK_SET0 */
 	local_irq_save(flags);
 	if (vsync_start && d->video_on) {
 		writel(BIT(7), d->link + SST1_INTERRUPT_STATUS_SET0);	/* VSYNC_DET, write 1 to clear */
@@ -1609,6 +1620,8 @@ static int x9dp_decon2_start(struct x9dp *d)
 	x9dp_d2_rmw(d, DECON_GLOBAL_CONTROL, DECON_EN | DECON_EN_F, ~0);
 	x9dp_d2_rmw(d, DECON_SHADOW_REG_UPDATE_REQ, DECON_SHADOW_GLOBAL, ~0);
 	local_irq_restore(flags);
+	if (d->irq > 0 && d->vsync_en)
+		link_rmw(d, 0x502c, BIT(7), BIT(7));
 	ret = readl_poll_timeout(d->decon2 + DECON_GLOBAL_CONTROL, v, v & DECON_RUN_STATUS,
 				 10, 20000);
 	d->decon2_on = true;		/* decon2_stop undoes it either way */
@@ -1853,6 +1866,7 @@ static int x9dp_dma(struct x9dp *d)
 	       dpp + DPP_MAIN_H_RATIO);
 	writel((readl(dpp + DPP_MAIN_V_RATIO) & ~GENMASK(23, 0)) | DPP_RATIO_1,
 	       dpp + DPP_MAIN_V_RATIO);
+	writel((readl(dpp + DPP_LINECNT_CON) & ~BIT(2)) | BIT(0), dpp + DPP_LINECNT_CON);
 	if (sfr_force) {
 		writel(readl(dma + IDMA_ENABLE) | BIT(4), dma + IDMA_ENABLE);
 		writel(readl(dpp + 0x0) | BIT(4), dpp + 0x0);
@@ -2155,6 +2169,45 @@ module_param(m4_vresets, uint, 0644);
 MODULE_PARM_DESC(m4_vresets, "m4up: on an underflowing start, restart only the link's video this many times before a full restart (default 0: dp27, the link then shows no VSYNC, its video stays stopped)");
 
 static void x9dp_vsync_mask(struct x9dp *d);
+#define VSYNC_DET_BIT			BIT(7)	/* SST1 interrupt status/mask */
+
+/*
+ * Where the DMA window's pipeline is when the link starts a frame: the DPP's
+ * line counter at the link's VSYNC (from the interrupt when it is on,
+ * polled otherwise). Aligned, it is near 0 or near the frame's end (the
+ * pipeline runs a little ahead); a start that came up shifted (dp37: one
+ * 720p start showed the picture moved down by a third) should show a line in
+ * the middle. m4_line_max > 0 retries such a start; 0 only logs.
+ */
+static uint m4_line_max;
+module_param(m4_line_max, uint, 0644);
+MODULE_PARM_DESC(m4_line_max, "m4up: retry when the DPP line at the link's VSYNC is more than this many lines from the frame's start or end (default 0: log only)");
+
+static int x9dp_line_at_vsync(struct x9dp *d, u32 *line)
+{
+	void __iomem *dma, *dpp;
+	unsigned long flags;
+	u32 blend, v, seq;
+	int ret;
+
+	if (!m4_src || x9dp_ch(d, &dma, &dpp, &blend))
+		return -ENODEV;
+	if (d->vsync_en && d->irq > 0) {
+		seq = d->vs_seq;
+		msleep(50);
+		if (d->vs_seq == seq)
+			return -ETIMEDOUT;
+		*line = d->vs_line;
+		return 0;
+	}
+	local_irq_save(flags);
+	writel(VSYNC_DET_BIT, d->link + SST1_INTERRUPT_STATUS_SET0);
+	ret = readl_poll_timeout_atomic(d->link + SST1_INTERRUPT_STATUS_SET0, v, v & VSYNC_DET_BIT,
+					1, 40000);
+	*line = readl(dpp + DPP_LINECNT_VAL) & 0x1fff;
+	local_irq_restore(flags);
+	return ret;
+}
 
 static int x9dp_m4up(struct x9dp *d)
 {
@@ -2180,8 +2233,18 @@ static int x9dp_m4up(struct x9dp *d)
 		st = readl(d->link + SST1_INTERRUPT_STATUS_SET0);
 		dev_info(d->dev, "m4up: try %u, SST1 int0 %08x over 100 ms, DECON2 frames %u\n", i, st,
 			 readl(d->decon2 + DECON_FRAME_COUNT));
-		if (!(st & BIT(8)))		/* MAPI_FIFO_UNDER_FLOW */
-			break;
+		if (!(st & BIT(8))) {		/* MAPI_FIFO_UNDER_FLOW */
+			u32 line = 0, va = d->vmode.va;
+			int lr = x9dp_line_at_vsync(d, &line);
+
+			if (!lr)
+				dev_info(d->dev, "m4up: DPP line %u of %u at the link's VSYNC\n", line, va);
+			if (lr || !m4_line_max || line <= m4_line_max || line + m4_line_max >= va)
+				break;
+			dev_info(d->dev, "m4up: the window's frame is not aligned with the link's: again\n");
+			st |= BIT(8);	/* counts as a failed start */
+			continue;
+		}
 		if (m4_vresets) {
 			u32 k;
 
@@ -2419,6 +2482,15 @@ static irqreturn_t x9dp_irq(int irq, void *data)
 	if (!(st & VSYNC_DET))
 		return IRQ_NONE;
 	writel(VSYNC_DET, d->link + SST1_INTERRUPT_STATUS_SET0);	/* write 1 to clear */
+	{
+		void __iomem *dma, *dpp;
+		u32 blend;
+
+		if (!x9dp_ch(d, &dma, &dpp, &blend)) {
+			d->vs_line = readl(dpp + DPP_LINECNT_VAL) & 0x1fff;
+			d->vs_seq++;
+		}
+	}
 	if (d->crtc && d->vsync_en)
 		drm_crtc_handle_vblank(d->crtc);
 	return IRQ_HANDLED;
