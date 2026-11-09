@@ -490,6 +490,7 @@ struct max77705_usbc {
 	u32 dp_status;			/* the partner's last DP Status VDO */
 	bool dp_status_valid;
 	bool dp_status_wanted;		/* the altmode driver asked; answer on PD_INT b2 */
+	bool dp_status_given;		/* it has had its Status Update answer */
 	struct typec_altmode *dp_port;	/* port altmode, SVID 0xff01 */
 	struct typec_altmode *dp_partner;
 	struct delayed_work dp_work;
@@ -2374,6 +2375,7 @@ static void usbc_dp_forget(struct max77705_usbc *u)
 	u->dp_status = 0;
 	u->dp_status_valid = false;
 	u->dp_status_wanted = false;
+	u->dp_status_given = false;
 	u->dp_q_n = 0;
 	u->dp_tries = 0;
 	spin_lock_irqsave(&u->dp_lock, flags);
@@ -2413,18 +2415,29 @@ static void usbc_dp_log_status(struct max77705_usbc *u, const char *what, u32 vd
 		 vdo & DP_STATUS_IRQ_HPD ? " + IRQ_HPD" : "");
 }
 
-/* a DP Status VDO from the partner: the answer to a Status Update, or news */
+/* the Status Update answer, once per entry; later VDOs are Attentions */
+static void usbc_dp_status_answer(struct max77705_usbc *u)
+{
+	u->dp_status_wanted = false;
+	u->dp_status_given = true;
+	usbc_dp_queue(u, usbc_dp_hdr(DP_CMD_STATUS_UPDATE, CMDT_RSP_ACK), u->dp_status, 2, false);
+}
+
+/*
+ * A DP Status VDO from the partner. The firmware sends its own Status Update
+ * right after Enter Mode, usually before the DP driver has asked for one:
+ * kept until it asks (as an Attention it would arrive mid-request: "ATTENTION
+ * while processing state 3"). After that answer, every new VDO is news.
+ */
 static void usbc_dp_status(struct max77705_usbc *u, const char *what, u32 vdo)
 {
 	usbc_dp_log_status(u, what, vdo);
 	u->dp_status = vdo;
 	u->dp_status_valid = true;
-	if (u->dp_status_wanted) {
-		u->dp_status_wanted = false;
-		usbc_dp_queue(u, usbc_dp_hdr(DP_CMD_STATUS_UPDATE, CMDT_RSP_ACK), vdo, 2, false);
-	} else if (u->dp_entered) {
+	if (u->dp_status_wanted)
+		usbc_dp_status_answer(u);
+	else if (u->dp_entered && u->dp_status_given)
 		usbc_dp_queue(u, 0, vdo, 1, true);
-	}
 }
 
 /*
@@ -2461,6 +2474,7 @@ static void usbc_dp_events(struct max77705_usbc *u, u8 pd_int, u8 vdm_int)
 		dev_info(u->dev, "DP: Enter Mode %s (header %08x)\n", ack ? "ACK" : "NAK/BUSY", hdr);
 		if (VDM_HDR_SVID(hdr) == USB_TYPEC_DP_SID) {
 			u->dp_entered = ack;
+			u->dp_status_given = false;
 			usbc_dp_queue(u, usbc_dp_hdr(CMD_ENTER_MODE, ack ? CMDT_RSP_ACK : CMDT_RSP_NAK),
 				      0, 1, false);
 		}
@@ -2592,8 +2606,7 @@ static void usbc_dp_work(struct work_struct *work)
 	if (req & DP_REQ_STATUS) {
 		/* the firmware's own Status Update may be in already */
 		if (u->dp_status_valid)
-			usbc_dp_queue(u, usbc_dp_hdr(DP_CMD_STATUS_UPDATE, CMDT_RSP_ACK),
-				      u->dp_status, 2, false);
+			usbc_dp_status_answer(u);
 		else
 			u->dp_status_wanted = true;
 	}

@@ -174,6 +174,9 @@ python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
 python3 "$ROOT/kernel/patch-p9320.py" "$SRC"
 # the MAX77705 USB-C controller driver (replaces s9p-max77705-muic with --power)
 python3 "$ROOT/kernel/patch-max77705-usbc.py" "$SRC"
+# --dp-altmode only (its private tree): typec switch/mux lookups defer when the
+# switch is not registered yet, instead of reporting "none" (a mainline bug)
+[ -z "$DPALT" ] || python3 "$ROOT/kernel/patch-typec-mux-defer.py" "$SRC"
 
 echo "=== initramfs ==="
 LIST=$B/initramfs.list
