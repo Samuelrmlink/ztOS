@@ -333,7 +333,8 @@ struct x9dp {
 	/* M4 writes: DECON0's DP_CONNECTION_CONTROL (and its shadow, read
 	 * only), the disp sysreg's TE_QACTIVE_PLL_EN; mapped, not requested */
 	void __iomem *d0conn, *d0conn_shd, *dsys;
-	void __iomem *d0win;		/* DECON0-space blender window 4 (approved), 0x1c */
+	void __iomem *d0win;
+	void __iomem *dma2, *dpp2;	/* DMA/DPP channel 2 (IDMA_VG0), optional */		/* DECON0-space blender window 4 (approved), 0x1c */
 	bool vsrc_decon;		/* video_on with DECON2's pixels, not BIST */
 	bool decon2_on;
 	void *fb_cpu;			/* the dma step's test image */
@@ -1004,6 +1005,14 @@ static const struct {
 } x9dp_1080p60 = { 148500, 1920, 88, 44, 148, 1080, 4, 5, 36 };
 
 /*
+ * Diagnostic: refresh 30 gives CEA VIC 34, 1080p30 (the same 2200x1125
+ * totals at 74.25 MHz), half the fetch rate of 1080p60.
+ */
+static uint refresh = 60;
+module_param(refresh, uint, 0644);
+MODULE_PARM_DESC(refresh, "1080p refresh: 60 (default) or 30 (diagnostic, VIC 34)");
+
+/*
  * displayport_reg_set_video_configuration + set_bist_video_configuration +
  * displayport_reg_start (displayport_reg.c:1348-1369, :570-729, :1487-1490):
  * VESA range, 8 bpc, RGB, the timing, Mvid/Nvid in master mode, the
@@ -1014,6 +1023,7 @@ static int x9dp_video_cfg(struct x9dp *d, u32 *ipp, u32 *fpp)
 {
 	const typeof(x9dp_1080p60) *m = &x9dp_1080p60;
 	u32 ls = x9dp_ls_khz(d->rate), bpp = 24, ip, fp, thr;
+	u32 khz = refresh == 30 ? 74250 : m->khz;
 	u64 tu;
 
 	if (!d->rate)
@@ -1023,7 +1033,7 @@ static int x9dp_video_cfg(struct x9dp *d, u32 *ipp, u32 *fpp)
 	 * 32 * pixel rate * bpp / (lanes * link symbol rate * 8) below 32
 	 * (dp14: a retrain fell back to RBR x2 and started 1080p60 at TU 45).
 	 */
-	if ((u64)m->khz * bpp >= (u64)d->nlanes * ls * 8) {
+	if ((u64)khz * bpp >= (u64)d->nlanes * ls * 8) {
 		dev_warn(d->dev, "1080p60 does not fit rate %02x x%u\n", d->rate, d->nlanes);
 		return -ERANGE;
 	}
@@ -1043,17 +1053,17 @@ static int x9dp_video_cfg(struct x9dp *d, u32 *ipp, u32 *fpp)
 		 VSYNC_POLARITY | HSYNC_POLARITY);	/* stock writes SYNC_POSITIVE */
 
 	/* Mvid/Nvid master mode, kHz (displayport_reg.c:636-656) */
-	writel(m->khz >> 1, d->link + SST1_MVID_MASTER_MODE);
+	writel(khz >> 1, d->link + SST1_MVID_MASTER_MODE);
 	writel(ls, d->link + SST1_NVID_MASTER_MODE);
 	link_rmw(d, SST1_MAIN_CONTROL, MVID_MODE, MVID_MODE);
-	writel(m->khz, d->link + SST1_MVID_SFR_CONFIGURE);
+	writel(khz, d->link + SST1_MVID_SFR_CONFIGURE);
 	writel(ls, d->link + SST1_NVID_SFR_CONFIGURE);
 
 	/* transfer unit: active symbols per 32-symbol TU, x1e10 (:658-729) */
 	link_rmw(d, SST1_ACTIVE_SYMBOL_MODE_CONTROL, BIT(0), BIT(0));
 	link_rmw(d, SST1_ACTIVE_SYMBOL_THRESHOLD_SEL_FEC_OFF, BIT(0), BIT(0));
 	link_rmw(d, SST1_ACTIVE_SYMBOL_THRESHOLD_SEL_FEC_ON, BIT(0), BIT(0));
-	tu = div64_u64((u64)m->khz * bpp * 32 * 10000000000ULL, (u64)d->nlanes * ls * 8);
+	tu = div64_u64((u64)khz * bpp * 32 * 10000000000ULL, (u64)d->nlanes * ls * 8);
 	ip = div64_u64(tu, 10000000000ULL);
 	fp = div64_u64(tu - (u64)ip * 10000000000ULL, 10);
 	thr = ip <= 2 ? 7 : ip <= 5 ? 8 : 9;
@@ -1091,7 +1101,7 @@ static int x9dp_bist(struct x9dp *d)
 	d->video_on = true;
 	d->vsrc_decon = false;
 	scnprintf(d->last, sizeof(d->last), "bist: 1080p60 colour bars on, TU %u.%09u, Mvid %u Nvid %u",
-		  ip, fp, x9dp_1080p60.khz >> 1, x9dp_ls_khz(d->rate));
+		  ip, fp, (refresh == 30 ? 74250 : x9dp_1080p60.khz) >> 1, x9dp_ls_khz(d->rate));
 	return 0;
 }
 
@@ -1470,9 +1480,23 @@ static int x9dp_decon2(struct x9dp *d)
  * (the lh step, W5, which stock does first in this function), DECON_EN
  * and DECON_EN_F, the global shadow update, RUN_STATUS within 20 ms.
  */
+/*
+ * dp19: with a DMA-fed window, a start at a random point of the link's
+ * frame underflowed the MAPI FIFO about half the time (the first lines
+ * need a fetch; a colour map needs none). With the link's video on,
+ * DECON2 starts right after the link's VSYNC (SST1 VSYNC_DET, int0 bit 7),
+ * so its first fetch falls in the vertical blanking (41 lines, ~0.6 ms at
+ * 1080p60). vsync_start=0 starts at once, as before.
+ */
+static bool vsync_start = true;
+module_param(vsync_start, bool, 0644);
+MODULE_PARM_DESC(vsync_start, "decon2_start waits for the link's VSYNC first (default 1)");
+
 static int x9dp_decon2_start(struct x9dp *d)
 {
-	u32 v;
+	u32 v, vs = 0;
+	unsigned long flags;
+	int vret = -ENODATA;
 	int ret = x9dp_m4_ok(d, true);
 
 	if (ret)
@@ -1483,14 +1507,22 @@ static int x9dp_decon2_start(struct x9dp *d)
 	if ((readl(d->d0conn) & DECON_DP_CONN_SEL_DP0) != 2 ||
 	    readl(d->decon2 + DECON_SRAM_SHARE_ENABLE) != DECON2_SRAM_12K)
 		return -EAGAIN;		/* route and sram first */
+	local_irq_save(flags);
+	if (vsync_start && d->video_on) {
+		writel(BIT(7), d->link + SST1_INTERRUPT_STATUS_SET0);	/* VSYNC_DET, write 1 to clear */
+		vret = readl_poll_timeout_atomic(d->link + SST1_INTERRUPT_STATUS_SET0, vs,
+						 vs & BIT(7), 1, 40000);
+	}
 	x9dp_d2_rmw(d, DECON_GLOBAL_CONTROL, DECON_EN | DECON_EN_F, ~0);
 	x9dp_d2_rmw(d, DECON_SHADOW_REG_UPDATE_REQ, DECON_SHADOW_GLOBAL, ~0);
+	local_irq_restore(flags);
 	ret = readl_poll_timeout(d->decon2 + DECON_GLOBAL_CONTROL, v, v & DECON_RUN_STATUS,
 				 10, 20000);
 	d->decon2_on = true;		/* decon2_stop undoes it either way */
 	scnprintf(d->last, sizeof(d->last),
-		  "decon2_start: %s; global %08x (shadow %08x) shadow_req %08x int %08x extra %08x frames %08x",
-		  ret ? "NOT running" : "running", v,
+		  "decon2_start: %s, vsync %s; global %08x (shadow %08x) shadow_req %08x int %08x extra %08x frames %08x",
+		  ret ? "NOT running" : "running",
+		  vret == -ENODATA ? "not waited" : vret ? "TIMEOUT" : "seen", v,
 		  readl(d->decon2 + DECON_SHADOW + DECON_GLOBAL_CONTROL),
 		  readl(d->decon2 + DECON_SHADOW_REG_UPDATE_REQ),
 		  readl(d->decon2 + DECON_INTERRUPT_PENDING),
@@ -1563,6 +1595,30 @@ MODULE_PARM_DESC(win_h, "window 4 height in lines, also the DMA crop (default 10
 module_param(dma_icmax, uint, 0644);
 MODULE_PARM_DESC(dma_icmax, "DMA channel 1 IC_MAX, outstanding reads 1-255 (default 64, stock)");
 
+/*
+ * Which DMA/DPP channel feeds window 4: 1 = IDMA_G1 (stock decon_t
+ * default_idma, blender channel 3, on the DPU2 bus port with VG1), 2 =
+ * IDMA_VG0 (blender channel 0, on the DPU1 port with G0, DECON0's live
+ * channel; stock bts.c:109-111, helper.c:604-633).
+ */
+static uint dma_ch = 1;
+module_param(dma_ch, uint, 0644);
+MODULE_PARM_DESC(dma_ch, "DMA channel for win_dma: 1 IDMA_G1 (default), 2 IDMA_VG0");
+
+static int x9dp_ch(struct x9dp *d, void __iomem **dma, void __iomem **dpp, u32 *blend)
+{
+	if (dma_ch == 2) {
+		*dma = d->dma2;
+		*dpp = d->dpp2;
+		*blend = 0;
+	} else {
+		*dma = d->dma1;
+		*dpp = d->dpp1;
+		*blend = 3;
+	}
+	return *dma && *dpp ? 0 : -ENODEV;
+}
+
 static void x9dp_win_size(u32 *w, u32 *h)
 {
 	*w = clamp_t(u32, win_w, 16, x9dp_1080p60.ha);
@@ -1585,8 +1641,13 @@ static int x9dp_dma(struct x9dp *d)
 {
 	const u32 w = x9dp_1080p60.ha, h = x9dp_1080p60.va;
 	u32 size = h << 16 | w;
+	void __iomem *dma, *dpp;
+	u32 blend;
 	int ret = x9dp_m4_ok(d, false);
 
+	if (ret)
+		return ret;
+	ret = x9dp_ch(d, &dma, &dpp, &blend);
 	if (ret)
 		return ret;
 	if (!d->fb_cpu) {
@@ -1600,38 +1661,38 @@ static int x9dp_dma(struct x9dp *d)
 		x9dp_fb_fill(d->fb_cpu, w, h);
 		wmb();
 	}
-	writel(readl(d->dma1 + IDMA_ENABLE) & ~IDMA_SRAM_CLOCK_GATE_EN, d->dma1 + IDMA_ENABLE);
-	writel((readl(d->dma1 + IDMA_OUT_CON) & ~IDMA_OUT_FRAME_ALPHA) |
-	       FIELD_PREP(IDMA_OUT_FRAME_ALPHA, 0xff), d->dma1 + IDMA_OUT_CON);
-	writel(0, d->dma1 + IDMA_SRC_OFFSET);
-	writel(size, d->dma1 + IDMA_SRC_SIZE);
+	writel(readl(dma + IDMA_ENABLE) & ~IDMA_SRAM_CLOCK_GATE_EN, dma + IDMA_ENABLE);
+	writel((readl(dma + IDMA_OUT_CON) & ~IDMA_OUT_FRAME_ALPHA) |
+	       FIELD_PREP(IDMA_OUT_FRAME_ALPHA, 0xff), dma + IDMA_OUT_CON);
+	writel(0, dma + IDMA_SRC_OFFSET);
+	writel(size, dma + IDMA_SRC_SIZE);
 	{
 		u32 cw, ch;
 
 		x9dp_win_size(&cw, &ch);
-		writel(ch << 16 | cw, d->dma1 + IDMA_IMG_SIZE);
-		writel(ch << 16 | cw, d->dpp1 + DPP_IMG_SIZE);
+		writel(ch << 16 | cw, dma + IDMA_IMG_SIZE);
+		writel(ch << 16 | cw, dpp + DPP_IMG_SIZE);
 	}
-	writel((u32)d->fb_dma, d->dma1 + IDMA_IN_BASE_ADDR_Y);
-	writel((u32)d->fb_dma, d->dma1 + IDMA_IN_BASE_ADDR_C);
-	writel((readl(d->dma1 + IDMA_IN_CON) &
+	writel((u32)d->fb_dma, dma + IDMA_IN_BASE_ADDR_Y);
+	writel((u32)d->fb_dma, dma + IDMA_IN_BASE_ADDR_C);
+	writel((readl(dma + IDMA_IN_CON) &
 		~(IDMA_IMG_FORMAT | IDMA_ROTATION | IDMA_AFBC_EN | IDMA_BLOCK_EN)) |
-	       FIELD_PREP(IDMA_IMG_FORMAT, IDMA_FMT_XRGB8888), d->dma1 + IDMA_IN_CON);
-	writel((readl(d->dma1 + IDMA_IN_CON) & ~GENMASK(26, 19)) |
-	       FIELD_PREP(GENMASK(26, 19), clamp_t(u32, dma_icmax, 1, 255)), d->dma1 + IDMA_IN_CON);
-	writel(readl(d->dpp1 + DPP_IN_CON) & ~(DPP_ALPHA_SEL | DPP_IMG_FORMAT),
-	       d->dpp1 + DPP_IN_CON);
-	writel((readl(d->dpp1 + DPP_MAIN_H_RATIO) & ~GENMASK(23, 0)) | DPP_RATIO_1,
-	       d->dpp1 + DPP_MAIN_H_RATIO);
-	writel((readl(d->dpp1 + DPP_MAIN_V_RATIO) & ~GENMASK(23, 0)) | DPP_RATIO_1,
-	       d->dpp1 + DPP_MAIN_V_RATIO);
+	       FIELD_PREP(IDMA_IMG_FORMAT, IDMA_FMT_XRGB8888), dma + IDMA_IN_CON);
+	writel((readl(dma + IDMA_IN_CON) & ~GENMASK(26, 19)) |
+	       FIELD_PREP(GENMASK(26, 19), clamp_t(u32, dma_icmax, 1, 255)), dma + IDMA_IN_CON);
+	writel(readl(dpp + DPP_IN_CON) & ~(DPP_ALPHA_SEL | DPP_IMG_FORMAT),
+	       dpp + DPP_IN_CON);
+	writel((readl(dpp + DPP_MAIN_H_RATIO) & ~GENMASK(23, 0)) | DPP_RATIO_1,
+	       dpp + DPP_MAIN_H_RATIO);
+	writel((readl(dpp + DPP_MAIN_V_RATIO) & ~GENMASK(23, 0)) | DPP_RATIO_1,
+	       dpp + DPP_MAIN_V_RATIO);
 	scnprintf(d->last, sizeof(d->last),
-		  "dma: fb %pad; en %08x in_con %08x out_con %08x src %08x img %08x base %08x err %08x; dpp en %08x in_con %08x img %08x",
-		  &d->fb_dma, readl(d->dma1 + IDMA_ENABLE), readl(d->dma1 + IDMA_IN_CON),
-		  readl(d->dma1 + IDMA_OUT_CON), readl(d->dma1 + IDMA_SRC_SIZE),
-		  readl(d->dma1 + IDMA_IMG_SIZE), readl(d->dma1 + IDMA_IN_BASE_ADDR_Y),
-		  d->dma1_sz >= 0x874 ? readl(d->dma1 + IDMA_CFG_ERR_STATE) : 0,
-		  readl(d->dpp1), readl(d->dpp1 + DPP_IN_CON), readl(d->dpp1 + DPP_IMG_SIZE));
+		  "dma: ch %u fb %pad; en %08x in_con %08x out_con %08x src %08x img %08x base %08x err %08x; dpp en %08x in_con %08x img %08x",
+		  dma_ch, &d->fb_dma, readl(dma + IDMA_ENABLE), readl(dma + IDMA_IN_CON),
+		  readl(dma + IDMA_OUT_CON), readl(dma + IDMA_SRC_SIZE),
+		  readl(dma + IDMA_IMG_SIZE), readl(dma + IDMA_IN_BASE_ADDR_Y),
+		  true ? readl(dma + IDMA_CFG_ERR_STATE) : 0,
+		  readl(dpp), readl(dpp + DPP_IN_CON), readl(dpp + DPP_IMG_SIZE));
 	return 0;
 }
 
@@ -1695,8 +1756,15 @@ static int x9dp_win_set(struct x9dp *d, bool dma)
 	writel(0xff << 16 | x9dp_c10(r), d->d0win + WIN_COLORMAP_0);
 	writel(x9dp_c10(g) << 16 | x9dp_c10(b), d->d0win + WIN_COLORMAP_1);
 	writel(0, d->d0win + WIN_START_TIME_CONTROL);
-	x9dp_d2_rmw(d, DECON_DATA_PATH_CONTROL_1, DECON_WIN_CHMAP(X9DP_WIN),
-		    X9DP_WIN_G1_CH << (4 * X9DP_WIN));
+	{
+		void __iomem *dma_, *dpp_;
+		u32 blend = 3;
+
+		if (dma && x9dp_ch(d, &dma_, &dpp_, &blend))
+			return -ENODEV;
+		x9dp_d2_rmw(d, DECON_DATA_PATH_CONTROL_1, DECON_WIN_CHMAP(X9DP_WIN),
+			    blend << (4 * X9DP_WIN));
+	}
 	x9dp_d2_rmw(d, DECON_DATA_PATH_CONTROL_0,
 		    DECON_WIN_EN(X9DP_WIN) | DECON_WIN_MAPCOLOR_EN(X9DP_WIN), en);
 	x9dp_d2_rmw(d, DECON_SHADOW_REG_UPDATE_REQ, DECON_SHADOW_GLOBAL | BIT(X9DP_WIN), ~0);
@@ -1809,8 +1877,8 @@ static int x9dp_m4up_once(struct x9dp *d)
 		return ret;
 	}
 	for (i = 0; i < ARRAY_SIZE(seq); i++) {
-		if ((m4_src && seq[i].fn == x9dp_win) ||
-		    (!m4_src && (seq[i].fn == x9dp_dma || seq[i].fn == x9dp_win_dma)))
+		/* always start on the colour map; the DMA comes in on the running pipeline */
+		if (seq[i].fn == x9dp_dma || seq[i].fn == x9dp_win_dma)
 			continue;
 		/* order 0: the first video entry (before lh); order 1: the last */
 		if (seq[i].fn == x9dp_video) {
@@ -1822,6 +1890,26 @@ static int x9dp_m4up_once(struct x9dp *d)
 		dev_info(d->dev, "m4up: %s\n", d->last);
 		if (ret) {
 			scnprintf(d->last, sizeof(d->last), "m4up: %s failed %d", seq[i].name, ret);
+			return ret;
+		}
+	}
+	/*
+	 * dp19/dp20: starting DECON2 with a DMA window underflowed the link in
+	 * most starts, even at VSYNC; with a colour-map window it never did,
+	 * and a DMA window that got going kept running. So the pipeline
+	 * starts on the colour map and the window switches to the DMA a few
+	 * frames later, through the window's shadow update, as a page flip
+	 * does on a running DECON (the DMA is programmed before the switch
+	 * and its first fetch is at a frame start).
+	 */
+	if (m4_src) {
+		msleep(50);
+		ret = x9dp_dma(d);
+		dev_info(d->dev, "m4up: %s\n", d->last);
+		ret = ret ?: x9dp_win_dma(d);
+		dev_info(d->dev, "m4up: %s\n", d->last);
+		if (ret) {
+			scnprintf(d->last, sizeof(d->last), "m4up: switch to DMA failed %d", ret);
 			return ret;
 		}
 	}
@@ -2195,6 +2283,8 @@ static int x9dp_probe(struct platform_device *pdev)
 	d->d0conn_shd = x9dp_map_opt(pdev, "decon0-dp-conn-shadow", NULL);
 	d->dsys = x9dp_map_opt(pdev, "disp-sysreg-te", NULL);
 	d->d0win = x9dp_map_opt(pdev, "decon0-win4", NULL);
+	d->dma2 = x9dp_map_opt(pdev, "dma2", NULL);
+	d->dpp2 = x9dp_map_opt(pdev, "dpp2", NULL);
 	ret = x9dp_read_pairs(dev, "samsung,link-power-status", iso, 2);
 	if (ret)
 		return ret;
