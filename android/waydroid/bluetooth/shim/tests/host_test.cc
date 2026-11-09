@@ -374,8 +374,7 @@ int main() {
   bt->create_bond(&sensor, 2);
   Wait(std::string("bond ") + SENSOR + " 1");
   Wait(std::string("bond ") + SENSOR + " 2 status 0");
-  RawAddress lock = Addr(LOCK);
-  Expect(bt->remove_bond(&lock) == BT_STATUS_FAIL, "remove a Linux bond refused");
+  Expect(bt->remove_bond(&airpods) == BT_STATUS_FAIL, "remove a bond Linux is using refused");
   Expect(bt->remove_bond(&sensor) == BT_STATUS_SUCCESS, "remove the bond Android made");
 
   // ---- GATT server: a heart-rate service; the harness's central reads and subscribes
