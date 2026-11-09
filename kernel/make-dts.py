@@ -323,7 +323,7 @@ ROOT_NODES = """
 	usb-sbu-mux {
 		compatible = "gpio-sbu-mux";
 		enable-gpios = <&expander 4 GPIO_ACTIVE_LOW>;	/* AUX_SW_OE */
-		select-gpios = <&expander 1 GPIO_ACTIVE_HIGH>;	/* SBU_SW_SEL: polarity unverified */
+		select-gpios = <&expander 1 GPIO_ACTIVE_HIGH>;	/* SBU_SW_SEL: 1 = reverse (CC2) */
 		orientation-switch;
 		mode-switch;
 
@@ -347,8 +347,9 @@ ROOT_NODES = """
 #     on, after selecting: active low). Pin 8 WPC_EN must stay an input: no
 #     consumer here, and gpio-pca953x leaves unclaimed pins as they are.
 #   SBU switch: mainline gpio-sbu-mux (enable = AUX_SW_OE, select = the CC
-#     orientation). Which select level goes with which orientation is not
-#     verified yet (stock derives it from gpg0-4, not from the CC chip).
+#     orientation). Stock drives select = !gpg0-4; on the phone (dp2) gpg0-4
+#     reads 1 with CC1 (normal) and 0 with CC2 (reverse), so select is 1 for
+#     reverse: active high.
 #   connector: the usb-c-connector binding under the MAX77705 USB-C node; the
 #     typec port is registered on it. altmodes/displayport is the port's DP
 #     capability VDO: DFP_D (2) | DP signalling (bit 2) | receptacle (bit 6) |

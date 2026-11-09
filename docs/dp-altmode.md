@@ -138,7 +138,7 @@ bluetooth-board {
 usb-sbu-mux {
 	compatible = "gpio-sbu-mux";
 	enable-gpios = <&expander 4 GPIO_ACTIVE_LOW>;	/* AUX_SW_OE */
-	select-gpios = <&expander 1 GPIO_ACTIVE_HIGH>;	/* SBU_SW_SEL */
+	select-gpios = <&expander 1 GPIO_ACTIVE_HIGH>;	/* SBU_SW_SEL: 1 = reverse */
 	orientation-switch;
 	mode-switch;
 	port { sbu_mux_in: endpoint { remote-endpoint = <&usbc_sbu>; }; };
@@ -180,7 +180,7 @@ These are listed so that the next drivers take them from the DT as well:
 
 ## Where each value comes from
 
-Verified on the phone (read-only, chg11/chg12):
+Verified on the phone (read-only, chg11/chg12/dp2):
 
 - **MAX77705 USB-C firmware:** 0x32. PD_INT_M 0x1c (DP bits masked) and
   VDM_INT_M 0xff before the driver touches them.
@@ -192,6 +192,13 @@ Verified on the phone (read-only, chg11/chg12):
   - configuration 0x7f 0xff 0xff: every pin is an input except pin 7
     (BT_EN). Pins 1 and 4 were not driven before this work, and pin 8
     (WPC_EN) is an input that nothing in the tree claims.
+- **Orientation input:** gpg0-4 reads 1 with CC1 (normal) and 0 with CC2
+  (reverse).
+- **M1 on the user's powered dock (VIA Labs 2109:0102, HDMI out), on dp2:**
+  the dock DR-swaps the phone to DFP while it sinks. Discover Identity,
+  SVIDs and Modes come back (first SVID ff01, mode 0x0c05: UFP_D, pins
+  C/D). Enter Mode is ACKed, DP Status is 0x1a, and Configure pin D
+  (0x806) is ACKed.
 - **Typec port and DP altmode (chg12):** `/sys/class/typec/port0` exists, and
   the DP port altmode registers (svid ff01).
 
@@ -203,12 +210,10 @@ verified on the phone:
 - **AUX_SW_OE polarity:** active low. Stock drives 1 at probe and on
   detach, and 0 to turn the switch on (`displayport_drv.c:2784-2792`,
   `:2867-2901`, `:2953`).
-- **SBU_SW_SEL level:** stock sets it to `!gpg0-4`. How gpg0-4 relates to
-  the CC orientation the MAX77705 reports is **not verified**. The tree's
-  `GPIO_ACTIVE_HIGH` on select is a guess. The check (read-only, with a
-  cable in each way round) is to compare `/sys/class/typec/port0/orientation`
-  with gpg0-4's level. A wrong polarity swaps AUX+/AUX- on the SBU pair: AUX
-  fails, nothing is damaged.
+- **SBU_SW_SEL level:** stock sets it to `!gpg0-4`. Settled on the phone
+  (dp2, `orientation-sense`, one plug each way round): gpg0-4 reads 1 with
+  CC1 (normal) and 0 with CC2 (reverse). Stock's select is therefore 1 for
+  reverse, which is gpio-sbu-mux with `GPIO_ACTIVE_HIGH` on select.
 - **The VDMs, pin choice and read lengths:** from stock
   `max77705_alternate.c`.
 
