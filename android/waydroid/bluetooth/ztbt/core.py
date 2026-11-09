@@ -191,7 +191,17 @@ class Bridge(GattServerMixin):
                 cb(True)
         if (("Paired" in changed or "Bonded" in changed) and self.bonded(d) != was_bonded
                 and addr not in self.pairing and self.visible(addr)):
-            self._event_all("EV_BOND_STATE", [addr, P.BOND_BONDED if self.bonded(d) else P.BOND_NONE, P.ST_OK])
+            if self.bonded(d):
+                # A pairing Android didn't start (the device asked: a security
+                # request, the agent's sheet; or Settings). Android's
+                # BondStateMachine drops BONDED unless BONDING came first, and
+                # then never records the bond (iTi spun on it, 9 Nov): BONDING,
+                # then BONDED, as its own stack would have said them.
+                self.log("bond made on Linux:", addr, "(Android told: bonding, bonded)")
+                self._event_all("EV_BOND_STATE", [addr, P.BOND_BONDING, P.ST_OK])
+                self._event_all("EV_BOND_STATE", [addr, P.BOND_BONDED, P.ST_OK])
+            else:
+                self._event_all("EV_BOND_STATE", [addr, P.BOND_NONE, P.ST_OK])
         if was_visible and not self.visible(addr):
             self.log("hidden from Android: Linux uses", addr)
         if self.visible(addr) and (added or any(k in changed for k in AD_FIELDS)):

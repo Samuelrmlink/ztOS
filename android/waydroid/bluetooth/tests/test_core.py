@@ -550,7 +550,29 @@ class Bonds(unittest.TestCase):
     def test_bonds_made_by_linux_are_reported(self):
         be, store, br, c = make()
         br.device_changed(SENSOR, {"Paired": True, "Bonded": True})
-        self.assertEqual(c.events("EV_BOND_STATE"), [[SENSOR, P.BOND_BONDED, P.ST_OK]])
+        # BONDING first: Android drops a BONDED it didn't see coming (iTi, 9 Nov)
+        self.assertEqual(c.events("EV_BOND_STATE"), [[SENSOR, P.BOND_BONDING, P.ST_OK],
+                                                      [SENSOR, P.BOND_BONDED, P.ST_OK]])
+
+    def test_device_initiated_pairing_while_android_uses_it(self):
+        # RM_2685: connected for iTi, it asks for a passkey itself; the agent's
+        # sheet answers; BlueZ says Paired, then Bonded
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        br.device_changed(SENSOR, {"Paired": True})
+        br.device_changed(SENSOR, {"Bonded": True})
+        self.assertEqual(c.events("EV_BOND_STATE"), [[SENSOR, P.BOND_BONDING, P.ST_OK],
+                                                      [SENSOR, P.BOND_BONDED, P.ST_OK]])
+        st, (devs,) = c.reply(c.request("BONDED_LIST"), "BONDED_LIST")
+        self.assertIn(SENSOR, [x[0] for x in devs])
+
+    def test_a_pairing_without_a_bond_says_nothing(self):
+        be, store, br, c = make()
+        br.device_changed(SENSOR, {"Paired": True, "Bonded": False})
+        self.assertEqual(c.events("EV_BOND_STATE"), [])
 
 
 class Helpers(unittest.TestCase):
