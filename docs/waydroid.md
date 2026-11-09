@@ -303,21 +303,52 @@ Android 13's Bluetooth is split into three layers:
    `BluetoothGattServer`, `BluetoothLeAdvertiser`).
 2. Binder (system_server's `BluetoothManagerService`, then the Bluetooth
    app's `AdapterService`, `GattService` and `ScanManager`).
-3. JNI, into the native stack `libbluetooth.so` (Fluoride/GD), through its C
-   and C++ interfaces: `bt_interface_t`, `btgatt_interface_t` (client and
-   server), `BleScannerInterface`, `BleAdvertiserInterface` and
-   `btsock_interface_t`. Below that is the HCI HAL.
+3. JNI, into the native stack (Fluoride/GD), through its C and C++
+   interfaces: `bt_interface_t`, `btgatt_interface_t` (client and server),
+   `BleScannerInterface`, `BleAdvertiserInterface` and `btsock_interface_t`.
+   Below that is the HCI HAL.
 
-The shim **replaces `libbluetooth.so`** in the system image. It implements
-those interfaces and keeps the Java Bluetooth app, permissions, scan filters
-and callbacks unchanged, so apps see stock Android behaviour.
+The shim implements layer 3's interfaces and keeps the Java Bluetooth app,
+permissions, scan filters and callbacks unchanged, so apps see stock Android
+behaviour.
+
+**What the pinned image has** (system.img of 20260927, `TQ3A.230901.001`,
+read with debugfs on 8 Nov):
+
+- `com.android.btservices` is a *flattened* APEX directory,
+  `/system/apex/com.android.btservices/`, so `strip-image.sh` can change it
+  like any other file.
+- There is **no `libbluetooth.so`**. In Android 13 the stack is linked
+  statically into `lib64/libbluetooth_jni.so` (13.8 MB). The JNI code reaches
+  it only through `hal_util_load_bt_library()`, which returns
+  `&bluetoothInterface` (no `dlopen`; `DYNAMIC_LOAD_BLUETOOTH` is off).
+  `bluetoothInterface` (328 bytes) and `JNI_OnLoad` are exported dynamic
+  symbols. Every profile interface, GATT, scanner, advertiser and sockets
+  included, is fetched through `bluetoothInterface.get_profile_interface`.
+- There is **no Bluetooth app** (`com.android.bluetooth`, `Bluetooth.apk`):
+  no `app/` in the APEX and none in any app directory. The LineageOS waydroid
+  target leaves it out. `framework-bluetooth.jar`, `service-bluetooth.jar`
+  (with its odex) and the app's privapp allowlist are there. Without the app,
+  `BluetoothManagerService` has nothing to bind, and without the
+  `android.hardware.bluetooth*` features system_server doesn't start it.
+
+So the shim does not replace a `libbluetooth.so`. It goes in as a **wrapper
+`libbluetooth_jni.so`**: the stock library is renamed
+`libbluetooth_jni_stock.so` in the same APEX directory, and the wrapper's
+`JNI_OnLoad` `dlopen`s it, makes the page of its `bluetoothInterface`
+writable, copies the shim's `bt_interface_t` over it, and calls the stock
+`JNI_OnLoad`, which registers the stock JNI methods. From then on the JNI
+code calls the shim. The stock stack stays in memory but is never
+initialised (`init` and `enable` are the shim's). This keeps the JNI layer
+the exact one the image was built with. The only ABI the shim must match is
+that of the interface structs and classes of `packages/modules/Bluetooth` at
+`lineage-20.0`. See "Shim build" below.
 
 Below the interfaces, it speaks a small framed protocol over a Unix socket.
-The socket is bind-mounted into the container the way the location bridge
-reaches the host. On the other end is a host daemon, **`ztos-btbridge`**, a
-user of BlueZ's D-Bus API. It runs on the host (BlueZ and `AF_BLUETOOTH` are
-there), as part of the ztos-waydroid package. It is not a stack: BlueZ does
-SMP, SSP, encryption and key storage.
+On the other end is a host daemon, **`ztos-btbridge`**, a user of BlueZ's
+D-Bus API. It runs on the host (BlueZ and `AF_BLUETOOTH` are there), as the
+user's systemd service, and is part of the ztos-waydroid package. It is not
+a stack: BlueZ does SMP, SSP, encryption and key storage.
 
 Rejected alternatives at other layers:
 
@@ -325,6 +356,42 @@ Rejected alternatives at other layers:
   while BlueZ also drives the real one. It can't honour BlueZ's ownership.
 - **Replacing the Java Bluetooth app.** That would mean reimplementing about
   ten AIDL interfaces, and it breaks with every Android release.
+- **Interposing `bluetoothInterface` by symbol** (loading a library first
+  that defines it). It doesn't work: the JNI code's reference is resolved at
+  link time, and no dynamic relocation names it.
+
+### Socket and trust
+
+- **Where.** The host's `~/.local/share/waydroid/data` is Android's `/data`
+  (Waydroid's session bind mount). The host user is uid 1000, which is
+  Android's `system` and owns `/data/misc`. The bridge makes
+  `/data/misc/ztos-btbridge/` (mode 0711) and listens on `bridge.sock` in
+  it. This needs no Waydroid change, and the path survives a bridge restart.
+- **Who.** The socket is `SOCK_SEQPACKET`. The bridge checks `SO_PEERCRED`
+  of every connection: the uid must be 1002 (`AID_BLUETOOTH`, the Bluetooth
+  app; the container has no user namespace, so uids are the host's), and the
+  pid must be in the `lxc.payload.waydroid` cgroup. Anything else is closed
+  at once. Apps can't reach the socket. The bridge doesn't trust the shim
+  anyway: all policy is on the host.
+- **What Android never gets.** No HCI: the container's network namespace
+  has no `AF_BLUETOOTH`, and the bridge has no op that sends raw HCI or mgmt
+  commands. No link keys or LTKs: no op returns them, and BlueZ's D-Bus API
+  doesn't expose them either. No agent role: the shim never raises Android's
+  pairing dialog. RFCOMM connections (stage 3) are handed over as an
+  already-connected socket fd (`SCM_RIGHTS`), which carries data only.
+
+### Protocol
+
+Each message is one `SOCK_SEQPACKET` packet of at most 64 KiB. It starts
+with a header `op:u16, flags:u16, id:u32` (little endian), followed by the
+arguments, each a type byte and its value (`y` u8, `q` u16, `u` u32, `i`
+i32, `B` bool, `a` address in 6 bytes, `U` 128-bit UUID, `s` UTF-8 string,
+`b` bytes, `L` list, `T` tuple). Requests carry an id. The answer is a
+`REPLY` with that id and a status first. Events carry id 0. The table of ops
+and their argument signatures is in
+`android/waydroid/bluetooth/ztbt/proto.py`, and a test checks the shim's
+C++ header against it. The bridge refuses a packet whose arguments don't
+match its op's signature.
 
 ### Mapping
 
@@ -338,8 +405,8 @@ Rejected alternatives at other layers:
 | `discoverServices` → `search_service` / `get_gatt_db` | the GattService1 / GattCharacteristic1 / GattDescriptor1 tree under the device (handles from their `Handle` property) |
 | `readCharacteristic`, `readDescriptor` | GattCharacteristic1/GattDescriptor1 `ReadValue({offset})` |
 | `writeCharacteristic` (with/without response, signed) | `WriteValue(value, {type: request/command/reliable})` (`AcquireWrite` for high-rate write-without-response) |
-| `setCharacteristicNotification` + CCCD write → `register_for_notification` | `StartNotify()`/`StopNotify()`, or `AcquireNotify()` for an fd; `PropertiesChanged(Value)` → `notify_cb` |
-| `requestMtu` → `configure_mtu` | read-only: BlueZ negotiates the MTU itself; the shim reports `MTU` from GattCharacteristic1 (BlueZ ≥ 5.62) |
+| `setCharacteristicNotification` (local only), then the app's CCCD (0x2902) write → `register_for_notification`, `write_descriptor` | the CCCD write becomes `StartNotify()`/`StopNotify()` on its characteristic (BlueZ refuses direct CCCD writes); `PropertiesChanged(Value)` → `notify_cb`; a CCCD read answers the last value written |
+| `requestMtu` → `configure_mtu` | BlueZ exchanges the MTU itself (it asks for 517 on every LE connection); the shim answers with GattCharacteristic1 `MTU` |
 | `readRemoteRssi`, `requestConnectionPriority`, `setPreferredPhy` | Device1 `RSSI`; no-op with success; `Adapter1`/mgmt PHY configuration, read-only at first |
 | `BluetoothDevice.createBond` → `bt_interface_t::create_bond` | Device1 `Pair()`; **BlueZ's agent** (ztOS's `ztos-bt-agent`, the shell's sheet) asks the user; the result → `bond_state_changed_cb`. The Android pairing dialog is never shown: the shim never calls `ssp_request_cb`/`pin_request_cb` |
 | encrypted characteristic (insufficient authentication) | BlueZ itself pairs on the ATT error (its agent again), retries, and returns the value; Android only sees a slower read |
@@ -371,24 +438,82 @@ The policy lives in the host daemon, so Android can't get around it.
 - **Pairing UI is ztOS's.** All pairing goes through BlueZ's registered agent
   (`ztos-bt-agent`). Today the agent accepts only while the phone is
   discoverable, so a request that started from an Android app needs one
-  rule: accept it while the bridge has a `Pair()` outstanding for that
-  device.
-- **Frozen Android.** A freeze or the screen-off policy ends discovery and
-  advertising started by Android, and keeps GATT connections only for
-  `keep_awake` apps.
+  rule: ask (with the usual sheet) while the bridge has a `Pair()`
+  outstanding for that device. The bridge writes the address to
+  `$XDG_RUNTIME_DIR/ztos-btbridge/pairing` for as long as the `Pair()` call
+  runs (at most 60 s). The agent asks about that device while the file is
+  younger than 90 s and names it. The agent still never says yes by itself.
+- **Bonded list.** The list Android gets at start leaves out bonded devices
+  that Linux is connected to. If Linux connects one later, Android keeps it
+  as bonded (a bond state change would make apps think it was unpaired), but
+  its connects fail with "busy" until Linux lets go.
+- **Frozen Android.** The bridge watches the container's cgroup
+  (`/sys/fs/cgroup/lxc.payload.waydroid/cgroup.events`, `frozen 1`). On a
+  freeze it ends Android's discovery and advertising and disconnects every
+  connection it made for Android. A `keep_awake` app keeps the container
+  thawed, so its connections stay. While Android can't read, scan results
+  are dropped and the other events are queued (bounded) until it thaws. A
+  stopped container closes the socket, which releases everything too.
+- **Removing bonds.** `removeBond` from Android is refused, except for a
+  bond that an Android app created through the bridge. The bridge records
+  those addresses in `~/.local/state/ztos-btbridge/android-bonds`. A
+  confirmation sheet in the shell for that case is still to do.
 
 ### Container side
 
 - Add `android.hardware.bluetooth.xml` and `android.hardware.bluetooth_le.xml`
   to the vendor permissions (`patch-vendor.sh`). Without them, apps see no
-  Bluetooth.
-- Install the shim as `/system/lib64/libbluetooth.so` (and
-  `libbluetooth_jni`'s dependency), with `strip-image.sh` and a checksum
-  pin, as for init and the composer.
+  Bluetooth and system_server doesn't start `BluetoothManagerService`.
+- Add the Bluetooth app as `app/Bluetooth/Bluetooth.apk` in the flattened
+  APEX directory, where `lineage-20.0` installs it. It must come from a build
+  of the same release (see "Shim build").
+- Rename the stock `libbluetooth_jni.so` to `libbluetooth_jni_stock.so` and
+  install the wrapper under the old name. Use `strip-image.sh` and checksum
+  pins, as for init and the composer.
+- Switch off the profiles the bridge doesn't offer (A2DP, HFP, AVRCP, HID,
+  PAN, LE Audio, hearing aids and so on) with the app's `profile_supported`
+  config (a runtime resource overlay) and the `bluetooth.profile.*.enabled`
+  properties. Then the Java side never asks for their native interfaces.
 - No HCI HAL service is needed: the shim never opens one.
-- The shim must be built against the LineageOS 20 `packages/modules/Bluetooth`
-  headers of the pinned build, because the C++ interface vtables have to
-  match. That needs the NDK plus those headers, built off the phone.
+
+### Shim build
+
+The wrapper and shim are C++ for aarch64 bionic. They are built on the PC
+with the NDK (r25 or later, API 33) and:
+
+- the interface headers of LineageOS `android_packages_modules_Bluetooth`
+  at `lineage-20.0` (`system/include/hardware/bluetooth.h`, `bt_gatt*.h`,
+  `ble_scanner.h`, `ble_advertiser.h`, `bt_sock.h`, `types/`), fetched by a
+  script at a pinned commit;
+- AOSP `external/libchrome` (r576279) headers at `android-13.0.0_r75`.
+  These are needed because `BleScannerInterface`, `BleAdvertiserInterface`
+  and the GATT client take `base::Callback`s. The out-of-line `base::`
+  functions they need come from the stock library, which exports them (for
+  example the constructors of `base::internal::BindStateBase`). So the shim
+  links against `libbluetooth_jni_stock.so` and uses the same libchrome
+  code;
+- AOSP `external/libcxx` headers and the image's own `libc++.so`
+  (`std::__1`), not the NDK's `libc++_shared` (`std::__ndk1`). `std::vector`
+  and `std::string` cross the interface, so both sides must use the same
+  libc++.
+
+A check after each build compares the shim's vtable sizes and struct sizes
+with the stock library. For example, `sizeof(bt_interface_t)` must be 328,
+the size of the stock symbol.
+
+The image has no Bluetooth app, so it has to come from somewhere else. That
+needs a decision:
+
+1. **Take it from another LineageOS 20 arm64 build of the same release** (a
+   GSI or a device build with `TQ3A.230901.001`), only `Bluetooth.apk`. A
+   check compares its native methods (class, name and signature) with the
+   strings the stock `libbluetooth_jni.so` registers, and rejects it on a
+   mismatch. This is the cheapest option, but it depends on finding such a
+   build.
+2. **Build it** from a LineageOS 20 checkout (about 150 GB without the
+   history) with `m Bluetooth` for `lineage_waydroid_arm64-userdebug`. This
+   takes hours of sync and build, once. After that, the app (and the shim as
+   a Soong module, if wanted) are exact.
 
 ### Stages
 
