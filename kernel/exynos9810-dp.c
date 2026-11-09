@@ -105,6 +105,17 @@
 #include <drm/display/drm_dp.h>
 #include <drm/display/drm_dp_helper.h>	/* struct drm_dp_aux_msg only */
 #include <drm/drm_edid.h>			/* DDC_ADDR, EDID_LENGTH */
+#include <drm/drm_atomic_helper.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_fb_dma_helper.h>
+#include <drm/drm_fourcc.h>
+#include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_gem_framebuffer_helper.h>
+#include <drm/drm_managed.h>
+#include <drm/drm_modes.h>
+#include <drm/drm_probe_helper.h>
+#include <drm/drm_simple_kms_helper.h>
+#include <drm/drm_vblank.h>
 
 /* ---- link controller (regs-displayport.h) ----------------------------------- */
 #define SYSTEM_DEVICE_VERSION		0x0000
@@ -344,7 +355,12 @@ struct x9dp {
 	void __iomem *dma2, *dpp2;	/* DMA/DPP channel 2 (IDMA_VG0), optional */
 	bool vsrc_decon;		/* video_on with DECON2's pixels, not BIST */
 	bool link_fresh;
-	bool qos_changed;		/* the DMA common QoS LUT is not 0x44444444 (experiment) */		/* HPD rose: the next m4up trains the link first */
+	bool qos_changed;
+	/* the DRM device (debugfs step drm) */
+	struct drm_device *drm;
+	bool drm_on;			/* its pipe is enabled: HPD rises restart it */
+	dma_addr_t scan_addr;		/* its framebuffer, 0: the test image */
+	struct work_struct hp_work;	/* connector hotplug event */		/* the DMA common QoS LUT is not 0x44444444 (experiment) */		/* HPD rose: the next m4up trains the link first */
 	bool decon2_on;
 	void *fb_cpu;			/* the dma step's test image */
 	dma_addr_t fb_dma;
@@ -1754,7 +1770,7 @@ static int x9dp_dma(struct x9dp *d)
 	ret = x9dp_ch(d, &dma, &dpp, &blend);
 	if (ret)
 		return ret;
-	if (!d->fb_cpu) {
+	if (!d->scan_addr && !d->fb_cpu) {
 		ret = dma_set_mask_and_coherent(d->dev, DMA_BIT_MASK(32));
 		if (ret)
 			return ret;
@@ -1802,8 +1818,12 @@ static int x9dp_dma(struct x9dp *d)
 		writel(ch << 16 | cw, dma + IDMA_IMG_SIZE);
 		writel(ch << 16 | cw, dpp + DPP_IMG_SIZE);
 	}
-	writel((u32)d->fb_dma, dma + IDMA_IN_BASE_ADDR_Y);
-	writel((u32)d->fb_dma, dma + IDMA_IN_BASE_ADDR_C);
+	{
+		dma_addr_t a = d->scan_addr ?: d->fb_dma;
+
+		writel((u32)a, dma + IDMA_IN_BASE_ADDR_Y);
+		writel((u32)a, dma + IDMA_IN_BASE_ADDR_C);
+	}
 	writel((readl(dma + IDMA_IN_CON) &
 		~(IDMA_IMG_FORMAT | IDMA_ROTATION | IDMA_AFBC_EN | IDMA_BLOCK_EN)) |
 	       FIELD_PREP(IDMA_IMG_FORMAT, IDMA_FMT_XRGB8888), dma + IDMA_IN_CON);
@@ -1875,7 +1895,7 @@ static int x9dp_win_set(struct x9dp *d, bool dma)
 		return ret;
 	if (!d->d0win)
 		return -ENODEV;
-	if (dma && !d->fb_cpu)
+	if (dma && !d->fb_cpu && !d->scan_addr)
 		return -EAGAIN;		/* dma first */
 	writel(WIN_FUNC_COPY_MULT_AF, d->d0win + WIN_CONTROL_0);
 	writel(0, d->d0win + WIN_START_POSITION);
@@ -2163,6 +2183,257 @@ static int x9dp_m4up(struct x9dp *d)
 	return st & BIT(8) ? -EIO : 0;
 }
 
+/* m4up with the window source given (the DRM pipe: the DMA) */
+static int x9dp_m4up_src(struct x9dp *d, uint src)
+{
+	uint saved = m4_src;
+	int ret;
+
+	m4_src = src;
+	ret = x9dp_m4up(d);
+	m4_src = saved;
+	return ret;
+}
+
+/* ---- M4: a DRM device for DP-1 ------------------------------------------------------ */
+
+/*
+ * A KMS-only DRM device of its own (DECON2 as the CRTC, blender window 4 on
+ * DMA channel VG0 as the primary plane, the DP link as the DP-1 connector),
+ * so userspace can set a mode and scan out a dumb or imported buffer.
+ *
+ * It is registered only by hand (debugfs step drm), never at boot: the shell
+ * (wlroots autocreate, no WLR_DRM_DEVICES) takes every KMS device of its
+ * seat, and a second card appearing at boot could change which one it uses.
+ * One mode for now, CEA 1080p60 (the timing the link and DECON2 run), and
+ * XRGB8888 only. Vblank events are sent at once (no DECON2 interrupt yet).
+ */
+static int x9dp_run(struct x9dp *d, const char *name);
+
+struct x9dp_drm {
+	struct drm_device drm;
+	struct drm_simple_display_pipe pipe;
+	struct drm_connector conn;
+	struct x9dp *d;
+};
+
+static struct x9dp_drm *to_x9dp_drm(struct drm_device *drm)
+{
+	return container_of(drm, struct x9dp_drm, drm);
+}
+
+static const struct drm_display_mode x9dp_drm_mode = {
+	DRM_MODE("1920x1080", DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED, 148500,
+		 1920, 2008, 2052, 2200, 0, 1080, 1084, 1089, 1125, 0,
+		 DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC)
+};
+
+static int x9dp_drm_get_modes(struct drm_connector *conn)
+{
+	struct x9dp *d = to_x9dp_drm(conn->dev)->d;
+	struct drm_display_mode *mode;
+	const struct drm_edid *edid = NULL;
+
+	mutex_lock(&d->lock);
+	if (d->edid_ok)
+		edid = drm_edid_alloc(d->edid, EDID_LENGTH);
+	mutex_unlock(&d->lock);
+	drm_edid_connector_update(conn, edid);	/* name, size, ELD; the modes are ours */
+	drm_edid_free(edid);
+	mode = drm_mode_duplicate(conn->dev, &x9dp_drm_mode);
+	if (!mode)
+		return 0;
+	drm_mode_probed_add(conn, mode);
+	return 1;
+}
+
+static enum drm_mode_status x9dp_drm_mode_valid(struct drm_connector *conn,
+						 const struct drm_display_mode *mode)
+{
+	return drm_mode_match(mode, &x9dp_drm_mode, DRM_MODE_MATCH_TIMINGS |
+			      DRM_MODE_MATCH_CLOCK | DRM_MODE_MATCH_FLAGS) ? MODE_OK : MODE_BAD;
+}
+
+static int x9dp_drm_detect(struct drm_connector *conn, struct drm_modeset_acquire_ctx *ctx,
+			   bool force)
+{
+	struct x9dp *d = to_x9dp_drm(conn->dev)->d;
+
+	return (d->dp_status & DP_STATUS_HPD_STATE) && x9dp_lanes(d) ?
+		connector_status_connected : connector_status_disconnected;
+}
+
+static const struct drm_connector_helper_funcs x9dp_conn_helpers = {
+	.get_modes = x9dp_drm_get_modes,
+	.mode_valid = x9dp_drm_mode_valid,
+	.detect_ctx = x9dp_drm_detect,
+};
+
+static const struct drm_connector_funcs x9dp_conn_funcs = {
+	.fill_modes = drm_helper_probe_single_connector_modes,
+	.destroy = drm_connector_cleanup,
+	.reset = drm_atomic_helper_connector_reset,
+	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
+};
+
+/* the base address of a new framebuffer, taken at DECON2's next frame (window 4 shadow) */
+static void x9dp_drm_flip(struct x9dp *d, dma_addr_t addr)
+{
+	void __iomem *dma, *dpp;
+	u32 blend;
+
+	if (!d->decon2_on || x9dp_ch(d, &dma, &dpp, &blend))
+		return;
+	writel((u32)addr, dma + IDMA_IN_BASE_ADDR_Y);
+	writel((u32)addr, dma + IDMA_IN_BASE_ADDR_C);
+	x9dp_d2_rmw(d, DECON_SHADOW_REG_UPDATE_REQ, BIT(X9DP_WIN), ~0);
+}
+
+static void x9dp_drm_send_event(struct drm_crtc *crtc)
+{
+	struct drm_pending_vblank_event *event;
+
+	spin_lock_irq(&crtc->dev->event_lock);
+	event = crtc->state->event;
+	crtc->state->event = NULL;
+	if (event)
+		drm_crtc_send_vblank_event(crtc, event);
+	spin_unlock_irq(&crtc->dev->event_lock);
+}
+
+static void x9dp_drm_enable(struct drm_simple_display_pipe *pipe,
+			    struct drm_crtc_state *cstate, struct drm_plane_state *pstate)
+{
+	struct x9dp *d = to_x9dp_drm(pipe->crtc.dev)->d;
+	int ret = -ENODEV;
+
+	mutex_lock(&d->lock);
+	d->scan_addr = drm_fb_dma_get_gem_addr(pstate->fb, pstate, 0);
+	d->drm_on = true;
+	if ((d->dp_status & DP_STATUS_HPD_STATE) && x9dp_lanes(d)) {
+		if ((!d->id_done && x9dp_run(d, "id")) || (!d->pma_on && x9dp_run(d, "pma")) ||
+		    (!d->phy_on && x9dp_run(d, "phy")) || (!d->ctrl_on && x9dp_run(d, "ctrl")))
+			ret = -EIO;
+		else
+			ret = x9dp_m4up_src(d, 1);
+	}
+	dev_info(d->dev, "drm: enable, fb %pad: %d (%s)\n", &d->scan_addr, ret, d->last);
+	mutex_unlock(&d->lock);
+	x9dp_drm_send_event(&pipe->crtc);
+}
+
+static void x9dp_drm_disable(struct drm_simple_display_pipe *pipe)
+{
+	struct x9dp *d = to_x9dp_drm(pipe->crtc.dev)->d;
+
+	mutex_lock(&d->lock);
+	d->drm_on = false;
+	if (d->video_on)
+		x9dp_video_off(d);
+	if (d->decon2_on)
+		x9dp_decon2_stop(d);
+	d->scan_addr = 0;
+	dev_info(d->dev, "drm: disable\n");
+	mutex_unlock(&d->lock);
+	x9dp_drm_send_event(&pipe->crtc);
+}
+
+static void x9dp_drm_update(struct drm_simple_display_pipe *pipe,
+			    struct drm_plane_state *old)
+{
+	struct x9dp *d = to_x9dp_drm(pipe->crtc.dev)->d;
+	struct drm_plane_state *state = pipe->plane.state;
+
+	if (state->fb && state->fb != old->fb && pipe->crtc.state->active) {
+		mutex_lock(&d->lock);
+		d->scan_addr = drm_fb_dma_get_gem_addr(state->fb, state, 0);
+		x9dp_drm_flip(d, d->scan_addr);
+		mutex_unlock(&d->lock);
+	}
+	x9dp_drm_send_event(&pipe->crtc);
+}
+
+static enum drm_mode_status x9dp_drm_crtc_mode_valid(struct drm_simple_display_pipe *pipe,
+						      const struct drm_display_mode *mode)
+{
+	return x9dp_drm_mode_valid(NULL, mode);
+}
+
+static const struct drm_simple_display_pipe_funcs x9dp_pipe_funcs = {
+	.mode_valid = x9dp_drm_crtc_mode_valid,
+	.enable = x9dp_drm_enable,
+	.disable = x9dp_drm_disable,
+	.update = x9dp_drm_update,
+};
+
+static const u32 x9dp_drm_formats[] = { DRM_FORMAT_XRGB8888 };
+
+static const struct drm_mode_config_funcs x9dp_mode_config_funcs = {
+	.fb_create = drm_gem_fb_create,
+	.atomic_check = drm_atomic_helper_check,
+	.atomic_commit = drm_atomic_helper_commit,
+};
+
+DEFINE_DRM_GEM_DMA_FOPS(x9dp_drm_fops);
+
+static const struct drm_driver x9dp_drm_driver = {
+	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_ATOMIC,
+	.fops = &x9dp_drm_fops,
+	DRM_GEM_DMA_DRIVER_OPS,
+	.name = "exynos9810-dp",
+	.desc = "Exynos 9810 DisplayPort (DECON2)",
+	.major = 1,
+	.minor = 0,
+};
+
+/* debugfs step drm: register the DRM device (once; not undone) */
+static int x9dp_drm_register(struct x9dp *d)
+{
+	struct x9dp_drm *xd;
+	struct drm_device *drm;
+	int ret;
+
+	if (d->drm)
+		return -EEXIST;
+	if (!d->decon2 || !d->dma2 || !d->dpp2 || !d->d0win)
+		return -ENODEV;
+	ret = dma_set_mask_and_coherent(d->dev, DMA_BIT_MASK(32));
+	if (ret)
+		return ret;
+	xd = devm_drm_dev_alloc(d->dev, &x9dp_drm_driver, struct x9dp_drm, drm);
+	if (IS_ERR(xd))
+		return PTR_ERR(xd);
+	xd->d = d;
+	drm = &xd->drm;
+	ret = drmm_mode_config_init(drm);
+	if (ret)
+		return ret;
+	drm->mode_config.min_width = 1920;
+	drm->mode_config.max_width = 1920;
+	drm->mode_config.min_height = 1080;
+	drm->mode_config.max_height = 1080;
+	drm->mode_config.funcs = &x9dp_mode_config_funcs;
+	drm->mode_config.preferred_depth = 24;
+	ret = drm_connector_init(drm, &xd->conn, &x9dp_conn_funcs, DRM_MODE_CONNECTOR_DisplayPort);
+	if (ret)
+		return ret;
+	drm_connector_helper_add(&xd->conn, &x9dp_conn_helpers);
+	xd->conn.polled = DRM_CONNECTOR_POLL_HPD;
+	ret = drm_simple_display_pipe_init(drm, &xd->pipe, &x9dp_pipe_funcs, x9dp_drm_formats,
+					   ARRAY_SIZE(x9dp_drm_formats), NULL, &xd->conn);
+	if (ret)
+		return ret;
+	drm_mode_config_reset(drm);
+	ret = drm_dev_register(drm, 0);
+	if (ret)
+		return ret;
+	d->drm = drm;
+	scnprintf(d->last, sizeof(d->last), "drm: registered %s (minor %d)", drm->driver->name,
+		  drm->primary->index);
+	return 0;
+}
+
 static int x9dp_m4regs_show(struct seq_file *s, void *unused)
 {
 	struct x9dp *d = s->private;
@@ -2200,7 +2471,7 @@ static const struct {
 	{ "video", x9dp_video }, { "decon2_start", x9dp_decon2_start },
 	{ "decon2_stop", x9dp_decon2_stop }, { "dma", x9dp_dma },
 	{ "win", x9dp_win }, { "win_dma", x9dp_win_dma }, { "frames", x9dp_frames },
-	{ "m4up", x9dp_m4up }, { "vreset", x9dp_vreset },
+	{ "m4up", x9dp_m4up }, { "vreset", x9dp_vreset }, { "drm", x9dp_drm_register },
 };
 
 static int x9dp_run(struct x9dp *d, const char *name)
@@ -2236,6 +2507,8 @@ static void x9dp_auto_work(struct work_struct *work)
 	mutex_unlock(&d->lock);
 }
 
+static void x9dp_hp_work(struct work_struct *work);
+
 static void x9dp_hpd_work(struct work_struct *work)
 {
 	struct x9dp *d = container_of(work, struct x9dp, hpd_work);
@@ -2260,12 +2533,16 @@ static void x9dp_hpd_work(struct work_struct *work)
 	 * with DECON2 running, its video); the sink's view 100 ms into the
 	 * video is logged.
 	 */
-	if (hpd_bist) {
-		bool decon = hpd_m4 || d->decon2_on;
+	if (hpd_bist || d->drm_on) {
+		bool decon = hpd_m4 || d->decon2_on || d->drm_on;
 		int ret;
 
 		/* m4up stops, resets and trains itself */
-		if (decon) {
+		if (d->drm_on) {
+			d->link_fresh = true;
+			ret = x9dp_m4up_src(d, 1);
+			dev_info(d->dev, "drm: HPD restart %d (%s)\n", ret, d->last);
+		} else if (decon) {
 			d->link_fresh = true;
 			ret = x9dp_run(d, "m4up");
 		} else {
@@ -2300,7 +2577,7 @@ static int x9dp_sw_set(struct typec_switch_dev *sw, enum typec_orientation orien
 static int x9dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state)
 {
 	struct x9dp *d = typec_mux_get_drvdata(mux);
-	bool was, now, hpd_up = false;
+	bool was, now, hpd_up = false, hpd_changed = false;
 
 	/*
 	 * The USB Safe State is what typec_displayport sets around Enter Mode
@@ -2323,6 +2600,7 @@ static int x9dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state
 				 dp->status & DP_STATUS_HPD_STATE ? "high" : "low");
 		hpd_up = (dp->status & DP_STATUS_HPD_STATE) &&
 			 !(d->dp_status & DP_STATUS_HPD_STATE);
+		hpd_changed = (dp->status ^ d->dp_status) & DP_STATUS_HPD_STATE;
 		d->dp_status = dp->status;
 		d->dp_conf = dp->conf;
 	}
@@ -2332,9 +2610,19 @@ static int x9dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state
 	mutex_unlock(&d->lock);
 	if ((auto_bringup || pma_early) && was != now)
 		schedule_work(&d->auto_work);
-	if (hpd_read && hpd_up)
+	if ((hpd_read || d->drm_on) && hpd_up)
 		schedule_work(&d->hpd_work);
+	if (d->drm && hpd_changed)
+		schedule_work(&d->hp_work);
 	return 0;
+}
+
+static void x9dp_hp_work(struct work_struct *work)
+{
+	struct x9dp *d = container_of(work, struct x9dp, hp_work);
+
+	if (d->drm)
+		drm_kms_helper_hotplug_event(d->drm);
 }
 
 /* ---- debugfs ------------------------------------------------------------------ */
@@ -2426,6 +2714,9 @@ static void x9dp_unregister(void *data)
 
 	cancel_work_sync(&d->auto_work);
 	cancel_work_sync(&d->hpd_work);
+	cancel_work_sync(&d->hp_work);
+	if (d->drm)
+		drm_dev_unplug(d->drm);
 	debugfs_remove_recursive(d->dbg);
 	mutex_lock(&d->lock);
 	x9dp_off(d);
@@ -2458,6 +2749,7 @@ static int x9dp_probe(struct platform_device *pdev)
 	mutex_init(&d->lock);
 	INIT_WORK(&d->auto_work, x9dp_auto_work);
 	INIT_WORK(&d->hpd_work, x9dp_hpd_work);
+	INIT_WORK(&d->hp_work, x9dp_hp_work);
 	d->orient = TYPEC_ORIENTATION_NORMAL;
 	d->mode = TYPEC_STATE_SAFE;
 

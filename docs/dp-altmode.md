@@ -136,6 +136,43 @@ registers sit in DECON0's space (`decon_reg_set_window_control`,
 proposed separately. Not written at all: W3 (DECON0 `CLOCK_CONTROL_0`
 TE_QACTIVE_PLL_ON) and the DMA common block.
 
+**M4 results (dp15-dp33).**
+
+- DECON2 runs no frame without a window (stock never starts it with
+  `num_of_window == 0`). Window 4 (stock `decon_t` `default_win`; DECON0
+  uses only window 5) in DECON0's blender space, plus DECON2's own window
+  enable and channel map, gives the picture: a colour map first (solid
+  green), then a DMA framebuffer.
+- DMA channel G1 (bus port DPU2) starved at full 1080p. VG0 (`dma_ch=2`,
+  DMA 0x16073000, DPP 0x16023000, blender channel 0, port DPU1 with
+  DECON0's own G0) carries 1920x1080 at 60 Hz without a single MAPI
+  underflow once started.
+- An SST1 MAPI FIFO underflow leaves the link's stream dead until restarted.
+  About half the starts underflow in their first frames (the same at
+  1080p30, so not bandwidth; the QoS LUT made no difference). `m4up` checks
+  the first 100 ms and restarts DECON2 (SST1 FIFOs cleared, no new
+  training) up to `m4_tries` times, `m4_retry_ms` apart: 10/10 HPD starts
+  showed the picture (dp32).
+- `m4up` trains the link only after an HPD rise: retraining a sink under
+  a running stream made the dock fail HBR training.
+- With `hpd_read=1 hpd_bist=1 hpd_m4=1` an HPD rise runs it all
+  (`m4_src` 0 colour map, 1 the DMA test image).
+
+**DRM (dp33).** debugfs step `drm` registers a KMS-only DRM device
+`exynos9810-dp` (DECON2 as the CRTC, window 4 on VG0 as the plane, DP-1
+as the connector with the sink's EDID, 1920x1080@60 XRGB8888 only, dumb
+buffers from DRM_GEM_DMA). It is never registered at boot: the shell's
+wlroots takes every KMS device of its seat. For tests, a volatile udev
+rule puts it on its own seat first:
+
+```
+SUBSYSTEM=="drm", KERNEL=="card*", DRIVERS=="exynos9810-dp", ENV{ID_SEAT}="seat-dp"
+```
+
+`modetest -M exynos9810-dp -s 35@38:1920x1080` shows modetest's pattern on
+the sink. An HPD rise with the pipe enabled restarts it; HPD changes send
+a hotplug event. No config change: the release stays 7.1.0-zboot-wd-dp4.
+
 **Fallback: the PMA up before Enter Mode.** Stock's USB3 bring-up powers the
 combo PHY's PMA before the dock is asked to enter DP. If HPD stays low even
 with USB enumerating, `exynos9810_dp.pma_early=1` (a `--dp-tx` image;
