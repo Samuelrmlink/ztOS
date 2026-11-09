@@ -35,7 +35,12 @@
  *   bist   1080p60 colour bars from the link controller's own pattern
  *          generator (no DECON): video timing, Mvid/Nvid, transfer unit,
  *          BIST on, VIDEO_EN
- *   video_off  VIDEO_EN and BIST off
+ *   video_off  VIDEO_EN, BIST and the SST1 video function off
+ *   status read only: the sink's DPCD 0x200-0x207 and symbol error
+ *          counters, the controller's SST1 function/interrupt/debug state,
+ *          logged and kept for debugfs state
+ *   lh     the SST1 LH power channel towards the DPU (stock powers it as
+ *          DECON2 starts); by hand only, never in the automatic path
  *   off    AUX/PCS off, PHY reset, PMA back to low power and reset
  *
  * auto=1 runs pma..edid itself when the class enters a DP pin state, and
@@ -114,6 +119,16 @@
 #define PCS_LANE_CONTROL		0x3004	/* LANEn_MAP at 4n */
 /* M3 (regs-displayport.h:28, :374-395, :586-767) */
 #define SYSTEM_MAIN_LINK_BANDWIDTH	0x000c
+#define SYSTEM_SST1_FUNCTION_ENABLE	0x001c
+#define  SST1_LH_PWR_ON_STATUS		BIT(5)
+#define  SST1_LH_PWR_ON			BIT(4)
+#define  SST1_VIDEO_FUNC_EN		BIT(0)
+#define SYSTEM_DEBUG_LH_PCH		0x0204
+#define DPCD_SYMBOL_ERROR_COUNT_LANE0	0x00210	/* DP 1.2: 0x210-0x217, lanes 0-3, 2 bytes each */
+#define SST1_INTERRUPT_STATUS_SET0	0x5024	/* MAPI_FIFO_UNDER_FLOW b8, VSYNC_DET b7 */
+#define SST1_INTERRUPT_STATUS_SET1	0x5028
+#define SST1_VIDEO_DEBUG_FSM_STATE	0x5460
+#define SST1_VIDEO_DEBUG_MAPI		0x5464
 #define SYSTEM_MAIN_LINK_LANE_COUNT	0x0010
 #define PCS_CONTROL			0x3000
 #define  LINK_TRAINING_PATTERN_SET	GENMASK(5, 4)
@@ -286,6 +301,7 @@ struct x9dp {
 	bool edid_ok;
 	u8 rate, nlanes;		/* trained link, 0: none */
 	bool video_on;
+	char vstat[320];		/* the last status step */
 };
 
 /* ---- register access ----------------------------------------------------------- */
@@ -959,6 +975,8 @@ static int x9dp_bist(struct x9dp *d)
 
 	if (!d->rate)
 		return -EAGAIN;
+	/* the SST1 video function, as stock's function_enable does at init (:432-437) */
+	link_rmw(d, SYSTEM_SST1_FUNCTION_ENABLE, SST1_VIDEO_FUNC_EN, SST1_VIDEO_FUNC_EN);
 	link_rmw(d, SST1_VIDEO_CONTROL, DYNAMIC_RANGE_MODE | VIDEO_BPC | COLOR_FORMAT,
 		 FIELD_PREP(VIDEO_BPC, 1));
 	writel(m->va + m->vfp + m->vs + m->vbp, d->link + SST1_VIDEO_VERTICAL_TOTAL_PIXELS);
@@ -1018,10 +1036,60 @@ static int x9dp_video_off(struct x9dp *d)
 		link_rmw(d, SST1_VIDEO_ENABLE, VIDEO_EN, 0);	/* displayport_reg_stop, :1499-1502 */
 		link_rmw(d, SST1_VIDEO_BIST_CONTROL, BIST_EN, 0);
 		link_rmw(d, SST1_VIDEO_CONTROL, STRM_VALID_FORCE | STRM_VALID_CTRL, 0);
+		link_rmw(d, SYSTEM_SST1_FUNCTION_ENABLE, SST1_VIDEO_FUNC_EN, 0);
 	}
 	d->video_on = false;
 	scnprintf(d->last, sizeof(d->last), "video_off");
 	return 0;
+}
+
+/*
+ * Read only. The sink: SINK_COUNT, IRQ vector, lane 0-3 status, alignment,
+ * SINK_STATUS (0x205: receive port in sync), adjust requests (0x200-0x207),
+ * symbol error counts (0x210-0x217). The controller: SST1 function enable
+ * (LH power state), SST1 interrupt status (FIFO underflow, VSYNC seen), the
+ * video FSM and MAPI debug, the LH P-channel debug, video/BIST/PCS controls.
+ */
+static int x9dp_status(struct x9dp *d)
+{
+	u8 a[8] = {}, e[8] = {};
+	int r1, r2;
+
+	if (!d->ctrl_on)
+		return -EAGAIN;
+	r1 = x9dp_dpcd_rd(d, DP_SINK_COUNT, a, sizeof(a));
+	r2 = x9dp_dpcd_rd(d, DPCD_SYMBOL_ERROR_COUNT_LANE0, e, sizeof(e));
+	scnprintf(d->vstat, sizeof(d->vstat),
+		  "sink 200-207: %8ph (%d), errors 210-217: %8ph (%d); sst1_func %08x int0 %08x int1 %08x fsm %08x mapi %08x lh_pch %08x video_en %08x video_ctl %08x bist %08x pcs %08x",
+		  a, r1, e, r2, readl(d->link + SYSTEM_SST1_FUNCTION_ENABLE),
+		  readl(d->link + SST1_INTERRUPT_STATUS_SET0),
+		  readl(d->link + SST1_INTERRUPT_STATUS_SET1),
+		  readl(d->link + SST1_VIDEO_DEBUG_FSM_STATE),
+		  readl(d->link + SST1_VIDEO_DEBUG_MAPI),
+		  readl(d->link + SYSTEM_DEBUG_LH_PCH),
+		  readl(d->link + SST1_VIDEO_ENABLE),
+		  readl(d->link + SST1_VIDEO_CONTROL),
+		  readl(d->link + SST1_VIDEO_BIST_CONTROL),
+		  readl(d->link + PCS_CONTROL));
+	dev_info(d->dev, "status: %s\n", d->vstat);
+	scnprintf(d->last, sizeof(d->last), "status: read (see vstat)");
+	return 0;
+}
+
+/* SST1_LH_PWR_ON and its status, as displayport_reg_lh_p_ch_power(1) (:1240-1258) */
+static int x9dp_lh(struct x9dp *d)
+{
+	u32 v;
+	int ret;
+
+	if (!d->ctrl_on)
+		return -EAGAIN;
+	link_rmw(d, SYSTEM_SST1_FUNCTION_ENABLE, SST1_LH_PWR_ON, SST1_LH_PWR_ON);
+	ret = readl_poll_timeout(d->link + SYSTEM_SST1_FUNCTION_ENABLE, v,
+				 v & SST1_LH_PWR_ON_STATUS, 1, 1000);
+	scnprintf(d->last, sizeof(d->last), "lh: SST1 LH power %s (%08x, lh_pch %08x)",
+		  ret ? "NOT acknowledged" : "on", v, readl(d->link + SYSTEM_DEBUG_LH_PCH));
+	return ret;
 }
 
 static const struct {
@@ -1030,7 +1098,8 @@ static const struct {
 } phases[] = {
 	{ "id", x9dp_id }, { "pma", x9dp_pma }, { "phy", x9dp_phy }, { "ctrl", x9dp_ctrl },
 	{ "dpcd", x9dp_dpcd }, { "edid", x9dp_edid }, { "train", x9dp_train },
-	{ "bist", x9dp_bist }, { "video_off", x9dp_video_off }, { "off", x9dp_off },
+	{ "bist", x9dp_bist }, { "video_off", x9dp_video_off }, { "status", x9dp_status },
+	{ "lh", x9dp_lh }, { "off", x9dp_off },
 };
 
 static int x9dp_run(struct x9dp *d, const char *name)
@@ -1084,8 +1153,21 @@ static void x9dp_hpd_work(struct work_struct *work)
 	if (x9dp_run(d, "edid") == 0)
 		for (i = 0; i < EDID_LENGTH; i += 16)
 			dev_info(d->dev, "EDID %02x: %16ph\n", i, d->edid + i);
-	if (hpd_bist && !d->video_on && x9dp_run(d, "train") == 0)
-		x9dp_run(d, "bist");
+	/*
+	 * Every HPD rise: the sink lost the link while HPD was low, so the
+	 * video stops, the link is trained again and the bars restart; the
+	 * sink's view 100 ms into the video is logged.
+	 */
+	if (hpd_bist) {
+		if (d->video_on)
+			x9dp_run(d, "video_off");
+		if (x9dp_run(d, "train") == 0 && x9dp_run(d, "bist") == 0) {
+			mutex_unlock(&d->lock);
+			msleep(100);
+			mutex_lock(&d->lock);
+			x9dp_run(d, "status");
+		}
+	}
 out:
 	mutex_unlock(&d->lock);
 }
@@ -1160,6 +1242,8 @@ static int x9dp_state_show(struct seq_file *s, void *unused)
 	seq_printf(s, "link: rate %02x x%u, video %s\n", d->rate, d->rate ? d->nlanes : 0,
 		   d->video_on ? "on (colour bars)" : "off");
 	seq_printf(s, "last: %s\n", d->last);
+	if (d->vstat[0])
+		seq_printf(s, "vstat: %s\n", d->vstat);
 	if (d->dpcd_ok)
 		seq_printf(s, "dpcd: %16phN\n", d->dpcd);
 	if (d->edid_ok) {
