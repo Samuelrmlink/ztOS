@@ -22,6 +22,10 @@
 #                                binder + binderfs, PSI, bridge/veth, nftables NAT,
 #                                policy routing, Android netd's xtables matches
 #                                (kernel/waydroid.config, docs/waydroid.md)
+#     --dp-altmode               DisplayPort Alt Mode in the typec class (needs --power):
+#                                the typec_displayport altmode driver built in; the
+#                                MAX77705 side stays off until max77705_usbc.dp_altmode=1.
+#                                Its own release (-dp suffix) and module set
 #     --cmdline "..."            extra kernel command line (zboot.rescue=1 ...)
 #     --config-only              stop after the configuration: out/<name>.config,
 #                                to build the modules for it first (below)
@@ -42,7 +46,9 @@
 # structures. So:
 #   - CONFIG_COMPAT (--waydroid) changes the release: 7.1.0-zboot-wd, whose
 #     modules live in /lib/modules/7.1.0-zboot-wd; without it 7.1.0-zboot. The
-#     kernel refuses a module of the other release (vermagic).
+#     kernel refuses a module of the other release (vermagic). --dp-altmode adds
+#     -dp (7.1.0-zboot-wd-dp): a test kernel with its own modules, never
+#     mistaken for the ABI of the image it is tried against.
 #   - the image is not built unless out/modules-<release>/ABI is this config's
 #     scripts/module-abi.sh hash, i.e. its modules were built against it. For a
 #     new config: build-boot.sh <name> <options> --config-only, then
@@ -63,7 +69,7 @@ FALLBACK=boot
 DTS_FLAGS=()
 EXTRA=
 WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
-UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID=
+UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID= DPALT=
 CONFIG_ONLY= MODULES= MODCHECK=1
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -77,6 +83,7 @@ while [ $# -gt 0 ]; do
 	--pm-debug) PMDEBUG=1 ;;
 	--lockup) LOCKUP=1 ;;
 	--waydroid) WAYDROID=1 ;;
+	--dp-altmode) DPALT=1 ;;
 	--config-only) CONFIG_ONLY=1 ;;
 	--modules) MODULES=$(realpath -m "$2"); shift ;;
 	--no-module-check) MODCHECK= ;;
@@ -281,6 +288,14 @@ if [ -n "$POWER" ]; then
 else
 	cfg --disable CHARGER_MAX77705_USBC
 	cfg --disable TYPEC
+	[ -z "$DPALT" ] || { echo "--dp-altmode needs --power (the USB-C controller)" >&2; exit 1; }
+fi
+# DisplayPort Alt Mode: the class's DP altmode driver, built in (no module to
+# ship); max77705_usbc.dp_altmode=1 on the command line turns the chip side on
+if [ -n "$DPALT" ]; then
+	cfg --enable TYPEC_DP_ALTMODE
+else
+	cfg --disable TYPEC_DP_ALTMODE
 fi
 if [ -n "$GPU" ]; then
 	cfg --enable DRM_PANFROST
@@ -373,6 +388,7 @@ fi
 # structures modules use, so a COMPAT kernel gets its own /lib/modules.
 LV=-zboot
 grep -q '^CONFIG_COMPAT=y$' out/.config && LV=-zboot-wd
+[ -n "$DPALT" ] && LV=$LV-dp
 cfg --set-str LOCALVERSION "$LV"
 make -s O=out olddefconfig
 RELEASE=$(sh "$ROOT/scripts/module-abi.sh" --release out/.config "$(make -s kernelversion)")
