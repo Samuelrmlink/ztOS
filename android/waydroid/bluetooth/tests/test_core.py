@@ -789,6 +789,8 @@ class ConnPriority(unittest.TestCase):
         if made:
             be.answer("connect")
             br.device_changed(addr, {"Connected": True})
+            be.answer("conn_update", values=(6, 0, 500))         # the bridge's own 7.5 ms for discovery
+            be.calls = [x for x in be.calls if x[0] != "conn_update"]
         else:
             be.answer("connect", error=("org.bluez.Error.AlreadyConnected", ""))
         return be, store, br, c, link, addr
@@ -848,6 +850,75 @@ class ConnPriority(unittest.TestCase):
         c.request("CONN_UPDATE", addr, 24, 40, 0, 500)
         c.request("GATT_CLOSE", link)
         self.assertEqual(len(be.called("conn_update")), 2)
+
+
+class BridgeIntervals(unittest.TestCase):
+    """As Fluoride: 7.5 ms while services are discovered, then 30 ms; only
+    on links the bridge made (an S10e's snoop, 9 Nov)."""
+
+    def test_discovery_then_settled(self):
+        be, store, br, c = make(3)
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        self.assertEqual(be.called("conn_update"), [("conn_update", SENSOR, 6, 6, 0, 500)])
+        be.answer("conn_update", values=(6, 0, 500))
+        rid = c.request("GATT_DISCOVER", link)
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        self.assertEqual(c.reply(rid, "GATT_DISCOVER")[0], P.ST_OK)
+        self.assertEqual(be.called("conn_update")[-1], ("conn_update", SENSOR, 24, 24, 0, 500))
+        br.device_changed(SENSOR, {"ServicesResolved": False})
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        self.assertEqual(len(be.called("conn_update")), 2)       # once
+        self.assertEqual(c.events("EV_CONN_UPDATED"), [])           # the bridge's own: Android not told
+
+    def test_a_refusal_changes_nothing_else(self):
+        be, store, br, c = make(3)
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        be.answer("conn_update", error=(0x3b,))                    # unacceptable connection parameters
+        self.assertIn(SENSOR, br.holds)
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        self.assertEqual(be.called("conn_update")[-1], ("conn_update", SENSOR, 24, 24, 0, 500))
+
+    def test_android_s_priority_wins(self):
+        be, store, br, c = make(3)
+        br.device_changed(SENSOR, {"RSSI": -60})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        c.request("CONN_UPDATE", SENSOR, 9, 12, 0, 500)
+        br.device_changed(SENSOR, {"ServicesResolved": True})
+        self.assertEqual([x[2:] for x in be.called("conn_update")], [(6, 6, 0, 500), (9, 12, 0, 500)])
+
+    def test_not_on_links_linux_had(self):
+        be, store, br, c = make(3)
+        br.device_changed(LOCK, {"Connected": True})
+        st, (link,) = c.reply(c.request("GATT_OPEN", LOCK, 0, P.T_LE), "GATT_OPEN")
+        be.answer("connect", error=("org.bluez.Error.AlreadyConnected", ""))
+        br.device_changed(LOCK, {"ServicesResolved": True})
+        self.assertEqual(be.called("conn_update"), [])
+
+    def test_not_on_classic(self):
+        be, store, br, c = make(3)
+        import socket
+        a, b = socket.socketpair()
+        rid = c.request("RFCOMM_CONNECT", "E8:00:00:00:00:05", "00001101-0000-1000-8000-00805f9b34fb", -1, 1,
+                        fds=[a.fileno()])
+        a.close()
+        b.close()
+        self.assertEqual(be.called("conn_update"), [])
+
+    def test_already_resolved_goes_straight_to_30(self):
+        be, store, br, c = make(3)
+        br.device_changed(SENSOR, {"RSSI": -60, "ServicesResolved": True})
+        st, (link,) = c.reply(c.request("GATT_OPEN", SENSOR, 1, P.T_LE), "GATT_OPEN")
+        be.answer("connect")
+        br.device_changed(SENSOR, {"Connected": True})
+        self.assertEqual(be.called("conn_update"), [("conn_update", SENSOR, 24, 24, 0, 500)])
 
 
 if __name__ == "__main__":

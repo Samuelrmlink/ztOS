@@ -46,6 +46,8 @@ SILENT_SECONDS = 2      # how often a connected, unused LE device is reported to
 SLOW_SECONDS = 5        # a GATT op BlueZ hasn't answered by then is logged
 RAW_MAX = 256           # advertisements as received, kept for this many devices
 BALANCED = (24, 40, 0, 500)     # Android's CONNECTION_PRIORITY_BALANCED: 30-50 ms, latency 0, 5 s
+DISCOVERY = (6, 6, 0, 500)      # Fluoride during service discovery: 7.5 ms
+SETTLED = (24, 24, 0, 500)      # and after it: 30 ms (an S10e, Android 11)
 
 
 def conn_params_ok(min_interval, max_interval, latency, timeout):
@@ -88,6 +90,8 @@ class Hold:
         self.timer = None
         self.linger = None        # the delayed disconnect after Android's last use
         self.fast = False         # Android changed the link's parameters (put back when it's done)
+        self.asked = False        # Android asked for a priority: the bridge's own steps stop
+        self.discovery_fast = False   # at 7.5 ms for service discovery, 30 ms to come
 
 
 class Link:
@@ -199,6 +203,7 @@ class Bridge(GattServerMixin):
         if "ServicesResolved" in changed and changed["ServicesResolved"]:
             for cb in self.resolving.pop(addr, []):
                 cb(True)
+            self._services_resolved(addr)
         if (("Paired" in changed or "Bonded" in changed) and self.bonded(d) != was_bonded
                 and addr not in self.pairing and self.visible(addr)):
             if self.bonded(d):
@@ -614,7 +619,38 @@ class Bridge(GattServerMixin):
             link = self.links.get(token)
             if link:
                 self._event(link.client, "EV_LINK", [link.id, P.ST_OK, True, mtu])
-        self._event_all("EV_ACL", [addr, True, P.T_LE if addr in self.le_seen or "Class" not in self.devs[addr] else P.T_BREDR])
+        le = addr in self.le_seen or "Class" not in self.devs[addr]
+        self._event_all("EV_ACL", [addr, True, P.T_LE if le else P.T_BREDR])
+        if hold.made and le:
+            # As Fluoride (an S10e's snoop, 9 Nov): 7.5 ms while the services
+            # are discovered, then 30 ms, the bottom of its default range;
+            # the BCM4361 left to BlueZ's 30-50 ms takes 48.75
+            if self.devs[addr].get("ServicesResolved"):
+                self._interval(addr, hold, SETTLED, "30 ms")
+            else:
+                hold.discovery_fast = True
+                self._interval(addr, hold, DISCOVERY, "7.5 ms for service discovery")
+
+    def _interval(self, addr, hold, params, why):
+        """The bridge's own connection parameters for a link it made, unless
+        Android asked for a priority. A refusal is logged and that's all."""
+        if hold.asked or self.holds.get(addr) is not hold:
+            return
+        started = time.monotonic()
+
+        def done(interval, latency, timeout):
+            self.log("connection", addr, "%s: interval %.2f ms, latency %d, timeout %d ms (%.0f ms)" % (
+                why, interval * 1.25, latency, timeout * 10, (time.monotonic() - started) * 1000))
+
+        def failed(st):
+            self.log("connection", addr, "%s: not taken (0x%02x); carrying on" % (why, st))
+        self.be.conn_update(addr, *params, done, failed)
+
+    def _services_resolved(self, addr):
+        hold = self.holds.get(addr)
+        if hold is not None and hold.discovery_fast and hold.state == "connected":
+            hold.discovery_fast = False
+            self._interval(addr, hold, SETTLED, "30 ms, services discovered")
 
     def _connected_changed(self, addr, connected):
         if not connected:
@@ -959,6 +995,8 @@ class Bridge(GattServerMixin):
             return
         answer(P.ST_OK)
         hold.fast = params != BALANCED
+        hold.asked = True
+        hold.discovery_fast = False
         started = time.monotonic()
         self.log("connection", addr, "update asked: interval %.2f-%.2f ms, latency %d, timeout %d ms" % (
             min_interval * 1.25, max_interval * 1.25, latency, timeout * 10))
