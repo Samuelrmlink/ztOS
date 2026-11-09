@@ -3,6 +3,11 @@
 #
 #   ztstore-helper install USER   repo NAME...   packages from the repos
 #                                 deps NAME...   the same, marked as dependencies
+#                                 flatpak install|update|remove ID
+#                                 flatpak update-all
+#                                 flatpak add-remote
+#                                                Flathub, system-wide (flatpak
+#                                                checks its signatures)
 #   ztstore-helper admin USER     file PATH      a package the person built from
 #                                                the AUR (asks their password:
 #                                                see 50-ztstore.rules)
@@ -70,7 +75,85 @@ pacman_run() {
 	fail "$(grep '^error:' "$log" | tail -1 | cut -c8- | tr -d '\n' | cut -c1-120)"
 }
 
+# Flathub, through flatpak, for the whole system. It runs in the background
+# so that the app can stop it: it writes /run/user/UID/ztstore/cancel with
+# this request's id (a file the person owns, checked as the request is).
+FLATHUB_REPO=/usr/local/share/ztstore/flathub.flatpakrepo
+cancel=/run/user/$uid/ztstore/cancel
+rm -f "$cancel" 2>/dev/null
+flatpak_run() {
+	command -v flatpak > /dev/null || fail "Flatpak is not installed"
+	# On a terminal flatpak says how far it is ("… 45%  1.2 MB/s"); without
+	# one, or with --noninteractive, it says nothing until the end. So it
+	# gets one (script's pty) and -y for its questions, and the app takes out
+	# the \r and the colour codes.
+	cmd=flatpak
+	for a in --system "$@"; do
+		cmd="$cmd '$(printf %s "$a" | sed "s/'/'\\\\''/g")'"
+	done
+	COLUMNS=80 script -qfec "$cmd" /dev/null < /dev/null >> "$log" 2>&1 &
+	pid=$!
+	while kill -0 "$pid" 2>/dev/null; do
+		if [ -f "$cancel" ] && [ ! -L "$cancel" ] && [ "$(stat -c %u "$cancel")" = "$uid" ] &&
+				[ "$(head -c 40 "$cancel" | tr -dc 0-9)" = "$id" ]; then
+			# flatpak stops cleanly on SIGINT: what it pulled stays in its
+			# repo for next time, nothing half-deployed
+			pkill -INT -P "$pid" 2>/dev/null	# flatpak, under script
+			kill -INT "$pid" 2>/dev/null
+			wait "$pid" 2>/dev/null
+			rm -f "$cancel"
+			fail "cancelled"
+		fi
+		sleep 1
+	done
+	wait "$pid" && return 0
+	fail "$(tr '\r' '\n' < "$log" | grep -i '^error' | tail -1 | cut -d: -f2- | tr -d '\n' | cut -c2-120)"
+}
+valid_app_id() {
+	# org.example.App: letters, digits, _ and -, at least three parts
+	case $1 in
+	''|-*|*[!A-Za-z0-9._-]*|*..*|.*|*.) return 1 ;;
+	*.*.*) return 0 ;;
+	esac
+	return 1
+}
+
 case $mode/$what in
+install/flatpak)
+	op=${1:-} app=${2:-}
+	case $op in
+	install|update|remove) valid_app_id "$app" || fail "bad app ID" ;;
+	update-all|add-remote) [ -z "$app" ] || fail "bad request" ;;
+	*) fail "not allowed" ;;
+	esac
+	if [ "$op" != add-remote ] && ! flatpak remotes --system --columns=name | grep -qx flathub; then
+		fail "Flathub is not set up"
+	fi
+	case $op in
+	install)
+		flatpak_run install -y flathub "app/$app/aarch64/stable"
+		tell "Installed" "$app"
+		;;
+	update)
+		flatpak_run update -y "app/$app/aarch64/stable"
+		;;
+	update-all)
+		flatpak_run update -y
+		;;
+	remove)
+		flatpak_run uninstall -y "app/$app/aarch64/stable"
+		# the runtimes no app needs any more (never one installed by itself:
+		# flatpak keeps those)
+		flatpak_run uninstall -y --unused
+		tell "Removed" "$app"
+		;;
+	add-remote)
+		[ -f "$FLATHUB_REPO" ] || fail "Flathub's file is missing"
+		flatpak_run remote-add --if-not-exists flathub "$FLATHUB_REPO"
+		flatpak_run update --appstream flathub
+		;;
+	esac
+	;;
 install/repo|install/deps)
 	[ $# -gt 0 ] || fail "nothing to install"
 	for n in "$@"; do valid_name "$n" || fail "bad name"; done

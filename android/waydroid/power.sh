@@ -39,6 +39,9 @@ push_hold_active() {
 	rm -f "$hold"
 	return 1
 }
+# Waydroid not set up yet (no images, or a kernel without binder): nothing to
+# freeze, and nothing to confirm. Success, quietly, so the shell has no warning.
+[[ -e /var/lib/waydroid/waydroid.cfg ]] || exit 0
 runtime=${XDG_RUNTIME_DIR:-$ZTOS_RUNTIME_DIR}
 policy="$runtime/ztos-waydroid-power-state"
 case ${1:-} in

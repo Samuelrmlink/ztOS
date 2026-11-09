@@ -20,7 +20,8 @@ endif
 
 all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
-	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy
+	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
+	acct/ztacctd acct/ztacct acct/ztusage
 
 sounds/ztos-sounds: sounds/ztos-sounds.c
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libpulse) -o $@ $< $(shell pkg-config --libs libpulse) -lm
@@ -119,6 +120,28 @@ perfd/zrnperfd: perfd/zrnperfd.c perfd/wlpm.c perfd/wlpm.h perfd/tickle.c perfd/
 perfd/ztprofile: perfd/ztprofile.c perfd/wlpm.c perfd/wlpm.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ perfd/ztprofile.c perfd/wlpm.c -lm
 
+# Battery and data use per app: the root daemon, its command (acct/README.md)
+ACCT_DEPS = acct/acctd.h acct/acct-common.h acct/acct-bpf.h ztos-user.h
+acct/ztacctd: acct/ztacctd.c acct/acct-net.c acct/acct-energy.c $(ACCT_DEPS)
+	$(CC) $(CFLAGS) $(WARN) -Wno-format-truncation -o $@ acct/ztacctd.c acct/acct-net.c acct/acct-energy.c -lm
+
+acct/ztacct: acct/ztacct.c acct/acct-common.h
+	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags json-c) -o $@ acct/ztacct.c $(shell pkg-config --libs json-c) -lm
+
+# "battery + data": the app that shows it
+acct/ztusage: acct/ztusage.c acct/acct-common.h $(CORE_DEPS)
+	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Iacct -o $@ acct/ztusage.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
+
+# only the accountant, for installing it by itself
+.PHONY: install-acct
+install-acct: acct/ztacctd acct/ztacct acct/ztusage
+	install -Dm755 acct/ztacctd /usr/local/sbin/ztacctd
+	install -Dm755 acct/ztacct /usr/local/bin/ztacct
+	install -Dm644 acct/ztacctd.service /etc/systemd/system/ztacctd.service
+	install -Dm755 acct/ztusage /usr/local/bin/ztusage
+	install -Dm644 acct/ztusage.desktop /usr/local/share/applications/ztusage.desktop
+	install -Dm644 acct/ztusage.svg /usr/local/share/icons/hicolor/scalable/apps/ztusage.svg
+
 touchkeyd/ztos-touchkeyd: touchkeyd/ztos-touchkeyd.c
 	$(CC) $(CFLAGS) $(WARN) -o $@ touchkeyd/ztos-touchkeyd.c
 
@@ -183,7 +206,7 @@ contacts/ztcontacts: contacts/ztcontacts.c comm/comm.h comm/contact-store.h $(CO
 
 # the App Store: the repos in pacman.conf and the AUR (see store/README.md)
 STORE = store/ztstore.c store/util.c store/json.c store/pkg.c store/repo.c store/appstream.c store/aur.c \
-	store/sections.c store/search.c store/jobs.c store/icons.c store/install.c
+	store/sections.c store/search.c store/jobs.c store/icons.c store/install.c store/flathub.c store/shots.c
 STORE_PKGS = librsvg-2.0 zlib
 store/ztstore: $(STORE) $(wildcard store/*.h) $(CORE_DEPS)
 	$(APP_BUILD) -DHAVE_RSVG $(shell pkg-config --cflags $(STORE_PKGS)) -o $@ $(STORE) $(CORE) $(APP_LIBS) \
@@ -216,8 +239,8 @@ install-browser: browser/superscan
 .PHONY: check-store
 check-store:
 	sh store/tests/make_fixture.sh /tmp/ztstore-fixture
-	cd store && for t in json repo appstream aur sections; do \
-		$(CC) -std=c11 -Wall -o /tmp/ztstore-test-$$t tests/test_$$t.c util.c json.c pkg.c repo.c appstream.c aur.c sections.c -lz && \
+	cd store && for t in json repo appstream aur sections flathub; do \
+		$(CC) -std=c11 -Wall -o /tmp/ztstore-test-$$t tests/test_$$t.c util.c json.c pkg.c repo.c appstream.c aur.c sections.c flathub.c -lz && \
 		/tmp/ztstore-test-$$t || exit 1; done
 
 # ztOSCoreSensorFramework: starts every piece of hardware support with the
@@ -304,6 +327,12 @@ install: check-arch
 	install -Dm644 perfd/zrnperfd.service /etc/systemd/system/zrnperfd.service
 	install -Dm755 perfd/ztprofile /usr/local/bin/ztprofile
 	install -Dm644 perfd/ztprofile.service /etc/systemd/system/ztprofile.service
+	install -Dm755 acct/ztacctd /usr/local/sbin/ztacctd
+	install -Dm755 acct/ztacct /usr/local/bin/ztacct
+	install -Dm644 acct/ztacctd.service /etc/systemd/system/ztacctd.service
+	install -Dm755 acct/ztusage /usr/local/bin/ztusage
+	install -Dm644 acct/ztusage.desktop /usr/local/share/applications/ztusage.desktop
+	install -Dm644 acct/ztusage.svg /usr/local/share/icons/hicolor/scalable/apps/ztusage.svg
 	install -Dm755 ledd/zrn-ledd /usr/local/sbin/zrn-ledd
 	install -Dm644 ledd/zrn-ledd.service /etc/systemd/system/zrn-ledd.service
 	install -Dm755 touchkeyd/ztos-touchkeyd /usr/local/sbin/ztos-touchkeyd
@@ -331,7 +360,8 @@ install: check-arch
 clean:
 	rm -f ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
-		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h
+		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h \
+		acct/ztacctd acct/ztacct acct/ztusage
 
 # Uses a private Wayland seat; does not touch the running compositor or display.
 .PHONY: check-arch check-keyboard

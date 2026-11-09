@@ -3,6 +3,11 @@
 set -euo pipefail
 [[ $EUID == 0 && $# -ge 1 ]] || exit 2
 . /usr/lib/ztos/user.sh
+# Waydroid not set up yet (ztos-waydroid-images: no images, or no binder in
+# this kernel): no Android to freeze or set (done), none to start (3: not up).
+if [[ ! -e /var/lib/waydroid/waydroid.cfg ]]; then
+    case $1 in freeze|display|settings|audio) exit 0 ;; *) exit 3 ;; esac
+fi
 lxc_args=(-P /var/lib/waydroid/lxc -n waydroid)
 # Frozen, or stuck half way (FREEZING: something thawed the cgroup under a
 # freeze LXC was still waiting on): running again either way.

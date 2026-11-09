@@ -187,6 +187,9 @@ static void icons_index(void) {
 	icons_walk("/usr/share/icons", "", 0);
 	icons_walk("/usr/local/share/icons", "", 0);
 	icons_walk("/var/lib/flatpak/exports/share/icons", "", 0);
+	/* (apps installed with flatpak --user export their icons here) */
+	snprintf(path, sizeof(path), "%s/.local/share/flatpak/exports/share/icons", home ? home : "");
+	icons_walk(path, "", 0);
 	icons_walk("/usr/share/pixmaps", "", 4);	/* that folder alone, not below it */
 	qsort(icons, n_icons, sizeof(*icons), icon_cmp);
 }

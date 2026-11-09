@@ -288,18 +288,8 @@ else
 fi
 ch update-desktop-database /usr/share/applications
 
-step "adding Android (Waydroid and the recipe for its image)"
-W=$R/usr/share/ztos-waydroid
-rm -rf "$W"; install -d "$W"
-for f in install.sh strip-image.sh patch-vendor.sh patch-composer.py waydroid.cfg network.py recover.sh \
-		audio-recover.py launch.sh power.sh ztos-waydroid-boot README.md \
-		ztos-waydroid-network.service ztos-waydroid-session.service ztos-waydroid-boot.service \
-		ztos-waydroid-audio-reconnect.service; do
-	[ -e "$SRC/android/waydroid/$f" ] && cp -a "$SRC/android/waydroid/$f" "$W/"
-done
-install -Dm755 "$SRC/android/waydroid/ztos-waydroid-images" "$R/usr/lib/ztos/ztos-waydroid-images"
-install -Dm644 "$SRC/android/waydroid/ztos-waydroid-images.service" \
-	"$R/usr/lib/systemd/system/ztos-waydroid-images.service"
+# (Waydroid is not in the base image: it is the optional ztos-waydroid
+# package, packages/ztos-waydroid, installed afterwards; docs/waydroid.md)
 
 DEVICE_UNITS=
 if [ "$TARGET" != gsi ]; then
@@ -372,7 +362,7 @@ step "turning on ztOS's services"
 # (zrnperfd: the CPU and GPU clocks from ztOSIAL's Perf1; without it the
 # GPU rests at its lowest step and ztMETRO lags)
 for u in greetd NetworkManager systemd-resolved sshd systemd-pstore ztos-pstore-keep ztoscoresensorframework ztos-update-check.timer \
-		ztos-iald zrnperfd waydroid-container ztos-waydroid-images; do
+		ztos-iald zrnperfd; do
 	ch systemctl enable "$u" > /dev/null 2>&1
 done
 # (systemd-networkd: only a device layer with a USB link turns it on, for its DHCP.

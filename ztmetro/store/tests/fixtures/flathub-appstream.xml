@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="flatpak">
+  <component type="desktop-application">
+    <id>org.gnome.Calculator</id>
+    <name>Calculator</name>
+    <name xml:lang="de">Taschenrechner</name>
+    <summary>Perform arithmetic, scientific or financial calculations</summary>
+    <summary xml:lang="de">Arithmetische Berechnungen</summary>
+    <project_license>GPL-3.0-or-later</project_license>
+    <description xml:lang="de">
+      <p>Taschenrechner ist ein Programm.</p>
+    </description>
+    <description>
+      <p>
+      Calculator is an application that solves mathematical equations.
+      Though it at first appears &amp; simple,
+    </p>
+      <p>Modes:</p>
+      <ul>
+        <li>Advanced <em>mode</em></li>
+        <li xml:lang="de">Erweitert</li>
+        <li>Financial</li>
+      </ul>
+      <ol><li>first</li><li>second</li></ol>
+    </description>
+    <project_group>GNOME</project_group>
+    <developer id="org.gnome">
+      <name>The GNOME Project</name>
+    </developer>
+    <requires>
+      <display_length>360</display_length>
+    </requires>
+    <icon height="64" type="cached" width="64">org.gnome.Calculator.png</icon>
+    <icon height="128" type="cached" width="128">org.gnome.Calculator.png</icon>
+    <icon type="stock">org.gnome.Calculator</icon>
+    <url type="homepage">https://apps.gnome.org/Calculator</url>
+    <url type="bugtracker">https://gitlab.gnome.org/GNOME/gnome-calculator/-/issues</url>
+    <url type="donation">https://www.gnome.org/donate/</url>
+    <categories>
+      <category>Utility</category>
+      <category>Calculator</category>
+    </categories>
+    <screenshots>
+      <screenshot type="default">
+        <caption>Basic Mode</caption>
+        <caption xml:lang="de">Grundmodus</caption>
+        <image height="666" type="source" width="410">https://dl.flathub.org/media/calc/image-1_orig.png</image>
+        <image height="363" type="thumbnail" width="224">https://dl.flathub.org/media/calc/image-1_224x363@1.png</image>
+      </screenshot>
+      <screenshot>
+        <image height="666" type="source" width="750">https://dl.flathub.org/media/calc/image-2_orig.png</image>
+        <image height="554" type="thumbnail" width="624">https://dl.flathub.org/media/calc/image-2_624x554@1.png</image>
+        <image height="198" type="thumbnail" width="224">https://dl.flathub.org/media/calc/image-2_224x198@1.png</image>
+      </screenshot>
+    </screenshots>
+    <keywords>
+      <keyword>calculation</keyword>
+      <keyword>unit converter</keyword>
+    </keywords>
+    <keywords xml:lang="de">
+      <keyword>Rechnen</keyword>
+    </keywords>
+    <releases>
+      <release timestamp="1791590400" type="stable" version="51.1">
+        <description>
+          <ul>
+            <li>Updated translations</li>
+          </ul>
+        </description>
+      </release>
+      <release timestamp="1787961600" type="development" version="51~rc"/>
+      <release date="2026-01-02" version="50.0"/>
+    </releases>
+    <content_rating type="oars-1.1"/>
+    <custom>
+      <value key="flathub::verification::verified">true</value>
+    </custom>
+    <bundle type="flatpak" runtime="org.gnome.Platform/aarch64/51" sdk="org.gnome.Sdk/aarch64/51">app/org.gnome.Calculator/aarch64/stable</bundle>
+  </component>
+  <component type="runtime">
+    <id>org.gnome.Platform</id>
+    <name>GNOME Platform</name>
+  </component>
+  <component type="desktop">
+    <id>org.example.Game.desktop</id>
+    <name>Game</name>
+    <summary>Shoot &lt;things&gt;</summary>
+    <developer_name>Example &amp; Co</developer_name>
+    <description>Plain text, no markup.</description>
+    <content_rating type="oars-1.1">
+      <content_attribute id="violence-cartoon">mild</content_attribute>
+      <content_attribute id="language-profanity">none</content_attribute>
+      <content_attribute id="money-purchasing">moderate</content_attribute>
+    </content_rating>
+    <categories><category>Game</category></categories>
+    <bundle type="flatpak" runtime="org.freedesktop.Platform/aarch64/26.08">app/org.example.Game/aarch64/stable</bundle>
+  </component>
+</components>

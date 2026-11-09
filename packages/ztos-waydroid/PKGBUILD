@@ -1,0 +1,66 @@
+# ztos-waydroid: Android apps in a container (Waydroid), as an optional ztOS
+# application. Everything ztOS adds to Waydroid is in here and goes with it:
+# the root helper and freeze policy the shell and zrn-pushd call, the
+# services, the network repair, the image download and set-up, the sudoers
+# rule, the docs. See docs/waydroid.md.
+#
+# Built from the ztOS checkout (no download): makepkg in this directory, with
+# android/waydroid two levels up, or ZTOS_SRC=/path/to/checkout makepkg.
+# The kernel needs scripts/build-boot.sh --waydroid (binder and friends);
+# without it the package installs, fetches its images and waits.
+pkgname=ztos-waydroid
+pkgver=1.0
+pkgrel=1
+pkgdesc='ztOS: Android apps through Waydroid (optional; LineageOS 20 image fetched at set-up)'
+arch=(aarch64)
+url='https://github.com/ztos/ztos'
+license=('GPL-3.0-or-later')
+depends=(waydroid lxc python-gbinder nftables dnsmasq python python-dbus python-gobject
+         curl unzip e2fsprogs util-linux sudo systemd)
+backup=()
+install=ztos-waydroid.install
+options=(!debug !strip)
+
+_src() { echo "${ZTOS_SRC:-$startdir/../..}"; }
+
+package() {
+	local src w
+	src=$(_src)
+	w=$src/android/waydroid
+	[[ -f $w/recover.sh ]] || { echo "no android/waydroid under $src (set ZTOS_SRC)" >&2; return 1; }
+
+	# the paths the shell (ztmetro), zrn-pushd and ztos-android call
+	install -Dm755 "$w/power.sh" "$pkgdir/usr/local/bin/ztos-waydroid-power"
+	install -Dm755 "$w/launch.sh" "$pkgdir/usr/local/bin/ztos-waydroid-launch"
+	install -Dm755 "$w/recover.sh" "$pkgdir/usr/local/libexec/ztos-waydroid-recover"
+	install -Dm755 "$w/network.py" "$pkgdir/usr/local/libexec/ztos-waydroid-network"
+	install -Dm755 "$w/audio-recover.py" "$pkgdir/usr/local/libexec/ztos-waydroid-audio"
+	install -Dm755 "$w/ztos-waydroid-boot" "$pkgdir/usr/local/libexec/ztos-waydroid-boot"
+	install -Dm755 "$w/ztos-waydroid-images" "$pkgdir/usr/lib/ztos/ztos-waydroid-images"
+
+	# system units, and the container manager's restart drop-in
+	install -Dm644 "$w/ztos-waydroid-images.service" "$pkgdir/usr/lib/systemd/system/ztos-waydroid-images.service"
+	install -Dm644 "$w/ztos-waydroid-network.service" "$pkgdir/usr/lib/systemd/system/ztos-waydroid-network.service"
+	install -Dm644 "$startdir/ztos-recovery.conf" \
+		"$pkgdir/usr/lib/systemd/system/waydroid-container.service.d/ztos-recovery.conf"
+	# user units (enabled globally by the install script)
+	local u
+	for u in ztos-waydroid-session ztos-waydroid-boot ztos-waydroid-audio-reconnect; do
+		install -Dm644 "$w/$u.service" "$pkgdir/usr/lib/systemd/user/$u.service"
+	done
+
+	# the recipe for the image: strip, patch, config, microG (ztos-waydroid-images
+	# runs install.sh from here; PACKAGED tells it the files above are in place)
+	local d=$pkgdir/usr/share/ztos-waydroid f
+	install -d "$d"
+	for f in "$w"/*.sh "$w"/*.py "$w/waydroid.cfg" "$w/README.md"; do
+		install -m"$([[ -x $f ]] && echo 755 || echo 644)" "$f" "$d/"
+	done
+	touch "$d/PACKAGED"
+
+	# the user's sudo rule: rendered with the user's name by ztos-user-dropins
+	install -Dm644 "$startdir/sudoers.template" \
+		"$pkgdir/usr/lib/ztos/user-templates/etc/sudoers.d/ztos-waydroid"
+
+	install -Dm644 "$src/docs/waydroid.md" "$pkgdir/usr/share/doc/ztos-waydroid/waydroid.md"
+}

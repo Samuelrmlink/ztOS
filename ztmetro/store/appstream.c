@@ -9,11 +9,17 @@
 #include <unistd.h>
 #include <zlib.h>
 
+#include "xml.h"
+
+#define unescape xml_unescape
+#define attr xml_attr
+#define element xml_element
+
 const char *const APPSTREAM_ROOTS[] = { "/usr/share/swcatalog", "/usr/share/app-info", NULL };
 
 /* ---- the XML, as much of it as is needed ------------------------------------ */
 
-static char *unescape(const char *s, size_t n) {
+char *xml_unescape(const char *s, size_t n) {
 	char *out = xstrndup(s, n), *o = out;
 	for (size_t i = 0; i < n; i++) {
 		if (s[i] == '&') {
@@ -48,7 +54,7 @@ static char *unescape(const char *s, size_t n) {
 }
 
 /* The value of attribute `name` inside the tag text [tag, tag_end). */
-static bool attr(const char *tag, const char *tag_end, const char *name, char *out, size_t size) {
+bool xml_attr(const char *tag, const char *tag_end, const char *name, char *out, size_t size) {
 	size_t n = strlen(name);
 	for (const char *p = tag; p + n + 2 < tag_end; p++) {
 		if ((p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\n') && !strncmp(p, name, n) && p[n] == '=' &&
@@ -66,7 +72,7 @@ static bool attr(const char *tag, const char *tag_end, const char *name, char *o
 }
 
 /* Find the next element called `name` in [p, end): its opening tag and text. */
-static const char *element(const char *p, const char *end, const char *name, const char **tag_end,
+const char *xml_element(const char *p, const char *end, const char *name, const char **tag_end,
 		const char **text, const char **text_end) {
 	size_t n = strlen(name);
 	while ((p = memmem(p, end - p, "<", 1)) && p < end) {
@@ -167,6 +173,116 @@ void appstream_parse(const char *xml, void (*each)(const struct as_app *app, con
 	}
 }
 
+/* ---- description markup to text ------------------------------------------------ */
+
+/* the text of an inline run: tags (<em>, <code>) taken out, then unescaped */
+static char *inline_text(const char *s, const char *e) {
+	char *bare = malloc(e - s + 1), *o = bare;
+	if (!bare) {
+		abort();
+	}
+	for (const char *p = s; p < e; p++) {
+		if (*p == '<') {
+			const char *gt = memchr(p, '>', e - p);
+			if (!gt) {
+				break;
+			}
+			p = gt;
+			continue;
+		}
+		*o++ = *p;
+	}
+	char *out = xml_unescape(bare, o - bare);
+	free(bare);
+	return out;
+}
+
+static void grow(char **buf, size_t *len, size_t *cap, const char *add) {
+	size_t n = strlen(add);
+	if (*len + n + 1 > *cap) {
+		*cap = (*len + n + 1) * 2;
+		*buf = realloc(*buf, *cap);
+		if (!*buf) {
+			abort();
+		}
+	}
+	memcpy(*buf + *len, add, n + 1);
+	*len += n;
+}
+
+static bool translated(const char *tag, const char *tag_end) {
+	char lang[16];
+	return xml_attr(tag + 1, tag_end, "xml:lang", lang, sizeof(lang)) && strcmp(lang, "en") &&
+		strcmp(lang, "en_US") && strcmp(lang, "C");
+}
+
+char *xml_markup_text(const char *s, const char *e) {
+	size_t len = 0, cap = 256;
+	char *out = malloc(cap);
+	if (!out) {
+		abort();
+	}
+	out[0] = 0;
+	const char *p = s;
+	while (p < e) {
+		const char *lt = memchr(p, '<', e - p);
+		if (!lt) {
+			break;
+		}
+		const char *te, *t, *tend;
+		bool ul = !strncmp(lt, "<ul", 3) && (lt[3] == '>' || lt[3] == ' ');
+		bool ol = !strncmp(lt, "<ol", 3) && (lt[3] == '>' || lt[3] == ' ');
+		if (!strncmp(lt, "<p", 2) && (lt[2] == '>' || lt[2] == ' ')) {
+			if (!xml_element(lt, e, "p", &te, &t, &tend)) {
+				break;
+			}
+			if (!translated(lt, te)) {
+				char *text = inline_text(t, tend);
+				if (*text) {
+					if (len) {
+						grow(&out, &len, &cap, "\n\n");
+					}
+					grow(&out, &len, &cap, text);
+				}
+				free(text);
+			}
+			p = tend + 4;
+		} else if (ul || ol) {
+			if (!xml_element(lt, e, ul ? "ul" : "ol", &te, &t, &tend)) {
+				break;
+			}
+			int n = 0;
+			const char *q = t, *li, *lte, *lt2, *ltend;
+			while ((li = xml_element(q, tend, "li", &lte, &lt2, &ltend))) {
+				q = ltend;
+				if (translated(li, lte)) {
+					continue;
+				}
+				char *text = inline_text(lt2, ltend);
+				if (*text) {
+					char mark[16];
+					snprintf(mark, sizeof(mark), ol ? "%d. " : "• ", ++n);
+					if (len) {
+						grow(&out, &len, &cap, n == 1 ? "\n\n" : "\n");
+					}
+					grow(&out, &len, &cap, mark);
+					grow(&out, &len, &cap, text);
+				}
+				free(text);
+			}
+			p = tend + 5;
+		} else {
+			p = lt + 1;
+		}
+	}
+	if (!len) {
+		/* no markup at all: plain text */
+		free(out);
+		return inline_text(s, e);
+	}
+	return out;
+}
+
 /* ---- putting it on the packages ---------------------------------------------- */
 
 struct apply_ctx {
@@ -218,7 +334,7 @@ static void apply_one(const struct as_app *a, const char *origin, void *data) {
 	c->found++;
 }
 
-static char *gunzip_file(const char *path) {
+char *gunzip_file(const char *path) {
 	gzFile gz = gzopen(path, "rb");
 	if (!gz) {
 		return NULL;

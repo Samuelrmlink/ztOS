@@ -1,5 +1,11 @@
 # Waydroid Phase 1 on ztOS
 
+> Since 8 Nov 2026, Waydroid is the optional `ztos-waydroid` package
+> (`packages/ztos-waydroid`), not part of the base system. The package installs
+> these scripts and units and runs `install.sh` for the image work. See
+> [docs/waydroid.md](../../docs/waydroid.md). The sections below are the
+> history of the work and still describe what the scripts do.
+
 This directory installs the Waydroid base on the Galaxy S9 / Exynos 9810 running
 Arch Linux ARM, kernel 7.1, Waydroid 1.6.3 and the 20260927 Android 13 VANILLA /
 MAINLINE images. Work was deployed over USB on 2026-10-23 UTC (2026-10-24 Colombo).

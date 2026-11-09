@@ -8,7 +8,7 @@
 
 struct pkg {
 	char *name;
-	char *repo;		/* a repo from pacman.conf, or "aur" */
+	char *repo;		/* a repo from pacman.conf, "aur", or "flathub" */
 	char *version;
 	char *desc;
 	char *url, *license, *arch, *packager;	/* packager: the AUR's Maintainer */
@@ -20,6 +20,8 @@ struct pkg {
 	long submitted, modified;	/* AUR */
 	/* from AppStream (repos) or the installed .desktop file */
 	char *app_name, *summary, *icon, *categories;	/* icon: a file path */
+	char *keywords;		/* AppStream's, space separated (Flathub) */
+	bool verified, mobile;	/* Flathub: a verified developer; made to fit a phone */
 	/* this phone */
 	bool installed, explicit_install;
 	char *installed_version;
@@ -33,6 +35,7 @@ void set_str(char **field, const char *value);	/* replaces, copying */
 /* append a word to a space-separated list */
 void append_word(char **field, const char *word);
 bool pkg_is_aur(const struct pkg *p);
+bool pkg_is_flathub(const struct pkg *p);
 const char *pkg_title(const struct pkg *p);	/* the app's name, else the package's */
 const char *pkg_blurb(const struct pkg *p);	/* the summary, else the description */
 
