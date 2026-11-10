@@ -46,6 +46,12 @@
 #                                the modules go into the set (build-bt-modules.sh). It
 #                                changes the module ABI: give it its own release
 #                                (--release-suffix with --dp-altmode)
+#     --hid                      USB keyboards and mice: HID, its generic driver and
+#                                USB HID built in (the boot console and the shell's
+#                                libinput need no module), UHID (BlueZ's HID profile),
+#                                multitouch and the common vendor drivers (Logitech,
+#                                Logitech receivers, Apple, Microsoft) as modules in the
+#                                set. It changes the module ABI: its own release
 #     --cmdline "..."            extra kernel command line (zboot.rescue=1 ...)
 #     --config-only              stop after the configuration: out/<name>.config,
 #                                to build the modules for it first (below)
@@ -89,7 +95,7 @@ FALLBACK=boot
 DTS_FLAGS=()
 EXTRA=
 WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
-UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID= DPALT= DPTX= RELSUFFIX= USBNET=
+UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID= DPALT= DPTX= RELSUFFIX= USBNET= HID=
 CONFIG_ONLY= MODULES= MODCHECK=1
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -104,6 +110,7 @@ while [ $# -gt 0 ]; do
 	--lockup) LOCKUP=1 ;;
 	--waydroid) WAYDROID=1 ;;
 	--usb-net) USBNET=1 ;;
+	--hid) HID=1 ;;
 	--dp-altmode) DTS_FLAGS+=(--dp-altmode); DPALT=1 ;;
 	--release-suffix) RELSUFFIX=$2; shift ;;
 	--dp-tx) DTS_FLAGS+=(--dp-tx); DPTX=1 ;;
@@ -451,6 +458,12 @@ cfg --module BT
 if [ -n "$USBNET" ]; then
 	cfg --enable NETDEVICES --enable USB_NET_DRIVERS --module USB_USBNET \
 		--module USB_RTL8152 --module USB_NET_CDCETHER --module USB_NET_CDC_NCM
+fi
+# --hid: keyboards and mice on USB (a dock's receiver) and, through UHID, BlueZ
+if [ -n "$HID" ]; then
+	cfg --enable INPUT --enable HID_SUPPORT --enable HID --enable HID_GENERIC --enable USB_HID --enable HIDRAW \
+		--module UHID --module HID_MULTITOUCH --module HID_LOGITECH --module HID_LOGITECH_DJ \
+		--module HID_LOGITECH_HIDPP --module HID_APPLE --module HID_MICROSOFT
 fi
 # The release names the module ABI (see the top): 32-bit compat changes
 # structures modules use, so a COMPAT kernel gets its own /lib/modules.

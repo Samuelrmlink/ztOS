@@ -108,6 +108,19 @@ if grep -q '^CONFIG_USB_USBNET=m' "$CONFIG"; then
 	done
 	make -s -j"$JOBS" O="$BASE" KBUILD_MODPOST_WARN=1 $NET 2>&1 | intree
 fi
+# and the HID ones (build-boot.sh --hid): HID itself is built in, these are =m
+HIDM=
+for m in UHID:drivers/hid/uhid HID_MULTITOUCH:drivers/hid/hid-multitouch \
+	HID_LOGITECH:drivers/hid/hid-logitech HID_LOGITECH_DJ:drivers/hid/hid-logitech-dj \
+	HID_LOGITECH_HIDPP:drivers/hid/hid-logitech-hidpp HID_APPLE:drivers/hid/hid-apple \
+	HID_MICROSOFT:drivers/hid/hid-microsoft INPUT_FF_MEMLESS:drivers/input/ff-memless; do
+	grep -q "^CONFIG_${m%%:*}=m" "$CONFIG" && HIDM="$HIDM ${m#*:}.ko"
+done
+if [ -n "$HIDM" ]; then
+	echo "=== HID drivers, in the target tree ==="
+	make -s -j"$JOBS" O="$BASE" KBUILD_MODPOST_WARN=1 $HIDM 2>&1 | intree
+	NET="$NET $HIDM"
+fi
 
 echo "=== with Bluetooth as modules ($OB) ==="
 python3 "$ROOT/bluetooth/patch-btbcm.py" "$SRC"
