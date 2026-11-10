@@ -16129,6 +16129,18 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 		return;
 	}
 	if (!server->screen_on) {
+		/* A keyboard on the desktop types into it with the phone's screen off,
+		 * as its mouse already points there (a monitor in use, the phone put
+		 * away): the desktop's front window has the keyboard, so the phone
+		 * gets none of it, and the phone stays asleep. */
+		if (keyboard && !keyboard->force && nav < 0 && !server->auth_active &&
+		    desk_keyboard_live(server)) {
+			if (!desk_key(server, keyboard->wlr_keyboard, event)) {
+				wlr_seat_set_keyboard(server->seat, keyboard->wlr_keyboard);
+				wlr_seat_keyboard_notify_key(server->seat, event->time_msec, event->keycode,
+					event->state);
+			}
+		}
 		return;
 	}
 	activity(server);

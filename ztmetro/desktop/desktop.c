@@ -2200,6 +2200,12 @@ static void desk_phone_touched(struct zt_server *server) {
 
 /* Keys from a real keyboard while the desktop has the focus: the window
  * manager's own first (Alt+Tab, Alt+F4, Alt+Space, Super+arrows). */
+/* The desktop is on a monitor and its window (or layer) has the keyboard. */
+static bool desk_keyboard_live(struct zt_server *server) {
+	struct zt_desk *desk = server->desk;
+	return desk && desk->out && !desk->out->virtual && desk_has_keyboard(desk);
+}
+
 static bool desk_key(struct zt_server *server, struct wlr_keyboard *keyboard,
 		const struct wlr_keyboard_key_event *event) {
 	struct zt_desk *desk = server->desk;

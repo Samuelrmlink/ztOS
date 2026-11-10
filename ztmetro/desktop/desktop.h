@@ -45,6 +45,7 @@ static bool desk_surface(struct zt_server *server, struct wlr_surface *surface);
 /* input */
 static bool desk_owns_pointers(struct zt_server *server);
 static void desk_new_input(struct zt_server *server, struct wlr_input_device *device);
+static bool desk_keyboard_live(struct zt_server *server);
 static bool desk_key(struct zt_server *server, struct wlr_keyboard *keyboard,
 	const struct wlr_keyboard_key_event *event);
 static void desk_app_shown(struct zt_server *server, struct zt_toplevel *toplevel);
