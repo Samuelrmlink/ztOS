@@ -98,6 +98,8 @@ static void head(json_object *r) {
 	printf("   on battery %s, charging %s\n", dur(num(r, "on_battery_s")), dur(num(r, "charging_s")));
 	printf("battery gauge: %s used, model %s", wh(meas), wh(model));
 	if (meas > 0) printf(" (%.0f%% of it)", 100 * model / meas);
+	if (meas > 0 && json_object_object_get_ex(r, "explained", NULL))
+		printf(", explained %.0f%%, Unaccounted %s", 100 * num(r, "explained"), wh(num(r, "unaccounted_wh")));
 	printf("   screen %s, in front: %s%s\n\n", num(r, "screen_on") ? "on" : "off", str(r, "front"),
 		num(r, "front_known") ? "" : " (the shell does not say)");
 }

@@ -128,5 +128,6 @@ void energy_settle(bool force);
 void energy_status(FILE *f);
 void energy_add_net(int g, struct proc *p, int cls, double bytes, double packets);
 void energy_save_calib(void);
+int energy_unaccounted_group(void);
 
 void tally_add(struct tally *to, const struct tally *d);

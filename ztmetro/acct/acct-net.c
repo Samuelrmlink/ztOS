@@ -16,8 +16,16 @@
  *     and later when such a socket moves bytes (at most every 10 minutes),
  *     every process's socket descriptors are looked at (pidfd_getfd, then
  *     SO_COOKIE), and each socket goes to the process holding it.
+ *   - sockets the kernel makes itself have no maker either: a TCP
+ *     connection accepted on a listening socket (sshd's, say) is a clone made
+ *     in the kernel, not by socket(). When one moves bytes, the kernel's
+ *     socket table (sock_diag, one netlink dump, no /proc walk) says its
+ *     local port; the listening socket on that port has a maker, and the
+ *     connection goes to it. Until a socket is placed its bytes wait (up to
+ *     RESCAN_S + 2 minutes) rather than go to nobody.
  *   - bytes of a socket whose maker has gone go to the app it belonged to;
- *     bytes of sockets nobody can be found for: "Network: not attributed".
+ *     bytes of sockets nobody can be found for: "Network: not attributed",
+ *     with why (net_status: never placed, or a maker no longer known).
  *
  * Counts are of IP packets (headers included), as the interface's own
  * counters, which net_status() sets beside the attributed totals.
@@ -26,7 +34,11 @@
 #include "acct-bpf.h"
 
 #include <dirent.h>
+#include <linux/inet_diag.h>
+#include <linux/netlink.h>
+#include <linux/sock_diag.h>
 #include <net/if.h>
+#include <netinet/in.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -48,6 +60,7 @@
 #define TABLE		32768
 #define IDLE_TICKS	4	/* unchanged this many scans: read, then deleted */
 #define RESCAN_S	600
+#define PEND_S		(RESCAN_S + 120)	/* unplaced bytes wait this long */
 
 static struct acct_bpf bpf;
 static uint64_t host_netns;
@@ -57,11 +70,16 @@ struct seen {
 	struct acct_skb_val v;
 	uint16_t idle;
 	bool used;
+	double pend_b, pend_p;	/* moved while nobody was known for it */
+	double pend_since;
 };
 static struct seen *tab[2];
 static int cur;
 
 static double unknown_since_rescan, attributed[NCLS][2], unattributed;
+/* why bytes went to nobody, and what sock_diag placed */
+static double unattr_never, unattr_gone, unattr_cls[NCLS], placed_listener;
+static unsigned diag_dumps;
 static double last_rescan = -1e9;
 static unsigned rescans, entries, deleted;
 static unsigned long long dev_base[NCLS][2], dev_now[NCLS][2];
@@ -207,6 +225,104 @@ static void owners_rescan(void) {
 	if (d) closedir(d);
 }
 
+/* ----------------------------------------- sockets the kernel made */
+
+/* The phone's TCP and UDP sockets from the kernel's table: cookie, ports,
+ * state, and which are listening. One dump per family and protocol, only in
+ * a scan where a socket with no maker moved bytes. */
+struct dsock { uint64_t cookie; uint16_t port, dport; uint8_t proto, state; bool listen; };
+static struct dsock *dtab;
+static int n_dtab, cap_dtab;
+
+/* the largest sockets nobody was found for, for net_status: what they were */
+#define UNPLACED_KEEP	8
+static struct unplaced { uint64_t cookie; double bytes; int cls; struct dsock d; bool known; } unplaced[UNPLACED_KEEP];
+
+static void unplaced_note(uint64_t cookie, double bytes, int cls) {
+	int at = -1, low = 0;
+	for (int i = 0; i < UNPLACED_KEEP; i++) {
+		if (unplaced[i].cookie == cookie) at = i;
+		if (unplaced[i].bytes < unplaced[low].bytes) low = i;
+	}
+	if (at < 0) {
+		if (unplaced[low].bytes > bytes) return;
+		at = low;
+		unplaced[at] = (struct unplaced){ .cookie = cookie, .cls = cls };
+		for (int i = 0; i < n_dtab; i++) {
+			if (dtab[i].cookie == cookie) {
+				unplaced[at].d = dtab[i];
+				unplaced[at].known = true;
+			}
+		}
+	}
+	unplaced[at].bytes += bytes;
+}
+
+static void diag_dump_family(int fd, int family, int proto) {
+	struct {
+		struct nlmsghdr nh;
+		struct inet_diag_req_v2 r;
+	} req = {
+		.nh = { .nlmsg_len = sizeof(req), .nlmsg_type = SOCK_DIAG_BY_FAMILY,
+			.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP },
+		.r = { .sdiag_family = family, .sdiag_protocol = proto, .idiag_states = ~0u },
+	};
+	if (send(fd, &req, sizeof(req), 0) < 0) return;
+	static char buf[32768];
+	for (;;) {
+		ssize_t n = recv(fd, buf, sizeof(buf), 0);
+		if (n <= 0) return;
+		for (struct nlmsghdr *h = (struct nlmsghdr *)buf; NLMSG_OK(h, (size_t)n); h = NLMSG_NEXT(h, n)) {
+			if (h->nlmsg_type == NLMSG_DONE || h->nlmsg_type == NLMSG_ERROR) return;
+			struct inet_diag_msg *m = NLMSG_DATA(h);
+			if (n_dtab == cap_dtab) {
+				int c = cap_dtab ? cap_dtab * 2 : 256;
+				struct dsock *t = realloc(dtab, c * sizeof(*t));
+				if (!t) return;
+				dtab = t;
+				cap_dtab = c;
+			}
+			dtab[n_dtab++] = (struct dsock){
+				.cookie = (uint64_t)m->id.idiag_cookie[0] | (uint64_t)m->id.idiag_cookie[1] << 32,
+				.port = ntohs(m->id.idiag_sport),
+				.dport = ntohs(m->id.idiag_dport),
+				.proto = proto,
+				.state = m->idiag_state,
+				.listen = proto == IPPROTO_TCP && m->idiag_state == 10,	/* TCP_LISTEN */
+			};
+		}
+	}
+}
+
+static void diag_dump(void) {
+	n_dtab = 0;
+	int fd = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
+	if (fd < 0) return;
+	diag_dump_family(fd, AF_INET, IPPROTO_TCP);
+	diag_dump_family(fd, AF_INET6, IPPROTO_TCP);
+	diag_dump_family(fd, AF_INET, IPPROTO_UDP);
+	diag_dump_family(fd, AF_INET6, IPPROTO_UDP);
+	close(fd);
+	diag_dumps++;
+}
+
+/* a connection the kernel accepted: the maker of the socket listening on its
+ * port, written into the owners map so its later bytes need no lookup */
+static bool diag_place(uint64_t cookie, struct acct_owner *o) {
+	for (int i = 0; i < n_dtab; i++) {
+		if (dtab[i].cookie != cookie || dtab[i].listen) continue;
+		for (int j = 0; j < n_dtab; j++) {
+			if (!dtab[j].listen || dtab[j].port != dtab[i].port) continue;
+			if (acct_bpf_get(bpf.map_owners, &dtab[j].cookie, o) == 0) {
+				acct_bpf_put(bpf.map_owners, &cookie, o);
+				return true;
+			}
+		}
+		return false;
+	}
+	return false;
+}
+
 /* ------------------------------------------------------------- start */
 
 bool net_start(void) {
@@ -240,7 +356,7 @@ void net_tick(double dt) {
 	static struct acct_skb_key dead[ENTRIES];
 	int n_dead = 0;
 	int def_cls = -1;
-	bool unknown_moved = false;
+	bool unknown_moved = false, dumped = false;
 	entries = 0;
 	while (acct_bpf_next(bpf.map_bytes, prev, &next) == 0) {
 		k = next;
@@ -259,11 +375,43 @@ void net_tick(double dt) {
 		if (!s) continue;
 		s->v = v;
 		s->idle = db > 0 ? 0 : (was ? was->idle + 1 : 1);
+		if (was) {
+			s->pend_b = was->pend_b;
+			s->pend_p = was->pend_p;
+			s->pend_since = was->pend_since;
+		}
 		if (s->idle >= IDLE_TICKS && n_dead < ENTRIES) dead[n_dead++] = k;
-		if (db <= 0) continue;
+		if (db <= 0 && s->pend_b <= 0) continue;
 		/* whose, and on which network */
 		struct acct_owner o = { 0 };
 		bool owned = acct_bpf_get(bpf.map_owners, &k.cookie, &o) == 0;
+		if (!owned) {
+			/* made by the kernel (accepted)? the listener's maker */
+			if (!dumped) {
+				diag_dump();
+				dumped = true;
+			}
+			owned = diag_place(k.cookie, &o);
+			if (owned) placed_listener += db + s->pend_b;
+		}
+		if (!owned) {
+			/* wait for a rescan; nobody's if it is going (idle) or waited too long */
+			if (s->pend_b <= 0) s->pend_since = now.mono_s;
+			s->pend_b += db;
+			s->pend_p += dp;
+			if (db > 0) unplaced_note(k.cookie, db, if_class(k.ifindex));
+			unknown_moved = true;
+			unknown_since_rescan += db;
+			if (s->idle < IDLE_TICKS - 1 && now.mono_s - s->pend_since < PEND_S) continue;
+		}
+		if (owned) {
+			db += s->pend_b;
+			dp += s->pend_p;
+		} else {
+			db = s->pend_b;	/* this scan's are in it */
+			dp = s->pend_p;
+		}
+		s->pend_b = s->pend_p = 0;
 		int cls;
 		if (owned && host_netns && o.netns && o.netns != host_netns) {
 			if (def_cls < 0) def_cls = net_default_class();
@@ -280,10 +428,9 @@ void net_tick(double dt) {
 		if (g < 0) {
 			g = group_unattributed_net();
 			unattributed += db;
-			if (!owned) {
-				unknown_moved = true;
-				unknown_since_rescan += db;
-			}
+			unattr_cls[cls] += db;
+			if (owned) unattr_gone += db;
+			else unattr_never += db;
 		}
 		struct tally d = { 0 };
 		if (k.dir) d.tx[cls] = db;
@@ -308,9 +455,31 @@ void net_tick(double dt) {
 	dev_counters(dev_now);
 }
 
+static double pending_now(void) {
+	double b = 0;
+	if (!tab[cur]) return 0;
+	for (int i = 0; i < TABLE; i++) if (tab[cur][i].used) b += tab[cur][i].pend_b;
+	return b;
+}
+
 void net_status(FILE *f) {
 	fprintf(f, "\"net\":{\"up\":%d,\"error\":\"%s\",\"entries\":%u,\"deleted\":%u,\"rescans\":%u,"
-		"\"unattributed_bytes\":%.0f", bpf.up, bpf.error, entries, deleted, rescans, unattributed);
+		"\"unattributed_bytes\":%.0f,\"unattributed\":{\"never_placed\":%.0f,\"maker_gone\":%.0f,"
+		"\"wifi\":%.0f,\"mobile\":%.0f,\"other\":%.0f},\"placed_by_listener\":%.0f,\"diag_dumps\":%u,"
+		"\"pending_bytes\":%.0f", bpf.up, bpf.error, entries, deleted, rescans, unattributed, unattr_never,
+		unattr_gone, unattr_cls[NET_WIFI], unattr_cls[NET_MOBILE], unattr_cls[NET_OTHER], placed_listener, diag_dumps,
+		pending_now());
+	/* the largest sockets no maker was found for (yet), as sock_diag saw them
+	 * when they first moved bytes (proto 0: already gone from its table) */
+	fprintf(f, ",\"unplaced_top\":[");
+	for (int i = 0, n = 0; i < UNPLACED_KEEP; i++) {
+		const struct unplaced *u = &unplaced[i];
+		if (u->bytes <= 0) continue;
+		fprintf(f, "%s{\"cookie\":%llu,\"bytes\":%.0f,\"net\":\"%s\",\"proto\":\"%s\",\"port\":%u,\"peer_port\":%u,"
+			"\"state\":%u}", n++ ? "," : "", (unsigned long long)u->cookie, u->bytes, net_names[u->cls],
+			!u->known ? "gone" : u->d.proto == IPPROTO_TCP ? "tcp" : "udp", u->d.port, u->d.dport, u->d.state);
+	}
+	fprintf(f, "]");
 	/* what the interfaces counted since ztacctd started, beside what it gave to processes */
 	for (int c = 0; c < NCLS; c++) {
 		fprintf(f, ",\"%s\":{\"dev_rx\":%llu,\"dev_tx\":%llu,\"counted_rx\":%.0f,\"counted_tx\":%.0f}", net_names[c],

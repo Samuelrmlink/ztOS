@@ -1338,6 +1338,14 @@ static void jb_window_head(struct jb *j, int window) {
 	/* the gauge's own group: e[0] measured, e[1] modelled (before scaling), fg_s seconds on battery */
 	jb_num(j, "measured_wh", gauge.e[0] / 3600);
 	jb_num(j, "modelled_wh", gauge.e[1] / 3600);
+	/* what the model leaves of the measured: the share it explains */
+	int gu = energy_unaccounted_group();
+	if (gu >= 0 && gu < n_groups) {
+		struct tally u;
+		group_window(&groups[gu], window, &u);
+		jb_num(j, "unaccounted_wh", u.e[E_BASE] / 3600);
+		jb_num(j, "explained", gauge.e[0] > 0 ? fmax(0, 1 - u.e[E_BASE] / gauge.e[0]) : 0);
+	}
 	jb_num(j, "on_battery_s", gauge.fg_s);
 	jb_num(j, "charging_s", gauge.cpu_s);
 	jb_int(j, "screen_on", now.screen_on);

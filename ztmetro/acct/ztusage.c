@@ -61,7 +61,7 @@ struct app {
 };
 static struct app apps[MAX_APPS];
 static int n_apps;
-static double measured_wh, modelled_wh, on_battery_s;
+static double measured_wh, modelled_wh, on_battery_s, unaccounted_wh, explained = -1;
 static char front[64];
 static bool front_known, daemon_up, loaded;
 static int list_page = PAGE_BATTERY;	/* which tab the list is for */
@@ -140,6 +140,8 @@ static void load_list(void) {
 	measured_wh = jnum(r, "measured_wh");
 	modelled_wh = jnum(r, "modelled_wh");
 	on_battery_s = jnum(r, "on_battery_s");
+	unaccounted_wh = jnum(r, "unaccounted_wh");
+	explained = json_object_object_get_ex(r, "explained", NULL) ? jnum(r, "explained") : -1;
 	snprintf(front, sizeof(front), "%s", jstr(r, "front"));
 	front_known = jnum(r, "front_known") != 0;
 	json_object *gs = jobj(r, "groups");
@@ -280,6 +282,12 @@ static void app_detail(const struct app *a, char *out, size_t size) {
 		if (rx + tx > 0) snprintf(out + l, size - l, " · %s", bytes(rx + tx));
 		if (a->kind == 'm' && !strcmp(a->name, "Unaccounted"))
 			snprintf(out, size, "%s the gauge measured beyond the model", wh(a->wh));
+		else if (a->kind == 'm' && !strcmp(a->name, "USB-C accessories"))
+			snprintf(out, size, "%s · the dock and what is plugged into it, on the phone's power", wh(a->wh));
+		else if (a->kind == 'm' && !strcmp(a->name, "Desktop (external display)"))
+			snprintf(out, size, "%s · the DisplayPort link and video out", wh(a->wh));
+		else if (a->kind == 'm' && !strcmp(a->name, "Always-on (unseparated)"))
+			snprintf(out, size, "%s · drawn whenever awake, not yet told apart", wh(a->wh));
 	}
 	}
 	if (!a->live && a->kind != 'm') {
@@ -373,7 +381,14 @@ static double draw_list(cairo_t *cr, int page) {
 	y = zmc_choice(cr, y, "Showing", window_titles[window_at], ACT_WINDOW);
 	char line[256];
 	if (page == PAGE_BATTERY) {
-		if (measured_wh > 0) {
+		if (measured_wh > 0 && explained >= 0) {
+			/* the share explained: what is not Unaccounted (a model above the
+			 * gauge is scaled down to it, so this is at most 100 %) */
+			snprintf(line, sizeof(line), "The battery gave %s in %s on battery; the model explains %.0f%% of it. "
+				"%s is under Unaccounted.%s", wh(measured_wh), dur(on_battery_s), 100 * explained,
+				wh(unaccounted_wh),
+				front_known ? "" : " The screen goes to ztMETRO: zrnperfd does not say which app is in front.");
+		} else if (measured_wh > 0) {
 			snprintf(line, sizeof(line), "The battery gave %s in %s on battery; the model accounts for %s (%.0f%%). "
 				"What it cannot place is under Unaccounted.%s", wh(measured_wh), dur(on_battery_s),
 				wh(modelled_wh), 100 * modelled_wh / measured_wh,
