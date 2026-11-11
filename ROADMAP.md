@@ -205,3 +205,4 @@ Status words as above. **Agent** names the branch where an agent is working on i
 | 8.17 | **Lock screen PIN**, so the dock-aware lock (8.3) means something. | M | Proposed, not decided. |
 | 8.18 | **Battery accounting**: "Unaccounted" down from 33% to 1.9%. About 480 mW is still one "Always-on" lump. | M | Agent: `power/always-on` |
 | 8.19 | **Owner checks still open**: real dock unplug for 8.1; Ethernet through the dock (DHCP); gadget/deadman check with the dock unplugged; keyboard dongle; whether a plain OTG adapter counts as a dock for 8.3. | S | Waiting on the owner. |
+| 8.20 | **Volume streams: Media, Alarm, Calls/Notification ring.** All three sliders in the audio tile's modal. Volume keys change ring/notification when nothing is playing, media when something is, and show a minimal one-slider overlay with a caret that expands to all three. | M | Agent: `feature/volume-streams` |

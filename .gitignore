@@ -1,7 +1,8 @@
 # Never in the repository
 # the phone's stock firmware and EFS backups (IMEI, calibration)
 stock/
-.claude/
+.claude/*
+!.claude/skills/
 
 # Builds, inputs and outputs (made again by the scripts and the installer)
 build/
