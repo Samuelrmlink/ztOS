@@ -93,6 +93,38 @@ said `hello` after 8 s, ztclockd starts `ztclock --ring` itself. It then shows
 once the phone is unlocked, and the sound and vibration have gone on
 regardless.
 
+### Stopping it: a slide, not a tap
+
+A finger that lands on the ring screen by chance must not end an alarm, so
+there are no buttons on it. There are two tracks, each with a square handle:
+
+- **stop**, the lower track: the accent handle starts at the left and is
+  slid right past 85 % of the track;
+- **snooze N min**, the upper track (alarms with a snooze only): the grey
+  handle starts at the right and is slid left past 60 %, which is easier.
+  The alarm rings again anyway.
+
+The handle follows how far the finger moves, not where it is, so a touch
+at the far end of a track does nothing. A click is felt once the handle
+is far enough. Letting go there snoozes or stops. Letting go short of it,
+or a cancelled touch, springs the handle home. A tap only nudges it.
+
+### The keys while it rings
+
+The shell handles these, since the app never sees the phone's keys. A key
+never stops an alarm.
+
+| key | alarm with a snooze | timer, or no snooze |
+|---|---|---|
+| volume up / down | snoozes it | nothing (it keeps ringing) |
+| power, screen on | snoozes it | nothing (it keeps ringing, the screen stays on) |
+| power, screen off | wakes the screen | wakes the screen |
+
+While it rings, the shell also keeps the screen on past its idle time, since a
+dark screen takes no touch and the slide could not be found. The volume keys
+don't change the volume while it rings. A key that snoozes
+gives a heavy tick, and one that does nothing gives a tap.
+
 The Metro lock screen also shows the next alarm, with a small bell and its
 time, after the date. It reads the time from `alarm` in `ztclock.next`.
 
