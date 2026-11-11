@@ -174,6 +174,9 @@ struct zt_desk {
 	struct wl_event_source *idle_timer;	/* frames for a virtual output nobody looks at */
 	pid_t session_pid;		/* ztos-desktop-session, while it runs */
 	bool session_wanted;
+	pid_t session_pgid;		/* its process group, kept after the script itself ends */
+	pid_t session_pgid_dying;	/* a stopped session's process group, killed if it lingers */
+	struct wl_event_source *session_kill_timer;
 	char x_display[16];
 
 	/* ~/.config/ztmetro/desktop (Settings' "desktop mode" page writes it) */
@@ -2805,17 +2808,43 @@ static void desk_session_start(struct zt_desk *desk) {
 		_exit(127);
 	}
 	desk->session_pid = pid;
+	desk->session_pgid = pid;
 	desk->session_wanted = true;
 	wlr_log(WLR_INFO, "desktop: session started (pid %d)", (int)pid);
 }
 
+/* A stopped session gets SIGTERM; whatever of its process group is still
+ * there 3 s later (xfdesktop catches SIGTERM and has been seen to stay,
+ * reparented to init) gets SIGKILL: nothing of XFCE outlives "desktop stop". */
+static int desk_session_kill_tick(void *data) {
+	struct zt_desk *desk = data;
+	if (desk->session_pgid_dying > 0 && kill(-desk->session_pgid_dying, 0) == 0) {
+		wlr_log(WLR_INFO, "desktop: session group %d still there, killed",
+			(int)desk->session_pgid_dying);
+		kill(-desk->session_pgid_dying, SIGKILL);
+	}
+	desk->session_pgid_dying = 0;
+	return 0;
+}
+
 static void desk_session_stop(struct zt_desk *desk) {
 	desk->session_wanted = false;
-	if (desk_session_alive(desk)) {
-		kill(-desk->session_pid, SIGTERM);	/* its process group: setsid above */
+	/* the group, even when its leader (the script) has gone already */
+	pid_t g = desk->session_pgid;
+	if (g > 0 && kill(-g, 0) == 0) {
+		kill(-g, SIGTERM);	/* its process group: setsid above */
 		wlr_log(WLR_INFO, "desktop: session stopped");
+		desk->session_pgid_dying = g;
+		if (!desk->session_kill_timer) {
+			desk->session_kill_timer = wl_event_loop_add_timer(desk->server->loop,
+				desk_session_kill_tick, desk);
+		}
+		if (desk->session_kill_timer) {
+			wl_event_source_timer_update(desk->session_kill_timer, 3000);
+		}
 	}
 	desk->session_pid = 0;
+	desk->session_pgid = 0;
 }
 
 /* ---- state for tools, and the control pipe ------------------------------------------------------- */
@@ -2836,6 +2865,9 @@ static void desk_state_write(struct zt_desk *desk) {
 		fprintf(f, "output %s %s %d %d %.2f %d %d\n", desk->out->wo->name,
 			desk->out->virtual ? "virtual" : "monitor", desk->out->wo->width, desk->out->wo->height,
 			desk->out->wo->scale, b.x, b.y);
+		/* the mode it runs at (refresh in mHz; 0 when the output has none) */
+		fprintf(f, "mode %d %d %d\n", desk->out->wo->width, desk->out->wo->height,
+			desk->out->wo->refresh);
 	} else {
 		fprintf(f, "output none\n");
 	}
@@ -2950,8 +2982,10 @@ static void desk_ctl(struct zt_server *server, const char *args) {
 		}
 	} else if (!strcmp(args, "start")) {
 		desk_session_start(desk);
+		desk_state_write(desk);
 	} else if (!strcmp(args, "stop")) {
 		desk_session_stop(desk);
+		desk_state_write(desk);
 	} else if (sscanf(args, "move %127s", name) == 1) {
 		struct zt_toplevel *t, *found = NULL;
 		if (!strcmp(name, "shown")) {

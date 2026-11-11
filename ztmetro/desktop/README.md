@@ -9,8 +9,14 @@ is built this way.
    `ztmetro`, idle until a second output exists. Then install the optional
    package: `makepkg -si` in `packages/ztos-desktop`. That pulls in XFCE's
    panel, xfdesktop, the settings daemon, Thunar, xfce4-terminal and Xwayland.
-2. Start a desktop, in either of two ways:
-   - Settings → display → desktop mode → **Start on a virtual screen**;
+2. Nothing of XFCE runs until you ask: **Start automatically** is off by
+   default, and a monitor that connects is only an output until then.
+   Start a desktop, in any of three ways:
+   - **Desktop mode** (ztdeskmode, from its tile or the app list): it shows
+     whether XFCE runs and on which output, the monitor and its mode, and
+     has Start/Stop, **Start automatically**, the virtual screen and the
+     monitor resolution. It is Settings' page, as an app of its own;
+   - Settings → display → desktop mode → **Start XFCE on a virtual screen**;
    - from a shell:
 
          echo 'desktop add 1920x1080' > $XDG_RUNTIME_DIR/ztmetro.ctl
@@ -46,7 +52,12 @@ The control pipe's `desktop ...` lines are listed at `desk_ctl` in
 - `watch SECONDS`
 - `state`
 
-The state is in `$XDG_RUNTIME_DIR/ztmetro-desktop.state`.
+The state is in `$XDG_RUNTIME_DIR/ztmetro-desktop.state`: an `output NAME
+monitor|virtual W H SCALE X Y` line (or `output none`), a `mode W H mHz` line
+for the output, `session running|stopped` and a `window ...` line for each
+window. `desktop stop` sends SIGTERM to the session's process group and,
+3 s later, SIGKILL to whatever of it is still there (xfdesktop has been seen
+to outlive SIGTERM).
 
 ## On a PC, without a phone
 

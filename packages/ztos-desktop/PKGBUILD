@@ -29,7 +29,7 @@ _src() { echo "${ZTOS_SRC:-$startdir/../..}"; }
 
 build() {
 	cd "$(_src)/ztmetro"
-	make desktop/ztdesk
+	make desktop/ztdesk desktop/ztdeskmode
 }
 
 package() {
@@ -39,6 +39,9 @@ package() {
 	install -Dm755 "$z/desktop/ztdesk" "$pkgdir/usr/local/bin/ztdesk"
 	install -Dm644 "$z/desktop/ztdesk.desktop" "$pkgdir/usr/local/share/applications/ztdesk.desktop"
 	install -Dm644 "$z/desktop/ztdesk.svg" "$pkgdir/usr/local/share/icons/hicolor/scalable/apps/ztdesk.svg"
+	install -Dm755 "$z/desktop/ztdeskmode" "$pkgdir/usr/local/bin/ztdeskmode"
+	install -Dm644 "$z/desktop/ztdeskmode.desktop" "$pkgdir/usr/local/share/applications/ztdeskmode.desktop"
+	install -Dm644 "$z/desktop/ztdeskmode.svg" "$pkgdir/usr/local/share/icons/hicolor/scalable/apps/ztdeskmode.svg"
 	install -Dm755 "$z/desktop/ztos-desktop-session" "$pkgdir/usr/local/bin/ztos-desktop-session"
 	install -Dm755 "$z/desktop/ztos-desktop-hotplug" "$pkgdir/usr/local/bin/ztos-desktop-hotplug"
 	install -dm755 "$pkgdir/usr/lib/ztos/desktop-hotplug.d"

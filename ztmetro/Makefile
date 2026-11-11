@@ -97,8 +97,15 @@ desktop/ztdesk: desktop/ztdesk.c $(DESK_CLIENT) $(DESK_CLIENT_H) $(CORE_DEPS)
 	$(APP_BUILD) -Idesktop $(shell pkg-config --cflags gbm) -o $@ desktop/ztdesk.c $(DESK_CLIENT) $(CORE) $(APP_LIBS) \
 		$(shell pkg-config --libs gbm)
 
+# ztDeskMode: desktop mode's controls (Settings' page) as an app with a tile
+desktop/ztdeskmode: desktop/ztdeskmode.c desktop/desktop-page.c desktop/desktop-page.h $(CORE_DEPS)
+	$(APP_BUILD) -Idesktop -o $@ desktop/ztdeskmode.c desktop/desktop-page.c $(CORE) $(APP_LIBS)
+
 .PHONY: install-desktop
-install-desktop: desktop/ztdesk
+install-desktop: desktop/ztdesk desktop/ztdeskmode
+	install -Dm755 desktop/ztdeskmode /usr/local/bin/ztdeskmode
+	install -Dm644 desktop/ztdeskmode.desktop /usr/local/share/applications/ztdeskmode.desktop
+	install -Dm644 desktop/ztdeskmode.svg /usr/local/share/icons/hicolor/scalable/apps/ztdeskmode.svg
 	install -Dm755 desktop/ztdesk /usr/local/bin/ztdesk
 	install -Dm644 desktop/ztdesk.desktop /usr/local/share/applications/ztdesk.desktop
 	install -Dm644 desktop/ztdesk.svg /usr/local/share/icons/hicolor/scalable/apps/ztdesk.svg

@@ -16,6 +16,8 @@
 double desktop_page_render(cairo_t *cr);
 void desktop_page_activate(int action, int arg);
 void desktop_page_arrived(void);
+/* ask the shell to write its state again (a session that ended by itself) */
+void desktop_page_poll(void);
 /* the detail under the page's entry on the display page */
 const char *desktop_page_summary(void);
 #endif

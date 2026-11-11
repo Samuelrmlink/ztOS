@@ -45,7 +45,7 @@ static struct {
 	/* the shell's state */
 	bool output, monitor, session;
 	char output_name[32];
-	int w, h;
+	int w, h, mhz;
 	int open_picker;
 } pg = { .size = 2 };
 
@@ -104,12 +104,14 @@ static void state(void) {
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
 	snprintf(p, sizeof(p), "%s/ztmetro-desktop.state", runtime ? runtime : "/tmp");
 	pg.output = pg.session = pg.monitor = false;
+	pg.mhz = 0;
 	FILE *f = fopen(p, "r");
 	while (f && fgets(line, sizeof(line), f)) {
 		char kind[16];
 		if (sscanf(line, "output %31s %15s %d %d", pg.output_name, kind, &pg.w, &pg.h) == 4) {
 			pg.output = true;
 			pg.monitor = !strcmp(kind, "monitor");
+		} else if (sscanf(line, "mode %*d %*d %d", &pg.mhz) == 1) {
 		} else if (!strncmp(line, "session running", 15)) {
 			pg.session = true;
 		}
@@ -126,6 +128,10 @@ static void shell_tell(const char *line) {
 		if (write(fd, line, strlen(line)) < 0) {}
 		close(fd);
 	}
+}
+
+void desktop_page_poll(void) {
+	shell_tell("desktop state\n");
 }
 
 const char *desktop_page_summary(void) {
@@ -145,12 +151,19 @@ void desktop_page_arrived(void) {
 double desktop_page_render(cairo_t *cr) {
 	state();
 	double y = zmc_header(cr, "desktop mode");
-	/* where it is now */
-	char now[128];
-	if (!pg.output) snprintf(now, sizeof(now), "No desktop screen");
-	else snprintf(now, sizeof(now), "%s, %d × %d%s", pg.monitor ? "A monitor" : "A virtual screen",
-		pg.w, pg.h, pg.session ? "" : ", desktop not started");
-	y = zmc_field(cr, y, "Desktop", now);
+	/* where it is now: XFCE, and the monitor */
+	char now[128], mon[128];
+	if (pg.session && pg.output) snprintf(now, sizeof(now), "Running on %s (%s)", pg.output_name,
+		pg.monitor ? "the monitor" : "a virtual screen");
+	else if (pg.output) snprintf(now, sizeof(now), "Not running; %s %s is ready", pg.monitor ? "monitor" : "virtual screen",
+		pg.output_name);
+	else snprintf(now, sizeof(now), "Not running");
+	y = zmc_field(cr, y, "XFCE", now);
+	if (!pg.monitor) snprintf(mon, sizeof(mon), "None connected");
+	else if (pg.mhz > 0) snprintf(mon, sizeof(mon), "%s, %d × %d, %d Hz", pg.output_name, pg.w, pg.h,
+		(pg.mhz + 500) / 1000);
+	else snprintf(mon, sizeof(mon), "%s, %d × %d", pg.output_name, pg.w, pg.h);
+	y = zmc_field(cr, y, "Monitor", mon);
 	y = zmc_switch(cr, y, "Start automatically", pg.autostart, ACT_AUTOSTART);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	y += zmc_text(cr, "When a monitor is connected over USB-C, XFCE starts on it, beside the phone.",
@@ -163,11 +176,11 @@ double desktop_page_render(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	if (pg.output) {
 		y = zmc_button(cr, ZMC_MARGIN, y + 6, zmc.width - 2 * ZMC_MARGIN,
-			pg.session ? "Stop the desktop" : "Start the desktop", ACT_SESSION, 0);
+			pg.session ? "Stop XFCE" : "Start XFCE", ACT_SESSION, 0);
 	}
 	if (!pg.monitor) {
 		y = zmc_button(cr, ZMC_MARGIN, y + 6, zmc.width - 2 * ZMC_MARGIN,
-			pg.output ? "Remove the virtual screen" : "Start on a virtual screen", ACT_VIRTUAL, 0);
+			pg.output ? "Remove the virtual screen" : "Start XFCE on a virtual screen", ACT_VIRTUAL, 0);
 	}
 	y = zmc_entry(cr, y + 10, "desktop", "See and use the desktop from the phone", ACT_VIEW, 0);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);

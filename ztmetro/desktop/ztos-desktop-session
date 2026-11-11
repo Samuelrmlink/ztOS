@@ -77,6 +77,8 @@ auto=${XDG_CONFIG_HOME:-$HOME/.config}/ztmetro/desktop-autostart
 	sh -c "$line" &
 done < "$auto"
 
-# the shell stops the session with SIGTERM to its process group
-trap 'kill 0; exit 0' TERM INT
+# the shell stops the session with SIGTERM to its process group. xfconfd is
+# not in it (D-Bus starts it, for xfsettingsd and the panel): it goes too,
+# so nothing of XFCE is left; D-Bus starts it again when it is asked for.
+trap 'pkill -TERM -x -U "$(id -u)" xfconfd; kill 0; exit 0' TERM INT
 wait
