@@ -101,7 +101,10 @@ are `System: sshd`). A socket still not placed keeps its bytes waiting for
 the next rescan (up to 12 minutes) instead of giving them to nobody.
 **Network: not attributed** is what is left: `ztacct status` says why
 (`unattributed`: never placed, or a maker that is no longer known, and on
-which network), what `sock_diag` placed, and what is waiting. Waydroid's
+which network), what `sock_diag` placed, what is waiting, and the largest
+sockets not placed with what `sock_diag` knew of them when they first moved
+bytes (`unplaced_top`: TCP or UDP, ports, state; `gone` if they had already
+left its table). Waydroid's
 apps are not in it: their sockets are made in the container by its
 processes and go to their packages; Waydroid's NAT (forwarded, no socket) is
 not counted at all, as the interfaces' own counters show.

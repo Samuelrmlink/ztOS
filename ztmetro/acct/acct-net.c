@@ -227,21 +227,45 @@ static void owners_rescan(void) {
 
 /* ----------------------------------------- sockets the kernel made */
 
-/* The phone's TCP sockets from the kernel's table: cookie and local port,
- * and the listening ones. One dump per address family, only in a scan where
- * a socket with no maker moved bytes. */
-struct dsock { uint64_t cookie; uint16_t port; bool listen; };
+/* The phone's TCP and UDP sockets from the kernel's table: cookie, ports,
+ * state, and which are listening. One dump per family and protocol, only in
+ * a scan where a socket with no maker moved bytes. */
+struct dsock { uint64_t cookie; uint16_t port, dport; uint8_t proto, state; bool listen; };
 static struct dsock *dtab;
 static int n_dtab, cap_dtab;
 
-static void diag_dump_family(int fd, int family) {
+/* the largest sockets nobody was found for, for net_status: what they were */
+#define UNPLACED_KEEP	8
+static struct unplaced { uint64_t cookie; double bytes; int cls; struct dsock d; bool known; } unplaced[UNPLACED_KEEP];
+
+static void unplaced_note(uint64_t cookie, double bytes, int cls) {
+	int at = -1, low = 0;
+	for (int i = 0; i < UNPLACED_KEEP; i++) {
+		if (unplaced[i].cookie == cookie) at = i;
+		if (unplaced[i].bytes < unplaced[low].bytes) low = i;
+	}
+	if (at < 0) {
+		if (unplaced[low].bytes > bytes) return;
+		at = low;
+		unplaced[at] = (struct unplaced){ .cookie = cookie, .cls = cls };
+		for (int i = 0; i < n_dtab; i++) {
+			if (dtab[i].cookie == cookie) {
+				unplaced[at].d = dtab[i];
+				unplaced[at].known = true;
+			}
+		}
+	}
+	unplaced[at].bytes += bytes;
+}
+
+static void diag_dump_family(int fd, int family, int proto) {
 	struct {
 		struct nlmsghdr nh;
 		struct inet_diag_req_v2 r;
 	} req = {
 		.nh = { .nlmsg_len = sizeof(req), .nlmsg_type = SOCK_DIAG_BY_FAMILY,
 			.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP },
-		.r = { .sdiag_family = family, .sdiag_protocol = IPPROTO_TCP, .idiag_states = ~0u },
+		.r = { .sdiag_family = family, .sdiag_protocol = proto, .idiag_states = ~0u },
 	};
 	if (send(fd, &req, sizeof(req), 0) < 0) return;
 	static char buf[32768];
@@ -261,7 +285,10 @@ static void diag_dump_family(int fd, int family) {
 			dtab[n_dtab++] = (struct dsock){
 				.cookie = (uint64_t)m->id.idiag_cookie[0] | (uint64_t)m->id.idiag_cookie[1] << 32,
 				.port = ntohs(m->id.idiag_sport),
-				.listen = m->idiag_state == 10,	/* TCP_LISTEN */
+				.dport = ntohs(m->id.idiag_dport),
+				.proto = proto,
+				.state = m->idiag_state,
+				.listen = proto == IPPROTO_TCP && m->idiag_state == 10,	/* TCP_LISTEN */
 			};
 		}
 	}
@@ -271,8 +298,10 @@ static void diag_dump(void) {
 	n_dtab = 0;
 	int fd = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
 	if (fd < 0) return;
-	diag_dump_family(fd, AF_INET);
-	diag_dump_family(fd, AF_INET6);
+	diag_dump_family(fd, AF_INET, IPPROTO_TCP);
+	diag_dump_family(fd, AF_INET6, IPPROTO_TCP);
+	diag_dump_family(fd, AF_INET, IPPROTO_UDP);
+	diag_dump_family(fd, AF_INET6, IPPROTO_UDP);
 	close(fd);
 	diag_dumps++;
 }
@@ -370,6 +399,7 @@ void net_tick(double dt) {
 			if (s->pend_b <= 0) s->pend_since = now.mono_s;
 			s->pend_b += db;
 			s->pend_p += dp;
+			if (db > 0) unplaced_note(k.cookie, db, if_class(k.ifindex));
 			unknown_moved = true;
 			unknown_since_rescan += db;
 			if (s->idle < IDLE_TICKS - 1 && now.mono_s - s->pend_since < PEND_S) continue;
@@ -439,6 +469,17 @@ void net_status(FILE *f) {
 		"\"pending_bytes\":%.0f", bpf.up, bpf.error, entries, deleted, rescans, unattributed, unattr_never,
 		unattr_gone, unattr_cls[NET_WIFI], unattr_cls[NET_MOBILE], unattr_cls[NET_OTHER], placed_listener, diag_dumps,
 		pending_now());
+	/* the largest sockets no maker was found for (yet), as sock_diag saw them
+	 * when they first moved bytes (proto 0: already gone from its table) */
+	fprintf(f, ",\"unplaced_top\":[");
+	for (int i = 0, n = 0; i < UNPLACED_KEEP; i++) {
+		const struct unplaced *u = &unplaced[i];
+		if (u->bytes <= 0) continue;
+		fprintf(f, "%s{\"cookie\":%llu,\"bytes\":%.0f,\"net\":\"%s\",\"proto\":\"%s\",\"port\":%u,\"peer_port\":%u,"
+			"\"state\":%u}", n++ ? "," : "", (unsigned long long)u->cookie, u->bytes, net_names[u->cls],
+			!u->known ? "gone" : u->d.proto == IPPROTO_TCP ? "tcp" : "udp", u->d.port, u->d.dport, u->d.state);
+	}
+	fprintf(f, "]");
 	/* what the interfaces counted since ztacctd started, beside what it gave to processes */
 	for (int c = 0; c < NCLS; c++) {
 		fprintf(f, ",\"%s\":{\"dev_rx\":%llu,\"dev_tx\":%llu,\"counted_rx\":%.0f,\"counted_tx\":%.0f}", net_names[c],
