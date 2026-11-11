@@ -110,6 +110,7 @@ static struct {
 	double dp_link_mw, dp_video_mw;
 	double bt_on_mw, bt_conn_mw;	/* bt_on: inside the base */
 	double cp_air_mw;		/* the modem's CP, radio off: inside the base */
+	double wake_ctxt_uj, wake_irq_uj;	/* each context switch, each interrupt (fitted; 0: not yet) */
 	struct ptab cl[MAX_CLUSTERS], gpu;
 	bool cl_set[MAX_CLUSTERS];
 } prof = {
@@ -183,6 +184,7 @@ static void profile_load(void) {
 			{ "dp_link_mw", &prof.dp_link_mw }, { "dp_video_mw", &prof.dp_video_mw },
 			{ "bt_on_mw", &prof.bt_on_mw }, { "bt_conn_mw", &prof.bt_conn_mw },
 			{ "cp_air_mw", &prof.cp_air_mw },
+			{ "wake_ctxt_uj", &prof.wake_ctxt_uj }, { "wake_irq_uj", &prof.wake_irq_uj },
 		};
 		bool done = false;
 		for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
@@ -245,7 +247,7 @@ static unsigned long resumes_prev;
 static char resume_path[96];
 
 static int g_idle = -1, g_sleep = -1, g_wifi = -1, g_mobile = -1, g_unacc = -1, g_kernel = -1, g_shell = -1, g_gauge = -1;
-static int g_usbc = -1, g_display = -1, g_bt = -1, g_cp = -1, g_floor = -1;
+static int g_usbc = -1, g_display = -1, g_bt = -1, g_cp = -1, g_floor = -1, g_wake = -1;
 
 static long long read_ll(const char *path) {
 	char buf[64];
@@ -298,12 +300,20 @@ static void read_gpu(unsigned long long *out, bool init) {
 	fclose(f);
 }
 
+/* the system's wakeups, from the same read: context switches and interrupts
+ * since boot (/proc/stat "ctxt", and the total that opens "intr") */
+static unsigned long long stat_ctxt, stat_intr;
+
 static void read_cpus(unsigned long long *busy, unsigned long long *irq) {
 	FILE *f = fopen("/proc/stat", "re");
 	char line[512];
 	if (!f) return;
 	while (fgets(line, sizeof(line), f)) {
 		int c;
+		/* "intr" is longer than the buffer: the rest of it comes back as
+		 * lines of digits, which match nothing below */
+		if (!strncmp(line, "intr ", 5)) stat_intr = strtoull(line + 5, NULL, 10);
+		else if (!strncmp(line, "ctxt ", 5)) stat_ctxt = strtoull(line + 5, NULL, 10);
 		unsigned long long u, n, s, id, io, ir, so, st;
 		if (strncmp(line, "cpu", 3) || line[3] == ' ') continue;
 		if (sscanf(line, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu", &c, &u, &n, &s, &id, &io, &ir, &so, &st) < 8)
@@ -541,8 +551,10 @@ static struct win {
 	/* the accessories' states, seconds (usb_dev_s, usb_active_s, bt_conn_s: x count) */
 	double otg_s, usb_host_s, usb_dev_s, usb_active_s, dp_link_s, dp_video_s, bt_on_s, bt_conn_s;
 	double cp_s, airplane_s, waydroid_s;
+	double ctxt, irqs;	/* context switches and interrupts in the window */
 	double e[NEK];
 } w;
+static unsigned long long ctxt_prev, intr_prev;
 static double k_last = 1, unacc_total;
 static char calib[CALIB_KEEP][448];
 static int n_calib;
@@ -609,6 +621,7 @@ void energy_start(void) {
 	g_bt = group_get("Bluetooth", "bluetooth", K_MODEL);
 	g_cp = group_get("Mobile radio (airplane)", "modem", K_MODEL);
 	g_floor = group_get("Always-on (unseparated)", "floor", K_MODEL);
+	g_wake = group_get("Wakeups (timers, interrupts)", "wakeups", K_MODEL);
 	acc_find();
 	acc.partner_was = true;		/* read the DP link at the first settle */
 	/* the clusters */
@@ -659,6 +672,8 @@ void energy_start(void) {
 		n_cl++;
 	}
 	read_cpus(cpu_busy, cpu_irq);
+	ctxt_prev = stat_ctxt;
+	intr_prev = stat_intr;
 	/* the GPU's devfreq */
 	d = opendir("/sys/class/devfreq");
 	while (d && (e = readdir(d))) {
@@ -691,6 +706,15 @@ void energy_tick(double dt_boot, double dt_mono) {
 	/* CPU: busy core seconds per cluster, and their joules */
 	unsigned long long busy[MAX_CPUS] = { 0 }, irq[MAX_CPUS] = { 0 };
 	read_cpus(busy, irq);
+	/* wakeups: each costs the SoC more than its CPU time says (the cores and
+	 * the uncore leave WFI and come back); fitted per wakeup, wake_*_uj */
+	double d_ctxt = stat_ctxt >= ctxt_prev ? (double)(stat_ctxt - ctxt_prev) : 0;
+	double d_intr = stat_intr >= intr_prev ? (double)(stat_intr - intr_prev) : 0;
+	ctxt_prev = stat_ctxt;
+	intr_prev = stat_intr;
+	w.ctxt += d_ctxt;
+	w.irqs += d_intr;
+	model(g_wake, NULL, E_BASE, (d_ctxt * prof.wake_ctxt_uj + d_intr * prof.wake_irq_uj) / 1e6);
 	double hz = tick_ticks(), irq_s[MAX_CLUSTERS] = { 0 };
 	for (int i = 0; i < n_cl; i++) cl[i].busy_s = 0;
 	for (int c = 0; c < MAX_CPUS; c++) {
@@ -884,13 +908,13 @@ void energy_settle(bool force) {
 		}
 		snprintf(calib[n_calib++], sizeof(calib[0]),
 			"%lld,%.1f,%.1f,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.0f,%.0f,%.0f,%.1f,%.1f,%.0f,%.2f,%.2f,%.3f,"
-			"%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f",
+			"%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.0f,%.0f",
 			(long long)w.t0, w.dt_boot, w.dt_mono, w.susp_s, w.screen_s, w.bright_s,
 			w.busy_s[0], n_cl > 1 ? w.busy_s[1] : 0, w.cpu_j[0], n_cl > 1 ? w.cpu_j[1] : 0, w.gpu_j,
 			w.wifi_pkts, w.wifi_bytes, w.mob_bytes, w.wifi_assoc_s, w.mob_active_s, w.resumes,
 			w.model_dis_j, w.meas_j, w.volt_n ? w.volt_sum / w.volt_n : 0,
 			w.otg_s, w.usb_host_s, w.usb_dev_s, w.usb_active_s, w.dp_link_s, w.dp_video_s,
-			w.bt_on_s, w.bt_conn_s, w.cp_s, w.airplane_s, w.waydroid_s);
+			w.bt_on_s, w.bt_conn_s, w.cp_s, w.airplane_s, w.waydroid_s, w.ctxt, w.irqs);
 	}
 	memset(&w, 0, sizeof(w));
 	w.t0 = now.wall;
@@ -899,7 +923,8 @@ void energy_settle(bool force) {
 static const char calib_head[] = "start,boot_s,awake_s,asleep_s,screen_s,screen_bright_s,busy_little_s,busy_big_s,"
 	"cpu_little_j,cpu_big_j,gpu_j,wifi_packets,wifi_bytes,mobile_bytes,wifi_assoc_s,mobile_active_s,"
 	"resumes,model_j,measured_j,volts,"
-	"otg_s,usb_host_s,usb_dev_s,usb_active_s,dp_link_s,dp_video_s,bt_on_s,bt_conn_s,cp_s,airplane_s,waydroid_s";
+	"otg_s,usb_host_s,usb_dev_s,usb_active_s,dp_link_s,dp_video_s,bt_on_s,bt_conn_s,cp_s,airplane_s,waydroid_s,"
+	"ctxt,irqs";
 
 /* A calib.csv from before the state columns: rewritten once with the new
  * header, its rows given empty fields (unknown, not 0: fit-calib.py fills

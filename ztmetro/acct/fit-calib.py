@@ -63,8 +63,13 @@ COLS = [("base_awake_mw", "awake_s", 1000), ("base_suspend_mw", "asleep_s", 1000
         ("cpu_scale", "cpu", 1), ("gpu_scale", "gpu_j", 1), ("wifi_pkt_mj", "wifi_packets", 1000),
         ("otg_mw", "otg_s", 1000), ("usb_host_mw", "usb_host_s", 1000), ("usb_dev_mw", "usb_dev_s", 1000),
         ("dp_link_mw", "dp_link_s", 1000), ("dp_video_mw", "dp_video_s", 1000),
-        ("bt_on_mw", "bt_on_s", 1000), ("bt_conn_mw", "bt_conn_s", 1000)]
-STATE = ["otg_s", "usb_host_s", "usb_dev_s", "usb_active_s", "dp_link_s", "dp_video_s", "bt_on_s", "bt_conn_s"]
+        ("bt_on_mw", "bt_on_s", 1000), ("bt_conn_mw", "bt_conn_s", 1000),
+        ("wake_ctxt_uj", "ctxt", 1e6), ("wake_irq_uj", "irqs", 1e6)]
+STATE = ["otg_s", "usb_host_s", "usb_dev_s", "usb_active_s", "dp_link_s", "dp_video_s", "bt_on_s", "bt_conn_s",
+         "ctxt", "irqs"]
+# a coefficient fitted only once this many windows know its column (the
+# rest of the fit would otherwise shrink to the few rows that do)
+MIN_ROWS = 24
 FROM_JOURNAL = ["otg_s", "usb_host_s", "usb_dev_s", "dp_link_s", "dp_video_s"]
 
 # ztacctd's defaults (acct-energy.c), what a row's model_j was made with
@@ -72,7 +77,7 @@ BASE_MEASURED = 1190	# mW: 325 mA, screen off, Wi-Fi off, panel asleep (power/RE
 DEFAULTS = {"base_awake_mw": 1190, "base_suspend_mw": 100, "screen_mw": 250, "screen_full_mw": 1100,
             "cpu_scale": 1, "gpu_scale": 1, "wifi_pkt_mj": 0.15, "wifi_byte_uj": 0.1,
             "otg_mw": 0, "usb_host_mw": 0, "usb_dev_mw": 0, "dp_link_mw": 0, "dp_video_mw": 0,
-            "bt_on_mw": 0, "bt_conn_mw": 0}
+            "bt_on_mw": 0, "bt_conn_mw": 0, "wake_ctxt_uj": 0, "wake_irq_uj": 0}
 
 
 def solve(a, b):
@@ -252,6 +257,10 @@ def do_fit(data, start, fixed0, wifi_on, wifi_off):
     """Least squares, >= 0: the fitted profile and the keys it fitted."""
     fixed = dict(fixed0)
     cols = [c for c in COLS if c[0] not in fixed and any((v.get(c[1]) or 0) > 0 for v in data)]
+    for c in [c for c in cols if sum(v.get(c[1]) is not None for v in data) < MIN_ROWS]:
+        print(f"  {c[0]}: fewer than {MIN_ROWS} windows know {c[1]}, held")
+        fixed[c[0]] = start[c[0]]
+        cols.remove(c)
     x = []
     while cols:
         # a row takes part only if it knows every fitted column
@@ -301,6 +310,7 @@ def parts(v, k, wifi_on, wifi_off):
                               + k["usb_dev_mw"] * g("usb_dev_s")) / 1000,
         "Desktop (external display)": (k["dp_link_mw"] * g("dp_link_s") + k["dp_video_mw"] * g("dp_video_s")) / 1000,
         "Bluetooth links": k["bt_conn_mw"] * g("bt_conn_s") / 1000,
+        "Wakeups": (k["wake_ctxt_uj"] * g("ctxt") + k["wake_irq_uj"] * g("irqs")) / 1e6,
     }
 
 
