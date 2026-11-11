@@ -1,0 +1,14 @@
+[Unit]
+Description=ztOS Alarms + Clock: rings the alarms and the timer, from sleep too
+Documentation=file:///usr/local/share/doc/ztos/clock/README.md
+
+[Service]
+# CAP_WAKE_ALARM comes from the program's file capability (make install:
+# setcap cap_wake_alarm+ep): a user manager cannot hand out ambient
+# capabilities. So no NoNewPrivileges= here: it would drop the file capability.
+ExecStart=/usr/local/bin/ztclockd
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

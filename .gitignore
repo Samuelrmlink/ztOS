@@ -94,3 +94,5 @@ ztmetro/desktop/*-protocol.c
 ztmetro/desktop/*.xml
 ztmetro/desktop/ztdesk
 ztmetro/desktop/ztdeskmode
+ztmetro/clock/ztclock
+ztmetro/clock/ztclockd
