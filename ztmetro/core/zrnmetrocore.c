@@ -27,6 +27,8 @@
 
 #include "xdg-shell-client-protocol.h"
 #include "viewporter-client-protocol.h"
+#include "zt-environment-v1-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "../retro/dm-chrome.h"
 #include "zrnmetrocore.h"
 #include "zmc-gesture.h"
@@ -3522,6 +3524,181 @@ static const struct wl_touch_listener touch_listener = {
 	.cancel = touch_cancel,
 };
 
+/* ---- the desktop: where the window is, and a pointer --------------------------------
+ *
+ * The shell says, through zt_environment_v1 (desktop/protocols/), whether
+ * this window is on the phone or on a desktop, and says it again when the
+ * window moves. On a desktop the app is a window like any other: the
+ * shell's frame (xdg-decoration, asked for always; the phone draws none),
+ * resizable within sizes our pages are made for, driven by a mouse (a
+ * pointer here acts as a finger does) and the wheel. */
+
+static struct zt_environment_manager_v1 *env_manager;
+static struct zt_environment_v1 *env;
+static struct zxdg_decoration_manager_v1 *deco_manager;
+static struct zxdg_toplevel_decoration_v1 *deco;
+
+#define POINTER_ID	0x7a70	/* the pointer's "finger" */
+static struct wl_pointer *pointer;
+static struct wl_surface *cursor_surface;
+static struct wl_buffer *cursor_buffer;
+static int cursor_scale;
+static double pointer_x, pointer_y;
+static bool pointer_down;
+
+static void env_environment(void *data, struct zt_environment_v1 *e, uint32_t kind, uint32_t input,
+		const char *output) {
+	bool desktop = kind == ZT_ENVIRONMENT_V1_KIND_DESKTOP;
+	bool changed = desktop != zmc.desktop || !zmc.env_known;
+	zmc.env_known = true;
+	zmc.desktop = desktop;
+	snprintf(zmc.env_output, sizeof(zmc.env_output), "%s", output ? output : "");
+	if (!changed) {
+		return;
+	}
+	if (getenv("ZMC_TRACE_ENV")) {
+		fprintf(stderr, "%s: environment %s (%s)\n", zmc.app->app_id, desktop ? "desktop" : "phone", zmc.env_output);
+	}
+	/* On a desktop: no narrower than a phone, and not so wide that the lines
+	 * of a page run across a monitor (maximized it may still be). The phone:
+	 * whatever the shell gives. Applied with the configure that comes next. */
+	if (desktop) {
+		xdg_toplevel_set_min_size(zmc.toplevel, 340, 420);
+		xdg_toplevel_set_max_size(zmc.toplevel, 900, 0);
+	} else {
+		xdg_toplevel_set_min_size(zmc.toplevel, 0, 0);
+		xdg_toplevel_set_max_size(zmc.toplevel, 0, 0);
+	}
+	if (zmc.app->environment) {
+		zmc.app->environment(desktop);
+	}
+	zmc.cache_stale = true;
+	zmc_redraw();
+}
+
+static const struct zt_environment_v1_listener env_listener = { .environment = env_environment };
+
+bool zmc_on_desktop(void) {
+	return zmc.desktop;
+}
+
+/* the arrow, drawn here (no cursor theme library in the apps) */
+static void cursor_make(int scale) {
+	if (cursor_buffer && cursor_scale == scale) return;
+	if (cursor_buffer) wl_buffer_destroy(cursor_buffer);
+	cursor_buffer = NULL;
+	int px = 24 * scale, stride = px * 4;
+	size_t size = (size_t)stride * px;
+	int fd = memfd_create("zmc-cursor", MFD_CLOEXEC);
+	if (fd < 0 || ftruncate(fd, (off_t)size) < 0) {
+		if (fd >= 0) close(fd);
+		return;
+	}
+	void *data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (data == MAP_FAILED) {
+		close(fd);
+		return;
+	}
+	cairo_surface_t *s = cairo_image_surface_create_for_data(data, CAIRO_FORMAT_ARGB32, px, px, stride);
+	cairo_t *cr = cairo_create(s);
+	cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+	cairo_paint(cr);
+	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+	cairo_scale(cr, scale, scale);
+	cairo_move_to(cr, 1.5, 1.5);
+	cairo_line_to(cr, 1.5, 18);
+	cairo_line_to(cr, 5.8, 14);
+	cairo_line_to(cr, 9, 21);
+	cairo_line_to(cr, 12, 19.6);
+	cairo_line_to(cr, 8.8, 13);
+	cairo_line_to(cr, 14.5, 13);
+	cairo_close_path(cr);
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_fill_preserve(cr);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	cairo_set_line_width(cr, 1.2);
+	cairo_stroke(cr);
+	cairo_destroy(cr);
+	cairo_surface_destroy(s);
+	munmap(data, size);
+	struct wl_shm_pool *pool = wl_shm_create_pool(zmc.shm, fd, (int32_t)size);
+	cursor_buffer = wl_shm_pool_create_buffer(pool, 0, px, px, stride, WL_SHM_FORMAT_ARGB8888);
+	wl_shm_pool_destroy(pool);
+	close(fd);
+	cursor_scale = scale;
+}
+
+static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *surface,
+		wl_fixed_t x, wl_fixed_t y) {
+	pointer_x = wl_fixed_to_double(x), pointer_y = wl_fixed_to_double(y);
+	int scale = zmc.scale > 0 ? zmc.scale : 1;
+	cursor_make(scale);
+	if (!cursor_surface) cursor_surface = wl_compositor_create_surface(zmc.compositor);
+	if (cursor_buffer && cursor_surface) {
+		wl_surface_set_buffer_scale(cursor_surface, scale);
+		wl_surface_attach(cursor_surface, cursor_buffer, 0, 0);
+		wl_surface_damage(cursor_surface, 0, 0, 24, 24);
+		wl_surface_commit(cursor_surface);
+		wl_pointer_set_cursor(p, serial, cursor_surface, 1, 1);
+	}
+}
+
+static void pointer_leave(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *surface) {
+	if (pointer_down) {
+		/* (the shell keeps a held button's pointer here; this is a grab
+		 * of its own taking it: the finger is taken away) */
+		pointer_down = false;
+		touch_cancel(NULL, NULL);
+	}
+}
+
+static void pointer_motion(void *data, struct wl_pointer *p, uint32_t time, wl_fixed_t x, wl_fixed_t y) {
+	pointer_x = wl_fixed_to_double(x), pointer_y = wl_fixed_to_double(y);
+	if (pointer_down) {
+		touch_motion(NULL, NULL, time, POINTER_ID, x, y);
+	}
+}
+
+static void pointer_button(void *data, struct wl_pointer *p, uint32_t serial, uint32_t time, uint32_t button,
+		uint32_t state) {
+	bool pressed = state == WL_POINTER_BUTTON_STATE_PRESSED;
+	if (button == BTN_LEFT) {
+		if (pressed && !pointer_down) {
+			pointer_down = true;
+			touch_down(NULL, NULL, serial, time, zmc.surface, POINTER_ID, wl_fixed_from_double(pointer_x),
+				wl_fixed_from_double(pointer_y));
+		} else if (!pressed && pointer_down) {
+			pointer_down = false;
+			touch_up(NULL, NULL, serial, time, POINTER_ID);
+		}
+	} else if ((button == BTN_SIDE || button == BTN_BACK) && pressed) {
+		zmc_back();	/* a mouse's back button */
+	}
+}
+
+static void pointer_axis(void *data, struct wl_pointer *p, uint32_t time, uint32_t axis, wl_fixed_t value) {
+	if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL || pointer_down || zmc.app->fixed) {
+		return;
+	}
+	/* the wheel moves the page, as far as a finger's drag would, no further than its ends */
+	double to = zmc.scroll + wl_fixed_to_double(value) * 2.0;
+	double max = scroll_max();
+	if (to > max) to = max;
+	if (to < 0) to = 0;
+	set_scroll(to);
+}
+
+static void pointer_frame(void *data, struct wl_pointer *p) {}
+static void pointer_axis_source(void *data, struct wl_pointer *p, uint32_t source) {}
+static void pointer_axis_stop(void *data, struct wl_pointer *p, uint32_t time, uint32_t axis) {}
+static void pointer_axis_discrete(void *data, struct wl_pointer *p, uint32_t axis, int32_t discrete) {}
+
+static const struct wl_pointer_listener pointer_listener = {
+	.enter = pointer_enter, .leave = pointer_leave, .motion = pointer_motion, .button = pointer_button,
+	.axis = pointer_axis, .frame = pointer_frame, .axis_source = pointer_axis_source,
+	.axis_stop = pointer_axis_stop, .axis_discrete = pointer_axis_discrete,
+};
+
 static bool key_shift;
 static struct xkb_context *key_context;
 static struct xkb_keymap *key_map;
@@ -3620,6 +3797,19 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps) {
 	if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !zmc.keyboard) {
 		zmc.keyboard = wl_seat_get_keyboard(seat);
 		wl_keyboard_add_listener(zmc.keyboard, &keyboard_listener, NULL);
+	}
+	/* a pointer reaches us on a desktop only (on the phone the shell makes
+	 * a mouse a finger itself) */
+	if ((caps & WL_SEAT_CAPABILITY_POINTER) && !pointer && wl_seat_get_version(seat) >= 5) {
+		pointer = wl_seat_get_pointer(seat);
+		wl_pointer_add_listener(pointer, &pointer_listener, NULL);
+	} else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && pointer) {
+		if (pointer_down) {
+			pointer_down = false;
+			touch_cancel(NULL, NULL);
+		}
+		wl_pointer_release(pointer);
+		pointer = NULL;
 	}
 }
 
@@ -3752,6 +3942,10 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 	} else if (strcmp(interface, wl_seat_interface.name) == 0) {
 		zmc.seat = wl_registry_bind(registry, name, &wl_seat_interface, 5);
 		wl_seat_add_listener(zmc.seat, &seat_listener, NULL);
+	} else if (strcmp(interface, zt_environment_manager_v1_interface.name) == 0) {
+		env_manager = wl_registry_bind(registry, name, &zt_environment_manager_v1_interface, 1);
+	} else if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0) {
+		deco_manager = wl_registry_bind(registry, name, &zxdg_decoration_manager_v1_interface, 1);
 	}
 }
 
@@ -5103,6 +5297,16 @@ int zmc_run(const struct zmc_app *app, int first_page) {
 	xdg_toplevel_add_listener(zmc.toplevel, &xdg_toplevel_listener, NULL);
 	xdg_toplevel_set_title(zmc.toplevel, app->title);
 	xdg_toplevel_set_app_id(zmc.toplevel, app->app_id);
+	/* the shell's frame on a desktop (the phone draws no frame at all) */
+	if (deco_manager) {
+		deco = zxdg_decoration_manager_v1_get_toplevel_decoration(deco_manager, zmc.toplevel);
+		zxdg_toplevel_decoration_v1_set_mode(deco, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	}
+	/* where it is, now and as it moves */
+	if (env_manager) {
+		env = zt_environment_manager_v1_get_environment(env_manager, zmc.toplevel);
+		zt_environment_v1_add_listener(env, &env_listener, NULL);
+	}
 	zmc_trace("toplevel");
 	zmg_init(zmc.display, zmc.surface, zmc.width, zmc.height, zmc.scale);
 	zmc_trace("gpu ready");

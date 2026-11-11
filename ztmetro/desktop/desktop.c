@@ -34,6 +34,7 @@
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
 #include <wlr/types/wlr_xcursor_manager.h>
+#include "zt-environment-v1-protocol.h"
 #if WLR_HAS_XWAYLAND
 #include <wlr/xwayland.h>
 #endif
@@ -139,6 +140,7 @@ struct zt_desk {
 	struct wl_list views;		/* desk_view, front first */
 	struct wl_list layers;		/* desk_layer */
 	struct wl_list popups;		/* desk_popup */
+	struct wl_list envs;		/* desk_env: apps told where their windows are */
 	struct desk_view *focused;
 	struct wlr_layer_surface_v1 *focused_layer;
 	int cascade;
@@ -236,6 +238,8 @@ static void desk_view_close(struct desk_view *view);
 static void desk_pointer_refocus(struct zt_desk *desk, uint32_t time);
 static void desk_view_set_shaded(struct desk_view *view, bool shaded);
 static void desk_theme_reload(struct zt_desk *desk);
+static void desk_env_announce(struct zt_server *server, struct zt_toplevel *top);
+static void desk_env_file(struct zt_server *server, pid_t pid, struct zt_toplevel *except);
 static void desk_grab_begin(struct zt_desk *desk, struct desk_view *view, enum desk_grab mode, uint32_t edges);
 
 /* ---- settings ------------------------------------------------------------- */
@@ -1169,6 +1173,16 @@ static void desk_grab_motion_to(struct zt_desk *desk, double px, double py) {
 	}
 	if (w < min) w = min;
 	if (h < min / 2) h = min / 2;
+	if (view->top) {
+		/* the app's own limits (xdg_toplevel.set_min_size, set_max_size) */
+		struct wlr_xdg_toplevel_state *st = &view->top->xdg_toplevel->current;
+		if (st->min_width > 0 && w < st->min_width) w = st->min_width;
+		if (st->min_height > 0 && h < st->min_height) h = st->min_height;
+		if (st->max_width > 0 && w > st->max_width) w = st->max_width;
+		if (st->max_height > 0 && h > st->max_height) h = st->max_height;
+		if (desk->grab_edges & WLR_EDGE_LEFT) x = b.x + b.width - w;
+		if (desk->grab_edges & WLR_EDGE_TOP) y = b.y + b.height - h;
+	}
 	if (view->top) {
 		/* the corner moves when the app has taken the size (desk_xdg_commit) */
 		view->saved = (struct wlr_box){ x, y, w, h };
@@ -2272,6 +2286,9 @@ static bool desk_toplevel_commit(struct zt_toplevel *top) {
 		desk_xdg_adopt(desk, top);
 		wlr_log(WLR_INFO, "desktop: new window '%s'", xt->app_id ? xt->app_id : "?");
 	}
+	if (xt->base->initial_commit) {
+		desk_env_announce(server, top);	/* phone or desktop: decided above */
+	}
 	if (!top->desk) {
 		return false;
 	}
@@ -2363,6 +2380,9 @@ static bool desk_toplevel_unmap(struct zt_toplevel *top) {
 }
 
 static void desk_toplevel_destroy(struct zt_toplevel *top) {
+	if (top->server->desk && top->xdg_toplevel->base->initialized) {
+		desk_env_file(top->server, toplevel_pid(top), top);
+	}
 	if (!top->desk || !top->view) {
 		return;
 	}
@@ -2379,6 +2399,172 @@ static bool desk_toplevel_fullscreen(struct zt_toplevel *top) {
 	}
 	desk_view_set_fullscreen(top->view, top->xdg_toplevel->requested.fullscreen);
 	return true;
+}
+
+/* ---- zt_environment_v1: an app is told where each of its windows is ----------------------------
+ *
+ * protocols/zt-environment-v1.xml. "phone" or "desktop", first with the
+ * window's first configure, then at every move, before the configure that
+ * comes with it. And the same in $XDG_RUNTIME_DIR/ztmetro-env/PID, for apps
+ * that would rather watch a file: "APP_ID phone|desktop OUTPUT", a line a
+ * window. */
+
+struct desk_env {
+	struct wl_list link;		/* zt_desk.envs */
+	struct zt_desk *desk;
+	struct wl_resource *resource;
+	struct wlr_xdg_toplevel *xt;	/* NULL once the toplevel is gone */
+	struct wl_listener xt_destroy;
+};
+
+static bool desk_env_on_desktop(struct zt_server *server, struct zt_toplevel *top) {
+	return top && top->desk && server->desk && server->desk->out;
+}
+
+static const char *desk_env_output(struct zt_server *server, struct zt_toplevel *top) {
+	if (desk_env_on_desktop(server, top)) {
+		return server->desk->out->wo->name;
+	}
+	return server->output ? server->output->wlr_output->name : "";
+}
+
+static void desk_env_send(struct desk_env *e) {
+	if (!e->xt) {
+		return;
+	}
+	struct zt_server *server = e->desk->server;
+	struct zt_toplevel *top = e->xt->base->data;
+	bool desktop = desk_env_on_desktop(server, top);
+	zt_environment_v1_send_environment(e->resource,
+		desktop ? ZT_ENVIRONMENT_V1_KIND_DESKTOP : ZT_ENVIRONMENT_V1_KIND_PHONE,
+		desktop ? ZT_ENVIRONMENT_V1_INPUT_POINTER | ZT_ENVIRONMENT_V1_INPUT_KEYBOARD :
+			ZT_ENVIRONMENT_V1_INPUT_TOUCH,
+		desk_env_output(server, top));
+}
+
+/* ztmetro-env/PID: every window of that process, where it is ("except" is going) */
+static void desk_env_file(struct zt_server *server, pid_t pid, struct zt_toplevel *except) {
+	if (pid <= 0) {
+		return;
+	}
+	char dir[256], path[300], tmp[310];
+	runtime_file(dir, sizeof(dir), "ztmetro-env");
+	mkdir(dir, 0700);
+	snprintf(path, sizeof(path), "%s/%d", dir, (int)pid);
+	snprintf(tmp, sizeof(tmp), "%s.new", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f) {
+		return;
+	}
+	int n = 0;
+	struct zt_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t != except && toplevel_pid(t) == pid && t->xdg_toplevel->base->initialized) {
+			const char *id = t->xdg_toplevel->app_id;
+			fprintf(f, "%s phone %s\n", id && id[0] ? id : "-", desk_env_output(server, t));
+			n++;
+		}
+	}
+	if (server->desk) {
+		struct desk_view *v;
+		wl_list_for_each(v, &server->desk->views, link) {
+			if (v->top && v->top != except && toplevel_pid(v->top) == pid) {
+				const char *id = v->top->xdg_toplevel->app_id;
+				fprintf(f, "%s desktop %s\n", id && id[0] ? id : "-", desk_env_output(server, v->top));
+				n++;
+			}
+		}
+	}
+	fclose(f);
+	if (n) {
+		rename(tmp, path);
+	} else {
+		unlink(tmp);
+		unlink(path);
+	}
+}
+
+/* The toplevel's environment is decided, or has changed: tell its objects. */
+static void desk_env_announce(struct zt_server *server, struct zt_toplevel *top) {
+	struct zt_desk *desk = server->desk;
+	if (!desk || !top) {
+		return;
+	}
+	struct desk_env *e;
+	wl_list_for_each(e, &desk->envs, link) {
+		if (e->xt == top->xdg_toplevel) {
+			desk_env_send(e);
+		}
+	}
+	desk_env_file(server, toplevel_pid(top), NULL);
+}
+
+static void desk_env_xt_destroy(struct wl_listener *l, void *data) {
+	struct desk_env *e = wl_container_of(l, e, xt_destroy);
+	wl_list_remove(&e->xt_destroy.link);
+	wl_list_init(&e->xt_destroy.link);
+	e->xt = NULL;
+}
+
+static void desk_env_resource_destroy(struct wl_resource *resource) {
+	struct desk_env *e = wl_resource_get_user_data(resource);
+	wl_list_remove(&e->xt_destroy.link);
+	wl_list_remove(&e->link);
+	free(e);
+}
+
+static void desk_env_handle_destroy(struct wl_client *client, struct wl_resource *resource) {
+	wl_resource_destroy(resource);
+}
+
+static const struct zt_environment_v1_interface desk_env_impl = {
+	.destroy = desk_env_handle_destroy,
+};
+
+static void desk_env_get(struct wl_client *client, struct wl_resource *manager, uint32_t id,
+		struct wl_resource *toplevel) {
+	struct zt_desk *desk = wl_resource_get_user_data(manager);
+	struct desk_env *e = calloc(1, sizeof(*e));
+	if (!e) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	e->resource = wl_resource_create(client, &zt_environment_v1_interface, wl_resource_get_version(manager), id);
+	if (!e->resource) {
+		free(e);
+		wl_client_post_no_memory(client);
+		return;
+	}
+	e->desk = desk;
+	wl_resource_set_implementation(e->resource, &desk_env_impl, e, desk_env_resource_destroy);
+	wl_list_insert(&desk->envs, &e->link);
+	wl_list_init(&e->xt_destroy.link);
+	e->xt = wlr_xdg_toplevel_from_resource(toplevel);
+	if (e->xt) {
+		e->xt_destroy.notify = desk_env_xt_destroy;
+		wl_signal_add(&e->xt->events.destroy, &e->xt_destroy);
+		if (e->xt->base->initialized) {
+			desk_env_send(e);	/* (otherwise at its first configure: desk_toplevel_commit) */
+		}
+	}
+}
+
+static void desk_env_manager_destroy(struct wl_client *client, struct wl_resource *resource) {
+	wl_resource_destroy(resource);
+}
+
+static const struct zt_environment_manager_v1_interface desk_env_manager_impl = {
+	.destroy = desk_env_manager_destroy,
+	.get_environment = desk_env_get,
+};
+
+static void desk_env_bind(struct wl_client *client, void *data, uint32_t version, uint32_t id) {
+	struct wl_resource *r = wl_resource_create(client, &zt_environment_manager_v1_interface, (int)version, id);
+	if (!r) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	wl_resource_set_implementation(r, &desk_env_manager_impl, data, NULL);
 }
 
 /* ---- moving windows between the phone and the desktop -------------------------------------------- */
@@ -2431,6 +2617,7 @@ static bool desk_take_from_phone(struct zt_server *server, struct zt_toplevel *t
 	desk_view_place(view);	/* at the size it was asked to take, not the phone's */
 	desk_toplevel_map(top);
 	desk_take_keyboard(desk);
+	desk_env_announce(server, top);	/* before the configure above goes out */
 	damage(server);
 	return true;
 }
@@ -2465,6 +2652,7 @@ static void desk_give_to_phone(struct desk_view *view) {
 	wlr_xdg_toplevel_set_tiled(xt, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
 	app_tell_scale(server, top);
 	app_configure(server, top);
+	desk_env_announce(server, top);
 	apps_running_write(server);
 	show_toplevel(server, top);
 	desk_state_write(desk);
@@ -2972,6 +3160,9 @@ static void desk_use_output(struct zt_desk *desk, struct desk_output *o) {
 		} else if (v->fullscreen) {
 			desk_view_configure(v, nb.x, nb.y, nb.width, nb.height);
 		}
+		if (old && v->top) {
+			desk_env_announce(desk->server, v->top);	/* another output now */
+		}
 	}
 	wlr_cursor_map_to_output(desk->cursor, o->wo);
 	wlr_cursor_warp(desk->cursor, NULL, nb.x + nb.width / 2.0, nb.y + nb.height / 2.0);
@@ -3302,9 +3493,9 @@ static void desk_state_write(struct zt_desk *desk) {
 				)) {
 			continue;
 		}
-		fprintf(f, "window %s %s %d %d %d %d %s%s%s%s\t%s\n", v->top ? "xdg" : "x11", desk_view_app_id(v)[0] ?
+		fprintf(f, "window %s %s %d %d %d %d %s%s%s%s%s\t%s\n", v->top ? "xdg" : "x11", desk_view_app_id(v)[0] ?
 			desk_view_app_id(v) : "-", v->x, v->y, v->w, v->h, v == desk->focused ? "focused," : "",
-			v->minimized ? "minimized," : "", v->shaded ? "shaded," : "", v->maximized ? "maximized" : "", desk_view_title(v));
+			v->minimized ? "minimized," : "", v->shaded ? "shaded," : "", v->title ? "framed," : "", v->maximized ? "maximized" : "", desk_view_title(v));
 	}
 	fclose(f);
 	rename(tmp, path);
@@ -3551,6 +3742,7 @@ static void desk_init(struct zt_server *server, struct wlr_compositor *composito
 	wl_list_init(&desk->views);
 	wl_list_init(&desk->layers);
 	wl_list_init(&desk->popups);
+	wl_list_init(&desk->envs);
 	wl_list_init(&desk->held_destroy.link);
 	desk->held_destroy.notify = desk_held_destroy;
 	desk_config_load(desk);
@@ -3634,6 +3826,8 @@ static void desk_init(struct zt_server *server, struct wlr_compositor *composito
 	desk->new_vkbd.notify = desk_new_vkbd;
 	wl_signal_add(&desk->vkbd_mgr->events.new_virtual_keyboard, &desk->new_vkbd);
 	desk->ft_mgr = wlr_foreign_toplevel_manager_v1_create(server->wl_display);
+	/* every app may ask where its windows are (phone or desktop) */
+	wl_global_create(server->wl_display, &zt_environment_manager_v1_interface, 1, desk, desk_env_bind);
 
 #if WLR_HAS_XWAYLAND
 	if (desk->xwayland_on) {

@@ -514,7 +514,8 @@ static double switch_row(cairo_t *cr, double y, const char *title, int value, in
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	double label = zmc_switch_label_y(zmc_text(cr, title, FONT_SEMILIGHT, 21, MARGIN, y, zmc.width - 2 * MARGIN - 64));
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, settings_open() ? "Not reported by the AirPods. Tap to turn on." : "Not known", FONT_REGULAR, 13, MARGIN, y + label, zmc.width - 2 * MARGIN - 64);
+	zmc_text(cr, settings_open() ? (zmc_on_desktop() ? "Not reported by the AirPods. Click to turn on." :
+		"Not reported by the AirPods. Tap to turn on.") : "Not known", FONT_REGULAR, 13, MARGIN, y + label, zmc.width - 2 * MARGIN - 64);
 	zmc_toggle(cr, zmc.width - MARGIN - 54, y + 4, false);
 	zmc_add_hit(0, y - 4, zmc.width, 52 + label - ZMC_SWITCH_LINE, action, 0);
 	return y + 66 + label - ZMC_SWITCH_LINE;
