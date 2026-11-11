@@ -39,7 +39,7 @@ DM_WRAP = retro/dm-wrap.c
 DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
 
 # desktop mode (desktop/): the outputs after the panel, in the same session
-DESK_DEPS = desktop/desktop.c desktop/desktop.h desktop/wlr-layer-shell-unstable-v1-protocol.h
+DESK_DEPS = desktop/desktop.c desktop/deco.c desktop/desktop.h desktop/wlr-layer-shell-unstable-v1-protocol.h
 desktop/wlr-layer-shell-unstable-v1-protocol.h: desktop/protocols/wlr-layer-shell-unstable-v1.xml
 	wayland-scanner server-header $< $@
 

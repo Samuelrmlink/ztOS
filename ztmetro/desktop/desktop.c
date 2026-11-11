@@ -38,17 +38,16 @@
 #include <wlr/xwayland.h>
 #endif
 
-#define DESK_TITLE_H	30	/* the title bar we draw, points */
-#define DESK_BUTTON_W	46	/* each of its buttons */
-#define DESK_EDGE	8	/* where a title-barred window can be taken to resize, outside it */
-#define DESK_MENU_W	200
-#define DESK_MENU_ROW	34
+#define DESK_EDGE	6	/* where a framed window can be taken to resize, outside its frame */
+#define DESK_MENU_W	220
+#define DESK_MENU_ROW	26
 #define DESK_ACTIVE_MS	10000	/* a window that maps this soon after desktop input opens there */
 
 enum desk_layer_index { DL_BACKGROUND, DL_BOTTOM, DL_TOP, DL_OVERLAY, DL_COUNT };
 enum desk_grab { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE };
-enum desk_button { DB_NONE = -1, DB_PHONE, DB_MINIMIZE, DB_MAXIMIZE, DB_CLOSE, DB_COUNT };
-enum desk_menu_item { DM_PHONE, DM_MINIMIZE, DM_MAXIMIZE, DM_CLOSE, DM_COUNT };
+enum desk_menu_item { DM_PHONE, DM_MINIMIZE, DM_MAXIMIZE, DM_SHADE, DM_MOVE, DM_RESIZE, DM_CLOSE, DM_COUNT };
+/* what of a window's frame is under the pointer */
+enum desk_part { PART_NONE, PART_TITLE, PART_BUTTON, PART_EDGE };
 /* what happens to the desktop's windows when its monitor goes */
 enum desk_unplug { UNPLUG_KEEP, UNPLUG_PHONE };
 
@@ -71,14 +70,18 @@ struct desk_view {
 	struct wlr_scene_tree *tree;	/* the whole window: title bar and content */
 	struct wlr_scene_tree *content;
 	struct wlr_scene_buffer *title;	/* NULL: the app draws its own */
+	struct wlr_scene_buffer *side[3];	/* and with it: the left and right sides, the bottom */
 	bool mapped, minimized, maximized, fullscreen, placed;
+	bool shaded;			/* rolled up: the title bar only */
 	int x, y;			/* the window's corner (its title bar's), layout points */
 	int w, h;			/* the content's size */
 	struct wlr_box saved;		/* where it was before maximising or full screen */
-	int hover;			/* the title bar's button under the pointer */
+	int hover;			/* the title bar's button under the pointer (deco_kind), -1 */
 	int title_drawn_w;		/* what the title bar was last drawn for */
 	bool title_drawn_focus;
-	int title_drawn_hover;
+	int title_drawn_hover, title_drawn_pressed, title_drawn_state;
+	int sides_drawn_w, sides_drawn_h;	/* and the sides */
+	bool sides_drawn_focus;
 	char title_drawn[128];
 	struct wlr_foreign_toplevel_handle_v1 *ft;
 	struct wl_listener ft_activate, ft_minimize, ft_maximize, ft_fullscreen, ft_close;
@@ -172,6 +175,11 @@ struct zt_desk {
 	double press_x, press_y, release_x, release_y;
 	struct desk_view *press_view;
 
+	/* a title bar's button held down: it acts when let go over it */
+	struct desk_view *btn_view;
+	int btn_kind;
+	bool btn_over;
+
 	/* the window menu (right-click on a title bar, Alt+Space, an app's own) */
 	struct desk_view *menu_view;
 	struct wlr_scene_buffer *menu;
@@ -226,6 +234,9 @@ static void desk_view_set_maximized(struct desk_view *view, bool maximized);
 static void desk_view_set_fullscreen(struct desk_view *view, bool fullscreen);
 static void desk_view_close(struct desk_view *view);
 static void desk_pointer_refocus(struct zt_desk *desk, uint32_t time);
+static void desk_view_set_shaded(struct desk_view *view, bool shaded);
+static void desk_theme_reload(struct zt_desk *desk);
+static void desk_grab_begin(struct zt_desk *desk, struct desk_view *view, enum desk_grab mode, uint32_t edges);
 
 /* ---- settings ------------------------------------------------------------- */
 
@@ -328,23 +339,7 @@ static float desk_scale(struct zt_desk *desk) {
 	return desk->out ? desk->out->wo->scale : 1.0f;
 }
 
-static void desk_text(cairo_t *cr, const char *font, double size, const char *text,
-		double x, double y, double max_w, bool centre) {
-	PangoLayout *layout = pango_cairo_create_layout(cr);
-	PangoFontDescription *fd = pango_font_description_from_string(font);
-	pango_font_description_set_absolute_size(fd, size * PANGO_SCALE);
-	pango_layout_set_font_description(layout, fd);
-	pango_layout_set_text(layout, text, -1);
-	pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END);
-	pango_layout_set_width(layout, (int)(max_w * PANGO_SCALE));
-	pango_layout_set_single_paragraph_mode(layout, true);
-	int lw, lh;
-	pango_layout_get_pixel_size(layout, &lw, &lh);
-	cairo_move_to(cr, centre ? x + (max_w - lw) / 2.0 : x, y - lh / 2.0);
-	pango_cairo_show_layout(cr, layout);
-	pango_font_description_free(fd);
-	g_object_unref(layout);
-}
+#include "deco.c"
 
 /* ---- views: where they are, what they are ----------------------------------- */
 
@@ -384,8 +379,31 @@ static const char *desk_view_app_id(struct desk_view *view) {
 	return id ? id : "";
 }
 
+/* The frame around a window we decorate: xfwm4's theme gives its sizes
+ * (deco.c). Maximized, only the title bar is left (xfwm4's
+ * borderless_maximize), rolled up only the title bar, full screen nothing. */
+static bool desk_framed(struct desk_view *view) {
+	return view->title && !view->fullscreen;
+}
+
 static int desk_title_h(struct desk_view *view) {
-	return view->title && !view->fullscreen ? DESK_TITLE_H : 0;
+	return desk_framed(view) ? deco.top : 0;
+}
+
+static bool desk_has_sides(struct desk_view *view) {
+	return desk_framed(view) && !view->maximized && !view->shaded;
+}
+
+static int desk_inset_l(struct desk_view *view) {
+	return desk_has_sides(view) ? deco.left : 0;
+}
+
+static int desk_inset_r(struct desk_view *view) {
+	return desk_has_sides(view) ? deco.right : 0;
+}
+
+static int desk_inset_b(struct desk_view *view) {
+	return desk_has_sides(view) ? deco.bottom : 0;
 }
 
 /* Whether an xdg app takes our title bar: it said so through xdg-decoration
@@ -399,6 +417,28 @@ static bool desk_xdg_wants_ssd(struct zt_desk *desk, struct zt_toplevel *top) {
 		}
 	}
 	return false;
+}
+
+/* The frame's pieces where they belong, shown or not, and the content inside. */
+static void desk_view_layout(struct desk_view *view) {
+	int l = desk_inset_l(view), t = desk_title_h(view);
+	if (view->content) {
+		wlr_scene_node_set_position(&view->content->node, l, t);
+		wlr_scene_node_set_enabled(&view->content->node, !view->shaded || !view->title);
+	}
+	if (view->title) {
+		wlr_scene_node_set_enabled(&view->title->node, desk_framed(view));
+	}
+	bool sides = desk_has_sides(view);
+	for (int i = 0; i < 3; i++) {
+		if (!view->side[i]) continue;
+		wlr_scene_node_set_enabled(&view->side[i]->node, sides);
+	}
+	if (sides) {
+		wlr_scene_node_set_position(&view->side[0]->node, 0, t);
+		wlr_scene_node_set_position(&view->side[1]->node, l + view->w, t);
+		wlr_scene_node_set_position(&view->side[2]->node, 0, t + view->h);
+	}
 }
 
 static void desk_view_ensure_title(struct desk_view *view) {
@@ -420,13 +460,21 @@ static void desk_view_ensure_title(struct desk_view *view) {
 		view->title = wlr_scene_buffer_create(view->tree, NULL);
 		view->title->node.data = view;
 		view->title_drawn_w = -1;
+		for (int i = 0; i < 3; i++) {
+			view->side[i] = wlr_scene_buffer_create(view->tree, NULL);
+			view->side[i]->node.data = view;
+		}
+		view->sides_drawn_w = view->sides_drawn_h = -1;
 	} else if (!want && view->title) {
 		wlr_scene_node_destroy(&view->title->node);
 		view->title = NULL;
+		for (int i = 0; i < 3; i++) {
+			wlr_scene_node_destroy(&view->side[i]->node);
+			view->side[i] = NULL;
+		}
+		view->shaded = false;
 	}
-	if (view->content) {
-		wlr_scene_node_set_position(&view->content->node, 0, desk_title_h(view));
-	}
+	desk_view_layout(view);
 }
 
 static void desk_view_geometry(struct desk_view *view, int *w, int *h) {
@@ -442,9 +490,11 @@ static void desk_view_geometry(struct desk_view *view, int *w, int *h) {
 #endif
 }
 
-/* The view's frame (title bar and content), layout points. */
+/* The view's frame (decoration and content), layout points. */
 static struct wlr_box desk_view_frame(struct desk_view *view) {
-	return (struct wlr_box){ view->x, view->y, view->w, view->h + desk_title_h(view) };
+	int ch = view->shaded && view->title ? 0 : view->h;
+	return (struct wlr_box){ view->x, view->y, view->w + desk_inset_l(view) + desk_inset_r(view),
+		ch + desk_title_h(view) + desk_inset_b(view) };
 }
 
 static void desk_view_move(struct desk_view *view, int x, int y) {
@@ -453,7 +503,7 @@ static void desk_view_move(struct desk_view *view, int x, int y) {
 #if WLR_HAS_XWAYLAND
 	if (view->xs) {
 		/* X11 clients place their menus from where they think they are */
-		wlr_xwayland_surface_configure(view->xs, x, y + desk_title_h(view), view->w, view->h);
+		wlr_xwayland_surface_configure(view->xs, x + desk_inset_l(view), y + desk_title_h(view), view->w, view->h);
 	}
 #endif
 }
@@ -470,9 +520,15 @@ static void desk_view_configure(struct desk_view *view, int x, int y, int w, int
 #if WLR_HAS_XWAYLAND
 	else if (view->xs) {
 		view->w = w, view->h = h;
-		wlr_xwayland_surface_configure(view->xs, x, y + desk_title_h(view), w, h);
+		wlr_xwayland_surface_configure(view->xs, x + desk_inset_l(view), y + desk_title_h(view), w, h);
 	}
 #endif
+}
+
+/* The frame to fill a box (maximized: the free area; full screen: the output) */
+static void desk_view_fill(struct desk_view *view, struct wlr_box b) {
+	desk_view_configure(view, b.x, b.y, b.width - desk_inset_l(view) - desk_inset_r(view),
+		b.height - desk_title_h(view) - desk_inset_b(view));
 }
 
 static struct desk_view *desk_view_at(struct zt_desk *desk, double lx, double ly,
@@ -522,63 +578,24 @@ static struct desk_view *desk_view_at(struct zt_desk *desk, double lx, double ly
 
 /* ---- title bars --------------------------------------------------------------- */
 
-static void desk_glyph(cairo_t *cr, int which, double cx, double cy, bool maximized) {
-	cairo_set_line_width(cr, 1.0);
-	switch (which) {
-	case DB_PHONE:	/* a phone: the window goes there */
-		cairo_rectangle(cr, cx - 4.5, cy - 7.5, 9, 15);
-		cairo_stroke(cr);
-		cairo_rectangle(cr, cx - 1.5, cy + 4.5, 3, 1);
-		cairo_fill(cr);
-		break;
-	case DB_MINIMIZE:
-		cairo_rectangle(cr, cx - 5, cy, 10, 1);
-		cairo_fill(cr);
-		break;
-	case DB_MAXIMIZE:
-		if (maximized) {
-			cairo_rectangle(cr, cx - 4.5, cy - 2.5, 7, 7);
-			cairo_move_to(cr, cx - 2.5, cy - 2.5);
-			cairo_line_to(cr, cx - 2.5, cy - 4.5);
-			cairo_line_to(cr, cx + 4.5, cy - 4.5);
-			cairo_line_to(cr, cx + 4.5, cy + 2.5);
-			cairo_line_to(cr, cx + 2.5, cy + 2.5);
-		} else {
-			cairo_rectangle(cr, cx - 4.5, cy - 4.5, 9, 9);
-		}
-		cairo_stroke(cr);
-		break;
-	case DB_CLOSE:
-		cairo_move_to(cr, cx - 5, cy - 5);
-		cairo_line_to(cr, cx + 5, cy + 5);
-		cairo_move_to(cr, cx + 5, cy - 5);
-		cairo_line_to(cr, cx - 5, cy + 5);
-		cairo_stroke(cr);
-		break;
-	}
-}
-
 /* An X11 window can't go to the phone: Metro draws xdg toplevels only. */
 static bool desk_view_can_go_to_phone(struct desk_view *view) {
 	return view->top != NULL;
 }
 
-static int desk_title_button_x(struct desk_view *view, int which) {
-	/* right to left: close, maximise, minimise, phone */
-	return view->w - (DB_COUNT - which) * DESK_BUTTON_W;
-}
-
-static int desk_title_button_at(struct desk_view *view, double x) {
-	for (int b = 0; b < DB_COUNT; b++) {
-		if (b == DB_PHONE && !desk_view_can_go_to_phone(view)) {
-			continue;
-		}
-		int bx = desk_title_button_x(view, b);
-		if (x >= bx && x < bx + DESK_BUTTON_W) {
-			return b;
+/* The title bar's button at x (frame points), as deco_buttons lays them out. */
+static int desk_title_button_at(struct desk_view *view, double x, double y) {
+	struct wlr_box f = desk_view_frame(view);
+	struct deco_button b[DECO_MAX_BUTTONS];
+	int tx0, tx1;
+	int n = deco_buttons(f.width, view->title != NULL, b, &tx0, &tx1);
+	for (int i = 0; i < n; i++) {
+		int by = (deco.top - b[i].h) / 2;
+		if (x >= b[i].x && x < b[i].x + b[i].w && y >= by && y < by + b[i].h) {
+			return b[i].kind;
 		}
 	}
-	return DB_NONE;
+	return -1;
 }
 
 static void desk_title_draw(struct desk_view *view, bool force) {
@@ -588,103 +605,134 @@ static void desk_title_draw(struct desk_view *view, bool force) {
 	struct zt_desk *desk = view->desk;
 	bool focus = desk->focused == view;
 	const char *title = desk_view_title(view);
-	if (!force && view->title_drawn_w == view->w && view->title_drawn_focus == focus &&
-			view->title_drawn_hover == view->hover && !strncmp(view->title_drawn, title, sizeof(view->title_drawn) - 1)) {
-		return;
-	}
-	view->title_drawn_w = view->w;
-	view->title_drawn_focus = focus;
-	view->title_drawn_hover = view->hover;
-	snprintf(view->title_drawn, sizeof(view->title_drawn), "%s", title);
-	if (view->w <= 0) {
-		return;
-	}
+	struct wlr_box f = desk_view_frame(view);
+	int pressed = desk->btn_view == view && desk->btn_over ? desk->btn_kind : -1;
 	float s = desk_scale(desk);
-	int pw = (int)ceilf(view->w * s), ph = (int)ceilf(DESK_TITLE_H * s);
-	cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
-	cairo_t *cr = cairo_create(surface);
-	cairo_scale(cr, s, s);
-	uint32_t accent = desk->server->accent;
-	if (focus) {
-		cairo_set_source_rgb(cr, ((accent >> 16) & 255) / 255.0, ((accent >> 8) & 255) / 255.0,
-			(accent & 255) / 255.0);
-	} else {
-		cairo_set_source_rgb(cr, 0.17, 0.17, 0.17);
-	}
-	cairo_paint(cr);
-	double fg = focus ? 1.0 : 0.62;
-	cairo_set_source_rgb(cr, fg, fg, fg);
-	int buttons_w = DESK_BUTTON_W * (desk_view_can_go_to_phone(view) ? DB_COUNT : DB_COUNT - 1);
-	desk_text(cr, FONT_REGULAR, 13.0, title, 12, DESK_TITLE_H / 2.0, view->w - 24 - buttons_w, false);
-	for (int b = 0; b < DB_COUNT; b++) {
-		if (b == DB_PHONE && !desk_view_can_go_to_phone(view)) {
-			continue;
+	if (force || view->title_drawn_w != f.width || view->title_drawn_focus != focus ||
+			view->title_drawn_hover != view->hover || view->title_drawn_pressed != pressed ||
+			view->title_drawn_state != (view->maximized | view->shaded << 1) ||
+			strncmp(view->title_drawn, title, sizeof(view->title_drawn) - 1)) {
+		view->title_drawn_w = f.width;
+		view->title_drawn_focus = focus;
+		view->title_drawn_hover = view->hover;
+		view->title_drawn_pressed = pressed;
+		view->title_drawn_state = view->maximized | view->shaded << 1;
+		snprintf(view->title_drawn, sizeof(view->title_drawn), "%s", title);
+		if (f.width > 0) {
+			int pw = (int)ceilf(f.width * s), ph = (int)ceilf(deco.top * s);
+			cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
+			cairo_t *cr = cairo_create(surface);
+			cairo_scale(cr, s, s);
+			deco_draw_title(cr, f.width, title, desk_view_app_id(view), s, focus, view->hover, pressed,
+				view->maximized, view->shaded, true);
+			cairo_destroy(cr);
+			struct wlr_buffer *buffer = desk_cbuf(surface);
+			wlr_scene_buffer_set_buffer(view->title, buffer);
+			wlr_buffer_drop(buffer);
+			wlr_scene_buffer_set_dest_size(view->title, f.width, deco.top);
 		}
-		int bx = desk_title_button_x(view, b);
-		if (view->hover == b) {
-			if (b == DB_CLOSE) {
-				cairo_set_source_rgb(cr, 0.91, 0.07, 0.14);
-			} else {
-				cairo_set_source_rgba(cr, 1, 1, 1, 0.18);
+	}
+	/* the sides and the bottom: only when the size or the focus changes */
+	if (!desk_has_sides(view) || view->w <= 0 || view->h <= 0) {
+		desk_view_layout(view);
+		return;
+	}
+	if (force || view->sides_drawn_w != view->w || view->sides_drawn_h != view->h ||
+			view->sides_drawn_focus != focus) {
+		view->sides_drawn_w = view->w, view->sides_drawn_h = view->h, view->sides_drawn_focus = focus;
+		for (int i = 0; i < 3; i++) {
+			int w = i == 0 ? deco.left : i == 1 ? deco.right : f.width;
+			int h = i == 2 ? deco.bottom : view->h;
+			if (w <= 0 || h <= 0) {
+				wlr_scene_buffer_set_buffer(view->side[i], NULL);
+				continue;
 			}
-			cairo_rectangle(cr, bx, 0, DESK_BUTTON_W, DESK_TITLE_H);
-			cairo_fill(cr);
+			cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+				(int)ceilf(w * s), (int)ceilf(h * s));
+			cairo_t *cr = cairo_create(surface);
+			cairo_scale(cr, s, s);
+			if (i == 2) deco_draw_bottom(cr, w, focus);
+			else deco_draw_side(cr, i == 0, h, focus);
+			cairo_destroy(cr);
+			struct wlr_buffer *buffer = desk_cbuf(surface);
+			wlr_scene_buffer_set_buffer(view->side[i], buffer);
+			wlr_buffer_drop(buffer);
+			wlr_scene_buffer_set_dest_size(view->side[i], w, h);
 		}
-		double c = view->hover == b ? 1.0 : fg;
-		cairo_set_source_rgb(cr, c, c, c);
-		desk_glyph(cr, b, bx + DESK_BUTTON_W / 2.0 + 0.5, DESK_TITLE_H / 2.0 + 0.5, view->maximized);
 	}
-	cairo_destroy(cr);
-	struct wlr_buffer *buffer = desk_cbuf(surface);
-	wlr_scene_buffer_set_buffer(view->title, buffer);
-	wlr_buffer_drop(buffer);
-	wlr_scene_buffer_set_dest_size(view->title, view->w, DESK_TITLE_H);
+	desk_view_layout(view);
 }
 
-/* ---- the window menu ------------------------------------------------------------ */
+/* ---- the window menu (xfwm4's, as GTK draws a menu) ---------------------------------- */
+
+#define DESK_MENU_PAD 4
 
 static const char *desk_menu_label(struct desk_view *view, int item) {
 	switch (item) {
-	case DM_PHONE: return "move to phone";
-	case DM_MINIMIZE: return "minimize";
-	case DM_MAXIMIZE: return view->maximized ? "restore" : "maximize";
-	case DM_CLOSE: return "close";
+	case DM_PHONE: return "Move to Phone";
+	case DM_MINIMIZE: return "Minimize";
+	case DM_MAXIMIZE: return view->maximized ? "Unmaximize" : "Maximize";
+	case DM_SHADE: return view->shaded ? "Roll Window Down" : "Roll Window Up";
+	case DM_MOVE: return "Move";
+	case DM_RESIZE: return "Resize";
+	case DM_CLOSE: return "Close";
 	}
 	return "";
 }
 
 static bool desk_menu_item_on(struct desk_view *view, int item) {
-	return item != DM_PHONE || desk_view_can_go_to_phone(view);
+	switch (item) {
+	case DM_PHONE: return desk_view_can_go_to_phone(view);
+	case DM_SHADE: return view->title != NULL && !view->fullscreen;
+	case DM_MOVE: return !view->fullscreen && !view->maximized;
+	case DM_RESIZE: return !view->fullscreen && !view->maximized && !view->shaded;
+	}
+	return true;
+}
+
+static int desk_menu_h(void) {
+	return DM_COUNT * DESK_MENU_ROW + 2 * DESK_MENU_PAD;
 }
 
 static void desk_menu_draw(struct zt_desk *desk) {
 	struct desk_view *view = desk->menu_view;
 	float s = desk_scale(desk);
-	int h = DM_COUNT * DESK_MENU_ROW + 8;
+	int h = desk_menu_h();
+	double bg[3], fg[3], sel[3], sel_fg[3], border[3], dim[3];
+	deco_menu_colors(bg, fg, sel, sel_fg, border, dim);
 	cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
 		(int)ceilf(DESK_MENU_W * s), (int)ceilf(h * s));
 	cairo_t *cr = cairo_create(surface);
 	cairo_scale(cr, s, s);
-	cairo_set_source_rgb(cr, 0.12, 0.12, 0.12);
+	cairo_set_source_rgb(cr, bg[0], bg[1], bg[2]);
 	cairo_paint(cr);
-	cairo_set_source_rgb(cr, 0.35, 0.35, 0.35);
+	cairo_set_source_rgb(cr, border[0], border[1], border[2]);
 	cairo_set_line_width(cr, 1);
 	cairo_rectangle(cr, 0.5, 0.5, DESK_MENU_W - 1, h - 1);
 	cairo_stroke(cr);
+	PangoLayout *layout = pango_cairo_create_layout(cr);
+	pango_cairo_context_set_resolution(pango_layout_get_context(layout), 96);
+	PangoFontDescription *fd = pango_font_description_from_string(deco.menu_font);
+	pango_layout_set_font_description(layout, fd);
 	for (int i = 0; i < DM_COUNT; i++) {
-		double y = 4 + i * DESK_MENU_ROW;
+		double y = DESK_MENU_PAD + i * DESK_MENU_ROW;
 		bool on = desk_menu_item_on(view, i);
-		if (i == desk->menu_hover && on) {
-			uint32_t a = desk->server->accent;
-			cairo_set_source_rgb(cr, ((a >> 16) & 255) / 255.0, ((a >> 8) & 255) / 255.0, (a & 255) / 255.0);
+		bool hot = i == desk->menu_hover && on;
+		if (hot) {
+			cairo_set_source_rgb(cr, sel[0], sel[1], sel[2]);
 			cairo_rectangle(cr, 1, y, DESK_MENU_W - 2, DESK_MENU_ROW);
 			cairo_fill(cr);
 		}
-		double c = on ? 1.0 : 0.4;
-		cairo_set_source_rgb(cr, c, c, c);
-		desk_text(cr, FONT_REGULAR, 14.0, desk_menu_label(view, i), 14, y + DESK_MENU_ROW / 2.0,
-			DESK_MENU_W - 28, false);
+		const double *c = hot ? sel_fg : on ? fg : dim;
+		cairo_set_source_rgb(cr, c[0], c[1], c[2]);
+		pango_layout_set_text(layout, desk_menu_label(view, i), -1);
+		int lw, lh;
+		pango_layout_get_pixel_size(layout, &lw, &lh);
+		cairo_move_to(cr, 24, y + (DESK_MENU_ROW - lh) / 2.0);
+		pango_cairo_show_layout(cr, layout);
 	}
+	pango_font_description_free(fd);
+	g_object_unref(layout);
 	cairo_destroy(cr);
 	struct wlr_buffer *buffer = desk_cbuf(surface);
 	wlr_scene_buffer_set_buffer(desk->menu, buffer);
@@ -699,7 +747,7 @@ static void desk_menu_open(struct zt_desk *desk, struct desk_view *view, int x, 
 	}
 	struct wlr_box o;
 	wlr_output_layout_get_box(desk->layout, desk->out->wo, &o);
-	int h = DM_COUNT * DESK_MENU_ROW + 8;
+	int h = desk_menu_h();
 	if (x + DESK_MENU_W > o.x + o.width) x = o.x + o.width - DESK_MENU_W;
 	if (y + h > o.y + o.height) y = o.y + o.height - h;
 	if (x < o.x) x = o.x;
@@ -721,11 +769,11 @@ static void desk_menu_close(struct zt_desk *desk) {
 }
 
 static int desk_menu_item_at(struct zt_desk *desk, double lx, double ly) {
-	int h = DM_COUNT * DESK_MENU_ROW + 8;
+	int h = desk_menu_h();
 	if (lx < desk->menu_x || lx >= desk->menu_x + DESK_MENU_W || ly < desk->menu_y || ly >= desk->menu_y + h) {
 		return -2;	/* outside */
 	}
-	int i = (int)((ly - desk->menu_y - 4) / DESK_MENU_ROW);
+	int i = (int)floor((ly - desk->menu_y - DESK_MENU_PAD) / DESK_MENU_ROW);
 	return i >= 0 && i < DM_COUNT ? i : -1;
 }
 
@@ -739,6 +787,17 @@ static void desk_menu_choose(struct zt_desk *desk, int item) {
 	case DM_PHONE: desk_give_to_phone(view); break;
 	case DM_MINIMIZE: desk_view_set_minimized(view, true); break;
 	case DM_MAXIMIZE: desk_view_set_maximized(view, !view->maximized); break;
+	case DM_SHADE: desk_view_set_shaded(view, !view->shaded); break;
+	case DM_MOVE:
+		/* as xfwm4: the window follows the pointer until a click */
+		desk_grab_begin(desk, view, GRAB_MOVE, 0);
+		break;
+	case DM_RESIZE: {
+		struct wlr_box f = desk_view_frame(view);
+		wlr_cursor_warp(desk->cursor, NULL, f.x + f.width - 1, f.y + f.height - 1);
+		desk_grab_begin(desk, view, GRAB_RESIZE, WLR_EDGE_RIGHT | WLR_EDGE_BOTTOM);
+		break;
+	}
 	case DM_CLOSE: desk_view_close(view); break;
 	}
 }
@@ -892,8 +951,8 @@ static void desk_view_set_maximized(struct desk_view *view, bool maximized) {
 	}
 	if (maximized) {
 		view->saved = (struct wlr_box){ view->x, view->y, view->w, view->h };
-		struct wlr_box *u = &desk->usable;
-		desk_view_configure(view, u->x, u->y, u->width, u->height - desk_title_h(view));
+		view->shaded = false;
+		desk_view_fill(view, desk->usable);
 	} else {
 		struct wlr_box *s = &view->saved;
 		desk_view_configure(view, s->x, s->y, s->width, s->height);
@@ -910,10 +969,7 @@ static void desk_view_set_fullscreen(struct desk_view *view, bool fullscreen) {
 		view->saved = (struct wlr_box){ view->x, view->y, view->w, view->h };
 	}
 	view->fullscreen = fullscreen;
-	if (view->title) {
-		wlr_scene_node_set_enabled(&view->title->node, !fullscreen);
-	}
-	wlr_scene_node_set_position(&view->content->node, 0, desk_title_h(view));
+	desk_view_layout(view);
 	wlr_scene_node_reparent(&view->tree->node, fullscreen ? desk->full_tree : desk->win_tree);
 	if (view->top) {
 		wlr_xdg_toplevel_set_fullscreen(view->top->xdg_toplevel, fullscreen);
@@ -931,13 +987,26 @@ static void desk_view_set_fullscreen(struct desk_view *view, bool fullscreen) {
 		wlr_output_layout_get_box(desk->layout, desk->out->wo, &o);
 		desk_view_configure(view, o.x, o.y, o.width, o.height);
 	} else if (view->maximized) {
-		struct wlr_box *u = &desk->usable;
-		desk_view_configure(view, u->x, u->y, u->width, u->height - desk_title_h(view));
+		desk_view_fill(view, desk->usable);
 	} else {
 		struct wlr_box *s = &view->saved;
 		desk_view_configure(view, s->x, s->y, s->width, s->height);
 	}
+	desk_title_draw(view, true);
 	desk_focus_view(desk, view);
+}
+
+/* Rolled up (xfwm4's shade): the title bar alone, the app as it was under it. */
+static void desk_view_set_shaded(struct desk_view *view, bool shaded) {
+	if (!view->title || view->fullscreen || view->shaded == shaded) {
+		return;
+	}
+	if (shaded && view->maximized) {
+		desk_view_set_maximized(view, false);
+	}
+	view->shaded = shaded;
+	desk_title_draw(view, true);
+	desk_state_write(view->desk);
 }
 
 static void desk_view_close(struct desk_view *view) {
@@ -956,7 +1025,8 @@ static void desk_view_close(struct desk_view *view) {
 static void desk_view_place(struct desk_view *view) {
 	struct zt_desk *desk = view->desk;
 	struct wlr_box *u = &desk->usable;
-	int w = view->w, h = view->h + desk_title_h(view);
+	struct wlr_box f = desk_view_frame(view);
+	int w = f.width, h = f.height;
 	if (w > u->width) w = u->width;
 	if (h > u->height) h = u->height;
 	int step = 28 * (desk->cascade++ % 8);
@@ -1039,7 +1109,7 @@ static void desk_ft_destroy(struct desk_view *view) {
 
 static void desk_grab_begin(struct zt_desk *desk, struct desk_view *view, enum desk_grab mode,
 		uint32_t edges) {
-	if (view->fullscreen) {
+	if (view->fullscreen || (view->shaded && mode == GRAB_RESIZE)) {
 		return;
 	}
 	if (view->maximized && mode == GRAB_MOVE) {
@@ -1047,7 +1117,7 @@ static void desk_grab_begin(struct zt_desk *desk, struct desk_view *view, enum d
 		double fx = (desk->cursor->x - view->x) / (view->w > 0 ? view->w : 1);
 		desk_view_set_maximized(view, false);
 		int x = (int)(desk->cursor->x - fx * view->saved.width);
-		desk_view_move(view, x, (int)desk->cursor->y - DESK_TITLE_H / 2);
+		desk_view_move(view, x, (int)desk->cursor->y - deco.top / 2);
 	} else if (view->maximized) {
 		return;
 	}
@@ -1180,8 +1250,11 @@ static void desk_cursor_set(struct zt_desk *desk, const char *name) {
 	}
 }
 
+/* The edges of a framed window that lx, ly would resize: its sides and
+ * bottom (the theme's), the top two points of its title bar, and a margin
+ * outside. Near a corner, both of its edges. */
 static uint32_t desk_edges_at(struct desk_view *view, double lx, double ly) {
-	if (!view->title || view->maximized || view->fullscreen) {
+	if (!desk_framed(view) || view->maximized || view->shaded) {
 		return 0;
 	}
 	struct wlr_box f = desk_view_frame(view);
@@ -1189,12 +1262,52 @@ static uint32_t desk_edges_at(struct desk_view *view, double lx, double ly) {
 			ly < f.y - DESK_EDGE || ly >= f.y + f.height + DESK_EDGE) {
 		return 0;
 	}
+	double x = lx - f.x, y = ly - f.y;
+	int l = desk_inset_l(view), r = desk_inset_r(view), b = desk_inset_b(view);
 	uint32_t e = 0;
-	if (lx < f.x) e |= WLR_EDGE_LEFT;
-	else if (lx >= f.x + f.width) e |= WLR_EDGE_RIGHT;
-	if (ly < f.y) e |= WLR_EDGE_TOP;
-	else if (ly >= f.y + f.height) e |= WLR_EDGE_BOTTOM;
+	if (x < l) e |= WLR_EDGE_LEFT;
+	else if (x >= f.width - r) e |= WLR_EDGE_RIGHT;
+	if (y < 2) e |= WLR_EDGE_TOP;
+	else if (y >= f.height - b) e |= WLR_EDGE_BOTTOM;
+	if (!e) {
+		return 0;	/* the title bar or the content */
+	}
+	const int corner = 16;
+	if (e & (WLR_EDGE_LEFT | WLR_EDGE_RIGHT)) {
+		if (y < corner) e |= WLR_EDGE_TOP;
+		else if (y >= f.height - corner) e |= WLR_EDGE_BOTTOM;
+	}
+	if (e & (WLR_EDGE_TOP | WLR_EDGE_BOTTOM)) {
+		if (x < corner) e |= WLR_EDGE_LEFT;
+		else if (x >= f.width - corner) e |= WLR_EDGE_RIGHT;
+	}
 	return e;
+}
+
+/* What of our frame is at lx, ly: a button of the title bar, the title bar,
+ * an edge (the sides), or nothing of ours. */
+static enum desk_part desk_frame_part(struct desk_view *view, double lx, double ly, uint32_t *edges, int *button) {
+	*edges = 0, *button = -1;
+	if (!view || !desk_framed(view)) {
+		return PART_NONE;
+	}
+	struct wlr_box f = desk_view_frame(view);
+	double x = lx - f.x, y = ly - f.y;
+	if (x < 0 || y < 0 || x >= f.width || y >= f.height) {
+		return PART_NONE;
+	}
+	if (y < deco.top) {
+		int b = desk_title_button_at(view, x, y);
+		if (b >= 0) {
+			*button = b;
+			return PART_BUTTON;
+		}
+	}
+	*edges = desk_edges_at(view, lx, ly);
+	if (*edges) {
+		return PART_EDGE;
+	}
+	return y < deco.top ? PART_TITLE : PART_NONE;
 }
 
 static const char *desk_edge_cursor(uint32_t e) {
@@ -1227,14 +1340,14 @@ static struct desk_view *desk_edge_view(struct zt_desk *desk, double lx, double 
 	struct desk_view *v;
 	wl_list_for_each(v, &desk->views, link) {
 		if (!v->mapped || v->minimized) continue;
-		struct wlr_box f = desk_view_frame(v);
-		if (lx >= f.x && lx < f.x + f.width && ly >= f.y && ly < f.y + f.height) {
-			return NULL;	/* inside a window in front: not an edge behind it */
-		}
 		uint32_t e = desk_edges_at(v, lx, ly);
 		if (e) {
 			*edges = e;
 			return v;
+		}
+		struct wlr_box f = desk_view_frame(v);
+		if (lx >= f.x && lx < f.x + f.width && ly >= f.y && ly < f.y + f.height) {
+			return NULL;	/* inside a window in front: not an edge behind it */
 		}
 		if (v == hit) {
 			return NULL;	/* (its shadow, say): what is behind it is hidden */
@@ -1246,7 +1359,7 @@ static struct desk_view *desk_edge_view(struct zt_desk *desk, double lx, double 
 static void desk_set_hover(struct zt_desk *desk, struct desk_view *view, int button) {
 	struct desk_view *v;
 	wl_list_for_each(v, &desk->views, link) {
-		int want = v == view ? button : DB_NONE;
+		int want = v == view ? button : -1;
 		if (v->hover != want) {
 			v->hover = want;
 			desk_title_draw(v, false);
@@ -1291,15 +1404,29 @@ static void desk_pointer_refocus(struct zt_desk *desk, uint32_t time) {
 	struct wlr_layer_surface_v1 *layer;
 	struct desk_view *view = desk_view_at(desk, lx, ly, &surface, &sx, &sy, &layer);
 	uint32_t edges = 0;
-	struct desk_view *edge_view = desk_edge_view(desk, lx, ly, surface, view, layer, &edges);
-	if (view && !surface && view->title && ly < view->y + DESK_TITLE_H) {
-		/* our title bar */
-		desk_set_hover(desk, view, desk_title_button_at(view, lx - view->x));
+	int button;
+	enum desk_part part = !surface ? desk_frame_part(view, lx, ly, &edges, &button) : PART_NONE;
+	struct desk_view *edge_view = part == PART_EDGE ? view :
+		desk_edge_view(desk, lx, ly, surface, view, layer, &edges);
+	if (desk->btn_view) {
+		/* a button held: pressed-looking while the pointer is on it */
+		bool over = desk->btn_view == view && part == PART_BUTTON && button == desk->btn_kind;
+		if (over != desk->btn_over) {
+			desk->btn_over = over;
+			desk_title_draw(desk->btn_view, false);
+		}
 		desk_cursor_set(desk, "default");
 		wlr_seat_pointer_clear_focus(seat);
 		return;
 	}
-	desk_set_hover(desk, NULL, DB_NONE);
+	if (part == PART_TITLE || part == PART_BUTTON) {
+		/* our title bar */
+		desk_set_hover(desk, view, part == PART_BUTTON ? button : -1);
+		desk_cursor_set(desk, "default");
+		wlr_seat_pointer_clear_focus(seat);
+		return;
+	}
+	desk_set_hover(desk, NULL, -1);
 	if (edge_view) {
 		desk_cursor_set(desk, desk_edge_cursor(edges));
 		wlr_seat_pointer_clear_focus(seat);
@@ -1352,6 +1479,24 @@ static void desk_cursor_button(struct wl_listener *l, void *data) {
 			desk_pointer_refocus(desk, e->time_msec);
 			return;
 		}
+		if (desk->btn_view) {
+			struct desk_view *view = desk->btn_view;
+			int kind = desk->btn_kind;
+			bool over = desk->btn_over;
+			desk->btn_view = NULL;
+			desk->btn_over = false;
+			desk_title_draw(view, false);
+			if (over) {
+				switch (kind) {
+				case BK_CLOSE: desk_view_close(view); break;
+				case BK_MAXIMIZE: desk_view_set_maximized(view, !view->maximized); break;
+				case BK_HIDE: desk_view_set_minimized(view, true); break;
+				case BK_SHADE: desk_view_set_shaded(view, !view->shaded); break;
+				}
+			}
+			desk_pointer_refocus(desk, e->time_msec);
+			return;
+		}
 		if (desk->menu && desk_menu_item_at(desk, desk->cursor->x, desk->cursor->y) != -2) {
 			int item = desk_menu_item_at(desk, desk->cursor->x, desk->cursor->y);
 			if (item >= 0) desk_menu_choose(desk, item);
@@ -1365,6 +1510,9 @@ static void desk_cursor_button(struct wl_listener *l, void *data) {
 		return;
 	}
 	desk->buttons_down |= 1u << (e->button & 31);
+	if (desk->grab != GRAB_NONE) {
+		return;	/* the window menu's Move or Resize: this click ends it (on release) */
+	}
 	double lx = desk->cursor->x, ly = desk->cursor->y;
 	if (desk->menu) {
 		int item = desk_menu_item_at(desk, lx, ly);
@@ -1383,30 +1531,44 @@ static void desk_cursor_button(struct wl_listener *l, void *data) {
 	if (view && alt && (e->button == BTN_LEFT || e->button == BTN_RIGHT)) {
 		uint32_t edges = 0;
 		if (e->button == BTN_RIGHT) {
-			edges = (lx < view->x + view->w / 2 ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT) |
-				(ly < view->y + (view->h + desk_title_h(view)) / 2 ? WLR_EDGE_TOP : WLR_EDGE_BOTTOM);
+			struct wlr_box f = desk_view_frame(view);
+			edges = (lx < f.x + f.width / 2 ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT) |
+				(ly < f.y + f.height / 2 ? WLR_EDGE_TOP : WLR_EDGE_BOTTOM);
 		}
 		desk->focused_layer = NULL;
 		desk_grab_begin(desk, view, e->button == BTN_LEFT ? GRAB_MOVE : GRAB_RESIZE, edges);
 		return;
 	}
-	if (view && !surface && view->title && ly < view->y + DESK_TITLE_H) {
+	uint32_t fedges = 0;
+	int fbutton = -1;
+	enum desk_part part = !surface ? desk_frame_part(view, lx, ly, &fedges, &fbutton) : PART_NONE;
+	if (part == PART_TITLE || part == PART_BUTTON) {
+		/* our title bar, as xfwm4's: a button acts when let go over it (the
+		 * menu's opens at once); right: the window menu; middle: to the back;
+		 * left: drag to move, twice to maximize */
 		desk->focused_layer = NULL;
 		desk_focus_view(desk, view);
 		desk_take_keyboard(desk);
-		int b = desk_title_button_at(view, lx - view->x);
-		if (e->button == BTN_RIGHT) {
+		struct wlr_box f = desk_view_frame(view);
+		if (part == PART_BUTTON && fbutton == BK_MENU && e->button == BTN_LEFT) {
+			struct deco_button bs[DECO_MAX_BUTTONS];
+			int tx0, tx1, n = deco_buttons(f.width, true, bs, &tx0, &tx1), bx = 0;
+			for (int i = 0; i < n; i++) if (bs[i].kind == BK_MENU) bx = bs[i].x;
+			desk_menu_open(desk, view, f.x + bx, f.y + deco.top);
+		} else if (part == PART_BUTTON && e->button == BTN_LEFT) {
+			desk->btn_view = view;
+			desk->btn_kind = fbutton;
+			desk->btn_over = true;
+			desk_title_draw(view, false);
+		} else if (e->button == BTN_RIGHT) {
 			desk_menu_open(desk, view, (int)lx, (int)ly);
 		} else if (e->button == BTN_MIDDLE) {
-			desk_view_set_minimized(view, true);
-		} else if (b == DB_CLOSE) {
-			desk_view_close(view);
-		} else if (b == DB_MAXIMIZE) {
-			desk_view_set_maximized(view, !view->maximized);
-		} else if (b == DB_MINIMIZE) {
-			desk_view_set_minimized(view, true);
-		} else if (b == DB_PHONE) {
-			desk_give_to_phone(view);
+			/* to the back */
+			wl_list_remove(&view->link);
+			wl_list_insert(desk->views.prev, &view->link);
+			wlr_scene_node_lower_to_bottom(&view->tree->node);
+			struct desk_view *front = desk_top_view(desk, NULL);
+			if (front && front != view) desk_focus_view(desk, front);
 		} else if (e->button == BTN_LEFT) {
 			static uint32_t last_ms;
 			static struct desk_view *last_view;
@@ -1420,8 +1582,9 @@ static void desk_cursor_button(struct wl_listener *l, void *data) {
 		}
 		return;
 	}
-	uint32_t edges = 0;
-	struct desk_view *edge_view = desk_edge_view(desk, lx, ly, surface, view, layer, &edges);
+	uint32_t edges = fedges;
+	struct desk_view *edge_view = part == PART_EDGE ? view :
+		desk_edge_view(desk, lx, ly, surface, view, layer, &edges);
 	if (edge_view && e->button == BTN_LEFT) {
 		desk->focused_layer = NULL;
 		desk_grab_begin(desk, edge_view, GRAB_RESIZE, edges);
@@ -1457,6 +1620,20 @@ static void desk_cursor_axis(struct wl_listener *l, void *data) {
 		return;
 	}
 	desk->last_input_ms = now_ms();
+	if (e->orientation == WL_POINTER_AXIS_VERTICAL_SCROLL && e->delta != 0 &&
+			e->source == WL_POINTER_AXIS_SOURCE_WHEEL) {
+		struct wlr_surface *surface;
+		double sx, sy;
+		struct desk_view *view = desk_view_at(desk, desk->cursor->x, desk->cursor->y, &surface, &sx, &sy, NULL);
+		uint32_t edges;
+		int button;
+		enum desk_part part = !surface ? desk_frame_part(view, desk->cursor->x, desk->cursor->y, &edges, &button) :
+			PART_NONE;
+		if (part == PART_TITLE || part == PART_BUTTON) {
+			desk_view_set_shaded(view, e->delta < 0);	/* xfwm4's mousewheel_rollup */
+			return;
+		}
+	}
 	wlr_seat_pointer_notify_axis(desk->server->seat, e->time_msec, e->orientation, e->delta,
 		e->delta_discrete, e->source, e->relative_direction);
 }
@@ -1622,7 +1799,7 @@ static void desk_arrange_layers(struct zt_desk *desk) {
 		struct desk_view *v;
 		wl_list_for_each(v, &desk->views, link) {
 			if (v->maximized && !v->fullscreen) {
-				desk_view_configure(v, usable.x, usable.y, usable.width, usable.height - desk_title_h(v));
+				desk_view_fill(v, usable);
 			}
 		}
 	}
@@ -1771,7 +1948,7 @@ static void desk_popup_unconstrain(struct desk_popup *p) {
 	if (t && t->base->data) {
 		struct zt_toplevel *top = t->base->data;
 		if (!top->view) return;
-		rx = top->view->x - t->base->geometry.x;
+		rx = top->view->x + desk_inset_l(top->view) - t->base->geometry.x;
 		ry = top->view->y + desk_title_h(top->view) - t->base->geometry.y;
 	} else if (ls && ls->data) {
 		struct desk_layer *dl = ls->data;
@@ -1900,7 +2077,8 @@ static void desk_xdg_req_menu(struct wl_listener *l, void *data) {
 	struct desk_view *view = wl_container_of(l, view, req_menu);
 	struct wlr_xdg_toplevel_show_window_menu_event *e = data;
 	struct wlr_box *g = &view->top->xdg_toplevel->base->geometry;
-	desk_menu_open(view->desk, view, view->x + e->x - g->x, view->y + desk_title_h(view) + e->y - g->y);
+	desk_menu_open(view->desk, view, view->x + desk_inset_l(view) + e->x - g->x,
+		view->y + desk_title_h(view) + e->y - g->y);
 }
 
 static void desk_xdg_set_title(struct wl_listener *l, void *data) {
@@ -1921,8 +2099,9 @@ static void desk_xdg_set_app_id(struct wl_listener *l, void *data) {
 static struct desk_view *desk_view_new(struct zt_desk *desk) {
 	struct desk_view *view = calloc(1, sizeof(*view));
 	view->desk = desk;
-	view->hover = DB_NONE;
-	view->title_drawn_hover = DB_NONE;
+	view->hover = -1;
+	view->title_drawn_hover = -1;
+	view->title_drawn_pressed = -1;
 	view->tree = wlr_scene_tree_create(desk->win_tree);
 	view->tree->node.data = view;
 	wlr_scene_node_set_enabled(&view->tree->node, false);
@@ -1940,6 +2119,9 @@ static void desk_view_free(struct desk_view *view) {
 	}
 	if (desk->focused == view) {
 		desk->focused = NULL;
+	}
+	if (desk->btn_view == view) {
+		desk->btn_view = NULL;
 	}
 	if (desk->press_view == view) {
 		desk->press_view = NULL;
@@ -2241,8 +2423,9 @@ static bool desk_take_from_phone(struct zt_server *server, struct zt_toplevel *t
 	/* phone-shaped apps of ours stay phone-shaped, others get a desktop window */
 	bool ours = id && (!strncmp(id, "zt", 2) || !strncmp(id, "zrn", 3));
 	int w = ours ? 480 : 1024, h = ours ? 860 : 700;
-	if (w > desk->usable.width) w = desk->usable.width;
-	if (h > desk->usable.height - desk_title_h(view)) h = desk->usable.height - desk_title_h(view);
+	int fw = desk_inset_l(view) + desk_inset_r(view), fh = desk_title_h(view) + desk_inset_b(view);
+	if (w > desk->usable.width - fw) w = desk->usable.width - fw;
+	if (h > desk->usable.height - fh) h = desk->usable.height - fh;
 	wlr_xdg_toplevel_set_size(xt, w, h);
 	view->w = w, view->h = h;
 	desk_view_place(view);	/* at the size it was asked to take, not the phone's */
@@ -2785,7 +2968,7 @@ static void desk_use_output(struct zt_desk *desk, struct desk_output *o) {
 			wlr_foreign_toplevel_handle_v1_output_enter(v->ft, o->wo);
 		}
 		if (v->maximized && !v->fullscreen) {
-			desk_view_configure(v, nb.x, nb.y, nb.width, nb.height - desk_title_h(v));
+			desk_view_fill(v, nb);
 		} else if (v->fullscreen) {
 			desk_view_configure(v, nb.x, nb.y, nb.width, nb.height);
 		}
@@ -3119,9 +3302,9 @@ static void desk_state_write(struct zt_desk *desk) {
 				)) {
 			continue;
 		}
-		fprintf(f, "window %s %s %d %d %d %d %s%s%s\t%s\n", v->top ? "xdg" : "x11", desk_view_app_id(v)[0] ?
+		fprintf(f, "window %s %s %d %d %d %d %s%s%s%s\t%s\n", v->top ? "xdg" : "x11", desk_view_app_id(v)[0] ?
 			desk_view_app_id(v) : "-", v->x, v->y, v->w, v->h, v == desk->focused ? "focused," : "",
-			v->minimized ? "minimized," : "", v->maximized ? "maximized" : "", desk_view_title(v));
+			v->minimized ? "minimized," : "", v->shaded ? "shaded," : "", v->maximized ? "maximized" : "", desk_view_title(v));
 	}
 	fclose(f);
 	rename(tmp, path);
@@ -3150,6 +3333,7 @@ static struct desk_view *desk_view_named(struct zt_desk *desk, const char *name)
  *     desktop pointer X Y       put the pointer there (output points), for tests
  *     desktop click X Y [B]     and click (B: 1 left, 2 right, 3 middle)
  *     desktop state             write ztmetro-desktop.state now
+ *     desktop theme             read xfwm4's theme and settings again (deco.c)
  *     desktop mode WxH[@HZ]|preferred   the monitors' mode, now (monitor_mode = in
  *                               ~/.config/ztmetro/desktop keeps one across plugs)
  */
@@ -3280,8 +3464,29 @@ static void desk_ctl(struct zt_server *server, const char *args) {
 		wlr_seat_pointer_notify_frame(server->seat);
 	} else if (!strcmp(args, "state")) {
 		desk_state_write(desk);
+	} else if (!strcmp(args, "theme")) {
+		desk_theme_reload(desk);	/* ztos-desktop-session: xfconf's xfwm4 settings changed */
 	} else {
 		wlr_log(WLR_INFO, "desktop: unknown control '%s'", args);
+	}
+}
+
+/* xfwm4's theme or settings changed (deco.c): every frame again, at its new sizes */
+static void desk_theme_reload(struct zt_desk *desk) {
+	if (!deco_load()) {
+		return;
+	}
+	struct desk_view *v;
+	wl_list_for_each(v, &desk->views, link) {
+		if (!v->title) continue;
+		v->sides_drawn_w = -1;
+		if (v->fullscreen) {
+			desk_view_layout(v);
+		} else if (v->maximized) {
+			desk_view_fill(v, desk->usable);
+		}
+		desk_title_draw(v, true);
+		desk_view_move(v, v->x, v->y);
 	}
 }
 
@@ -3291,10 +3496,7 @@ static void desk_reload(struct zt_server *server) {
 		return;
 	}
 	desk_config_load(desk);
-	struct desk_view *v;
-	wl_list_for_each(v, &desk->views, link) {
-		desk_title_draw(v, true);	/* the accent may have changed */
-	}
+	desk_theme_reload(desk);
 }
 
 /* ---- set-up ------------------------------------------------------------------------------------------ */
@@ -3352,6 +3554,7 @@ static void desk_init(struct zt_server *server, struct wlr_compositor *composito
 	wl_list_init(&desk->held_destroy.link);
 	desk->held_destroy.notify = desk_held_destroy;
 	desk_config_load(desk);
+	deco_load();
 
 	/* the virtual output's backend, beside the panel's (DRM, or a window) */
 	if (wlr_backend_is_multi(server->backend)) {
