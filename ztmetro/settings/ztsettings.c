@@ -173,10 +173,12 @@ enum action {
 };
 
 /* The force press's vibration, ms: as the shell has them (ztmetro.c FORCE_PRESS_MS).
- * Below the minimum the motor (160 Hz, a cycle is 6 ms) isn't felt. */
+ * The driver (haptics/zrn_haptic_main.c) starts the motor at full drive and
+ * brakes it at the end, so even 4 ms is a crisp tick, felt for about as long
+ * as asked; below that it is barely felt. */
 #define FORCE_MS_DEFAULT	24
 #define FORCE_MS_MAX		60
-#define FORCE_MS_MIN		12
+#define FORCE_MS_MIN		4
 #define FORCE_STRENGTH_DEFAULT	80	/* ztmetro.c FORCE_PRESS_STRENGTH */
 #define FORCE_LEVEL_MAX		5
 
