@@ -1,0 +1,251 @@
+Oops#21 Part1
+<1>[   42.884161]   SET = 0, FnV = 0
+<1>[   42.884171]   EA = 0, S1PTW = 0
+<1>[   42.884181]   FSC = 0x04: level 0 translation fault
+<1>[   42.884191] Data abort info:
+<1>[   42.884199]   ISV = 0, ISS = 0x00000004, ISS2 = 0x00000000
+<1>[   42.884209]   CM = 0, WnR = 0, TnD = 0, TagAccess = 0
+<1>[   42.884220]   GCS = 0, Overlay = 0, DirtyBit = 0, Xs = 0
+<1>[   42.884231] user pgtable: 4k pages, 48-bit VAs, pgdp=000000008bad4000
+<1>[   42.884244] [00000000000003a4] pgd=0000000000000000, p4d=0000000000000000
+<0>[   42.884264] Internal error: Oops: 0000000096000004 [#17]  SMP
+<3>[   42.884277] Modules linked in: snd_zrn_abox(O) snd_pcm snd_timer snd soundcore zrn_bbd(O) zrn_hotplug(O) zrn_modem(O) hci_uart btbcm bluetooth ecdh_generic kpp ecc zrn_bt(O) zrn_haptic(O) zrn_led(O) zrn_flash(O) i2c_gpio i2c_algo_bit
+<3>[   42.884373] CPU: 0 UID: 0 PID: 2317 Comm: btmgmt Tainted: G S    D    O        7.1.0-zboot #13 PREEMPT 
+<3>[   42.884392] Tainted: [S]=CPU_OUT_OF_SPEC, [D]=DIE, [O]=OOT_MODULE
+<3>[   42.884403] Hardware name: Samsung Galaxy S9 (SM-G960) (DT)
+<3>[   42.884414] pstate: 60000005 (nZCv daif -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+<3>[   42.884428] pc : kmem_cache_alloc_noprof+0x24/0x2f4
+<3>[   42.884450] lr : sk_prot_alloc+0x38/0x124
+<3>[   42.884466] sp : ffff8000960f3bf0
+<3>[   42.884475] x29: ffff8000960f3c00 x28: ffff00082db53c00 x27: ffff8000798a5b00
+<3>[   42.884497] x26: ffff8000817aec40 x25: ffff8000960f3dc0 x24: 0000000000000000
+<3>[   42.884518] x23: 0000000000000388 x22: 000000000000001f x21: 0000000000000920
+<3>[   42.884539] x20: ffff80007988a290 x19: ffff00080423aa80 x18: 0000000000000000
+<3>[   42.884561] x17: 0000000000000000 x16: 0000000000000000 x15: 0000000000000000
+<3>[   42.884581] x14: 0000000000000000 x13: 0000000000000000 x12: 0000000000000000
+<3>[   42.884602] x11: 0000000000000000 x10: 0000000000000000 x9 : 0000000000000000
+<3>[   42.884622] x8 : ffff00080fcabb88 x7 : 0000000000000000 x6 : ffff80007988af28
+<3>[   42.884644] x5 : 0000000000000000 x4 : 0000000000000000 x3 : 0000000000000000
+<3>[   42.884664] x2 : ffff00082db53c00 x1 : 0000000000000820 x0 : 0000000000000388
+<3>[   42.884685] Call trace:
+<3>[   42.884695]  kmem_cache_alloc_noprof+0x24/0x2f4 (P)
+<3>[   42.884715]  sk_prot_alloc+0x38/0x124
+<3>[   42.884730]  sk_alloc+0x38/0x1fc
+<3>[   42.884747]  bt_sock_alloc+0x34/0x1a0 [bluetooth]
+<3>[   42.884882]  hci_sock_create+0x48/0x9c [bluetooth]
+<3>[   42.884984]  bt_sock_create+0xb4/0x114 [bluetooth]
+<3>[   42.885079]  __sock_create+0x130/0x220
+<3>[   42.885098]  __sys_socket+0xa0/0x140
+<3>[   42.885115]  __arm64_sys_socket+0x20/0x38
+<3>[   42.885132]  invoke_syscall+0x54/0x10c
+<3>[   42.885150]  el0_svc_common.constprop.0+0x40/0xe0
+<3>[   42.885167]  do_el0_svc+0x1c/0x34
+<3>[   42.885182]  el0_svc+0x38/0x120
+<3>[   42.885200]  el0t_64_sync_handler+0xa0/0xf0
+<3>[   42.885217]  el0t_64_sync+0x198/0x19c
+<0>[   42.885237] Code: a9035bf5 f9427843 f90007e3 d2800003 (b9401c15) 
+<4>[   42.885252] ---[ end trace 0000000000000000 ]---
+<6>[   42.891299] note: btmgmt[2317] exited with preempt_count 1
+<1>[   43.931490] Unable to handle kernel NULL pointer dereference at virtual address 00000000000003a4
+<1>[   43.931533] Mem abort info:
+<1>[   43.931543]   ESR = 0x0000000096000004
+<1>[   43.931554]   EC = 0x25: DABT (current EL), IL = 32 bits
+<1>[   43.931566]   SET = 0, FnV = 0
+<1>[   43.931576]   EA = 0, S1PTW = 0
+<1>[   43.931585]   FSC = 0x04: level 0 translation fault
+<1>[   43.931596] Data abort info:
+<1>[   43.931604]   ISV = 0, ISS = 0x00000004, ISS2 = 0x00000000
+<1>[   43.931615]   CM = 0, WnR = 0, TnD = 0, TagAccess = 0
+<1>[   43.931626]   GCS = 0, Overlay = 0, DirtyBit = 0, Xs = 0
+<1>[   43.931637] user pgtable: 4k pages, 48-bit VAs, pgdp=00000000893a5000
+<1>[   43.931650] [00000000000003a4] pgd=0000000000000000, p4d=0000000000000000
+<0>[   43.931670] Internal error: Oops: 0000000096000004 [#18]  SMP
+<3>[   43.931683] Modules linked in: snd_zrn_abox(O) snd_pcm snd_timer snd soundcore zrn_bbd(O) zrn_hotplug(O) zrn_modem(O) hci_uart btbcm bluetooth ecdh_generic kpp ecc zrn_bt(O) zrn_haptic(O) zrn_led(O) zrn_flash(O) i2c_gpio i2c_algo_bit
+<3>[   43.931779] CPU: 1 UID: 0 PID: 2362 Comm: btmgmt Tainted: G S    D    O        7.1.0-zboot #13 PREEMPT 
+<3>[   43.931799] Tainted: [S]=CPU_OUT_OF_SPEC, [D]=DIE, [O]=OOT_MODULE
+<3>[   43.931810] Hardware name: Samsung Galaxy S9 (SM-G960) (DT)
+<3>[   43.931822] pstate: 60000005 (nZCv daif -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+<3>[   43.931836] pc : kmem_cache_alloc_noprof+0x24/0x2f4
+<3>[   43.931859] lr : sk_prot_alloc+0x38/0x124
+<3>[   43.931874] sp : ffff800095fe3bf0
+<3>[   43.931884] x29: ffff800095fe3c00 x28: ffff00082daf2d00 x27: ffff8000798a5b00
+<3>[   43.931906] x26: ffff8000817aec40 x25: ffff800095fe3dc0 x24: 0000000000000000
+<3>[   43.931927] x23: 0000000000000388 x22: 000000000000001f x21: 0000000000000920
+<3>[   43.931949] x20: ffff80007988a290 x19: ffff00080423ce40 x18: 0000000000000000
+<3>[   43.931970] x17: 0000000000000000 x16: 0000000000000000 x15: 0000000000000000
+<3>[   43.931991] x14: 0000000000000000 x13: 0000000000000000 x12: 0000000000000000
+<3>[   43.932012] x11: 0000000000000000 x10: 0000000000000000 x9 : 0000000000000000
+<3>[   43.932032] x8 : ffff0000066ff978 x7 : 0000000000000000 x6 : ffff80007988af28
+<3>[   43.932053] x5 : 0000000000000000 x4 : 0000000000000000 x3 : 0000000000000000
+<3>[   43.932073] x2 : ffff00082daf2d00 x1 : 0000000000000820 x0 : 0000000000000388
+<3>[   43.932095] Call trace:
+<3>[   43.932105]  kmem_cache_alloc_noprof+0x24/0x2f4 (P)
+<3>[   43.932124]  sk_prot_alloc+0x38/0x124
+<3>[   43.932139]  sk_alloc+0x38/0x1fc
+<3>[   43.932155]  bt_sock_alloc+0x34/0x1a0 [bluetooth]
+<3>[   43.932294]  hci_sock_create+0x48/0x9c [bluetooth]
+<3>[   43.932392]  bt_sock_create+0xb4/0x114 [bluetooth]
+<3>[   43.932489]  __sock_create+0x130/0x220
+<3>[   43.932508]  __sys_socket+0xa0/0x140
+<3>[   43.932526]  __arm64_sys_socket+0x20/0x38
+<3>[   43.932543]  invoke_syscall+0x54/0x10c
+<3>[   43.932560]  el0_svc_common.constprop.0+0x40/0xe0
+<3>[   43.932576]  do_el0_svc+0x1c/0x34
+<3>[   43.932592]  el0_svc+0x38/0x120
+<3>[   43.932609]  el0t_64_sync_handler+0xa0/0xf0
+<3>[   43.932627]  el0t_64_sync+0x198/0x19c
+<0>[   43.932647] Code: a9035bf5 f9427843 f90007e3 d2800003 (b9401c15) 
+<4>[   43.932662] ---[ end trace 0000000000000000 ]---
+<6>[   43.938540] note: btmgmt[2362] exited with preempt_count 1
+<1>[   44.996559] Unable to handle kernel NULL pointer dereference at virtual address 00000000000003a4
+<1>[   44.996595] Mem abort info:
+<1>[   44.996605]   ESR = 0x0000000096000004
+<1>[   44.996616]   EC = 0x25: DABT (current EL), IL = 32 bits
+<1>[   44.996627]   SET = 0, FnV = 0
+<1>[   44.996637]   EA = 0, S1PTW = 0
+<1>[   44.996647]   FSC = 0x04: level 0 translation fault
+<1>[   44.996658] Data abort info:
+<1>[   44.996666]   ISV = 0, ISS = 0x00000004, ISS2 = 0x00000000
+<1>[   44.996677]   CM = 0, WnR = 0, TnD = 0, TagAccess = 0
+<1>[   44.996687]   GCS = 0, Overlay = 0, DirtyBit = 0, Xs = 0
+<1>[   44.996699] user pgtable: 4k pages, 48-bit VAs, pgdp=0000000087a00000
+<1>[   44.996711] [00000000000003a4] pgd=0000000000000000, p4d=0000000000000000
+<0>[   44.996731] Internal error: Oops: 0000000096000004 [#19]  SMP
+<3>[   44.996743] Modules linked in: snd_zrn_abox(O) snd_pcm snd_timer snd soundcore zrn_bbd(O) zrn_hotplug(O) zrn_modem(O) hci_uart btbcm bluetooth ecdh_generic kpp ecc zrn_bt(O) zrn_haptic(O) zrn_led(O) zrn_flash(O) i2c_gpio i2c_algo_bit
+<3>[   44.996839] CPU: 1 UID: 0 PID: 2445 Comm: btmgmt Tainted: G S    D    O        7.1.0-zboot #13 PREEMPT 
+<3>[   44.996858] Tainted: [S]=CPU_OUT_OF_SPEC, [D]=DIE, [O]=OOT_MODULE
+<3>[   44.996869] Hardware name: Samsung Galaxy S9 (SM-G960) (DT)
+<3>[   44.996880] pstate: 60000005 (nZCv daif -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+<3>[   44.996894] pc : kmem_cache_alloc_noprof+0x24/0x2f4
+<3>[   44.996917] lr : sk_prot_alloc+0x38/0x124
+<3>[   44.996933] sp : ffff80009625bbf0
+<3>[   44.996943] x29: ffff80009625bc00 x28: ffff000806481e00 x27: ffff8000798a5b00
+<3>[   44.996965] x26: ffff8000817aec40 x25: ffff80009625bdc0 x24: 0000000000000000
+<3>[   44.996987] x23: 0000000000000388 x22: 000000000000001f x21: 0000000000000920
+<3>[   44.997008] x20: ffff80007988a290 x19: ffff0008103754c0 x18: 0000000000000000
+<3>[   44.997029] x17: 0000000000000000 x16: 0000000000000000 x15: 0000000000000000
+<3>[   44.997049] x14: 0000000000000000 x13: 0000000000000000 x12: 0000000000000000
+<3>[   44.997069] x11: 0000000000000000 x10: 0000000000000000 x9 : 0000000000000000
+<3>[   44.997090] x8 : ffff0008131d0a98 x7 : 0000000000000000 x6 : ffff80007988af28
+<3>[   44.997110] x5 : 0000000000000000 x4 : 0000000000000000 x3 : 0000000000000000
+<3>[   44.997131] x2 : ffff000806481e00 x1 : 0000000000000820 x0 : 0000000000000388
+<3>[   44.997152] Call trace:
+<3>[   44.997162]  kmem_cache_alloc_noprof+0x24/0x2f4 (P)
+<3>[   44.997182]  sk_prot_alloc+0x38/0x124
+<3>[   44.997197]  sk_alloc+0x38/0x1fc
+<3>[   44.997214]  bt_sock_alloc+0x34/0x1a0 [bluetooth]
+<3>[   44.997357]  hci_sock_create+0x48/0x9c [bluetooth]
+<3>[   44.997456]  bt_sock_create+0xb4/0x114 [bluetooth]
+<3>[   44.997555]  __sock_create+0x130/0x220
+<3>[   44.997574]  __sys_socket+0xa0/0x140
+<3>[   44.997591]  __arm64_sys_socket+0x20/0x38
+<3>[   44.997609]  invoke_syscall+0x54/0x10c
+<3>[   44.997626]  el0_svc_common.constprop.0+0x40/0xe0
+<3>[   44.997643]  do_el0_svc+0x1c/0x34
+<3>[   44.997658]  el0_svc+0x38/0x120
+<3>[   44.997676]  el0t_64_sync_handler+0xa0/0xf0
+<3>[   44.997692]  el0t_64_sync+0x198/0x19c
+<0>[   44.997712] Code: a9035bf5 f9427843 f90007e3 d2800003 (b9401c15) 
+<4>[   44.997728] ---[ end trace 0000000000000000 ]---
+<6>[   45.003686] note: btmgmt[2445] exited with preempt_count 1
+<1>[   46.113611] Unable to handle kernel NULL pointer dereference at virtual address 00000000000003a4
+<1>[   46.113650] Mem abort info:
+<1>[   46.113660]   ESR = 0x0000000096000004
+<1>[   46.113671]   EC = 0x25: DABT (current EL), IL = 32 bits
+<1>[   46.113683]   SET = 0, FnV = 0
+<1>[   46.113693]   EA = 0, S1PTW = 0
+<1>[   46.113703]   FSC = 0x04: level 0 translation fault
+<1>[   46.113713] Data abort info:
+<1>[   46.113722]   ISV = 0, ISS = 0x00000004, ISS2 = 0x00000000
+<1>[   46.113732]   CM = 0, WnR = 0, TnD = 0, TagAccess = 0
+<1>[   46.113743]   GCS = 0, Overlay = 0, DirtyBit = 0, Xs = 0
+<1>[   46.113755] user pgtable: 4k pages, 48-bit VAs, pgdp=0000000894f4a000
+<1>[   46.113767] [00000000000003a4] pgd=0000000000000000, p4d=0000000000000000
+<0>[   46.113787] Internal error: Oops: 0000000096000004 [#20]  SMP
+<3>[   46.113800] Modules linked in: snd_zrn_abox(O) snd_pcm snd_timer snd soundcore zrn_bbd(O) zrn_hotplug(O) zrn_modem(O) hci_uart btbcm bluetooth ecdh_generic kpp ecc zrn_bt(O) zrn_haptic(O) zrn_led(O) zrn_flash(O) i2c_gpio i2c_algo_bit
+<3>[   46.113900] CPU: 0 UID: 0 PID: 2471 Comm: btmgmt Tainted: G S    D    O        7.1.0-zboot #13 PREEMPT 
+<3>[   46.113920] Tainted: [S]=CPU_OUT_OF_SPEC, [D]=DIE, [O]=OOT_MODULE
+<3>[   46.113930] Hardware name: Samsung Galaxy S9 (SM-G960) (DT)
+<3>[   46.113941] pstate: 60000005 (nZCv daif -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+<3>[   46.113955] pc : kmem_cache_alloc_noprof+0x24/0x2f4
+<3>[   46.113976] lr : sk_prot_alloc+0x38/0x124
+<3>[   46.113992] sp : ffff80009621bbf0
+<3>[   46.114002] x29: ffff80009621bc00 x28: ffff000867089e00 x27: ffff8000798a5b00
+<3>[   46.114024] x26: ffff8000817aec40 x25: ffff80009621bdc0 x24: 0000000000000000
+<3>[   46.114045] x23: 0000000000000388 x22: 000000000000001f x21: 0000000000000920
+<3>[   46.114066] x20: ffff80007988a290 x19: ffff0008007ac480 x18: 0000000000000000
+<3>[   46.114087] x17: 0000000000000000 x16: 0000000000000000 x15: 0000000000000000
+<3>[   46.114108] x14: 0000000000000000 x13: 0000000000000000 x12: 0000000000000000
+<3>[   46.114128] x11: 0000000000000000 x10: 0000000000000000 x9 : 0000000000000000
+<3>[   46.114149] x8 : ffff000843167f48 x7 : 0000000000000000 x6 : ffff80007988af28
+<3>[   46.114169] x5 : 0000000000000000 x4 : 0000000000000000 x3 : 0000000000000000
+<3>[   46.114189] x2 : ffff000867089e00 x1 : 0000000000000820 x0 : 0000000000000388
+<3>[   46.114211] Call trace:
+<3>[   46.114221]  kmem_cache_alloc_noprof+0x24/0x2f4 (P)
+<3>[   46.114240]  sk_prot_alloc+0x38/0x124
+<3>[   46.114255]  sk_alloc+0x38/0x1fc
+<3>[   46.114271]  bt_sock_alloc+0x34/0x1a0 [bluetooth]
+<3>[   46.114412]  hci_sock_create+0x48/0x9c [bluetooth]
+<3>[   46.114517]  bt_sock_create+0xb4/0x114 [bluetooth]
+<3>[   46.114617]  __sock_create+0x130/0x220
+<3>[   46.114636]  __sys_socket+0xa0/0x140
+<3>[   46.114654]  __arm64_sys_socket+0x20/0x38
+<3>[   46.114671]  invoke_syscall+0x54/0x10c
+<3>[   46.114688]  el0_svc_common.constprop.0+0x40/0xe0
+<3>[   46.114705]  do_el0_svc+0x1c/0x34
+<3>[   46.114720]  el0_svc+0x38/0x120
+<3>[   46.114738]  el0t_64_sync_handler+0xa0/0xf0
+<3>[   46.114755]  el0t_64_sync+0x198/0x19c
+<0>[   46.114775] Code: a9035bf5 f9427843 f90007e3 d2800003 (b9401c15) 
+<4>[   46.114792] ---[ end trace 0000000000000000 ]---
+<6>[   46.120885] note: btmgmt[2471] exited with preempt_count 1
+<1>[   47.227924] Unable to handle kernel NULL pointer dereference at virtual address 00000000000003a4
+<1>[   47.227963] Mem abort info:
+<1>[   47.227973]   ESR = 0x0000000096000004
+<1>[   47.227983]   EC = 0x25: DABT (current EL), IL = 32 bits
+<1>[   47.227994]   SET = 0, FnV = 0
+<1>[   47.228004]   EA = 0, S1PTW = 0
+<1>[   47.228014]   FSC = 0x04: level 0 translation fault
+<1>[   47.228024] Data abort info:
+<1>[   47.228033]   ISV = 0, ISS = 0x00000004, ISS2 = 0x00000000
+<1>[   47.228043]   CM = 0, WnR = 0, TnD = 0, TagAccess = 0
+<1>[   47.228054]   GCS = 0, Overlay = 0, DirtyBit = 0, Xs = 0
+<1>[   47.228065] user pgtable: 4k pages, 48-bit VAs, pgdp=00000008a667a000
+<1>[   47.228081] [00000000000003a4] pgd=0000000000000000, p4d=0000000000000000
+<0>[   47.228117] Internal error: Oops: 0000000096000004 [#21]  SMP
+<3>[   47.228135] Modules linked in: snd_zrn_abox(O) snd_pcm snd_timer snd soundcore zrn_bbd(O) zrn_hotplug(O) zrn_modem(O) hci_uart btbcm bluetooth ecdh_generic kpp ecc zrn_bt(O) zrn_haptic(O) zrn_led(O) zrn_flash(O) i2c_gpio i2c_algo_bit
+<3>[   47.228233] CPU: 0 UID: 0 PID: 2539 Comm: btmgmt Tainted: G S    D    O        7.1.0-zboot #13 PREEMPT 
+<3>[   47.228252] Tainted: [S]=CPU_OUT_OF_SPEC, [D]=DIE, [O]=OOT_MODULE
+<3>[   47.228262] Hardware name: Samsung Galaxy S9 (SM-G960) (DT)
+<3>[   47.228273] pstate: 60000005 (nZCv daif -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+<3>[   47.228287] pc : kmem_cache_alloc_noprof+0x24/0x2f4
+<3>[   47.228308] lr : sk_prot_alloc+0x38/0x124
+<3>[   47.228324] sp : ffff8000963abbf0
+<3>[   47.228333] x29: ffff8000963abc00 x28: ffff0008055f8f00 x27: ffff8000798a5b00
+<3>[   47.228356] x26: ffff8000817aec40 x25: ffff8000963abdc0 x24: 0000000000000000
+<3>[   47.228377] x23: 0000000000000388 x22: 000000000000001f x21: 0000000000000920
+<3>[   47.228398] x20: ffff80007988a290 x19: ffff000841bd7200 x18: 0000000000000000
+<3>[   47.228419] x17: 0000000000000000 x16: 0000000000000000 x15: 0000000000000000
+<3>[   47.228440] x14: 0000000000000000 x13: 0000000000000000 x12: 0000000000000000
+<3>[   47.228460] x11: 0000000000000000 x10: 0000000000000000 x9 : 0000000000000000
+<3>[   47.228480] x8 : ffff000820e94d68 x7 : 0000000000000000 x6 : ffff80007988af28
+<3>[   47.228501] x5 : 0000000000000000 x4 : 0000000000000000 x3 : 0000000000000000
+<3>[   47.228522] x2 : ffff0008055f8f00 x1 : 0000000000000820 x0 : 0000000000000388
+<3>[   47.228543] Call trace:
+<3>[   47.228553]  kmem_cache_alloc_noprof+0x24/0x2f4 (P)
+<3>[   47.228572]  sk_prot_alloc+0x38/0x124
+<3>[   47.228587]  sk_alloc+0x38/0x1fc
+<3>[   47.228604]  bt_sock_alloc+0x34/0x1a0 [bluetooth]
+<3>[   47.228746]  hci_sock_create+0x48/0x9c [bluetooth]
+<3>[   47.228851]  bt_sock_create+0xb4/0x114 [bluetooth]
+<3>[   47.228949]  __sock_create+0x130/0x220
+<3>[   47.228968]  __sys_socket+0xa0/0x140
+<3>[   47.228985]  __arm64_sys_socket+0x20/0x38
+<3>[   47.229003]  invoke_syscall+0x54/0x10c
+<3>[   47.229020]  el0_svc_common.constprop.0+0x40/0xe0
+<3>[   47.229037]  do_el0_svc+0x1c/0x34
+<3>[   47.229052]  el0_svc+0x38/0x120
+<3>[   47.229070]  el0t_64_sync_handler+0xa0/0xf0
+<3>[   47.229086]  el0t_64_sync+0x198/0x19c
+<0>[   47.229107] Code: a9035bf5 f9427843 f90007e3 d2800003 (b9401c15) 
+<4>[   47.229123] ---[ end trace 0000000000000000 ]---

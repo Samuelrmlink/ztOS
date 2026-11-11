@@ -1,0 +1,400 @@
+Nov 11 08:41:57 ztos systemd[583]: Stopped ztOS Waydroid user session.
+Nov 11 08:41:57 ztos systemd[583]: ztos-waydroid-session.service: Consumed 1.166s CPU time over 56min 3.868s wall clock time, 32.2M memory peak, 10M memory swap peak.
+Nov 11 08:41:57 ztos systemd[583]: Stopped target Basic System.
+Nov 11 08:41:57 ztos systemd[583]: Stopped target Paths.
+Nov 11 08:41:57 ztos systemd[583]: Stopped target Sockets.
+Nov 11 08:41:57 ztos systemd[583]: Stopped target Timers.
+Nov 11 08:41:57 ztos systemd[583]: Closed GnuPG network certificate management daemon.
+Nov 11 08:41:57 ztos systemd[583]: Closed GnuPG cryptographic agent and passphrase cache (access for web browsers).
+Nov 11 08:41:57 ztos systemd[583]: Closed GnuPG cryptographic agent and passphrase cache (restricted).
+Nov 11 08:41:57 ztos systemd[583]: Closed GnuPG cryptographic agent (ssh-agent emulation).
+Nov 11 08:41:57 ztos systemd[583]: Closed GnuPG cryptographic agent and passphrase cache.
+Nov 11 08:41:57 ztos systemd[583]: Closed GnuPG public key management service.
+Nov 11 08:41:57 ztos systemd[583]: Closed p11-kit server.
+Nov 11 08:41:57 ztos systemd[1]: mkinitcpio-generate-shutdown-ramfs.service: Deactivated successfully.
+Nov 11 08:41:57 ztos systemd[583]: Closed PipeWire PulseAudio.
+Nov 11 08:41:57 ztos systemd[1]: Finished Generate shutdown-ramfs.
+Nov 11 08:41:57 ztos systemd[583]: Closed PipeWire Multimedia System Sockets.
+Nov 11 08:41:57 ztos systemd[583]: Closed Query the User Interactively for a Password.
+Nov 11 08:41:57 ztos systemd[583]: Closed Disk Image Download Service Socket.
+Nov 11 08:41:57 ztos systemd[583]: Closed Journal Log Access Socket.
+Nov 11 08:41:57 ztos systemd[583]: Closed Virtual Machine and Container Registration Service Socket.
+Nov 11 08:41:57 ztos systemd[583]: Closed Simple File System Backed Storage Provider.
+Nov 11 08:41:57 ztos systemd[583]: Closed ztOS: Bluetooth for Android apps, the Waydroid container's socket to BlueZ.
+Nov 11 08:41:57 ztos dbus-broker[616]: Dispatched 1642 messages @ 17(±33)μs / message.
+Nov 11 08:41:57 ztos systemd[583]: Stopping D-Bus User Message Bus...
+Nov 11 08:41:57 ztos kernel: psci: S9P vendor PMU 1088: 8d150000 -> 8d150000 mask=ff000000
+Nov 11 08:41:57 ztos kernel: psci: S9P vendor PMU 2114: 00000002 -> 00000002 mask=00000003
+Nov 11 08:41:57 ztos kernel: psci: S9P vendor PMU 2180: 00000002 -> 00000002 mask=00000003
+Nov 11 08:41:57 ztos kernel: psci: S9P vendor PMU 21ec: 00000002 -> 00000002 mask=00000003
+Nov 11 08:41:57 ztos kernel: psci: S9P vendor PMU 2258: 00000002 -> 00000002 mask=00000003
+Nov 11 08:41:57 ztos kernel: psci: S9P vendor PMU 2384: 00000002 -> 00000002 mask=00000003
+Nov 11 08:41:57 ztos kernel: Detected VIPT I-cache on CPU7
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_CTR_EL0. Boot CPU: 0x00000094448004, CPU7: 0x00000084448004
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64DFR0_EL1. Boot CPU: 0x00000010305408, CPU7: 0x00000010305116
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64ISAR0_EL1. Boot CPU: 0x00000010211120, CPU7: 0x00000000011120
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64ISAR1_EL1. Boot CPU: 0x00000000100001, CPU7: 0x00000000000000
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR1_EL1. Boot CPU: 0x00000010212122, CPU7: 0x00000000000000
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR2_EL1. Boot CPU: 0x00000000001011, CPU7: 0x00000000000000
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64PFR0_EL1. Boot CPU: 0x00000010112222, CPU7: 0x00000000002222
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_DFR0_EL1. Boot CPU: 0x00000004010088, CPU7: 0x00000003011066
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_ISAR5_EL1. Boot CPU: 0x00000001011121, CPU7: 0x00000000011121
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_MMFR3_EL1. Boot CPU: 0x00000002122211, CPU7: 0x00000002102211
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_MMFR4_EL1. Boot CPU: 0x00000000021110, CPU7: 0x00000000000000
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_ID_PFR0_EL1. Boot CPU: 0x00000010000131, CPU7: 0x00000000000131
+Nov 11 08:41:57 ztos kernel: CPU features: SANITY CHECK: Unexpected variation in SYS_MVFR1_EL1. Boot CPU: 0x00000013211111, CPU7: 0x00000012111111
+Nov 11 08:41:57 ztos kernel: CPU7: Booted secondary processor 0x0000000103 [0x531f0020]
+Nov 11 08:41:57 ztos systemd[583]: Stopped D-Bus User Message Bus.
+Nov 11 08:41:57 ztos systemd[583]: Removed slice User Core Session Slice.
+Nov 11 08:41:57 ztos systemd[583]: session.slice: Consumed 49.328s CPU time over 56min 5.953s wall clock time, 135.5M memory peak, 41M memory swap peak.
+Nov 11 08:41:57 ztos systemd[583]: Closed D-Bus User Message Bus Socket.
+Nov 11 08:41:57 ztos systemd[583]: Removed slice User Application Slice.
+Nov 11 08:41:57 ztos systemd[583]: app.slice: Consumed 2min 3.305s CPU time over 56min 5.956s wall clock time, 160M memory peak, 28.2M memory swap peak.
+Nov 11 08:41:57 ztos systemd[583]: Reached target Shutdown.
+Nov 11 08:41:57 ztos systemd[583]: Finished Exit the Session.
+Nov 11 08:41:57 ztos systemd[583]: Reached target Exit the Session.
+Nov 11 08:41:57 ztos kernel: binder: undelivered TRANSACTION_COMPLETE
+Nov 11 08:41:57 ztos kernel: binder: undelivered transaction 121426, process died.
+Nov 11 08:41:57 ztos zrnperfd[566]: zrnperfd: stopped, every app running
+Nov 11 08:41:57 ztos kernel: binder: undelivered TRANSACTION_COMPLETE
+Nov 11 08:41:57 ztos kernel: binder: undelivered transaction 121436, process died.
+Nov 11 08:41:57 ztos kernel: binder: release 3941:4288 transaction 121437 out, still active
+Nov 11 08:41:57 ztos kernel: binder: undelivered TRANSACTION_COMPLETE
+Nov 11 08:41:57 ztos kernel: binder: send failed reply for transaction 121437, target dead
+Nov 11 08:41:57 ztos systemd[1]: zrnperfd.service: Deactivated successfully.
+Nov 11 08:41:57 ztos systemd[1]: Stopped zrnperfd (minimal): power profiles and screen-off low power for ztMETRO.
+Nov 11 08:41:57 ztos systemd[1]: zrnperfd.service: Consumed 53.068s CPU time over 56min 8.878s wall clock time, 9.3M memory peak.
+Nov 11 08:41:57 ztos (sd-pam)[593]: pam_unix(systemd-user:session): session closed for user samuel
+Nov 11 08:41:57 ztos systemd-logind[467]: Removed session 2.
+Nov 11 08:41:57 ztos systemd[1]: user@1000.service: Deactivated successfully.
+Nov 11 08:41:57 ztos systemd[1]: Stopped User Manager for UID 1000.
+Nov 11 08:41:57 ztos systemd[1]: user@1000.service: Consumed 2min 55.350s CPU time over 56min 8.436s wall clock time, 301M memory peak, 69.9M memory swap peak.
+Nov 11 08:41:57 ztos kernel: waydroid0: port 1(vethPc9HVa) entered disabled state
+Nov 11 08:41:57 ztos kernel: vethPc9HVa (unregistering): left allmulticast mode
+Nov 11 08:41:57 ztos kernel: vethPc9HVa (unregistering): left promiscuous mode
+Nov 11 08:41:57 ztos kernel: waydroid0: port 1(vethPc9HVa) entered disabled state
+Nov 11 08:41:57 ztos kernel: mif: LNK-RX(23): f8 eb 17 00 13 00 1f 00 07 01 03 01 04 00 00 63 ...
+Nov 11 08:41:57 ztos kernel: mif: rx_demux: shmem: ERR! umts_ipc0 is not opened
+Nov 11 08:41:57 ztos kernel: mif: io_dev_recv_skb_single_from_link_dev: umts_ipc0<-shmem: ERR! rx_demux fail (err -19)
+Nov 11 08:41:57 ztos kernel: mif: pass_skb_to_demux: shmem: umts_ipc0<-ss360ap: ERR! umts_ipc0->recv_skb fail (-19)
+Nov 11 08:41:57 ztos tailscaled[545]: monitor: RTM_DELROUTE: src=192.168.240.1/0, dst=192.168.240.0/24, gw=, outif=14, table=254
+Nov 11 08:41:57 ztos tailscaled[545]: monitor: RTM_DELROUTE: src=192.168.240.1/0, dst=192.168.240.255/32, gw=, outif=14, table=255
+Nov 11 08:41:57 ztos tailscaled[545]: monitor: RTM_DELROUTE: src=192.168.240.1/0, dst=192.168.240.1/32, gw=, outif=14, table=255
+Nov 11 08:41:57 ztos tailscaled[545]: monitor: RTM_DELROUTE: src=, dst=fe80::216:3eff:fe00:1/128, gw=, outif=14, table=255
+Nov 11 08:41:57 ztos tailscaled[545]: monitor: RTM_DELROUTE: src=, dst=fe80::/64, gw=, outif=14, table=254
+Nov 11 08:41:57 ztos tailscaled[545]: monitor: RTM_DELROUTE: src=, dst=ff00::/8, gw=, outif=14, table=255
+Nov 11 08:41:57 ztos NetworkManager[466]: <info>  [1794408117.7458] device (waydroid0): state change: activated -> unmanaged (reason 'unmanaged-external-down', managed-type: 'external')
+Nov 11 08:41:57 ztos NetworkManager[466]: <info>  [1794408117.7471] manager: NetworkManager state is now DISCONNECTED
+Nov 11 08:41:57 ztos dbus-broker-launch[462]: Activation request for 'org.freedesktop.nm_dispatcher' failed.
+Nov 11 08:41:57 ztos systemd[1]: Stopping Permit User Sessions...
+Nov 11 08:41:57 ztos systemd[1]: Stopping User Runtime Directory /run/user/1000...
+Nov 11 08:41:57 ztos systemd[1]: Stopping ztOSIAL: the phone's hardware interfaces (org.ztos.ial)...
+Nov 11 08:41:57 ztos systemd[1]: ztos-iald.service: Deactivated successfully.
+Nov 11 08:41:57 ztos systemd[1]: Stopped ztOSIAL: the phone's hardware interfaces (org.ztos.ial).
+Nov 11 08:41:57 ztos systemd[1]: ztos-iald.service: Consumed 9.725s CPU time over 56min 9.963s wall clock time, 39.9M memory peak, 6.5M memory swap peak.
+Nov 11 08:41:57 ztos systemd[1]: systemd-user-sessions.service: Deactivated successfully.
+Nov 11 08:41:57 ztos systemd[1]: Stopped Permit User Sessions.
+Nov 11 08:41:57 ztos systemd[1]: Stopped target Network.
+Nov 11 08:41:57 ztos systemd[1]: Stopped target Remote File Systems.
+Nov 11 08:41:57 ztos wpa_supplicant[555]: wlp1s0: Do not deauthenticate as part of interface deinit since WoWLAN is enabled
+Nov 11 08:41:57 ztos systemd[1]: systemd-userdb-load-credentials.service: Deactivated successfully.
+Nov 11 08:41:57 ztos systemd[1]: Stopped Load JSON user/group Records from Credentials.
+Nov 11 08:41:57 ztos systemd[1]: Stopping WPA supplicant...
+Nov 11 08:41:57 ztos systemd[1]: run-user-1000.mount: Deactivated successfully.
+Nov 11 08:41:57 ztos systemd[1]: Unmounted /run/user/1000.
+Nov 11 08:41:57 ztos systemd[1]: var-lib-waydroid-rootfs-vendor-waydroid.prop.mount: Deactivated successfully.
+Nov 11 08:41:57 ztos systemd[1]: Unmounted /var/lib/waydroid/rootfs/vendor/waydroid.prop.
+Nov 11 08:41:58 ztos systemd[1]: var-lib-waydroid-rootfs-vendor.mount: Deactivated successfully.
+Nov 11 08:41:58 ztos systemd[1]: Unmounted /var/lib/waydroid/rootfs/vendor.
+Nov 11 08:41:58 ztos kernel: EXT4-fs (loop1): unmounting filesystem 8955afe7-70a4-4cf8-8048-a4503ce2d01d.
+Nov 11 08:41:58 ztos systemd[1]: user-runtime-dir@1000.service: Deactivated successfully.
+Nov 11 08:41:58 ztos systemd[1]: Stopped User Runtime Directory /run/user/1000.
+Nov 11 08:41:58 ztos systemd[1]: var-lib-waydroid-rootfs.mount: Deactivated successfully.
+Nov 11 08:41:58 ztos systemd[1]: Unmounted /var/lib/waydroid/rootfs.
+Nov 11 08:41:58 ztos systemd[1]: Removed slice User Slice of UID 1000.
+Nov 11 08:41:58 ztos systemd[1]: user-1000.slice: Consumed 17min 13.105s CPU time over 56min 9.095s wall clock time, 1.3G memory peak, 161.9M memory swap peak.
+Nov 11 08:41:58 ztos systemd[1]: Stopping User Login Management...
+Nov 11 08:41:58 ztos wpa_supplicant[555]: wlp1s0: CTRL-EVENT-DSCP-POLICY clear_all
+Nov 11 08:41:58 ztos wpa_supplicant[555]: nl80211: deinit ifname=wlp1s0 disabled_11b_rates=0
+Nov 11 08:41:58 ztos kernel: ieee80211 phy0: brcmf_msgbuf_tx_ioctl: Failed to reserve space in commonring
+Nov 11 08:41:58 ztos kernel: ieee80211 phy0: brcmf_cfg80211_get_channel: chanspec failed (-12)
+Nov 11 08:41:58 ztos kernel: ieee80211 phy0: brcmf_msgbuf_tx_ioctl: Failed to reserve space in commonring
+Nov 11 08:41:58 ztos kernel: ieee80211 phy0: brcmf_cfg80211_get_tx_power: error (-12)
+Nov 11 08:41:58 ztos wpa_supplicant[555]: wlp1s0: CTRL-EVENT-TERMINATING
+Nov 11 08:41:58 ztos NetworkManager[466]: <info>  [1794408118.0499] device (wlp1s0): supplicant interface state: disconnected -> internal-down
+Nov 11 08:41:58 ztos NetworkManager[466]: <info>  [1794408118.0504] device (wlp1s0): state change: disconnected -> unavailable (reason 'supplicant-failed', managed-type: 'full')
+Nov 11 08:41:58 ztos kernel: ieee80211 phy0: brcmf_msgbuf_tx_ioctl: Failed to reserve space in commonring
+Nov 11 08:41:58 ztos kernel: ieee80211 phy0: brcmf_cfg80211_get_channel: chanspec failed (-12)
+Nov 11 08:41:58 ztos systemd[1]: wpa_supplicant.service: Deactivated successfully.
+Nov 11 08:41:58 ztos kernel: ieee80211 phy0: brcmf_msgbuf_tx_ioctl: Failed to reserve space in commonring
+Nov 11 08:41:58 ztos systemd[1]: Stopped WPA supplicant.
+Nov 11 08:41:58 ztos kernel: ieee80211 phy0: brcmf_cfg80211_get_tx_power: error (-12)
+Nov 11 08:41:58 ztos NetworkManager[466]: <info>  [1794408118.0592] device (p2p-dev-wlp1s0): state change: disconnected -> unavailable (reason 'supplicant-failed', managed-type: 'full')
+Nov 11 08:41:58 ztos NetworkManager[466]: <warn>  [1794408118.0593] device (p2p-dev-wlp1s0): error setting IPv4 forwarding to '1': Resource temporarily unavailable
+Nov 11 08:41:58 ztos NetworkManager[466]: <error> [1794408118.0597] device (wlp1s0): Couldn't initialize supplicant interface: Name owner lost
+Nov 11 08:41:58 ztos kernel: EXT4-fs (loop0): unmounting filesystem e9d74858-d524-41f7-be60-f850f9b93e08.
+Nov 11 08:41:58 ztos systemd[1]: systemd-logind.service: Deactivated successfully.
+Nov 11 08:41:58 ztos systemd[1]: Stopped User Login Management.
+Nov 11 08:41:58 ztos systemd[1]: systemd-logind.service: Consumed 1.683s CPU time over 56min 10.158s wall clock time, 3.1M memory peak, 8K memory swap peak.
+Nov 11 08:41:58 ztos waydroid[530]: [08:41:58] Terminating session because the container was stopped
+Nov 11 08:41:58 ztos waydroid[530]: [gbinder] Service manager /dev/anbox-binder has appeared
+Nov 11 08:41:58 ztos tailscaled[545]: logtail: upload: log upload of 184 bytes not-compressed failed: Post "https://log.tailscale.com/c/tailnode.log.tailscale.io/207ae152d06407fcb5d55305e0c718fe0f3338f72c15de326f2d185d3c568a41": context canceled
+Nov 11 08:41:58 ztos systemd[1]: waydroid-container.service: Deactivated successfully.
+Nov 11 08:41:58 ztos systemd[1]: Stopped Waydroid Container.
+Nov 11 08:41:58 ztos systemd[1]: waydroid-container.service: Consumed 1.714s CPU time over 56min 10.045s wall clock time, 49.1M memory peak, 8.7M memory swap peak.
+Nov 11 08:41:58 ztos systemd[1]: zrn-rtc.service: Deactivated successfully.
+Nov 11 08:41:58 ztos systemd[1]: Stopped RTC wake alarms (zrn-exynos-rtc) before Android starts, so its alarm clock can wake the phone.
+Nov 11 08:41:58 ztos tailscaled[35183]: TPM: error opening: stat /dev/tpmrm0: no such file or directory
+Nov 11 08:41:58 ztos tailscaled[35183]: Program starting: v1.104.5, Go 1.27.3-X:nodwarf5: []string{"/usr/sbin/tailscaled", "--cleanup"}
+Nov 11 08:41:58 ztos tailscaled[35183]: LogID: 659ca65e059a84607f36497e003e273af67f4e6a50085511a9bd6babbc27417d
+Nov 11 08:41:58 ztos tailscaled[35183]: logpolicy: using $STATE_DIRECTORY, "/var/lib/tailscale"
+Nov 11 08:41:58 ztos tailscaled[35183]: dns: [resolved-ping=yes rc=resolved resolved=nss nm=yes nm-resolved=yes nm-safe=no resolv-conf-mode=stub ret=systemd-resolved]
+Nov 11 08:41:58 ztos tailscaled[35183]: dns: using "systemd-resolved" mode
+Nov 11 08:41:58 ztos tailscaled[35183]: creating dns cleanup: route ip+net: no such network interface
+Nov 11 08:41:58 ztos tailscaled[35183]: logtail: dial "log.tailscale.com:443" failed: dial tcp: lookup log.tailscale.com: Temporary failure in name resolution (in 4ms), trying bootstrap...
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp3.tailscale.com", "68.183.179.66") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp3.tailscale.com", "68.183.179.66") for "log.tailscale.com" error: Get "https://derp3.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp 68.183.179.66:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp4e.tailscale.com", "2a03:b0c0:3:d0::29:9001") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp4e.tailscale.com", "2a03:b0c0:3:d0::29:9001") for "log.tailscale.com" error: Get "https://derp4e.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp [2a03:b0c0:3:d0::29:9001]:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp2e.tailscale.com", "192.73.252.134") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp2e.tailscale.com", "192.73.252.134") for "log.tailscale.com" error: Get "https://derp2e.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp 192.73.252.134:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp8c.tailscale.com", "2a03:b0c0:1:d0::e1f:4001") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp8c.tailscale.com", "2a03:b0c0:1:d0::e1f:4001") for "log.tailscale.com" error: Get "https://derp8c.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp [2a03:b0c0:1:d0::e1f:4001]:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp8d.tailscale.com", "178.62.44.132") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp8d.tailscale.com", "178.62.44.132") for "log.tailscale.com" error: Get "https://derp8d.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp 178.62.44.132:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp7.tailscale.com", "2401:c080:1000:467f:5400:2ff:feee:22aa") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp7.tailscale.com", "2401:c080:1000:467f:5400:2ff:feee:22aa") for "log.tailscale.com" error: Get "https://derp7.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp [2401:c080:1000:467f:5400:2ff:feee:22aa]:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp10.tailscale.com", "137.220.36.168") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp10.tailscale.com", "137.220.36.168") for "log.tailscale.com" error: Get "https://derp10.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp 137.220.36.168:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp11.tailscale.com", "2600:1f1e:ee4:5611:ec5c:1736:d43b:a454") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp11.tailscale.com", "2600:1f1e:ee4:5611:ec5c:1736:d43b:a454") for "log.tailscale.com" error: Get "https://derp11.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp [2600:1f1e:ee4:5611:ec5c:1736:d43b:a454]:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp2f.tailscale.com", "208.111.34.178") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp2f.tailscale.com", "208.111.34.178") for "log.tailscale.com" error: Get "https://derp2f.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp 208.111.34.178:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp5.tailscale.com", "2001:19f0:5801:10b7:5400:2ff:feaa:284c") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp5.tailscale.com", "2001:19f0:5801:10b7:5400:2ff:feaa:284c") for "log.tailscale.com" error: Get "https://derp5.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp [2001:19f0:5801:10b7:5400:2ff:feaa:284c]:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp8b.tailscale.com", "46.101.74.201") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp8b.tailscale.com", "46.101.74.201") for "log.tailscale.com" error: Get "https://derp8b.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp 46.101.74.201:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: trying bootstrapDNS("derp4d.tailscale.com", "2a03:b0c0:3:d0::1501:b001") for "log.tailscale.com" ...
+Nov 11 08:41:58 ztos tailscaled[35183]: bootstrapDNS("derp4d.tailscale.com", "2a03:b0c0:3:d0::1501:b001") for "log.tailscale.com" error: Get "https://derp4d.tailscale.com/bootstrap-dns?q=log.tailscale.com": dial tcp [2a03:b0c0:3:d0::1501:b001]:443: connect: network is unreachable
+Nov 11 08:41:58 ztos tailscaled[35183]: logtail: upload: log upload of 28153 bytes compressed failed: Post "https://log.tailscale.com/c/tailnode.log.tailscale.io/207ae152d06407fcb5d55305e0c718fe0f3338f72c15de326f2d185d3c568a41": failed to resolve "log.tailscale.com": no DNS fallback candidates remain for "log.tailscale.com"
+Nov 11 08:41:58 ztos tailscaled[35183]: router: enumerating tailscale0 addresses for cleanup failed: failed to look up link "tailscale0": Link not found
+Nov 11 08:41:58 ztos tailscaled[35183]: flushing log.
+Nov 11 08:41:58 ztos tailscaled[35183]: logger closing down
+Nov 11 08:41:59 ztos systemd[1]: tailscaled.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Tailscale node agent.
+Nov 11 08:41:59 ztos systemd[1]: tailscaled.service: Consumed 1min 20.014s CPU time over 56min 11.231s wall clock time, 88.9M memory peak, 17.2M memory swap peak.
+Nov 11 08:41:59 ztos systemd[1]: Stopping Network Manager...
+Nov 11 08:41:59 ztos NetworkManager[466]: <info>  [1794408119.7253] caught SIGTERM, shutting down normally.
+Nov 11 08:41:59 ztos NetworkManager[466]: <info>  [1794408119.7336] device (p2p-dev-wlp1s0): state change: unavailable -> unmanaged (reason 'unmanaged-link-not-init', managed-type: 'removed')
+Nov 11 08:41:59 ztos dbus-broker-launch[462]: Activation request for 'org.freedesktop.nm_dispatcher' failed.
+Nov 11 08:41:59 ztos NetworkManager[466]: <info>  [1794408119.7836] exiting (success)
+Nov 11 08:41:59 ztos systemd[1]: NetworkManager.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Network Manager.
+Nov 11 08:41:59 ztos systemd[1]: NetworkManager.service: Consumed 12.072s CPU time over 56min 11.922s wall clock time, 30.5M memory peak, 4.2M memory swap peak.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Basic System.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Preparation for Network.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Path Units.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Slice Units.
+Nov 11 08:41:59 ztos systemd[1]: Removed slice User and Session Slice.
+Nov 11 08:41:59 ztos systemd[1]: user.slice: Consumed 17min 13.105s CPU time over 56min 18.571s wall clock time, 1.3G memory peak, 161.9M memory swap peak.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Socket Units.
+Nov 11 08:41:59 ztos systemd[1]: dirmngr@etc-pacman.d-gnupg.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed GnuPG network certificate management daemon for /etc/pacman.d/gnupg.
+Nov 11 08:41:59 ztos systemd[1]: Removed slice Slice /system/dirmngr.
+Nov 11 08:41:59 ztos systemd[1]: gpg-agent-browser@etc-pacman.d-gnupg.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed GnuPG cryptographic agent and passphrase cache (access for web browsers) for /etc/pacman.d/gnupg.
+Nov 11 08:41:59 ztos systemd[1]: Removed slice Slice /system/gpg-agent-browser.
+Nov 11 08:41:59 ztos systemd[1]: gpg-agent-extra@etc-pacman.d-gnupg.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed GnuPG cryptographic agent and passphrase cache (restricted) for /etc/pacman.d/gnupg.
+Nov 11 08:41:59 ztos systemd[1]: Removed slice Slice /system/gpg-agent-extra.
+Nov 11 08:41:59 ztos systemd[1]: gpg-agent-ssh@etc-pacman.d-gnupg.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed GnuPG cryptographic agent (ssh-agent emulation) for /etc/pacman.d/gnupg.
+Nov 11 08:41:59 ztos systemd[1]: Removed slice Slice /system/gpg-agent-ssh.
+Nov 11 08:41:59 ztos systemd[1]: gpg-agent@etc-pacman.d-gnupg.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed GnuPG cryptographic agent and passphrase cache for /etc/pacman.d/gnupg.
+Nov 11 08:41:59 ztos systemd[1]: Removed slice Slice /system/gpg-agent.
+Nov 11 08:41:59 ztos systemd[1]: keyboxd@etc-pacman.d-gnupg.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed GnuPG public key management service for /etc/pacman.d/gnupg.
+Nov 11 08:41:59 ztos systemd[1]: Removed slice Slice /system/keyboxd.
+Nov 11 08:41:59 ztos systemd[1]: polkit-agent-helper.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed Authorization Manager Agent Helper.
+Nov 11 08:41:59 ztos systemd[1]: sshd-unix-local.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed OpenSSH Server Socket (systemd-ssh-generator, AF_UNIX Local).
+Nov 11 08:41:59 ztos systemd[1]: systemd-hostnamed.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed Hostname Service Socket.
+Nov 11 08:41:59 ztos systemd[1]: systemd-importd.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed Disk Image Download Service Socket.
+Nov 11 08:41:59 ztos systemd[1]: systemd-logind-varlink.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed User Login Management Varlink Socket.
+Nov 11 08:41:59 ztos systemd[1]: systemd-machined.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed Virtual Machine and Container Registration Service Socket.
+Nov 11 08:41:59 ztos systemd[1]: systemd-mute-console.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed Console Output Muting Service Socket.
+Nov 11 08:41:59 ztos systemd[1]: systemd-repart.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed Disk Repartitioning Service Socket.
+Nov 11 08:41:59 ztos systemd[1]: systemd-sysinstall.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed System Install Tool.
+Nov 11 08:41:59 ztos systemd[1]: ztos-bt-adwatch.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed ztOS: advertisements as received, for Android apps' Bluetooth scans.
+Nov 11 08:41:59 ztos systemd[1]: ztos-bt-connparam.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed ztOS: LE connection updates for Android apps (requestConnectionPriority).
+Nov 11 08:41:59 ztos dbus-broker[465]: Dispatched 309561 messages @ 38(±55)μs / message.
+Nov 11 08:41:59 ztos systemd[1]: Stopping D-Bus System Message Bus...
+Nov 11 08:41:59 ztos systemd[1]: dbus-broker.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped D-Bus System Message Bus.
+Nov 11 08:41:59 ztos systemd[1]: dbus-broker.service: Consumed 47.309s CPU time over 56min 12.083s wall clock time, 10.1M memory peak.
+Nov 11 08:41:59 ztos systemd[1]: dbus.socket: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Closed D-Bus System Message Bus Socket.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target System Initialization.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Local dm-clone Devices.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Local Encrypted Volumes.
+Nov 11 08:41:59 ztos systemd[1]: systemd-ask-password-console.path: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Dispatch Password Requests to Console Directory Watch.
+Nov 11 08:41:59 ztos systemd[1]: systemd-ask-password-wall.path: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Forward Password Requests to Wall Directory Watch.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Image Downloads.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Local Integrity Protected Volumes.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Local Verity Protected Volumes.
+Nov 11 08:41:59 ztos systemd[1]: Stopping Load/Save Screen Backlight Brightness of backlight:s9p-panel...
+Nov 11 08:41:59 ztos systemd[1]: systemd-pstore.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Platform Persistent Storage Archival.
+Nov 11 08:41:59 ztos systemd[1]: Stopping Network Time Synchronization...
+Nov 11 08:41:59 ztos systemd[1]: systemd-update-done.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Update is Completed.
+Nov 11 08:41:59 ztos systemd[1]: ldconfig.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Rebuild Dynamic Linker Cache.
+Nov 11 08:41:59 ztos systemd[1]: systemd-journal-catalog-update.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Rebuild Journal Catalog.
+Nov 11 08:41:59 ztos systemd[1]: Stopping Record System Boot/Shutdown in UTMP...
+Nov 11 08:41:59 ztos systemd[1]: systemd-timesyncd.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Network Time Synchronization.
+Nov 11 08:41:59 ztos systemd[1]: Stopping Network Name Resolution...
+Nov 11 08:41:59 ztos systemd[1]: systemd-backlight@backlight:s9p-panel.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Load/Save Screen Backlight Brightness of backlight:s9p-panel.
+Nov 11 08:41:59 ztos systemd[1]: Removed slice Slice /system/systemd-backlight.
+Nov 11 08:41:59 ztos systemd[1]: systemd-update-utmp.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Record System Boot/Shutdown in UTMP.
+Nov 11 08:41:59 ztos systemd[1]: systemd-tmpfiles-setup.service: Deactivated successfully.
+Nov 11 08:41:59 ztos systemd[1]: Stopped Create System Files and Directories.
+Nov 11 08:41:59 ztos systemd[1]: Stopped target Local File Systems.
+Nov 11 08:41:59 ztos systemd[1]: Unmounting /mnt/system...
+Nov 11 08:41:59 ztos systemd[1]: Unmounting /mnt/vendor...
+Nov 11 08:41:59 ztos systemd[1]: Unmounting /run/android/apex/com.android.runtime...
+Nov 11 08:41:59 ztos systemd[1]: Unmounting /run/android/data...
+Nov 11 08:41:59 ztos systemd[1]: Unmounting /run/android/dev/hugepages...
+Nov 11 08:41:59 ztos systemd[1]: Unmounting /run/android/dev/mqueue...
+Nov 11 08:41:59 ztos systemd[1]: Unmounting /run/android/dev/pts...
+Nov 11 08:41:59 ztos systemd[1]: Unmounting /run/android/dev/shm...
+Nov 11 08:41:59 ztos systemd[1]: Unmounting /run/android/mnt/vendor/efs...
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/proc...
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/sys/fs/bpf...
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/sys/fs/cgroup...
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/sys/fs/fuse/connections...
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/sys/fs/pstore...
+Nov 11 08:42:00 ztos kernel: EXT4-fs (sda3): unmounting filesystem 57f8f4bc-abf4-655f-bf67-946fc0f9f25b.
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/sys/kernel/config...
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/sys/kernel/debug...
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/sys/kernel/security...
+Nov 11 08:42:00 ztos umount[35244]: umount: /run/android/sys/fs/cgroup: target is busy.
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/system...
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/vendor...
+Nov 11 08:42:00 ztos systemd[1]: Unmounting Temporary Directory /tmp...
+Nov 11 08:42:00 ztos systemd[1]: sys-fs-fuse-connections.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: sys-kernel-config.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: sys-kernel-debug.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: systemd-resolved.service: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Stopped Network Name Resolution.
+Nov 11 08:42:00 ztos systemd[1]: systemd-resolved.service: Consumed 1.880s CPU time over 56min 18.017s wall clock time, 5.3M memory peak, 8K memory swap peak.
+Nov 11 08:42:00 ztos systemd[1]: mnt-system.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos kernel: EXT4-fs (sda19): unmounting filesystem cdccee81-4c36-5017-bf06-b4dd410c0d8f.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /mnt/system.
+Nov 11 08:42:00 ztos systemd[1]: mnt-vendor.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /mnt/vendor.
+Nov 11 08:42:00 ztos systemd[1]: run-android-apex-com.android.runtime.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/apex/com.android.runtime.
+Nov 11 08:42:00 ztos systemd[1]: run-android-data.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/data.
+Nov 11 08:42:00 ztos systemd[1]: run-android-dev-hugepages.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/dev/hugepages.
+Nov 11 08:42:00 ztos systemd[1]: run-android-dev-mqueue.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/dev/mqueue.
+Nov 11 08:42:00 ztos systemd[1]: run-android-dev-pts.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/dev/pts.
+Nov 11 08:42:00 ztos systemd[1]: run-android-dev-shm.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/dev/shm.
+Nov 11 08:42:00 ztos kernel: EXT4-fs (sda18): unmounting filesystem fa7e4159-4411-51a1-910a-d0c01c498bc6.
+Nov 11 08:42:00 ztos systemd[1]: run-android-mnt-vendor-efs.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/mnt/vendor/efs.
+Nov 11 08:42:00 ztos systemd[1]: run-android-proc.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/proc.
+Nov 11 08:42:00 ztos systemd[1]: run-android-sys-fs-bpf.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/sys/fs/bpf.
+Nov 11 08:42:00 ztos systemd[1]: run-android-sys-fs-cgroup.mount: Mount process exited, code=exited, status=32/n/a
+Nov 11 08:42:00 ztos systemd[1]: Failed unmounting /run/android/sys/fs/cgroup.
+Nov 11 08:42:00 ztos systemd[1]: run-android-sys-fs-fuse-connections.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/sys/fs/fuse/connections.
+Nov 11 08:42:00 ztos systemd[1]: run-android-sys-fs-pstore.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/sys/fs/pstore.
+Nov 11 08:42:00 ztos systemd[1]: run-android-sys-kernel-config.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/sys/kernel/config.
+Nov 11 08:42:00 ztos systemd[1]: run-android-sys-kernel-debug.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/sys/kernel/debug.
+Nov 11 08:42:00 ztos systemd[1]: run-android-sys-kernel-security.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/sys/kernel/security.
+Nov 11 08:42:00 ztos systemd[1]: run-android-system.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/system.
+Nov 11 08:42:00 ztos systemd[1]: run-android-vendor.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/vendor.
+Nov 11 08:42:00 ztos systemd[1]: tmp.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted Temporary Directory /tmp.
+Nov 11 08:42:00 ztos systemd[1]: systemd-resolved-monitor.socket: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Closed Resolve Monitor Varlink Socket.
+Nov 11 08:42:00 ztos systemd[1]: systemd-resolved-varlink.socket: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Closed Resolve Service Varlink Socket.
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/dev...
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android/sys...
+Nov 11 08:42:00 ztos systemd[1]: systemd-sysctl.service: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Stopped Apply Kernel Variables.
+Nov 11 08:42:00 ztos systemd[1]: systemd-coredump.socket: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Closed Process Core Dump Socket.
+Nov 11 08:42:00 ztos systemd[1]: systemd-modules-load.service: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Stopped Load Kernel Modules.
+Nov 11 08:42:00 ztos umount[35275]: umount: /run/android/sys: target is busy.
+Nov 11 08:42:00 ztos systemd[1]: run-android-sys.mount: Mount process exited, code=exited, status=32/n/a
+Nov 11 08:42:00 ztos systemd[1]: Failed unmounting /run/android/sys.
+Nov 11 08:42:00 ztos systemd[1]: run-android-dev.mount: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Unmounted /run/android/dev.
+Nov 11 08:42:00 ztos systemd[1]: Unmounting /run/android...
+Nov 11 08:42:00 ztos umount[35278]: umount: /run/android: target is busy.
+Nov 11 08:42:00 ztos systemd[1]: run-android.mount: Mount process exited, code=exited, status=32/n/a
+Nov 11 08:42:00 ztos systemd[1]: Failed unmounting /run/android.
+Nov 11 08:42:00 ztos systemd[1]: Stopped target Preparation for Local File Systems.
+Nov 11 08:42:00 ztos systemd[1]: Stopped target Swaps.
+Nov 11 08:42:00 ztos systemd[1]: Deactivating swap /dev/disk/by-diskseq/9...
+Nov 11 08:42:00 ztos systemd[1]: systemd-tmpfiles-setup-dev.service: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Stopped Create Static Device Nodes in /dev.
+Nov 11 08:42:00 ztos systemd[1]: systemd-sysusers.service: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Stopped Create System Users.
+Nov 11 08:42:00 ztos systemd[1]: systemd-remount-fs.service: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Stopped Remount Root and Kernel File Systems.
+Nov 11 08:42:00 ztos systemd[1]: systemd-fsck-root.service: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Stopped File System Check on Root Device.
+Nov 11 08:42:00 ztos systemd[1]: systemd-tmpfiles-setup-dev-early.service: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Stopped Create Static Device Nodes in /dev gracefully.
+Nov 11 08:42:00 ztos systemd[1]: Reached target System Shutdown.
+Nov 11 08:42:00 ztos systemd[1]: dev-disk-by\x2ddiskseq-9.swap: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Deactivated swap /dev/disk/by-diskseq/9.
+Nov 11 08:42:00 ztos systemd[1]: dev-disk-by\x2duuid-2a747c28\x2d129d\x2d4aed\x2d94d1\x2d700c0fc0ca42.swap: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Deactivated swap /dev/disk/by-uuid/2a747c28-129d-4aed-94d1-700c0fc0ca42.
+Nov 11 08:42:00 ztos systemd[1]: dev-zram0.swap: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Deactivated swap /dev/zram0.
+Nov 11 08:42:00 ztos systemd[1]: Reached target Unmount All Filesystems.
+Nov 11 08:42:00 ztos systemd[1]: Reached target Late Shutdown Services.
+Nov 11 08:42:00 ztos systemd[1]: systemd-poweroff.service: Deactivated successfully.
+Nov 11 08:42:00 ztos systemd[1]: Finished System Power Off.
+Nov 11 08:42:00 ztos systemd[1]: Reached target System Power Off.
+Nov 11 08:42:00 ztos systemd[1]: Shutting down.
+Nov 11 08:42:00 ztos systemd-shutdown[1]: Syncing filesystems and block devices.
+Nov 11 08:42:00 ztos systemd-shutdown[1]: Sending SIGTERM to remaining processes...
+Nov 11 08:42:00 ztos systemd-journald[226]: Received SIGTERM from PID 1 (systemd-shutdow).
+Nov 11 08:42:00 ztos systemd-journald[226]: Journal stopped

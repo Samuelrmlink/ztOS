@@ -1,0 +1,200 @@
+ input limit ramps again
+[    0.952606] s9p-decon 16030000.decon: irq 99 (index 0) pending 00001000
+[    0.962197] s9p-decon 16030000.decon: irq 100 (index 1) pending 00002000
+[    1.048861] Console: switching to colour frame buffer device 180x185
+[    1.096094] s9p-decon 16030000.decon: [drm] fb0: exynosdrmfb frame buffer device
+[    1.096202] s9p-decon 16030000.decon: [drm] DECON scanout 1440x2960 on window 5
+[    1.099985] input: gpio-keys as /devices/platform/gpio-keys/input/input0
+[    1.101612] cfg80211: Loading compiled-in X.509 certificates for regulatory database
+[    1.103632] Loaded X.509 cert 'sforshee: 00b28ddf47aef9cea7'
+[    1.103858] Loaded X.509 cert 'wens: 61c038651aabdcf94bd0ac7ff06c7248db18c600'
+[    1.103905] clk: Disabling unused clocks
+[    1.103925] PM: genpd: Disabling unused power domains
+[    1.113833] exynos9810-ufs 11120000.ufs: ufshcd_populate_vreg: Unable to find vdd-hba-supply regulator, assuming enabled
+[    1.113872] exynos9810-ufs 11120000.ufs: ufshcd_populate_vreg: unable to find vcc-max-microamp
+[    1.113897] exynos9810-ufs 11120000.ufs: ufshcd_populate_vreg: Unable to find vccq-supply regulator, assuming enabled
+[    1.113927] exynos9810-ufs 11120000.ufs: ufshcd_populate_vreg: Unable to find vccq2-supply regulator, assuming enabled
+[    1.122983] exynos9810-ufs 11120000.ufs: unipro mclk 166500000 Hz
+[    1.134207] exynos9810-ufs 11120000.ufs: hw_rev=5 refclk_sel=00000000
+[    1.134226] exynos9810-ufs 11120000.ufs: inherited 1us=166 clkstop=00000000 force_hcs=00000de0
+[    1.142052] exynos9810-ufs 11120000.ufs: fmp: desctype 0 -> 0
+[    1.142079] exynos9810-ufs 11120000.ufs: fmp: smu init -> 0 sg_entry=16
+[    1.142096] exynos9810-ufs 11120000.ufs: limits: sg=128 sectors=2048 seg_size=4096
+[    1.142124] exynos9810-ufs 11120000.ufs: dma mask 64 bit err=0
+[    1.142463] exynos9810-ufs 11120000.ufs: vcc off err=0 enabled=0
+[    1.163505] exynos9810-ufs 11120000.ufs: vcc on err=0 enabled=1
+[    1.216647] exynos9810-ufs 11120000.ufs: device reset done, gpio=00000001
+[    1.293238] scsi host0: ufshcd
+[    1.293627] exynos9810-ufs 11120000.ufs: available lanes rx 2 tx 2
+[    1.294781] exynos9810-ufs 11120000.ufs: pre-link: HCE=00000001 HCS=00000008 IS=00000000 IE=00000470
+[    1.294831] exynos9810-ufs 11120000.ufs: UIC cmd=00000002 args=40200000/00000000/00000000 errors PA=00000000 DL=00000000 DME=00000000
+[    1.294889] exynos9810-ufs 11120000.ufs: link clocks stop=00000008 force=00000de0 refclk=00000000 gpio=00000001 phy=00010001 vcc=1
+[    1.294947] exynos9810-ufs 11120000.ufs: PMA readback 74=00000010 8c=00000000 lane0-134=00000043 lane1-134=00000043
+[    1.294997] exynos9810-ufs 11120000.ufs: pre-link: fsm=00000000 acg=00000001 hold=00000000
+[    1.295067] exynos9810-ufs 11120000.ufs: pre-link: live dme_get err=0 avail_rx=2
+[    1.349389] exynos9810-ufs 11120000.ufs: power mode: M(1) G(3) L(2) HS-series(2)
+[    1.350991] scsi 0:0:0:49488: Well-known LUN    SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+[    1.360387] scsi 0:0:0:49476: Well-known LUN    SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+[    1.361831] s9p-g3d-pd 14064040.power-domain: G3D LPM init: memory=00000002 option=00000001 duration=00000363 sci=af4d0001 pwr=896b0001
+[    1.362204] scsi 0:0:0:49456: Well-known LUN    SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+[    1.364398] scsi 0:0:0:0: Direct-Access     SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+[    1.366171] sd 0:0:0:0: [sda] 15616000 4096-byte logical blocks: (64.0 GB/59.6 GiB)
+[    1.366271] scsi 0:0:0:1: Direct-Access     SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+[    1.366305] sd 0:0:0:0: [sda] Write Protect is off
+[    1.366471] sd 0:0:0:0: [sda] Write cache: enabled, read cache: enabled, supports DPO and FUA
+[    1.366570] sd 0:0:0:0: [sda] Preferred minimum I/O size 8192 bytes
+[    1.366603] sd 0:0:0:0: [sda] Optimal transfer size 8192 bytes
+[    1.368384] sd 0:0:0:1: [sdb] 1024 4096-byte logical blocks: (4.19 MB/4.00 MiB)
+[    1.368431] scsi 0:0:0:2: Direct-Access     SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+[    1.368470] sd 0:0:0:1: [sdb] Write Protect is on
+[    1.368588] sd 0:0:0:1: [sdb] Write cache: disabled, read cache: enabled, supports DPO and FUA
+[    1.368667] sd 0:0:0:1: [sdb] Preferred minimum I/O size 8192 bytes
+[    1.368689] sd 0:0:0:1: [sdb] Optimal transfer size 8192 bytes
+[    1.369679] sd 0:0:0:2: [sdc] 1024 4096-byte logical blocks: (4.19 MB/4.00 MiB)
+[    1.369700] scsi 0:0:0:3: Direct-Access     SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+[    1.369780] sd 0:0:0:2: [sdc] Write Protect is on
+[    1.369905] sd 0:0:0:2: [sdc] Write cache: disabled, read cache: enabled, supports DPO and FUA
+[    1.369984] sd 0:0:0:2: [sdc] Preferred minimum I/O size 8192 bytes
+[    1.370006] sd 0:0:0:2: [sdc] Optimal transfer size 8192 bytes
+[    1.370890] scsi 0:0:0:4: Direct-Access     SAMSUNG  KLUCG2K1EA-B0C1  0001 PQ: 0 ANSI: 6
+[    1.371243] sd 0:0:0:3: [sdd] 2048 4096-byte logical blocks: (8.39 MB/8.00 MiB)
+[    1.371385] sd 0:0:0:3: [sdd] Write Protect is on
+[    1.371559] sd 0:0:0:3: [sdd] Write cache: disabled, read cache: enabled, supports DPO and FUA
+[    1.371652] sd 0:0:0:3: [sdd] Preferred minimum I/O size 8192 bytes
+[    1.371686] sd 0:0:0:3: [sdd] Optimal transfer size 8192 bytes
+[    1.372459] sd 0:0:0:4: [sde] 2048 4096-byte logical blocks: (8.39 MB/8.00 MiB)
+[    1.372591] sd 0:0:0:4: [sde] Write Protect is on
+[    1.372772] sd 0:0:0:4: [sde] Write cache: disabled, read cache: enabled, supports DPO and FUA
+[    1.372884] sd 0:0:0:4: [sde] Preferred minimum I/O size 8192 bytes
+[    1.372920] sd 0:0:0:4: [sde] Optimal transfer size 8192 bytes
+[    1.407944] sd 0:0:0:2: [sdc] Attached SCSI disk
+[    1.407947] sd 0:0:0:1: [sdb] Attached SCSI disk
+[    1.408660] sd 0:0:0:4: [sde] Attached SCSI disk
+[    1.410920] Alternate GPT is invalid, using primary GPT.
+[    1.411280]  sda: sda1 sda2 sda3 sda4 sda5 sda6 sda7 sda8 sda9 sda10 sda11 sda12 sda13 sda14 sda15 sda16 sda17 sda18 sda19 sda20 sda21 sda22 sda23 sda24 sda25
+[    1.412011]  sdd: sdd1
+[    1.414798] sd 0:0:0:3: [sdd] Attached SCSI disk
+[    1.422412] sd 0:0:0:0: [sda] Attached SCSI disk
+[    1.427688] Freeing unused kernel memory: 2944K
+[    1.427851] Run /init as init process
+[    1.471357] zboot| ===== zboot on 7.1.0-zboot-wd-dp6, Samsung Galaxy S9 (SM-G960) =====
+[    1.478057] zboot| cpus online: 0-7  mem: 3516 MB
+[    1.490973] zboot| deadman: reset in 600 s unless /run/zboot.hold exists
+[    1.513424] configfs-gadget.zboot gadget.0: HOST MAC 02:5a:42:00:00:02
+[    1.513459] configfs-gadget.zboot gadget.0: MAC 02:5a:42:00:00:01
+[    1.529819] zboot| usb: 10c00000.usb bound, telnet on 172.16.42.1
+[    1.598661] zboot| block devices after 0 tries: sda sda1 sda10 sda11 sda12 sda13 sda14 sda15 sda16 sda17 sda18 sda19 sda2 sda20 sda21 sda22 sda23 sda24 sda25 sda3 sda4 sda5 sda6 sda7 sda8 sda9 sdb sdc sdd sdd1 sde zram0
+[    1.599955] zboot| ZR_ARCH is /dev/sda25
+[    1.606242] EXT4-fs (sda25): mounted filesystem cb3fd559-aaea-43e5-9a4d-709ac4d0d134 ro with ordered data mode. Quota mode: none.
+[    1.680157] zboot| switch_root to /dev/sda25
+[    1.698194] zboot| deadman re-armed for the new root: touch /run/zboot.hold within 600 s
+[    1.769593] systemd[1]: System time advanced to timestamp on /var/lib/systemd/timesync/clock: Wed 2026-11-11 01:58:54 CST
+[    1.861543] systemd[1]: systemd 262.1-1-arch running in system mode (+PAM +AUDIT -SELINUX +APPARMOR -IMA +IPE +SMACK +SECCOMP +GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 +KMOD +LIBCRYPTSETUP +LIBCRYPTSETUP_PLUGINS +LIBFDISK +PCRE2 +PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD +BPF_FRAMEWORK -BTF +XKBCOMMON +UTMP +LIBARCHIVE)
+[    1.861714] systemd[1]: Detected architecture arm64.
+[    1.864896] systemd[1]: Hostname set to <ztos>.
+[    1.997406] systemd[1]: bpf-restrict-fs: BPF LSM hook not enabled in the kernel, BPF LSM not supported.
+[    1.997624] systemd[1]: Using hardware watchdog /dev/watchdog0: 'S3C2410 Watchdog', version 0.
+[    1.997661] systemd[1]: Watchdog running with a hardware timeout of 30s.
+[    2.428721] systemd[1]: multi-user.target: Found ordering cycle: ztos-variant.service/start after ztoscorenetworking-modem.service/start after multi-user.target/start - after ztos-variant.service
+[    2.428799] systemd[1]: multi-user.target: Job ztos-variant.service/start deleted to break ordering cycle starting with multi-user.target/start
+[    2.429775] systemd[1]: Queued start job for default target Graphical Interface.
+[    2.450261] systemd[1]: Created slice Slice /system/dirmngr.
+[    2.451062] systemd[1]: Created slice Slice /system/gpg-agent.
+[    2.451898] systemd[1]: Created slice Slice /system/gpg-agent-browser.
+[    2.452676] systemd[1]: Created slice Slice /system/gpg-agent-extra.
+[    2.453440] systemd[1]: Created slice Slice /system/gpg-agent-ssh.
+[    2.454165] systemd[1]: Created slice Slice /system/keyboxd.
+[    2.454922] systemd[1]: Created slice Slice /system/modprobe.
+[    2.455500] systemd[1]: Created slice User and Session Slice.
+[    2.455690] systemd[1]: Started Dispatch Password Requests to Console Directory Watch.
+[    2.455824] systemd[1]: Started Forward Password Requests to Wall Directory Watch.
+[    2.455937] systemd[1]: Arbitrary Executable File Formats File System Automount Point skipped, unmet condition check ConditionPathExists=/proc/sys/fs/binfmt_misc
+[    2.456033] systemd[1]: Reached target Local dm-clone Devices.
+[    2.456096] systemd[1]: Reached target Login Prompts.
+[    2.456147] systemd[1]: Reached target Image Downloads.
+[    2.456199] systemd[1]: Reached target Local Integrity Protected Volumes.
+[    2.456281] systemd[1]: Reached target Path Units.
+[    2.456337] systemd[1]: Reached target Remote File Systems.
+[    2.456386] systemd[1]: Reached target Slice Units.
+[    2.456449] systemd[1]: Reached target Swaps.
+[    2.456515] systemd[1]: Reached target Local Verity Protected Volumes.
+[    2.456737] systemd[1]: Listening on Device-mapper event daemon FIFOs.
+[    2.458190] systemd[1]: Listening on Query the User Interactively for a Password.
+[    2.460712] systemd[1]: Listening on Process Core Dump Socket.
+[    2.461916] systemd[1]: Listening on Credential Encryption/Decryption.
+[    2.463072] systemd[1]: Listening on Disk Encryption Enrollment Service Socket.
+[    2.467554] systemd[1]: Listening on Factory Reset Management.
+[    2.467698] systemd[1]: Listening on Hostname Service Socket.
+[    2.467860] systemd[1]: Listening on Journal Socket (/dev/log).
+[    2.468001] systemd[1]: Listening on Journal Sockets.
+[    2.472493] systemd[1]: Listening on Console Output Muting Service Socket.
+[    2.472581] systemd[1]: TPM PCR Measurements skipped, unmet condition check ConditionSecurity=measured-os
+[    2.472628] systemd[1]: Make TPM PCR Policy skipped, unmet condition check ConditionSecurity=measured-uki
+[    2.473392] systemd[1]: Listening on Disk Repartitioning Service Socket.
+[    2.473560] systemd[1]: Listening on Resolve Monitor Varlink Socket.
+[    2.473686] systemd[1]: Listening on Resolve Service Varlink Socket.
+[    2.474574] systemd[1]: Listening on Simple Block Device Backed Storage Provider.
+[    2.475468] systemd[1]: Listening on Simple File System Backed Storage Provider.
+[    2.476261] systemd[1]: Listening on System Install Tool.
+[    2.477335] systemd[1]: Listening on System Updates.
+[    2.477458] systemd[1]: Listening on udev Kernel Socket.
+[    2.477622] systemd[1]: Listening on udev Varlink Socket.
+[    2.477764] systemd[1]: Listening on User Database Manager Socket.
+[    2.479771] systemd[1]: Mounting Huge Pages File System...
+[    2.480722] systemd[1]: Mounting POSIX Message Queue File System...
+[    2.482003] systemd[1]: Mounting Kernel Debug File System...
+[    2.482139] systemd[1]: Kernel Trace File System skipped, unmet condition check ConditionPathExists=/sys/kernel/tracing
+[    2.482500] systemd[1]: tmp.mount: x-systemd.graceful-option=usrquota specified, but option is not available, suppressing.
+[    2.484634] systemd[1]: Mounting Temporary Directory /tmp...
+[    2.486783] systemd[1]: Starting Create List of Static Device Nodes...
+[    2.488813] systemd[1]: Load Kernel Module configfs skipped, unmet condition check ConditionKernelModuleLoaded=!configfs
+[    2.490650] systemd[1]: Load Kernel Module drm skipped, unmet condition check ConditionKernelModuleLoaded=!drm
+[    2.494326] systemd[1]: Starting Load Kernel Module efi_pstore...
+[    2.496542] systemd[1]: Load Kernel Module fuse skipped, unmet condition check ConditionKernelModuleLoaded=!fuse
+[    2.500327] systemd[1]: Mounting FUSE Control File System...
+[    2.504099] systemd[1]: Starting File System Check on Root Device...
+[    2.506150] systemd[1]: Clear Stale Hibernate Storage Info skipped, unmet condition check ConditionPathExists=/sys/firmware/efi/efivars/HibernateLocation-8cf2644b-4b0b-428f-9387-6d876050dc67
+[    2.514335] systemd[1]: Starting Journal Service...
+[    2.520886] systemd[1]: Starting Load Kernel Modules...
+[    2.523473] systemd[1]: TPM PCR Machine ID Measurement skipped, unmet condition check ConditionSecurity=measured-os
+[    2.525635] systemd[1]: TPM PCR OS Separator skipped, unmet condition check ConditionSecurity=measured-os
+[    2.527627] systemd[1]: Early TPM SRK Setup skipped, unmet condition check ConditionSecurity=measured-os
+[    2.529505] systemd[1]: TPM PCR NvPCR Initialization Separator skipped, unmet condition check ConditionPathExists=/etc/initrd-release
+[    2.531426] systemd[1]: Reached target Local Encrypted Volumes.
+[    2.533408] systemd[1]: TPM NvPCR Product ID Measurement skipped, unmet condition check ConditionSecurity=measured-os
+[    2.537059] systemd[1]: Starting Load udev Rules from Credentials...
+[    2.540915] systemd[1]: Starting Coldplug All udev Devices...
+[    2.555322] systemd-journald[233]: Collecting audit messages is disabled.
+[    2.568630] pca953x 96-0022: supply vcc not found, using dummy regulator
+[    2.570779] pca953x 96-0022: using auto increment
+[    2.576292] i2c-gpio i2c-expander: using lines 583 (SDA) and 582 (SCL)
+[    2.578547] zrn_flash: loading out-of-tree module taints kernel.
+[    2.578974] max77705-usbc 1-0025: Failed to create device link (0x180) with supplier usb-sbu-mux for /soc@0/i2c@14360000/usb-c@25/connector
+[    2.584807] i2c-gpio i2c-gpio.97: using lines 581 (SDA) and 580 (SCL)
+[    2.588062] zrn-flash: S2MPB02 id 0x00
+[    2.591052] ztos-fsck[/dev/sda25]: ZR_ARCH: clean, 207479/3481600 files, 6635536/13916928 blocks
+[    2.592971] zrn-flash: LDO9 control b0 -> b0
+[    2.821741] max77705-usbc 1-0025: DP: port altmode registered (vdo 00001c46: DFP_D pins 1c)
+[    2.825555] max77705-usbc 1-0025: typec port registered after 1 tries
+[    2.864320] EXT4-fs (sda25): re-mounted cb3fd559-aaea-43e5-9a4d-709ac4d0d134 r/w.
+[    2.893328] EXT4-fs (sda25): re-mounted cb3fd559-aaea-43e5-9a4d-709ac4d0d134 ro.
+[    2.900853] ztos-fsck: finished /dev/sda25 rc=0; log=/run/ztos-fsck/20261111-015855-sda25.log
+[    2.945771] systemd[1]: Started Journal Service.
+[20780.500538] systemd-shutdown[1]: Failed to set watchdog hardware timeout to 10min: Invalid argument
+[20781.116221] shutdown[1]: Failed to set watchdog hardware timeout to 10min: Invalid argument
+[20781.728030] rx_demux: 6 callbacks suppressed
+[20781.728378] mif: rx_demux: shmem: ERR! umts_ipc0 is not opened
+[20781.732130] io_dev_recv_skb_single_from_link_dev: 6 callbacks suppressed
+[20781.732485] mif: io_dev_recv_skb_single_from_link_dev: umts_ipc0<-shmem: ERR! rx_demux fail (err -19)
+[20781.736851] pass_skb_to_demux: 6 callbacks suppressed
+[20781.737072] mif: pass_skb_to_demux: shmem: umts_ipc0<-ss360ap: ERR! umts_ipc0->recv_skb fail (-19)
+[20782.166932] mif: ss310ap_shutdown: +++
+[20783.007202] mif: rx_demux: shmem: ERR! umts_ipc0 is not opened
+[20783.007375] mif: io_dev_recv_skb_single_from_link_dev: umts_ipc0<-shmem: ERR! rx_demux fail (err -19)
+[20783.007466] mif: pass_skb_to_demux: shmem: umts_ipc0<-ss360ap: ERR! umts_ipc0->recv_skb fail (-19)
+[20785.358104] mif: ss310ap_shutdown: T-I-M-E-O-U-T
+[20785.371258] mif: ss310ap_shutdown: ---
+[20785.371328] mif: modem_shutdown: ss360ap
+[20785.387317] max77705-usbc 1-0025: shutdown: hv_mode 0, contract pdo 2, mailbox on
+[20785.387562] max77705-usbc 1-0025: shutdown: PD back to pdo 1 (5 V)
+[20785.711009] reboot: Restarting system

@@ -389,6 +389,9 @@ static void brcmf_pcie_mb_value(struct brcmf_pciedev_info *devinfo,
 	brcmf_pcie_intr_disable(devinfo);
 	devinfo->d3_kept = true;
 	if (devinfo->host_wake) {
+		/* the dongle pulses the line as it acknowledges (swa1: the
+		 * first edge gave the suspend up); armed once it settles */
+		msleep(50);
 		enable_irq(devinfo->host_wake_irq);
 		enable_irq_wake(devinfo->host_wake_irq);
 	}
@@ -417,10 +420,17 @@ static void brcmf_pcie_mb_value(struct brcmf_pciedev_info *devinfo,
 		if (shared == devinfo->shared.tcm_base_address) {
 			brcmf_pcie_attach(devinfo);	/* BAR0 window, BAR1 size */
 			devinfo->state = BRCMFMAC_PCIE_STATE_UP;
-			if (!devinfo->mb_ctrlmsg &&
-			    brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D0_INFORM))
-				goto cleanup;
 			brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
+			/* D0_INFORM in the TCM mailbox, rung on doorbell 1
+			 * (Samsung's db1_for_mb): a dongle acknowledged into
+			 * D3 that saw no PCIe D3/PERST cycle (a suspend given
+			 * up) answered nothing after a bare HOSTRDY (swa1). */
+			if (devinfo->shared.htod_mb_data_addr) {
+				brcmf_pcie_write_tcm32(devinfo, devinfo->shared.htod_mb_data_addr,
+						       BRCMF_H2D_HOST_D0_INFORM);
+				brcmf_pcie_write_reg32(devinfo,
+						       devinfo->reginfo->h2d_mailbox_1, 0x12345678);
+			}
 			brcmf_bus_change_state(bus, BRCMF_BUS_UP);
 			brcmf_pcie_intr_enable(devinfo);
 			brcmf_pcie_hostready(devinfo);
