@@ -21,7 +21,7 @@ endif
 all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
 	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
-	acct/ztacctd acct/ztacct acct/ztusage
+	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
 
 sounds/ztos-sounds: sounds/ztos-sounds.c
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libpulse) -o $@ $< $(shell pkg-config --libs libpulse) -lm
@@ -131,6 +131,26 @@ acct/ztacct: acct/ztacct.c acct/acct-common.h
 # "battery + data": the app that shows it
 acct/ztusage: acct/ztusage.c acct/acct-common.h $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Iacct -o $@ acct/ztusage.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
+
+# Alarms + Clock: the app, and the user service that rings (clock/README.md)
+clock/ztclock: clock/ztclock.c clock/clock-store.h $(CORE_DEPS)
+	$(APP_BUILD) -Wno-format-truncation -Iclock -o $@ clock/ztclock.c $(CORE) $(APP_LIBS)
+
+clock/ztclockd: clock/ztclockd.c clock/clock-store.h core/zrnvibe.h
+	$(CC) $(CFLAGS) $(WARN) -Wno-format-truncation -Wno-unused-function -Iclock -Icore -o $@ clock/ztclockd.c -lm
+
+# only the clock, for installing it by itself. ztclockd needs CAP_WAKE_ALARM
+# for its timer to wake the phone from sleep: a file capability (a user
+# service cannot be given one otherwise)
+.PHONY: install-clock
+install-clock: clock/ztclock clock/ztclockd
+	install -Dm755 clock/ztclock /usr/local/bin/ztclock
+	install -Dm755 clock/ztclockd /usr/local/bin/ztclockd
+	setcap cap_wake_alarm+ep /usr/local/bin/ztclockd
+	install -Dm644 clock/ztclockd.service /usr/lib/systemd/user/ztclockd.service
+	install -Dm644 clock/ztclock.desktop /usr/local/share/applications/ztclock.desktop
+	install -Dm644 clock/ztclock.svg /usr/local/share/icons/hicolor/scalable/apps/ztclock.svg
+	install -Dm644 clock/README.md /usr/local/share/doc/ztos/clock/README.md
 
 # only the accountant, for installing it by itself
 .PHONY: install-acct
@@ -333,6 +353,13 @@ install: check-arch
 	install -Dm755 acct/ztusage /usr/local/bin/ztusage
 	install -Dm644 acct/ztusage.desktop /usr/local/share/applications/ztusage.desktop
 	install -Dm644 acct/ztusage.svg /usr/local/share/icons/hicolor/scalable/apps/ztusage.svg
+	install -Dm755 clock/ztclock /usr/local/bin/ztclock
+	install -Dm755 clock/ztclockd /usr/local/bin/ztclockd
+	setcap cap_wake_alarm+ep /usr/local/bin/ztclockd
+	install -Dm644 clock/ztclockd.service /usr/lib/systemd/user/ztclockd.service
+	install -Dm644 clock/ztclock.desktop /usr/local/share/applications/ztclock.desktop
+	install -Dm644 clock/ztclock.svg /usr/local/share/icons/hicolor/scalable/apps/ztclock.svg
+	install -Dm644 clock/README.md /usr/local/share/doc/ztos/clock/README.md
 	install -Dm755 ledd/zrn-ledd /usr/local/sbin/zrn-ledd
 	install -Dm644 ledd/zrn-ledd.service /etc/systemd/system/zrn-ledd.service
 	install -Dm755 touchkeyd/ztos-touchkeyd /usr/local/sbin/ztos-touchkeyd
@@ -361,7 +388,7 @@ clean:
 	rm -f ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h \
-		acct/ztacctd acct/ztacct acct/ztusage
+		acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
 
 # Uses a private Wayland seat; does not touch the running compositor or display.
 .PHONY: check-arch check-keyboard

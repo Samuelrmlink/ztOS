@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=alarms + clock
+Comment=Alarms, world clock, timer and stopwatch
+Exec=ztclock
+Terminal=false
+Type=Application
+Icon=ztclock
+Categories=Utility;Clock;
