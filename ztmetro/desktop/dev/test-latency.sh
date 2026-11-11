@@ -4,12 +4,10 @@
 #
 #   ztmetro/desktop/dev/run.sh --test latency
 set -u
-pass=0 fail=0
-ok() { pass=$((pass + 1)); echo "PASS $*"; }
-no() { fail=$((fail + 1)); echo "FAIL $*"; }
+. "$(dirname "$0")/testlib.sh"
 for i in 1 2; do
-	old=$(./desktop/zt-desklat HEADLESS-2 1600 900 old 300)
-	new=$(./desktop/zt-desklat HEADLESS-2 1600 900 new 300)
+	old=$("$DESKLAT" "$OUT" "$W" "$H" old 300)
+	new=$("$DESKLAT" "$OUT" "$W" "$H" new 300)
 	echo "$old"
 	echo "$new"
 done
