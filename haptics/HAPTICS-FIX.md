@@ -1,5 +1,58 @@
 # Haptics fix
 
+## v3 (fix/vibration): pulses shaped from a model of the motor
+
+The user's report: the settings did not change how long a buzz felt; everything rang on ("reverb").
+Measured with the phone's own microphone (`s9-microphone`, raw, 48 kHz; the motor's 160 Hz buzz
+band-passed, enveloped, and lock-in demodulated at 160 Hz; scripts below):
+
+* **The v2 "brake" drove the motor instead of stopping it.** The chip is signed (a duty as far
+  below a half as another is above gives the same buzz in the opposite phase, measured), but a fixed
+  brake (up to 10 ms) is mostly longer than the mass needs to stop (the model below says 2 to 7 ms
+  at full reverse for the shell's pulses), so the rest drove it the other way. 40 ms pulses at 63 %:
+  above -10 dB until 55-61 ms with no brake, 68 ms with 10 ms of full brake, 84 ms with 20 ms; the
+  default (10 ms at 70 %) was no better than none (-20 dB at 74 ms against 69 ms).
+* **The chip hummed for idle_ms (300 ms) after every pulse.** Enabled and at half duty it is not
+  quite still: a steady 160 Hz hum at about -30 dB of a pulse until it was switched off, 300 ms on.
+  Starting it again only costs an I2C write (0.2 ms measured), so it is now switched off at once.
+* **A fixed 8 ms overdrive at 150 %** made every pulse under 8 ms 1.5 times as strong as asked and
+  added a fixed shape that had nothing to do with the settings.
+* The motor's time constant is about 14 ms (13-15 ms fitted to the ring-down of unbraked pulses),
+  so every pulse was felt about 30 ms (-20 dB) past its end, whatever its length: asked 7 ms -> 40 ms,
+  14 -> 49, 24 -> 66, 38 -> 76, 100 -> 137 ms (v2 defaults, onset to -20 dB). Short settings could not
+  feel short.
+
+What v3 does (zrn_haptic_main.c): it keeps a first-order model of the motor's amplitude (tau_us)
+and plans every pulse from where the motor is: full drive only until the amplitude reaches the
+strength asked for (so short ticks start at once and nothing is ever stronger than asked), the
+strength asked for until the length is up, then reversed drive for exactly as long as the model says
+the mass needs to stop (at most brake_max_ms), then the chip off. Stopping an effect brakes from
+wherever it is; restarting plans from the current amplitude. Duty changes no longer restart the
+timer's count (only TCMPB1 is written while it runs), so the carrier's phase is never disturbed.
+
+Parameters (`/sys/module/zrn_haptic/parameters`, live): `tau_us` 14000, `od_pct` 100, `brake_pct` 100,
+`brake_max_ms` 15, `idle_ms` 0, `zero_trim` 0 (PWM counts added to the half duty). `stats` shows,
+per pulse, the overdrive, drive and brake times and the model's amplitude at the start and at the
+end of the drive. Old parameters `od_ms`, `od_boost`, `brake_ms` are gone.
+
+Status (2026-11-11): v3's timing is verified on the phone through `stats` (it plays exactly what the
+model plans: 7 ms at 28 %: 4.6 ms overdrive, 2.4 ms drive, 3.5 ms brake; 38 ms at 70 %: 16.9 + 21.1
++ 7.4 ms). Its effect on the ring-down is **not yet measured**: the room was too loud for the
+microphone while v3 was loaded, and then the phone went offline. To do: record before and after in
+a quiet room, tune `tau_us`, then install it as `zrn-haptic.ko`. So far it was only tried as
+`zrn-haptic-dev.ko`, bound by hand; the installed module is still v2.
+
+Measuring (`haptics/measure/`): `vt.c` plays pulses (build it on the phone with gcc), `rec.sh`
+records the raw microphone (`pw-record --target s9-microphone`) while it plays, `sweep3.sh` repeats
+that for several settings of the driver; on the laptop `ana.py` (envelope, -10/-20/-30 dB times),
+`tau.py` (ring-down time constant) and `lockin.py` (160 Hz amplitude and phase, to see a brake
+oppose the motion) analyse the recordings. The microphone also hears the room: measure only when it
+is quiet (the band-passed floor between pulses about 10-20).
+
+---
+
+## v2 (kept for history)
+
 ## Why it felt bad
 
 Our driver ran the motor through the kernel's `ff-memless`. Reading it against the stock S9 driver
