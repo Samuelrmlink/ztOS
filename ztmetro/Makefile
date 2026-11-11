@@ -97,6 +97,14 @@ desktop/ztdesk: desktop/ztdesk.c $(DESK_CLIENT) $(DESK_CLIENT_H) $(CORE_DEPS)
 	$(APP_BUILD) -Idesktop $(shell pkg-config --cflags gbm) -o $@ desktop/ztdesk.c $(DESK_CLIENT) $(CORE) $(APP_LIBS) \
 		$(shell pkg-config --libs gbm)
 
+# zt-deskpoke: the desktop's pointer driven as ztdesk drives it, for tests
+desktop/zt-deskpoke: desktop/zt-deskpoke.c desktop/wlr-virtual-pointer-unstable-v1-protocol.c \
+		desktop/wlr-virtual-pointer-unstable-v1-client-protocol.h desktop/virtual-keyboard-unstable-v1-protocol.c \
+		desktop/virtual-keyboard-unstable-v1-client-protocol.h
+	$(CC) $(CFLAGS) $(WARN) -Idesktop $(shell pkg-config --cflags wayland-client xkbcommon) -o $@ desktop/zt-deskpoke.c \
+		desktop/wlr-virtual-pointer-unstable-v1-protocol.c desktop/virtual-keyboard-unstable-v1-protocol.c \
+		$(shell pkg-config --libs wayland-client xkbcommon)
+
 # ztDeskMode: desktop mode's controls (Settings' page) as an app with a tile
 desktop/ztdeskmode: desktop/ztdeskmode.c desktop/desktop-page.c desktop/desktop-page.h $(CORE_DEPS)
 	$(APP_BUILD) -Idesktop -o $@ desktop/ztdeskmode.c desktop/desktop-page.c $(CORE) $(APP_LIBS)

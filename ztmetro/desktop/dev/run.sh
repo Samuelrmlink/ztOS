@@ -9,7 +9,9 @@
 #   ztmetro/desktop/dev/run.sh sh              stay in a shell in the session
 #
 # In the commands, `c LINE` writes to the shell's control pipe (desktop move
-# foot, desktop click 800 450, ...) and `shot NAME` captures both screens.
+# foot, desktop click 800 450, ...), `shot NAME` captures both screens, `poke
+# 'drag X0 Y0 X1 Y1'` drives ztdesk's kind of pointer (desktop/zt-deskpoke.c)
+# and `win APP` prints the APP's window line from the state file.
 # Needs podman and a render node: the desktop is composited on the GPU.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
@@ -20,6 +22,11 @@ mkdir -p "$root/out/desktop"
 cat > "$root/out/desktop/.session.sh" <<EOF
 c() { echo "\$*" > \$XDG_RUNTIME_DIR/ztmetro.ctl; }
 shot() { grim -o HEADLESS-2 /out/\$1-desktop.png; grim -o HEADLESS-1 /out/\$1-phone.png; }
+poke() { ./desktop/zt-deskpoke HEADLESS-2 1600 900 "\$*"; }
+win() { c desktop state; sleep 0.2; grep "^window.*\$1" \$XDG_RUNTIME_DIR/ztmetro-desktop.state; }
+# the phone starts locked, and nothing here can swipe it open: the desktop
+# does not lock with it
+export ZTMETRO_DESKTOP_NOLOCK=1
 WLR_BACKENDS=headless WLR_HEADLESS_OUTPUTS=1 ZTMETRO_DESKTOP=1600x900 ./ztmetro > /out/ztmetro.log 2>&1 &
 sleep 4
 export WAYLAND_DISPLAY=wayland-0
@@ -32,7 +39,7 @@ EOF
 tty=; [ -t 0 ] && tty=-it
 exec podman run --rm $tty --privileged --device /dev/dri/renderD128 --group-add keep-groups \
 	-v "$root:/src:Z" -v "$root/out/desktop:/out:Z" -w /src/ztmetro $img sh -c '
-	make ztmetro >/dev/null
+	make ztmetro desktop/zt-deskpoke >/dev/null
 	export XDG_RUNTIME_DIR=/tmp/rt HOME=/tmp/home PATH=/src/ztmetro/desktop:$PATH
 	mkdir -p $XDG_RUNTIME_DIR $HOME && chmod 700 $XDG_RUNTIME_DIR
 	dbus-uuidgen > /etc/machine-id

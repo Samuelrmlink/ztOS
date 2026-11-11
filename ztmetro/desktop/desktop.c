@@ -161,6 +161,16 @@ struct zt_desk {
 	struct wlr_box grab_box;	/* and the window then (content size) */
 	uint32_t grab_edges;
 	uint32_t buttons_down;
+	/* the implicit grab: the surface a button went down on keeps the pointer
+	 * until every button is up, wherever it goes (as on any desktop) */
+	struct wlr_surface *held;
+	double held_ox, held_oy;	/* that surface's origin, layout */
+	struct wl_listener held_destroy;
+	/* the last press given to a client, for its move or resize request,
+	 * which may come after the button is up (a slow app on a slow phone) */
+	uint32_t press_serial, release_ms;
+	double press_x, press_y, release_x, release_y;
+	struct desk_view *press_view;
 
 	/* the window menu (right-click on a title bar, Alt+Space, an app's own) */
 	struct desk_view *menu_view;
@@ -1061,9 +1071,9 @@ static void desk_grab_end(struct zt_desk *desk) {
 	desk->grab_view = NULL;
 }
 
-static void desk_grab_motion(struct zt_desk *desk) {
+static void desk_grab_motion_to(struct zt_desk *desk, double px, double py) {
 	struct desk_view *view = desk->grab_view;
-	double dx = desk->cursor->x - desk->grab_x, dy = desk->cursor->y - desk->grab_y;
+	double dx = px - desk->grab_x, dy = py - desk->grab_y;
 	struct wlr_box b = desk->grab_box;
 	if (desk->grab == GRAB_MOVE) {
 		int y = b.y + (int)dy;
@@ -1098,7 +1108,70 @@ static void desk_grab_motion(struct zt_desk *desk) {
 	}
 }
 
+static void desk_grab_motion(struct zt_desk *desk) {
+	desk_grab_motion_to(desk, desk->cursor->x, desk->cursor->y);
+}
+
+/* An app asks to be moved or resized (xdg_toplevel.move/resize, or X11's
+ * _NET_WM_MOVERESIZE), from its own title bar or border. It names the press
+ * it means by its serial. The grab starts from where that press was, not from
+ * where the pointer is by now: GTK on the phone can take a frame or more to
+ * ask, and the window would otherwise jump from under the pointer.
+ *
+ * A request after the button is up starts no grab (it would never end: the
+ * window followed the pointer until the next click). If it is for the last
+ * press and that release was recent, the move is done in one step, to where
+ * the pointer let go. */
+static void desk_client_grab(struct desk_view *view, enum desk_grab mode, uint32_t edges, uint32_t serial,
+		bool check_serial) {
+	struct zt_desk *desk = view->desk;
+	if (desk->grab != GRAB_NONE || view->fullscreen) {
+		return;
+	}
+	bool ours = !check_serial || serial == desk->press_serial;
+	if (desk->buttons_down && ours) {
+		bool was_maximized = view->maximized;	/* (taken out under the pointer instead) */
+		desk_grab_begin(desk, view, mode, edges);
+		if (desk->grab == mode && desk->press_view == view && !was_maximized) {
+			desk->grab_x = desk->press_x, desk->grab_y = desk->press_y;
+			desk_grab_motion(desk);	/* catch up with the pointer */
+		}
+		return;
+	}
+	if (!desk->buttons_down && ours && mode == GRAB_MOVE && desk->press_view == view && !view->maximized &&
+			now_ms() - desk->release_ms < 1500) {
+		desk_grab_begin(desk, view, GRAB_MOVE, 0);
+		if (desk->grab == GRAB_MOVE) {
+			desk->grab_x = desk->press_x, desk->grab_y = desk->press_y;
+			desk_grab_motion_to(desk, desk->release_x, desk->release_y);
+			desk_grab_end(desk);
+		}
+		wlr_log(WLR_INFO, "desktop: '%s' asked to move after the release: moved in one step",
+			desk_view_app_id(view));
+		return;
+	}
+	wlr_log(WLR_DEBUG, "desktop: '%s' asked to %s with no button down: ignored", desk_view_app_id(view),
+		mode == GRAB_MOVE ? "move" : "resize");
+}
+
 /* ---- the pointer ------------------------------------------------------------------------- */
+
+static void desk_held_destroy(struct wl_listener *l, void *data) {
+	struct zt_desk *desk = wl_container_of(l, desk, held_destroy);
+	wl_list_remove(&desk->held_destroy.link);
+	wl_list_init(&desk->held_destroy.link);
+	desk->held = NULL;
+}
+
+static void desk_hold(struct zt_desk *desk, struct wlr_surface *surface, double ox, double oy) {
+	wl_list_remove(&desk->held_destroy.link);
+	wl_list_init(&desk->held_destroy.link);
+	desk->held = surface;
+	desk->held_ox = ox, desk->held_oy = oy;
+	if (surface) {
+		wl_signal_add(&surface->events.destroy, &desk->held_destroy);
+	}
+}
 
 static void desk_cursor_set(struct zt_desk *desk, const char *name) {
 	if (desk->cursor_name != name) {
@@ -1138,8 +1211,19 @@ static const char *desk_edge_cursor(uint32_t e) {
 	return "default";
 }
 
-/* the title-barred view whose resize border is under the pointer, front first */
-static struct desk_view *desk_edge_view(struct zt_desk *desk, double lx, double ly, uint32_t *edges) {
+/* The title-barred view whose resize border is under the pointer, front
+ * first. The border is outside the window, over whatever is behind it, and
+ * that is a surface too: xfdesktop's background, or a window further back
+ * (`hit`, what the scene has under the pointer). Never under the panel, a
+ * menu, or the window that was hit when it is in front. */
+static struct desk_view *desk_edge_view(struct zt_desk *desk, double lx, double ly, struct wlr_surface *surface,
+		struct desk_view *hit, struct wlr_layer_surface_v1 *layer, uint32_t *edges) {
+	if (layer && layer->current.layer >= ZWLR_LAYER_SHELL_V1_LAYER_TOP) {
+		return NULL;
+	}
+	if (surface && !hit && !layer) {
+		return NULL;	/* a popup, a drag icon */
+	}
 	struct desk_view *v;
 	wl_list_for_each(v, &desk->views, link) {
 		if (!v->mapped || v->minimized) continue;
@@ -1151,6 +1235,9 @@ static struct desk_view *desk_edge_view(struct zt_desk *desk, double lx, double 
 		if (e) {
 			*edges = e;
 			return v;
+		}
+		if (v == hit) {
+			return NULL;	/* (its shadow, say): what is behind it is hidden */
 		}
 	}
 	return NULL;
@@ -1178,6 +1265,15 @@ static void desk_pointer_refocus(struct zt_desk *desk, uint32_t time) {
 		desk_grab_motion(desk);
 		return;
 	}
+	if (desk->held && desk->buttons_down) {
+		/* a button is down on a surface: it keeps the pointer (a drag on
+		 * GTK's header bar that leaves the window still reaches GTK) */
+		if (seat->pointer_state.focused_surface == desk->held) {
+			wlr_seat_pointer_notify_motion(seat, time, lx - desk->held_ox, ly - desk->held_oy);
+			return;
+		}
+		desk_hold(desk, NULL, 0, 0);
+	}
 	if (desk->menu) {
 		int item = desk_menu_item_at(desk, lx, ly);
 		if (item != -2) {
@@ -1192,10 +1288,10 @@ static void desk_pointer_refocus(struct zt_desk *desk, uint32_t time) {
 	}
 	struct wlr_surface *surface;
 	double sx, sy;
-	struct desk_view *view = desk_view_at(desk, lx, ly, &surface, &sx, &sy, NULL);
+	struct wlr_layer_surface_v1 *layer;
+	struct desk_view *view = desk_view_at(desk, lx, ly, &surface, &sx, &sy, &layer);
 	uint32_t edges = 0;
-	struct desk_view *edge_view = !surface && (!view || !view->title || ly >= view->y + DESK_TITLE_H) ?
-		desk_edge_view(desk, lx, ly, &edges) : NULL;
+	struct desk_view *edge_view = desk_edge_view(desk, lx, ly, surface, view, layer, &edges);
 	if (view && !surface && view->title && ly < view->y + DESK_TITLE_H) {
 		/* our title bar */
 		desk_set_hover(desk, view, desk_title_button_at(view, lx - view->x));
@@ -1246,8 +1342,13 @@ static void desk_cursor_button(struct wl_listener *l, void *data) {
 	desk->last_input_ms = now_ms();
 	if (!pressed) {
 		desk->buttons_down &= ~(1u << (e->button & 31));
+		if (!desk->buttons_down) {
+			desk->release_ms = now_ms();
+			desk->release_x = desk->cursor->x, desk->release_y = desk->cursor->y;
+		}
 		if (desk->grab != GRAB_NONE) {
 			desk_grab_end(desk);
+			if (!desk->buttons_down) desk_hold(desk, NULL, 0, 0);
 			desk_pointer_refocus(desk, e->time_msec);
 			return;
 		}
@@ -1257,6 +1358,10 @@ static void desk_cursor_button(struct wl_listener *l, void *data) {
 			return;
 		}
 		wlr_seat_pointer_notify_button(seat, e->time_msec, e->button, e->state);
+		if (!desk->buttons_down && desk->held) {
+			desk_hold(desk, NULL, 0, 0);
+			desk_pointer_refocus(desk, e->time_msec);	/* what is under it now */
+		}
 		return;
 	}
 	desk->buttons_down |= 1u << (e->button & 31);
@@ -1316,7 +1421,7 @@ static void desk_cursor_button(struct wl_listener *l, void *data) {
 		return;
 	}
 	uint32_t edges = 0;
-	struct desk_view *edge_view = !surface ? desk_edge_view(desk, lx, ly, &edges) : NULL;
+	struct desk_view *edge_view = desk_edge_view(desk, lx, ly, surface, view, layer, &edges);
 	if (edge_view && e->button == BTN_LEFT) {
 		desk->focused_layer = NULL;
 		desk_grab_begin(desk, edge_view, GRAB_RESIZE, edges);
@@ -1332,7 +1437,17 @@ static void desk_cursor_button(struct wl_listener *l, void *data) {
 		desk_focus_view(desk, view);
 		desk_take_keyboard(desk);
 	}
-	wlr_seat_pointer_notify_button(seat, e->time_msec, e->button, e->state);
+	if (surface && seat->pointer_state.focused_surface != surface) {
+		wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
+	}
+	uint32_t serial = wlr_seat_pointer_notify_button(seat, e->time_msec, e->button, e->state);
+	if (surface && desk->buttons_down == (1u << (e->button & 31))) {
+		/* the first button down: this surface holds the pointer until the last is up */
+		desk_hold(desk, surface, lx - sx, ly - sy);
+		desk->press_serial = serial;
+		desk->press_x = lx, desk->press_y = ly;
+		desk->press_view = view;
+	}
 }
 
 static void desk_cursor_axis(struct wl_listener *l, void *data) {
@@ -1759,13 +1874,14 @@ static bool desk_surface(struct zt_server *server, struct wlr_surface *surface) 
 
 static void desk_xdg_req_move(struct wl_listener *l, void *data) {
 	struct desk_view *view = wl_container_of(l, view, req_move);
-	desk_grab_begin(view->desk, view, GRAB_MOVE, 0);
+	struct wlr_xdg_toplevel_move_event *e = data;
+	desk_client_grab(view, GRAB_MOVE, 0, e->serial, true);
 }
 
 static void desk_xdg_req_resize(struct wl_listener *l, void *data) {
 	struct desk_view *view = wl_container_of(l, view, req_resize);
 	struct wlr_xdg_toplevel_resize_event *e = data;
-	desk_grab_begin(view->desk, view, GRAB_RESIZE, e->edges);
+	desk_client_grab(view, GRAB_RESIZE, e->edges, e->serial, true);
 }
 
 static void desk_xdg_req_maximize(struct wl_listener *l, void *data) {
@@ -1824,6 +1940,9 @@ static void desk_view_free(struct desk_view *view) {
 	}
 	if (desk->focused == view) {
 		desk->focused = NULL;
+	}
+	if (desk->press_view == view) {
+		desk->press_view = NULL;
 	}
 	desk_ft_destroy(view);
 	wl_list_remove(&view->link);
@@ -2401,13 +2520,13 @@ static void desk_x_activate(struct wl_listener *l, void *data) {
 
 static void desk_x_move(struct wl_listener *l, void *data) {
 	struct desk_view *view = wl_container_of(l, view, x_move);
-	desk_grab_begin(view->desk, view, GRAB_MOVE, 0);
+	desk_client_grab(view, GRAB_MOVE, 0, 0, false);	/* (X11 has no serial) */
 }
 
 static void desk_x_resize(struct wl_listener *l, void *data) {
 	struct desk_view *view = wl_container_of(l, view, x_resize);
 	struct wlr_xwayland_resize_event *e = data;
-	desk_grab_begin(view->desk, view, GRAB_RESIZE, e->edges);
+	desk_client_grab(view, GRAB_RESIZE, e->edges, 0, false);
 }
 
 static void desk_x_maximize(struct wl_listener *l, void *data) {
@@ -2953,7 +3072,9 @@ static void desk_phone_lock(struct zt_server *server, bool locked) {
 	if (!desk) {
 		return;
 	}
-	desk->phone_locked = locked;
+	/* ZTMETRO_DESKTOP_NOLOCK (desktop/dev/run.sh, which has no finger to
+	 * swipe the phone's lock away): the desktop never locks with the phone */
+	desk->phone_locked = locked && !getenv("ZTMETRO_DESKTOP_NOLOCK");
 	if (!locked) {
 		desk_set_locked(desk, false);	/* only this lifts the desktop's lock */
 	}
@@ -3228,6 +3349,8 @@ static void desk_init(struct zt_server *server, struct wlr_compositor *composito
 	wl_list_init(&desk->views);
 	wl_list_init(&desk->layers);
 	wl_list_init(&desk->popups);
+	wl_list_init(&desk->held_destroy.link);
+	desk->held_destroy.notify = desk_held_destroy;
 	desk_config_load(desk);
 
 	/* the virtual output's backend, beside the panel's (DRM, or a window) */
