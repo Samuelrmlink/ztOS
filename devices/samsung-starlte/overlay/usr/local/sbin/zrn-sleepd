@@ -824,6 +824,66 @@ def why_awake(ignore=(), ignore_inhibits=()):
 	return None
 
 
+def active_sources():
+	"""Names of the wakeup sources active now."""
+	out = []
+	for p in WAKEUP.glob('*'):
+		try:
+			if int(read(p / 'active_time_ms', '0') or 0) > 0:
+				out.append(read(p / 'name'))
+		except ValueError:
+			pass
+	return out
+
+
+def cgroup_frozen(path):
+	for line in read(Path('/sys/fs/cgroup') / path.lstrip('/') / 'cgroup.events').splitlines():
+		key, _, value = line.partition(' ')
+		if key == 'frozen':
+			return value.strip() == '1'
+	return False
+
+
+def epollwakeup_timerfd_cgroups(proc=Path('/proc')):
+	"""The cgroups of the processes that poll a timerfd with EPOLLWAKEUP."""
+	groups = set()
+	for pdir in proc.iterdir():
+		if not pdir.name.isdigit():
+			continue
+		try:
+			infos = list((pdir / 'fdinfo').iterdir())
+		except OSError:
+			continue
+		for info in infos:
+			text = read(info)
+			for m in re.finditer(r'tfd:\s+(\d+)\s+events:\s+([0-9a-f]+)', text):
+				if not int(m.group(2), 16) & EPOLLWAKEUP:
+					continue
+				try:
+					target = os.readlink(pdir / 'fd' / m.group(1))
+				except OSError:
+					continue
+				if 'timerfd' in target:
+					groups.add(read(pdir / 'cgroup').split('::')[-1] or '/')
+	return groups
+
+
+def frozen_timerfd_holders():
+	"""Every active wakeup source is a '[timerfd]' and every timerfd polled
+	with EPOLLWAKEUP belongs to a frozen cgroup: Android's AlarmManager
+	(system_server) in the Waydroid container, frozen with the screen off.
+	Its expired timers hold their sources active until it reads them, which
+	it cannot do frozen, so /sys/power/wakeup_count would block all night."""
+	active = active_sources()
+	if not active or any(name != '[timerfd]' for name in active):
+		return False
+	groups = epollwakeup_timerfd_cgroups()
+	return bool(groups) and all(cgroup_frozen(g) for g in groups)
+
+
+_pending_reader = None	# a wakeup_count read still blocked from an earlier cycle
+
+
 def read_wakeup_count(seconds=WAKEUP_COUNT_S):
 	"""/sys/power/wakeup_count, read without hanging on our own watch.
 
@@ -831,13 +891,18 @@ def read_wakeup_count(seconds=WAKEUP_COUNT_S):
 	just before it activates the watch's own source, which only drain()
 	lets go: so the read runs in a thread, and this thread drains while it
 	waits. Past `seconds` some other source holds it: Stalled."""
+	global _pending_reader
 	box = {}
 
 	def reader():
 		box['count'] = read('/sys/power/wakeup_count')
 	if _watch is not None:
 		_watch.drain()
+	if _pending_reader is not None and _pending_reader.is_alive():
+		# still blocked since an earlier stall: no second thread
+		raise Stalled(0)
 	thread = threading.Thread(target=reader, name='wakeup_count', daemon=True)
+	_pending_reader = thread
 	thread.start()
 	end = time.monotonic() + seconds
 	while True:
@@ -1138,14 +1203,23 @@ def cycle(ignore=(), ignore_inhibits=()):
 			step('settle')
 			time.sleep(settle)
 			step('mark and sync')
-			# the row before the sync, which puts it on the disk
-			soc_row('sleep', awake=(boottime() - last_wake_boot) if last_wake_boot else None,
-				note=f'alarm +{alarm_s}s; wifi was {wifi_before}' + ('; dozing' if dozing else ''))
 			MARK.write_text(str(time.time()))
 			os.sync()
 			step('wakeup_count')
 			ensure_watch()
-			count = read_wakeup_count()
+			# Android's frozen timers would block the read: sleep without
+			# the count (late inhibits then rest on the re-check alone)
+			if frozen_timerfd_holders():
+				count = None
+				log('wakeup_count skipped: only frozen Android timers hold wakeup sources')
+			else:
+				try:
+					count = read_wakeup_count()
+				except Stalled:
+					if not frozen_timerfd_holders():
+						raise
+					count = None
+					log('wakeup_count skipped after a stall: frozen Android timers hold it')
 			# what happened during the preparations (a power key press, a
 			# call, a new inhibit) stops the sleep here; anything later
 			# moves the count, and the write below fails. An inhibit
@@ -1155,7 +1229,8 @@ def cycle(ignore=(), ignore_inhibits=()):
 			if why:
 				raise Cancelled(why)
 			try:
-				write('/sys/power/wakeup_count', count)
+				if count is not None:
+					write('/sys/power/wakeup_count', count)
 			except OSError as e:
 				if e.errno == errno.EINVAL:
 					raise Cancelled('a wakeup event during the check: ' + wakeup_sources())
@@ -1164,6 +1239,10 @@ def cycle(ignore=(), ignore_inhibits=()):
 			# second after the return is what woke the phone (the frames that
 			# wake it are read by the resume path within milliseconds)
 			rx_before = modem_counts()
+			# only now is the sleep going ahead (an append is no wakeup
+			# event); it reaches the disk with the next sync or writeback
+			soc_row('sleep', awake=(boottime() - last_wake_boot) if last_wake_boot else None,
+				note=f'alarm +{alarm_s}s; wifi was {wifi_before}' + ('; dozing' if dozing else ''))
 			signal.alarm(0)		# the sleep itself may last MAX_SLEEP_S
 			step('suspend')
 			last_sleep['charge_in'] = charge_uah()

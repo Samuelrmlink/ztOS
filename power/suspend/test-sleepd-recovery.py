@@ -25,7 +25,7 @@ loader.exec_module(sleepd)
 
 class RecoveryTest(unittest.TestCase):
     def exercise(self, failure=None, awake_after_settle=None, busy=False, capacity=None, hub_busy=False,
-                 count_einval=False, watch=None):
+                 count_einval=False, watch=None, frozen_holders=False):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             wifi = base / 'wifi'
@@ -90,6 +90,8 @@ class RecoveryTest(unittest.TestCase):
                                 INHIBIT=base / 'inhibit'), \
                     patch.object(sleepd, '_watch', watch), \
                     patch.object(sleepd, 'ensure_watch', side_effect=lambda: watch), \
+                    patch.object(sleepd, '_pending_reader', None), \
+                    patch.object(sleepd, 'frozen_timerfd_holders', return_value=frozen_holders), \
                     patch.object(sleepd, 'wakeup_sources', return_value='none'), \
                     patch.object(sleepd, 'read', side_effect=read), \
                     patch.object(sleepd, 'why_awake', return_value=awake_after_settle), \
@@ -707,6 +709,37 @@ class LogTest(unittest.TestCase):
                 printed.clear()
                 sleepd.show_log(None)
                 self.assertEqual(printed, ['old 1', 'old 2', 'new 1', 'new 2', 'new 3'])
+
+
+class FrozenHoldersTest(unittest.TestCase):
+    def test_frozen_android_timers_skip_the_count(self):
+        writes = []
+        orig = RecoveryTest.exercise
+        test = RecoveryTest('test_success_clears_crash_marker')
+        with patch.object(sleepd, 'read_wakeup_count', side_effect=AssertionError('read')):
+            orig(test, frozen_holders=True)
+        self.assertNotIn('/sys/power/wakeup_count', [w[0] for w in test.writes])
+        self.assertIn(('/sys/power/state', 'mem'), test.writes)
+
+    def test_detection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            wakeup = base / 'wakeup'
+            for i, (name, active) in enumerate((('[timerfd]', '5000'), ('umts_ipc0', '0'))):
+                w = wakeup / f'wakeup{i}'
+                w.mkdir(parents=True)
+                (w / 'name').write_text(name + '\n')
+                (w / 'active_time_ms').write_text(active + '\n')
+            frozen = {'/lxc.payload.waydroid': True}
+            with patch.object(sleepd, 'WAKEUP', wakeup), \
+                    patch.object(sleepd, 'epollwakeup_timerfd_cgroups', return_value={'/lxc.payload.waydroid'}), \
+                    patch.object(sleepd, 'cgroup_frozen', side_effect=lambda g: frozen[g]):
+                self.assertTrue(sleepd.frozen_timerfd_holders())
+                frozen['/lxc.payload.waydroid'] = False
+                self.assertFalse(sleepd.frozen_timerfd_holders())
+                frozen['/lxc.payload.waydroid'] = True
+                (wakeup / 'wakeup1' / 'active_time_ms').write_text('10\n')
+                self.assertFalse(sleepd.frozen_timerfd_holders())
 
 
 class SocCsvTest(unittest.TestCase):
