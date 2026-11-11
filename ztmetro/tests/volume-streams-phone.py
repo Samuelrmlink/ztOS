@@ -151,7 +151,7 @@ def main():
         got = stream_gain_of("ring")
         l = loudness(record(1.2))
         p.wait()
-        ok("ring moved to 35%% while playing", got and near(got[0][1] * dev_gain()[0], cube(35), 0.05) and near(l, cube(35)),
+        ok("ring moved to 35% while playing", got and near(got[0][1] * dev_gain()[0], cube(35), 0.05) and near(l, cube(35)),
            "stream x output %.4f, measured %.4f, want %.4f" % (got[0][1] * dev_gain()[0] if got else -1, l, cube(35)))
         # 3. Media moved while the ring plays: the ring stays where it is
         set_ring(50)
@@ -175,7 +175,7 @@ def main():
         got = stream_gain_of("alarm")
         l = loudness(record(1.4))
         p.wait()
-        ok("alarm 60%%", got and got[0][2] == "Alarm" and near(l, cube(60)),
+        ok("alarm 60%", got and got[0][2] == "Alarm" and near(l, cube(60)),
            "role %s, measured %.4f want %.4f" % (got[0][2] if got else None, l, cube(60)))
         # 5. its floor: the file says 0, it plays at 20
         set_alarm(0)
@@ -191,11 +191,11 @@ def main():
         mid = state()
         l = loudness(record(1.0))
         p.wait()
-        ok("Media 3%%: output turned up for the alarm", mid["streams"]["boost"] and mid["active"]["percent"] > 3 and near(l, cube(60), 0.15),
+        ok("Media 3%: output turned up for the alarm", mid["streams"]["boost"] and mid["active"]["percent"] > 3 and near(l, cube(60), 0.15),
            "output %d%%, boost %s, measured %.4f want %.4f" % (mid["active"]["percent"], mid["streams"]["boost"], l, cube(60)))
         time.sleep(5.0)
         after = state()
-        ok("and back to 3%% after it", after["active"]["percent"] == 3 and not after["streams"]["boost"],
+        ok("and back to 3% after it", after["active"]["percent"] == 3 and not after["streams"]["boost"],
            "output %d%%, boost %s" % (after["active"]["percent"], after["streams"]["boost"]))
         # 7. none of these counted as apps
         ok("ring and alarm sounds not listed as apps", not any(x["name"] == "pw-play" and x["running"] for x in state()["apps"]))
