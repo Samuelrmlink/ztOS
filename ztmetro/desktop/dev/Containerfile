@@ -1,9 +1,9 @@
 # Desktop mode on a PC, headless: the shell with a virtual "phone" and a
 # virtual desktop, XFCE on it, on this machine's GPU (desktop/dev/run.sh).
 FROM docker.io/library/archlinux:latest
-RUN pacman -Sy --noconfirm --needed gcc make pkgconf wayland wayland-protocols libxkbcommon mesa \
+RUN pacman -Syu --noconfirm --needed gcc make pkgconf wayland wayland-protocols libxkbcommon mesa \
 	cairo pango gdk-pixbuf2 librsvg json-c ttf-opensans ttf-dejavu libdrm pixman wlroots0.20 \
 	grim foot wlr-randr dbus python \
 	xfce4-panel xfdesktop xfce4-settings thunar xfce4-terminal xfconf garcon tumbler \
 	xorg-xwayland xkeyboard-config xorg-xkbcomp adwaita-icon-theme gtk-layer-shell \
-	mesa-utils mesa-demos glmark2 xorg-xeyes >/dev/null && pacman -Scc --noconfirm >/dev/null
+	mesa-utils mesa-demos glmark2 xorg-xeyes xfwm4 python-gobject gtk3 >/dev/null && pacman -Scc --noconfirm >/dev/null

@@ -104,6 +104,11 @@ struct zmc_app {
 	bool fixed;
 	/* the overlay may cover the header: draw the cached header before overlay */
 	bool overlay_above_header;
+	/* the window went to a desktop (true) or to the phone (false), or the
+	 * shell first said which (zt_environment_v1; zmc_on_desktop()). zmc has
+	 * already set what it does: the shell's frame, sizes for a window, a
+	 * pointer as a finger. The page is drawn again afterwards. */
+	void (*environment)(bool desktop);
 };
 
 struct zmc_buffer {
@@ -137,6 +142,9 @@ struct zmc_state {
 	int width, height;	/* points */
 	bool configured, running, dirty;
 	bool active;		/* the shell has this app in front (XDG activated) */
+	bool desktop;		/* the window is on a desktop, not the phone (zt_environment_v1) */
+	bool env_known;		/* the shell has said which */
+	char env_output[32];	/* the output it is shown on */
 	uint32_t accent;	/* 0xRRGGBB */
 	/* the shell's style (ztRetrofit): the same widgets with another face.
 	 * ZMC_STYLE_DOTMATRIX draws switches, sliders, buttons, the loading dots
@@ -229,6 +237,8 @@ void zmc_scroll_end(void);		/* at the next drawing, show the end of the page (a 
 void zmc_go(int page, int dir);		/* turn to a page: dir > 0 deeper, < 0 back */
 void zmc_turn(int dir);			/* this page's content changes: its rows swivel out and in */
 void zmc_back(void);
+/* the window is on a desktop (XFCE beside the phone), not the phone's shell */
+bool zmc_on_desktop(void);
 void zmc_quit(void);
 void zmc_busy(bool busy);		/* the dots across the top, while something loads */
 /* step() runs at the start of every frame, and a frame is drawn every time,

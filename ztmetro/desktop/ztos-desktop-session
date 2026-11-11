@@ -45,6 +45,38 @@ if [ ! -f "$conf/xfce4-panel.xml" ]; then
 	done
 fi
 
+# A panel from before ztos-status: the phone's status and the volume are put
+# in front of its clock, once (taken out again, they stay out).
+mark=${XDG_CONFIG_HOME:-$HOME/.config}/ztmetro/desktop-panel-status
+if [ ! -e "$mark" ] && [ -f "$conf/xfce4-panel.xml" ] && command -v xfconf-query >/dev/null &&
+   ! grep -q '"ztos-status"' "$conf/xfce4-panel.xml"; then
+	ids=$(xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids 2>/dev/null | grep -E '^[0-9]+$')
+	top=$(xfconf-query -c xfce4-panel -l 2>/dev/null | sed -n 's|^/plugins/plugin-\([0-9]*\)$|\1|p' | sort -n | tail -1)
+	if [ -n "$ids" ] && [ -n "$top" ]; then
+		st=$((top + 1)) pa=$((top + 2))
+		xfconf-query -c xfce4-panel -p /plugins/plugin-$st -n -t string -s ztos-status
+		new=
+		if [ -d /usr/lib/xfce4/panel/plugins ] && [ -e /usr/lib/xfce4/panel/plugins/libpulseaudio-plugin.so ]; then
+			xfconf-query -c xfce4-panel -p /plugins/plugin-$pa -n -t string -s pulseaudio
+			xfconf-query -c xfce4-panel -p /plugins/plugin-$pa/enable-keyboard-shortcuts -n -t bool -s false
+			xfconf-query -c xfce4-panel -p /plugins/plugin-$pa/show-notifications -n -t uint -s 0
+			new="-t int -s $st -t int -s $pa"
+		else
+			new="-t int -s $st"
+		fi
+		clock=$(xfconf-query -c xfce4-panel -l -v 2>/dev/null | sed -n 's|^/plugins/plugin-\([0-9]*\) *clock$|\1|p' | head -1)
+		args= put=
+		for i in $ids; do
+			[ "$i" = "$clock" ] && [ -z "$put" ] && { args="$args $new"; put=1; }
+			args="$args -t int -s $i"
+		done
+		[ -z "$put" ] && args="$args $new"
+		# shellcheck disable=SC2086
+		xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids --force-array $args &&
+			echo "panel: ztos-status added" && mkdir -p "$(dirname "$mark")" && : > "$mark"
+	fi
+fi
+
 # one program, started again when it dies, not more than 5 times a minute
 keep() {
 	name=$1; shift
@@ -70,6 +102,28 @@ keep xfsettingsd xfsettingsd --no-daemon --replace
 keep thunar thunar --daemon
 keep xfdesktop xfdesktop
 keep xfce4-panel xfce4-panel
+# Window frames as xfwm4's (the shell draws them, ztmetro/desktop/deco.c):
+# what XFCE's "Window Manager" and "Appearance" settings choose, told to the
+# shell as it changes. xfconfd writes its files late, so the shell is given
+# the values themselves, in $XDG_RUNTIME_DIR/ztmetro-xfwm4.
+deco_state() {
+	f=${XDG_RUNTIME_DIR:-/tmp}/ztmetro-xfwm4
+	{
+		for p in theme button_layout title_alignment title_font; do
+			printf '%s=%s\n' "$p" "$(xfconf-query -c xfwm4 -p /general/$p 2>/dev/null)"
+		done
+		printf 'gtk_theme=%s\n' "$(xfconf-query -c xsettings -p /Net/ThemeName 2>/dev/null)"
+		printf 'gtk_font=%s\n' "$(xfconf-query -c xsettings -p /Gtk/FontName 2>/dev/null)"
+	} > "$f.new" && mv "$f.new" "$f"
+	echo 'desktop theme' > "${XDG_RUNTIME_DIR:-/tmp}/ztmetro.ctl" 2>/dev/null || true
+}
+if command -v xfconf-query >/dev/null 2>&1; then
+	deco_state
+	for ch in xfwm4 xsettings; do
+		(xfconf-query -c $ch -m 2>/dev/null | while read -r _; do deco_state; done) &
+	done
+fi
+
 # anything the user wants with it (one command per line)
 auto=${XDG_CONFIG_HOME:-$HOME/.config}/ztmetro/desktop-autostart
 [ -f "$auto" ] && while IFS= read -r line; do

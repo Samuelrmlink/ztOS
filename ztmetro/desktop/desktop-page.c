@@ -186,8 +186,9 @@ double desktop_page_render(cairo_t *cr) {
 	}
 	y = zmc_entry(cr, y + 10, "desktop", "See and use the desktop from the phone", ACT_VIEW, 0);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	y += zmc_text(cr, "Apps move between the phone and the desktop: pull an app's card down in the app "
-		"switcher, or use the phone button in a window's title bar.", FONT_REGULAR, 13, ZMC_MARGIN, y,
+	y += zmc_text(cr, "Apps move between the phone and the desktop, still running: with Move Apps, on "
+		"either side; by pulling an app's card down in the app switcher; or with \"Move to Phone\" in a "
+		"window's menu (right-click its title bar).", FONT_REGULAR, 13, ZMC_MARGIN, y,
 		zmc.width - 2 * ZMC_MARGIN);
 	return y + 30;
 }

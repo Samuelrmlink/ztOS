@@ -13650,6 +13650,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		aod_bl_release();
 	}
 	server->screen_on = on;
+	desk_phone_view(server);	/* the desktop is drawn only while seen */
 	state_file_write(server);
 	if (demoloop_active()) {
 		char path[256];
@@ -17986,6 +17987,7 @@ static void render_frame(struct zt_server *server) {
 static void output_frame(struct wl_listener *listener, void *data) {
 	struct zt_output *output = wl_container_of(listener, output, frame);
 	struct zt_server *server = output->server;
+	desk_phone_view(server);	/* ztdesk in front or not */
 	if (server->aod) {
 		/* the always-on display: a frame only when its picture changed */
 		if (server->aod_dirty) {

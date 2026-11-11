@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Move Apps
+Comment=Move running apps between the phone and the desktop
+Exec=ztmove
+Terminal=false
+Type=Application
+Icon=ztmove
+Categories=System;Utility;
+Keywords=phone;desktop;window;move;send;

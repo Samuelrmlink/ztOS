@@ -17,10 +17,17 @@ static void open_bluetooth(void) {
 	if (system("ztsettings bluetooth >/dev/null 2>&1 &") != 0) {}
 }
 
+/* On the phone or on a desktop (XFCE), as the window moves: zmc has given it
+ * the shell's frame, window sizes and the mouse; the pages say "click" for
+ * "tap" there (zmc_on_desktop), and are drawn again. */
+static void pods_environment(bool desktop) {
+	fprintf(stderr, "ztpods: on the %s\n", desktop ? "desktop" : "phone");
+}
+
 static const struct zmc_app app = {
 	.app_id = "ztpods", .title = "AirPods", .caps = "AIRPODS",
 	.render = pods_render, .activate = pods_activate, .slide = pods_slide, .back = pods_back,
-	.arrived = pods_arrived, .text = pods_text,
+	.arrived = pods_arrived, .text = pods_text, .environment = pods_environment,
 };
 
 static const struct { const char *name; int page; } PAGES[] = {
