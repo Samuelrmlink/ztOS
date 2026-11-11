@@ -35,10 +35,12 @@ cgroups per app would be better still (cgroup v2 `cpu.stat` counts exited
 children exactly, and the tree would survive reparenting), and are picked up
 by rule 3 the day the shell launches into `app-ID.scope`.
 
-The phone's own costs are groups too: **Idle (awake)**, **Deep sleep**,
-**Wi-Fi idle**, **Mobile radio idle**, **Unaccounted** (what the gauge
-measured beyond the model), **Short-lived processes** (born and gone between
-scans with no known parent), **Network: not attributed**.
+The phone's own costs are groups too: **Idle (awake)**, **Always-on
+(unseparated)**, **Deep sleep**, **Wi-Fi idle**, **Mobile radio idle**,
+**Mobile radio (airplane)**, **Bluetooth**, **USB-C accessories**, **Desktop
+(external display)**, **Unaccounted** (what the gauge measured beyond the
+model), **Short-lived processes** (born and gone between scans with no known
+parent), **Network: not attributed**.
 
 ## CPU time, also of processes that have exited
 
@@ -85,7 +87,24 @@ agree to a few percent (link-layer headers, ARP and DHCP frames).
 
 Traffic through a tunnel (Tailscale) is counted twice in the totals: once
 for the app, on the tunnel ("other"), and once for `tailscaled`, on Wi-Fi.
-That is how Android shows VPNs too.
+That is how Android shows VPNs too. With Tailscale in userspace mode (no
+tunnel interface, as here) an ssh over Tailscale is `tailscaled`'s Wi-Fi
+traffic only: sshd sees it on loopback, which is not counted.
+
+Sockets the kernel makes itself have no maker on record: a TCP connection
+accepted on a listening socket (an ssh or rsync over the LAN or USB) is a
+clone made in the kernel, and the `cgroup/sock` hook only sees `socket()`.
+When such a socket moves bytes, the kernel's socket table (`sock_diag`, one
+netlink dump in that scan, no `/proc` walk) gives its local port, and the
+listening socket on that port has a maker: the connection goes to it (sshd's
+are `System: sshd`). A socket still not placed keeps its bytes waiting for
+the next rescan (up to 12 minutes) instead of giving them to nobody.
+**Network: not attributed** is what is left: `ztacct status` says why
+(`unattributed`: never placed, or a maker that is no longer known, and on
+which network), what `sock_diag` placed, and what is waiting. Waydroid's
+apps are not in it: their sockets are made in the container by its
+processes and go to their packages; Waydroid's NAT (forwarded, no socket) is
+not counted at all, as the interfaces' own counters show.
 
 ## Energy
 
@@ -107,18 +126,113 @@ Android's `power_profile` approach on this phone's counters, every scan:
   tail, by bytes; up and idle: Mobile radio idle.
 - **Base**: awake and idle (this kernel has no cpuidle states: 325 mA with the
   screen off, dark, radio off) and deep sleep (`CLOCK_BOOTTIME −
-  CLOCK_MONOTONIC`), plus each resume.
+  CLOCK_MONOTONIC`), plus each resume. Bluetooth up and the modem's CP
+  online in airplane mode were on when the base was measured: their share
+  of it (estimates, 10 and 25 mW) is shown as **Bluetooth** and **Mobile
+  radio (airplane)**, moved out of Idle, not added; each Bluetooth link
+  (`/sys/class/bluetooth/hci0:N`) adds 20 mW (an estimate).
+- **Always-on (unseparated)**: what the gauge shows, window after window,
+  beyond the measured base when nothing we read changes: 480 mW, fitted
+  (below). The gauge is not the cause: its coulomb counter and `current_now`
+  agree to 1 % minute by minute (2026-11-11). It is real draw of the phone as
+  used day to day that the 150 s bench (Wi-Fi off, nothing running but the
+  test) did not have, and that no state we read tells apart. What it may be,
+  and what would settle it: "What is left", below.
+- **USB-C accessories** (host / OTG power): while the MAX77705's boost gives
+  VBUS to a sink partner (its regulator `max77705-otg` reads `enabled`;
+  without it, `typec/port0/power_role` `[source]`), the boost (90 mW) and,
+  with devices on the bus (`/sys/bus/usb/devices`, `1-1`, `1-1.4`, …), the
+  bus (470 mW: xHCI, the PHY, the dock's hub) and each device (140 mW). The
+  MAX77705 has no OTG current readout (its power supplies show only the
+  input side), so these are fitted. The Belkin 6-in-1 dock (two hubs, an
+  RTL8153 Ethernet, a card reader, a billboard device, an HDMI converter, a
+  keyboard/mouse dongle) is **1.5–1.6 W** on the battery: the gauge stepped
+  from 3.55 W to 1.95 W, screen off, when it was pulled (2026-11-10 23:48
+  CST). A dock that powers the phone (PD in) costs the battery nothing: the
+  boost is off. *This is what was Unaccounted on the desktop, not XFCE*:
+  XFCE's own processes are counted by their CPU under their `Login:` groups
+  (xfdesktop 0.11 s of CPU a minute, screen off).
+- **Desktop (external display)**: the DisplayPort link up, the combo PHY's
+  DP part, the PHY and the link controller (220 mW, fitted), and video out
+  (DECON2 scanout and the link's video at 1080p60: 300 mW, an estimate;
+  never on long enough on battery to fit). The link being up is only in the
+  driver's debugfs `state` (root): `id N pma N phy N ctrl N`, up if any of
+  pma, phy, ctrl is 1 (its "link powered and clocked" is the power domain,
+  on at every boot). It is read at a settle (every 5 minutes) and only
+  while a USB-C partner is there or the last read found it up: a read with
+  the link's power domain off logs a warning. Video out is the DRM
+  connector `card*-DP-*/enabled`. The driver leaves the link up after the
+  dock is pulled (`x9dp_off` is not called on detach), until a reboot: 220 mW
+  a day long with no display (seen 2026-11-11).
 
 Every 5 minutes the modelled joules are checked against the gauge's coulomb
 counter (`max170xx_battery/charge_counter`, µAh × `voltage_now`). On battery,
 a model above the measurement is scaled down to it; below, the rest is
 **Unaccounted**. On the charger the gauge cannot see the phone's own use and
-the model stands. Every checked window is appended to
-`/var/lib/ztacct/calib.csv` with the model's inputs, to fit the coefficients
-(`/etc/ztacct/power_profile`, `KEY VALUE` lines: `base_awake_mw`,
-`screen_mw`, `cluster1.khz`/`cluster1.mw`, `cpu_scale`, …): `fit-calib.py
-calib.csv` fits them by least squares. `bench-cpu.sh` (overnight, `ztbench`)
-measures the CPU tables with busy loops, screen off.
+the model stands. `ztacct top` and the app say what share of the measured
+energy the model explains (all but Unaccounted).
+
+Every checked window is appended to `/var/lib/ztacct/calib.csv` with the
+model's inputs, to fit the coefficients (`/etc/ztacct/power_profile`, `KEY
+VALUE` lines: `base_awake_mw`, `base_extra_mw`, `screen_mw`,
+`cluster1.khz`/`cluster1.mw`, `cpu_scale`, `gpu_scale`, `otg_mw`,
+`usb_host_mw`, `usb_dev_mw`, `dp_link_mw`, `dp_video_mw`, `bt_on_mw`,
+`bt_conn_mw`, `cp_air_mw`, …): `fit-calib.py calib.csv` fits them by least
+squares. CPU and GPU joules are written at scale 1. Since 2026-11-11 each
+row also has the accessories' and radios' states, in seconds:
+`otg_s` (VBUS out), `usb_host_s`, `usb_dev_s` and `usb_active_s` (device
+seconds: devices × seconds, all and not runtime-suspended), `dp_link_s`,
+`dp_video_s`, `bt_on_s`, `bt_conn_s` (link seconds), `cp_s` (modem online),
+`airplane_s`, `waydroid_s` (the container running). The first save of the
+new daemon rewrites an older calib.csv once with the new header, its rows
+given empty fields: unknown, not 0.
+
+Older rows get their accessory states from the kernel's log:
+`fit-calib.py calib.csv --journal KLOG`, with `journalctl _TRANSPORT=kernel
+-o short-unix` (all boots; the journal is persistent) as KLOG. It rebuilds
+`otg_s` from max77705's `OTG: boost on` / `boost off`, the USB devices from
+`usb 1-1…: new … USB device` / `USB disconnect` (and `usb1-port1: unable to
+enumerate`: a dock that never came up), the bus going with usbdrd's `device
+mode`, the DP link from exynos9810-dp's `pma: on` (then on until the next
+boot) and video from its `drm: enable` / `disable`; a boot (`Linux
+version`) ends everything. Bluetooth was never logged usably: rows without
+it do not fit it. `--report` says how much each model leaves Unaccounted
+and where the energy goes by group; `--holdout-after EPOCH` fits on the
+rows before and reports on the rows after.
+
+The profile of 2026-11-11 (`fit-calib.py calib.csv --journal KLOG --fix
+base_suspend_mw=100 --fix dp_video_mw=300 --fix bt_on_mw=0 --fix
+bt_conn_mw=0 --report`, 109 windows of 11-08 to 11-11, deep sleep off
+throughout): Unaccounted was 33.0 % of the measured energy with the old
+model and is 1.9 % with the new; fitted on the 90 windows before 11-11 and
+tested on the 19 after (the dock on, then pulled), the old model left
+48.9 % Unaccounted and the new one predicts the gauge to +2.8 %. Where the
+measured energy went over all 109 windows: Idle (awake) 42 %, USB-C
+accessories 19 %, Always-on (unseparated) 17 %, CPU 9 %, Wi-Fi 5 %, Desktop
+(external display) 4 %, screen 2.5 %, Unaccounted 2 %.
+
+`bench-cpu.sh` (overnight, `ztbench`) measures the CPU tables with busy
+loops, screen off.
+
+### What is left
+
+The **Always-on (unseparated)** 480 mW: draw in daily use beyond the 325 mA
+bench, with nothing we read changing. Candidates, and what would settle each
+(all with the charger out, the screen off, five-minute windows):
+
+- The sensor hub and its daemons (28 mA in October's A/B: 100 mW), the
+  audio codec and PipeWire held open, Waydroid's container (its CPU is
+  counted, but not what its wakeups keep awake), BLE scanning by
+  ztos-podsd: stop one at a time (the container: `waydroid container
+  stop`) and read the window's gauge.
+- The modem's CP: online in airplane mode, `mif` traffic every ~20 s; the
+  base had it too, but not necessarily as busy. A window with the modem
+  driver unloaded would say.
+- The panel not asleep while "off" (157 mA in October) on some screen-offs:
+  `s9p_decon panel_sleep` should read `Y`; ztacctd could record it.
+- The DP link (above) is separated since it is read; were the driver to
+  power it down on unplug, its 220 mW would show as gone from the gauge, and
+  confirm the fit.
 
 ## Windows and the state file
 

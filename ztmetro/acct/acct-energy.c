@@ -30,21 +30,44 @@
  * the model stands as it is. The windows the gauge saw are kept, with the
  * model's inputs, in /var/lib/ztacct/calib.csv for fitting the coefficients.
  *
+ *   accessories  what the phone powers beyond itself, by state read from
+ *		sysfs on the scan (no wakes of their own):
+ *		"USB-C accessories": the MAX77705's boost giving VBUS to a sink
+ *		partner (its regulator max77705-otg enabled), and while it does,
+ *		the USB host bus with devices on it (xHCI, the PHY, the dock's
+ *		hubs and devices: /sys/bus/usb/devices, per device).
+ *		"Desktop (external display)": the DisplayPort link powered (the
+ *		driver's debugfs state, read at most every 5 minutes) and video
+ *		out (the DRM connector card*-DP-* enabled).
+ *		"Bluetooth": the controller up (HCIGETDEVINFO) and its links
+ *		(/sys/class/bluetooth/hci0:N). "Mobile radio (airplane)": the
+ *		modem's CP online (mif modem_state) with the radio off. Both
+ *		are inside the measured base (they were on when it was taken):
+ *		their share is moved out of "Idle (awake)", not added.
+ *   floor	"Always-on (unseparated)": what the gauge shows, window after
+ *		window, beyond the measured base with nothing we read changing
+ *		(fitted; see base_extra_mw).
+ *
  * Coefficients: /etc/ztacct/power_profile (KEY VALUE lines) overrides the
  * defaults below. Measured on this phone: the base (325 mA, screen off, dark,
  * radio off) and Wi-Fi idle (17 mA tuned, screen off; 82 mA untuned, which
  * is what zrnperfd leaves on with the screen on), power/README.md. The rest
- * are estimates until fitted (the overnight bench, calib.csv).
+ * fitted to the gauge (fit-calib.py on calib.csv, 2026-11-11: 109 windows,
+ * the old ones' accessory states rebuilt from the kernel's log), or
+ * estimates where marked.
  */
 #include "acctd.h"
 #include "acct-common.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 
 #define SETTLE_S	300
 #define MAX_CLUSTERS	4
@@ -81,16 +104,51 @@ static struct {
 	double mobile_idle_mw, mobile_active_mw, mobile_tail_s, mobile_pkt_s;
 	double wake_mj;			/* each resume from deep sleep */
 	double cpu_scale;		/* the CPU tables times this */
+	double gpu_scale;		/* the GPU table times this */
+	double base_extra_mw;		/* the awake floor beyond the measured base */
+	double otg_mw, usb_host_mw, usb_dev_mw;	/* VBUS out; the bus with devices; each device */
+	double dp_link_mw, dp_video_mw;
+	double bt_on_mw, bt_conn_mw;	/* bt_on: inside the base */
+	double cp_air_mw;		/* the modem's CP, radio off: inside the base */
 	struct ptab cl[MAX_CLUSTERS], gpu;
 	bool cl_set[MAX_CLUSTERS];
 } prof = {
 	.base_awake_mw = 1190, .base_suspend_mw = 100,	/* 325 mA x 3.67 V; suspend: an estimate */
-	.screen_mw = 250, .screen_full_mw = 1100,
+	/* screen: fitted 2026-11-11 (was 250 + 1100, estimates): ztMETRO is
+	 * black on an AMOLED panel, and the floor below now takes what the
+	 * screen-on windows used to blame on it */
+	.screen_mw = 80, .screen_full_mw = 400,
 	.wifi_idle_on_mw = 315, .wifi_idle_off_mw = 65,
-	.wifi_pkt_mj = 0.15, .wifi_byte_uj = 0.1,	/* fitted to a 1.2 GB download, 2026-11-08 */
+	.wifi_pkt_mj = 0.07, .wifi_byte_uj = 0.1,	/* per byte: a 1.2 GB download, 2026-11-08; per packet: 2026-11-11 */
 	.mobile_idle_mw = 40, .mobile_active_mw = 900, .mobile_tail_s = 5, .mobile_pkt_s = 0.002,
 	.wake_mj = 300,
-	.cpu_scale = 1,
+	/* the CPU tables x 0.78, the GPU table x 2.5: fitted 2026-11-11 */
+	.cpu_scale = 0.78, .gpu_scale = 2.5,
+	/* fit-calib.py, 2026-11-11, 109 windows (calib.csv since 11-08, states
+	 * of the old rows from the kernel's log). The floor: the base fitted to
+	 * 1673 mW against the 1190 measured (Wi-Fi off, panel asleep, 150 s on
+	 * the bench); the gauge agrees with current_now to 1 % (checked
+	 * 2026-11-11), so the difference is real draw that no state we read
+	 * tells apart (bench vs daily use: see README.md) */
+	.base_extra_mw = 480,
+	/* the Belkin 6-in-1 dock on the phone's VBUS (hub, hub, RTL8153
+	 * Ethernet without a cable, card reader, billboard, HDMI converter,
+	 * keyboard/mouse dongle): 1.5-1.6 W in all, the gauge's step when it was
+	 * pulled (11-11 00:48: 3.55 W -> 1.95 W, screen off). The boost alone, a
+	 * dock that never enumerated (11-09): 90 mW. Bus vs per device rests on
+	 * one device more on 11-11 than on 11-10: the sum is solid, the split is
+	 * not */
+	.otg_mw = 90, .usb_host_mw = 470, .usb_dev_mw = 140,
+	/* the DP link left up, PMA/PHY/controller (the driver keeps it so after
+	 * unplugging, until a reboot): fitted, 11-09 and 11-11 windows with and
+	 * without it. Video out (DECON2 scanout + the link's video at 1080p60):
+	 * an estimate, never on long enough on battery to fit */
+	.dp_link_mw = 220, .dp_video_mw = 300,
+	/* estimates: the BCM4361's Bluetooth up and idle (inside the base: on
+	 * when it was measured), each link in sniff mode; the CP online in
+	 * airplane mode (CFUN=4, mif traffic every ~20 s; inside the base) */
+	.bt_on_mw = 10, .bt_conn_mw = 20,
+	.cp_air_mw = 25,
 };
 
 static void parse_list(const char *s, double *out, int *n) {
@@ -120,6 +178,11 @@ static void profile_load(void) {
 			{ "mobile_idle_mw", &prof.mobile_idle_mw }, { "mobile_active_mw", &prof.mobile_active_mw },
 			{ "mobile_tail_s", &prof.mobile_tail_s }, { "mobile_pkt_s", &prof.mobile_pkt_s },
 			{ "wake_mj", &prof.wake_mj }, { "cpu_scale", &prof.cpu_scale },
+			{ "base_extra_mw", &prof.base_extra_mw }, { "otg_mw", &prof.otg_mw },
+			{ "usb_host_mw", &prof.usb_host_mw }, { "usb_dev_mw", &prof.usb_dev_mw },
+			{ "dp_link_mw", &prof.dp_link_mw }, { "dp_video_mw", &prof.dp_video_mw },
+			{ "bt_on_mw", &prof.bt_on_mw }, { "bt_conn_mw", &prof.bt_conn_mw },
+			{ "cp_air_mw", &prof.cp_air_mw },
 		};
 		bool done = false;
 		for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
@@ -182,6 +245,7 @@ static unsigned long resumes_prev;
 static char resume_path[96];
 
 static int g_idle = -1, g_sleep = -1, g_wifi = -1, g_mobile = -1, g_unacc = -1, g_kernel = -1, g_shell = -1, g_gauge = -1;
+static int g_usbc = -1, g_display = -1, g_bt = -1, g_cp = -1, g_floor = -1;
 
 static long long read_ll(const char *path) {
 	char buf[64];
@@ -326,6 +390,146 @@ static unsigned long resumes(void) {
 	return n;
 }
 
+/* ------------------------------------------------------ the accessories */
+
+/* What the phone powers beyond itself, read on the scan from sysfs: no
+ * wakes, a few small files. Paths are found at start (and looked for again
+ * at a settle if missing: the DRM connector appears with the first hot
+ * plug). */
+static struct acc {
+	char otg[96];		/* the boost regulator's state file */
+	char dp_on[96];		/* card*-DP-* "enabled" */
+	char modem[128];	/* mif modem_state */
+	int bt_fd;		/* HCI control socket, for HCIGETDEVINFO */
+	bool dp_link;		/* the last debugfs read */
+	bool partner_was;	/* a USB-C partner at the last read */
+	/* this scan */
+	bool vbus, dp_video, bt_up, cp_on, airplane, waydroid;
+	int usb_n, usb_active, bt_links;
+} acc = { .bt_fd = -1 };
+
+static bool read_word(const char *path, char *out, size_t size) {
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) return false;
+	ssize_t n = read(fd, out, size - 1);
+	close(fd);
+	if (n <= 0) return false;
+	out[n] = 0;
+	out[strcspn(out, "\n")] = 0;
+	return true;
+}
+
+static void acc_find(void) {
+	DIR *d;
+	struct dirent *e;
+	if (!acc.otg[0] && (d = opendir("/sys/class/regulator"))) {
+		while ((e = readdir(d))) {
+			char p[96], name[64];
+			if (e->d_name[0] == '.') continue;
+			snprintf(p, sizeof(p), "/sys/class/regulator/%s/name", e->d_name);
+			if (read_word(p, name, sizeof(name)) && strstr(name, "otg")) {
+				snprintf(acc.otg, sizeof(acc.otg), "/sys/class/regulator/%s/state", e->d_name);
+				break;
+			}
+		}
+		closedir(d);
+	}
+	if (!acc.dp_on[0] && (d = opendir("/sys/class/drm"))) {
+		while ((e = readdir(d))) {
+			if (!strncmp(e->d_name, "card", 4) && strstr(e->d_name, "-DP-")) {
+				snprintf(acc.dp_on, sizeof(acc.dp_on), "/sys/class/drm/%s/enabled", e->d_name);
+				break;
+			}
+		}
+		closedir(d);
+	}
+	if (!acc.modem[0] && (d = opendir("/sys/devices/platform"))) {
+		while ((e = readdir(d))) {
+			char p[128];
+			if (!strstr(e->d_name, "mif")) continue;
+			snprintf(p, sizeof(p), "/sys/devices/platform/%s/modem_state", e->d_name);
+			if (access(p, R_OK) == 0) {
+				snprintf(acc.modem, sizeof(acc.modem), "%s", p);
+				break;
+			}
+		}
+		closedir(d);
+	}
+	if (acc.bt_fd < 0) acc.bt_fd = socket(31 /* AF_BLUETOOTH */, SOCK_RAW | SOCK_CLOEXEC, 1 /* BTPROTO_HCI */);
+}
+
+/* Whether the DP link is up is in the driver's debugfs state only. Reading it
+ * touches PMU registers and, with the link's power domain off, logs a
+ * warning; so it is read at a settle (every 5 minutes), and only while a
+ * USB-C partner is there, or the last read found the link on, or the partner
+ * just left: after the link goes off, one read and at most one warning. */
+static void acc_dp_link(void) {
+	bool partner = access("/sys/class/typec/port0-partner", F_OK) == 0;
+	if (!partner && !acc.dp_link && !acc.partner_was) return;
+	acc.partner_was = partner;
+	FILE *f = fopen("/sys/kernel/debug/exynos9810-dp/state", "re");
+	char line[256];
+	bool on = false;
+	while (f && fgets(line, sizeof(line), f)) {
+		/* "id 1 pma 1 phy 1 ctrl 1; PHY not isolated; link powered and
+		 * clocked": the combo PHY's DP part, the PHY and the link controller
+		 * up. ("powered and clocked" is the power domain: on at every boot) */
+		int id, pma, phy, ctrl;
+		if (sscanf(line, "id %d pma %d phy %d ctrl %d", &id, &pma, &phy, &ctrl) == 4) {
+			on = pma || phy || ctrl;
+			break;
+		}
+	}
+	if (f) fclose(f);
+	acc.dp_link = on;
+}
+
+static void acc_read(void) {
+	char s[64];
+	/* VBUS out: the boost on; without its regulator, the port's power role */
+	if (acc.otg[0]) acc.vbus = read_word(acc.otg, s, sizeof(s)) && !strcmp(s, "enabled");
+	else acc.vbus = read_word("/sys/class/typec/port0/power_role", s, sizeof(s)) && strstr(s, "[source]");
+	/* devices on the USB host bus (none in device mode: the controller is unbound) */
+	acc.usb_n = acc.usb_active = 0;
+	DIR *d = opendir("/sys/bus/usb/devices");
+	struct dirent *e;
+	while (d && (e = readdir(d))) {
+		/* "1-1", "1-1.4": devices; "usb1": root hubs; "1-1:1.0": interfaces */
+		if (!isdigit((unsigned char)e->d_name[0]) || strchr(e->d_name, ':')) continue;
+		char p[96];
+		acc.usb_n++;
+		snprintf(p, sizeof(p), "/sys/bus/usb/devices/%s/power/runtime_status", e->d_name);
+		if (!read_word(p, s, sizeof(s)) || strcmp(s, "suspended")) acc.usb_active++;
+	}
+	if (d) closedir(d);
+	acc.dp_video = acc.dp_on[0] && read_word(acc.dp_on, s, sizeof(s)) && !strcmp(s, "enabled");
+	/* Bluetooth: hci0 up, and its links (each an hci0:HANDLE device) */
+	acc.bt_up = false;
+	if (acc.bt_fd >= 0) {
+		/* struct hci_dev_info: dev_id u16, name[8], bdaddr[6], then flags u32 */
+		unsigned char di[128] = { 0 };
+		if (ioctl(acc.bt_fd, _IOR('H', 211, int), di) == 0) {
+			uint32_t flags;
+			memcpy(&flags, di + 16, 4);
+			acc.bt_up = flags & 1;	/* HCI_UP */
+		}
+	}
+	acc.bt_links = 0;
+	if (acc.bt_up && (d = opendir("/sys/class/bluetooth"))) {
+		while ((e = readdir(d))) if (!strncmp(e->d_name, "hci0:", 5)) acc.bt_links++;
+		closedir(d);
+	}
+	acc.cp_on = acc.modem[0] && read_word(acc.modem, s, sizeof(s)) && !strcmp(s, "ONLINE");
+	acc.airplane = false;
+	FILE *f = fopen("/run/ztoscorenetworking/status", "re");
+	if (f) {
+		char line[96];
+		while (fgets(line, sizeof(line), f)) if (!strncmp(line, "airplane=1", 10)) acc.airplane = true;
+		fclose(f);
+	}
+	acc.waydroid = access("/sys/fs/cgroup/lxc.payload.waydroid", F_OK) == 0;
+}
+
 /* ------------------------------------------------------------- the model */
 
 /* what the scan modelled, before settling, for the window and calib.csv */
@@ -334,10 +538,13 @@ static struct win {
 	double busy_s[MAX_CLUSTERS], cpu_j[MAX_CLUSTERS];
 	double gpu_j, wifi_pkts, wifi_bytes, mob_bytes, wifi_assoc_s, mob_active_s;
 	double model_dis_j, model_chg_j, meas_j, dis_s, chg_s, volt_sum, volt_n, resumes;
+	/* the accessories' states, seconds (usb_dev_s, usb_active_s, bt_conn_s: x count) */
+	double otg_s, usb_host_s, usb_dev_s, usb_active_s, dp_link_s, dp_video_s, bt_on_s, bt_conn_s;
+	double cp_s, airplane_s, waydroid_s;
 	double e[NEK];
 } w;
 static double k_last = 1, unacc_total;
-static char calib[CALIB_KEEP][320];
+static char calib[CALIB_KEEP][448];
 static int n_calib;
 static double front_since = -1, mob_until;
 static double mob_bytes_tick;
@@ -384,8 +591,11 @@ void energy_add_net(int g, struct proc *p, int cls, double bytes, double packets
 	}
 }
 
+static void calib_upgrade(void);
+
 void energy_start(void) {
 	profile_load();
+	calib_upgrade();
 	g_idle = group_get("Idle (awake)", "idle", K_MODEL);
 	g_sleep = group_get("Deep sleep", "suspend", K_MODEL);
 	g_wifi = group_get("Wi-Fi idle", "wifi", K_MODEL);
@@ -394,6 +604,13 @@ void energy_start(void) {
 	g_kernel = group_get("Kernel", "kernel", K_KERNEL);
 	g_shell = group_get("ztMETRO", "ztmetro", K_SHELL);
 	g_gauge = group_get("__gauge", "gauge", K_GAUGE);
+	g_usbc = group_get("USB-C accessories", "usbc", K_MODEL);
+	g_display = group_get("Desktop (external display)", "display", K_MODEL);
+	g_bt = group_get("Bluetooth", "bluetooth", K_MODEL);
+	g_cp = group_get("Mobile radio (airplane)", "modem", K_MODEL);
+	g_floor = group_get("Always-on (unseparated)", "floor", K_MODEL);
+	acc_find();
+	acc.partner_was = true;		/* read the DP link at the first settle */
 	/* the clusters */
 	DIR *d = opendir("/sys/devices/system/cpu/cpufreq");
 	struct dirent *e;
@@ -507,7 +724,7 @@ void energy_tick(double dt_boot, double dt_mono) {
 		c->busy_total += c->busy_s;
 		c->e_total += c->e_j;
 		w.busy_s[i] += c->busy_s;
-		w.cpu_j[i] += c->e_j;
+		w.cpu_j[i] += prof.cpu_scale > 0 ? c->e_j / prof.cpu_scale : c->e_j;	/* at scale 1, for fitting */
 		all_e += c->e_j;
 		all_busy += c->busy_s;
 		model(g_kernel, NULL, E_CPU, irq_s[i] * c->eps);
@@ -533,7 +750,8 @@ void energy_tick(double dt_boot, double dt_mono) {
 		gj += dt * ptab_mw(&prof.gpu, gpu_khz[k]) / 1000;
 		gpu_ms[k] = gt[k];
 	}
-	w.gpu_j += gj;
+	w.gpu_j += gj;		/* at scale 1, for fitting */
+	gj *= prof.gpu_scale;
 	model(now.screen_on ? now.front_g : g_shell, NULL, E_GPU, gj);
 	/* the radios when idle */
 	if (wifi_associated()) {
@@ -548,8 +766,43 @@ void energy_tick(double dt_boot, double dt_mono) {
 		w.mob_active_s += prof.mobile_tail_s;
 		mob_bytes_tick = 0;
 	}
+	/* the accessories: what the phone powers beyond itself */
+	acc_read();
+	double base_mw = prof.base_awake_mw;
+	if (acc.vbus) {
+		/* the boost, and the bus it powers (the dock's hubs and devices; the
+		 * xHCI and PHY on our side) */
+		double mw = prof.otg_mw;
+		if (acc.usb_n > 0) mw += prof.usb_host_mw + prof.usb_dev_mw * acc.usb_n;
+		model(g_usbc, NULL, E_BASE, mw * dt_boot / 1000);
+	}
+	w.otg_s += acc.vbus ? dt_boot : 0;
+	w.usb_host_s += acc.usb_n > 0 ? dt_boot : 0;
+	w.usb_dev_s += acc.usb_n * dt_boot;
+	w.usb_active_s += acc.usb_active * dt_boot;
+	if (acc.dp_link || acc.dp_video)
+		model(g_display, NULL, E_BASE, ((acc.dp_link ? prof.dp_link_mw : 0) + (acc.dp_video ? prof.dp_video_mw : 0)) * dt_boot / 1000);
+	w.dp_link_s += acc.dp_link ? dt_boot : 0;
+	w.dp_video_s += acc.dp_video ? dt_boot : 0;
+	/* the radios that were on when the base was measured: their share of it */
+	if (acc.bt_up) {
+		double own = fmin(prof.bt_on_mw, base_mw);
+		base_mw -= own;
+		model(g_bt, NULL, E_BASE, (own + prof.bt_conn_mw * acc.bt_links) * dt_mono / 1000);
+	}
+	w.bt_on_s += acc.bt_up ? dt_boot : 0;
+	w.bt_conn_s += acc.bt_links * dt_boot;
+	if (acc.cp_on && !mobile_up()) {
+		double own = fmin(prof.cp_air_mw, base_mw);
+		base_mw -= own;
+		model(g_cp, NULL, E_BASE, own * dt_mono / 1000);
+	}
+	w.cp_s += acc.cp_on ? dt_boot : 0;
+	w.airplane_s += acc.airplane ? dt_boot : 0;
+	w.waydroid_s += acc.waydroid ? dt_boot : 0;
 	/* the rest: awake and idle, asleep, and the wakes */
-	model(g_idle, NULL, E_BASE, prof.base_awake_mw * dt_mono / 1000);
+	model(g_idle, NULL, E_BASE, base_mw * dt_mono / 1000);
+	model(g_floor, NULL, E_BASE, prof.base_extra_mw * dt_mono / 1000);
 	model(g_sleep, NULL, E_BASE, prof.base_suspend_mw * susp / 1000);
 	unsigned long r = resumes();
 	if (r > resumes_prev) {
@@ -581,6 +834,8 @@ void energy_tick(double dt_boot, double dt_mono) {
 
 void energy_settle(bool force) {
 	(void)force;
+	acc_find();
+	acc_dp_link();
 	if (w.dt_boot <= 0 && w.model_dis_j + w.model_chg_j <= 0) {
 		w.t0 = now.wall;
 		return;
@@ -628,25 +883,68 @@ void energy_settle(bool force) {
 			n_calib--;
 		}
 		snprintf(calib[n_calib++], sizeof(calib[0]),
-			"%lld,%.1f,%.1f,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.0f,%.0f,%.0f,%.1f,%.1f,%.0f,%.2f,%.2f,%.3f",
+			"%lld,%.1f,%.1f,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.0f,%.0f,%.0f,%.1f,%.1f,%.0f,%.2f,%.2f,%.3f,"
+			"%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f",
 			(long long)w.t0, w.dt_boot, w.dt_mono, w.susp_s, w.screen_s, w.bright_s,
 			w.busy_s[0], n_cl > 1 ? w.busy_s[1] : 0, w.cpu_j[0], n_cl > 1 ? w.cpu_j[1] : 0, w.gpu_j,
 			w.wifi_pkts, w.wifi_bytes, w.mob_bytes, w.wifi_assoc_s, w.mob_active_s, w.resumes,
-			w.model_dis_j, w.meas_j, w.volt_n ? w.volt_sum / w.volt_n : 0);
+			w.model_dis_j, w.meas_j, w.volt_n ? w.volt_sum / w.volt_n : 0,
+			w.otg_s, w.usb_host_s, w.usb_dev_s, w.usb_active_s, w.dp_link_s, w.dp_video_s,
+			w.bt_on_s, w.bt_conn_s, w.cp_s, w.airplane_s, w.waydroid_s);
 	}
 	memset(&w, 0, sizeof(w));
 	w.t0 = now.wall;
 }
 
+static const char calib_head[] = "start,boot_s,awake_s,asleep_s,screen_s,screen_bright_s,busy_little_s,busy_big_s,"
+	"cpu_little_j,cpu_big_j,gpu_j,wifi_packets,wifi_bytes,mobile_bytes,wifi_assoc_s,mobile_active_s,"
+	"resumes,model_j,measured_j,volts,"
+	"otg_s,usb_host_s,usb_dev_s,usb_active_s,dp_link_s,dp_video_s,bt_on_s,bt_conn_s,cp_s,airplane_s,waydroid_s";
+
+/* A calib.csv from before the state columns: rewritten once with the new
+ * header, its rows given empty fields (unknown, not 0: fit-calib.py fills
+ * them from the kernel's log, or leaves those rows out of their fit). */
+static void calib_upgrade(void) {
+	FILE *f = fopen(ACCT_CALIB, "re");
+	char line[1024];
+	if (!f) return;
+	if (!fgets(line, sizeof(line), f)) {
+		fclose(f);
+		return;
+	}
+	line[strcspn(line, "\n")] = 0;
+	if (!strcmp(line, calib_head)) {
+		fclose(f);
+		return;
+	}
+	int cols_new = 1, cols_old = 1;
+	for (const char *c = calib_head; *c; c++) cols_new += *c == ',';
+	for (const char *c = line; *c; c++) cols_old += *c == ',';
+	FILE *o = fopen(ACCT_CALIB ".new", "we");
+	if (!o) {
+		fclose(f);
+		return;
+	}
+	fprintf(o, "%s\n", calib_head);
+	while (fgets(line, sizeof(line), f)) {
+		line[strcspn(line, "\n")] = 0;
+		int n = 1;
+		for (const char *c = line; *c; c++) n += *c == ',';
+		fputs(line, o);
+		for (int i = n; i < cols_new && n == cols_old; i++) fputc(',', o);
+		fputc('\n', o);
+	}
+	fclose(f);
+	if (fclose(o) == 0) rename(ACCT_CALIB ".new", ACCT_CALIB);
+	else unlink(ACCT_CALIB ".new");
+}
+
 void energy_save_calib(void) {
 	if (!n_calib) return;
+	calib_upgrade();
 	FILE *f = fopen(ACCT_CALIB, "ae");
 	if (!f) return;
-	if (ftell(f) == 0) {
-		fprintf(f, "start,boot_s,awake_s,asleep_s,screen_s,screen_bright_s,busy_little_s,busy_big_s,"
-			"cpu_little_j,cpu_big_j,gpu_j,wifi_packets,wifi_bytes,mobile_bytes,wifi_assoc_s,mobile_active_s,"
-			"resumes,model_j,measured_j,volts\n");
-	}
+	if (ftell(f) == 0) fprintf(f, "%s\n", calib_head);
 	for (int i = 0; i < n_calib; i++) fprintf(f, "%s\n", calib[i]);
 	long size = ftell(f);
 	fclose(f);
@@ -664,7 +962,20 @@ void energy_status(FILE *f) {
 	}
 	fprintf(f, "],\"profile\":{\"base_awake_mw\":%.0f,\"base_suspend_mw\":%.0f,\"screen_mw\":%.0f,"
 		"\"screen_full_mw\":%.0f,\"wifi_idle_on_mw\":%.0f,\"wifi_idle_off_mw\":%.0f,\"wifi_pkt_mj\":%.3f,"
-		"\"wifi_byte_uj\":%.3f,\"cpu_scale\":%.3f},\"gpu\":\"%s\",\"resumes\":\"%s\"}",
+		"\"wifi_byte_uj\":%.3f,\"cpu_scale\":%.3f,\"gpu_scale\":%.3f,\"base_extra_mw\":%.0f,\"otg_mw\":%.0f,"
+		"\"usb_host_mw\":%.0f,\"usb_dev_mw\":%.0f,\"dp_link_mw\":%.0f,\"dp_video_mw\":%.0f,\"bt_on_mw\":%.0f,"
+		"\"bt_conn_mw\":%.0f,\"cp_air_mw\":%.0f},\"gpu\":\"%s\",\"resumes\":\"%s\",",
 		prof.base_awake_mw, prof.base_suspend_mw, prof.screen_mw, prof.screen_full_mw, prof.wifi_idle_on_mw,
-		prof.wifi_idle_off_mw, prof.wifi_pkt_mj, prof.wifi_byte_uj, prof.cpu_scale, gpu_path, resume_path);
+		prof.wifi_idle_off_mw, prof.wifi_pkt_mj, prof.wifi_byte_uj, prof.cpu_scale, prof.gpu_scale,
+		prof.base_extra_mw, prof.otg_mw, prof.usb_host_mw, prof.usb_dev_mw, prof.dp_link_mw, prof.dp_video_mw,
+		prof.bt_on_mw, prof.bt_conn_mw, prof.cp_air_mw, gpu_path, resume_path);
+	/* what the accessories were at the last scan, and where it was read */
+	fprintf(f, "\"accessories\":{\"vbus_out\":%d,\"usb_devices\":%d,\"usb_active\":%d,\"dp_link\":%d,"
+		"\"dp_video\":%d,\"bt_up\":%d,\"bt_links\":%d,\"modem_online\":%d,\"airplane\":%d,\"waydroid\":%d,"
+		"\"otg\":\"%s\",\"dp\":\"%s\",\"modem\":\"%s\"}}",
+		acc.vbus, acc.usb_n, acc.usb_active, acc.dp_link, acc.dp_video, acc.bt_up, acc.bt_links, acc.cp_on,
+		acc.airplane, acc.waydroid, acc.otg, acc.dp_on, acc.modem);
+}
+
+int energy_unaccounted_group(void) { return g_unacc;
 }
