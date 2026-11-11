@@ -91,9 +91,29 @@ With Waydroid also running, that leaves about 1 GB free on the 3.5 GB phone.
 
 **CPU and battery:**
 
-- A virtual desktop that nobody looks at is drawn once a second, and its
-  apps get one frame callback a second. The shell measured 0% of a core
-  over 10 s.
+- A desktop that nobody looks at is not drawn at all, and its apps get no
+  frame callbacks until it is seen again. There is no timer in the shell for
+  it (DESIGN.md, "Not drawn while nobody looks"). Measured on 11 Nov
+  (screen off, the phone kept awake, 120 s), with XFCE on an unviewed
+  virtual output, wakeups (context switches) a second and CPU:
+
+  | Process | Unviewed | Viewed (`desktop watch`) |
+  |---|---|---|
+  | xfce4-panel (with ztos-status and the volume plugin) | 2.0, 0.04% | 1.1, 0.03% |
+  | xfdesktop | 0.26, 0.01% | 0.03, 0% |
+  | tumblerd (exits when idle) | 0.27, 0% | 0.32, 0.02% |
+  | Thunar daemon | 0.05, 0% | 0.03, 0% |
+  | xfsettingsd | 0.03, 0% | 0.05, 0% |
+  | xfconfd, ztos-desktop-session | 0, 0% | 0, 0% |
+
+  The panel's remaining ~2 a second were there before ztos-status and the
+  volume plugin (1.7 to 2.0 with XFCE's default panel). They don't come from
+  frames, and ztos-status has nothing open while unviewed.
+
+  None of the session's processes has a capability (`CapEff` 0). So none can
+  hold a wakeup source, an EPOLLWAKEUP or an alarm timer: their timerfds are
+  CLOCK_MONOTONIC. The only logind inhibitors are NetworkManager's and
+  rtkit's.
 - With ztdesk in front, the desktop runs at 60 Hz, but only redraws when
   something on it changed. ztdesk captures only changed frames, at most
   30 a second.

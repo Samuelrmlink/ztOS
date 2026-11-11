@@ -1,0 +1,10 @@
+[Xfce Panel]
+Type=X-XFCE-PanelPlugin
+Encoding=UTF-8
+Name=Phone status
+Comment=Mobile, Wi-Fi, VPN, Bluetooth and battery, from the phone's own daemons
+Icon=phone
+X-XFCE-Module=ztos-status
+X-XFCE-Internal=true
+X-XFCE-Unique=true
+X-XFCE-API=2.0
