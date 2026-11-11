@@ -181,6 +181,9 @@ python3 "$ROOT/kernel/patch-decon-wake.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-flip.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-panel-lock.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-panel-io.py" "$SRC"
+# the always-on display's blank: aod_keep=Y leaves the panel lit with its last
+# frame while the output is off, so the SoC may sleep under it (ROADMAP 8.16)
+python3 "$ROOT/kernel/patch-decon-aod.py" "$SRC"
 python3 "$ROOT/kernel/patch-suspend-mpidr.py" "$SRC"
 python3 "$ROOT/kernel/patch-ufs-suspend.py" "$SRC"
 python3 "$ROOT/kernel/patch-touch-suspend.py" "$SRC"
@@ -189,6 +192,9 @@ python3 "$ROOT/kernel/patch-touch-force.py" "$SRC"
 python3 "$ROOT/kernel/patch-pinctrl-resume.py" "$SRC"
 # the firmware's roams are reported to the host the way Samsung's driver does
 python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
+# the BCM4361 stays associated through system sleep: D3 through the control
+# ring, WL_HOST_WAKE as a wake line, the association kept (ROADMAP 8.16)
+python3 "$ROOT/kernel/patch-brcmfmac-d3.py" "$SRC"
 # MAX77705 charger: input_current_limit is a ceiling the limit ramps up to,
 # stock-like AICL back-off (300 mA floor) instead of mainline's ratchet that
 # wraps to 3.2 A, the battery's charge current, and max77705-wireless (WCIN)

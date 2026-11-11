@@ -913,6 +913,13 @@ struct zt_server {
 	uint32_t aod_fast_until;	/* read the room often until then */
 	struct wl_event_source *aod_light_timer;
 	int aod_place_shown;		/* the place last drawn, to log each move */
+	/* parked (AOD_KEEP_PARAM): the frame stays on the panel with the output
+	 * off, so the SoC may sleep under it; zrn-sleepd wakes it on the minute
+	 * and says "aod tick" */
+	bool aod_parked;
+	struct wl_event_source *aod_park_timer;
+	long aod_minute_drawn;		/* time / 60 of the picture in aod_layer */
+	long aod_minute_shown;		/* and of the one on the panel */
 	int screen_timeout;		/* seconds of no input before the screen sleeps; 0: never */
 	int lock_timeout;		/* the same on the lock screen; 0: screen_timeout */
 	bool double_tap_wake;		/* config double_tap_wake: a double tap wakes the AOD */
@@ -6699,6 +6706,7 @@ static void lock_lift_sync(struct zt_server *server, bool animated) {
  * not by --render, whose notifications are pretend. */
 static bool led_notes_live;
 static void aod_refresh(struct zt_server *server);
+static void aod_render_frame(struct zt_server *server);
 
 static void led_notes_sync(struct zt_server *server) {
 	if (!server->screen_on && server->aod) {
@@ -13270,7 +13278,11 @@ static int aod_light_tick(void *data) {
 			if (AOD_LEVELS[level].scale != server->aod_scale) {
 				server->aod_scale = AOD_LEVELS[level].scale;
 				server->aod_dirty = true;	/* the pixels' part: a frame now */
-				wlr_output_schedule_frame(server->output->wlr_output);
+				if (server->aod_parked) {
+					aod_render_frame(server);
+				} else {
+					wlr_output_schedule_frame(server->output->wlr_output);
+				}
 			}
 		}
 	}
@@ -13315,6 +13327,86 @@ static void aod_light_stop(struct zt_server *server) {
 }
 
 /* Draw it again and send it: the next frame carries it. */
+/*
+ * The always-on display, parked: s9p_decon's aod_keep (kernel/patch-decon-aod.py)
+ * makes the next blank leave the panel awake with its last frame, the trigger
+ * masked. The shell disables the output a moment after each AOD frame, with
+ * aod_keep set only for that commit: the output then reads disabled and
+ * zrn-sleepd may put the SoC to sleep with the time still on the glass
+ * (ROADMAP 8.16). Each new frame enables the output again with it (the panel
+ * never slept: no sleep-out), then parks again. Without the parameter, or
+ * ZTMETRO_AOD_PARK=0, the output stays on as before.
+ */
+#define AOD_KEEP_PARAM	"/sys/module/s9p_decon/parameters/aod_keep"
+#define AOD_PARK_MS	150	/* after a frame's commit, before parking */
+
+static bool aod_keep_set(bool on) {
+	int fd = open(AOD_KEEP_PARAM, O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return false;
+	}
+	bool ok = write(fd, on ? "Y" : "N", 1) == 1;
+	close(fd);
+	return ok;
+}
+
+static bool aod_park_available(void) {
+	const char *env = getenv("ZTMETRO_AOD_PARK");
+	if (env && strcmp(env, "0") == 0) {
+		return false;
+	}
+	return access(AOD_KEEP_PARAM, W_OK) == 0;
+}
+
+static int aod_park_tick(void *data) {
+	struct zt_server *server = data;
+	if (!server->output || !server->aod || server->screen_on || server->aod_parked ||
+			server->aod_dirty || !aod_park_available()) {
+		return 0;
+	}
+	pthread_mutex_lock(&bl.lock);
+	bool gliding = ramp.moving;
+	pthread_mutex_unlock(&bl.lock);
+	if (gliding) {
+		/* the level is still on its way to the panel */
+		wl_event_source_timer_update(server->aod_park_timer, 500);
+		return 0;
+	}
+	if (!aod_keep_set(true)) {
+		wlr_log(WLR_ERROR, "aod: cannot set %s: not parked", AOD_KEEP_PARAM);
+		return 0;
+	}
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_enabled(&state, false);
+	bool ok = wlr_output_commit_state(server->output->wlr_output, &state);
+	wlr_output_state_finish(&state);
+	aod_keep_set(false);	/* only this blank keeps the panel lit */
+	if (!ok) {
+		wlr_log(WLR_ERROR, "aod: could not park (output commit failed)");
+		return 0;
+	}
+	server->aod_parked = true;
+	state_file_write(server);
+	return 0;
+}
+
+/* Leave the park for the dark (the AOD no longer wanted): the output on, then
+ * off with the ordinary blank (black, display off, sleep in). */
+static void aod_unpark_dark(struct zt_server *server) {
+	if (!server->aod_parked) {
+		return;
+	}
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_enabled(&state, true);
+	if (!wlr_output_commit_state(server->output->wlr_output, &state)) {
+		wlr_log(WLR_ERROR, "aod: could not leave the park");
+	}
+	wlr_output_state_finish(&state);
+	server->aod_parked = false;
+}
+
 static void aod_refresh(struct zt_server *server) {
 	if (!server->aod) {
 		return;
@@ -13326,8 +13418,11 @@ static void aod_refresh(struct zt_server *server) {
 		server->aod_place_shown = place;
 	}
 	aod_draw_at(server, now);
+	server->aod_minute_drawn = (long)(now / 60);
 	server->aod_dirty = true;
-	if (server->output) {
+	if (server->output && server->aod_parked) {
+		aod_render_frame(server);	/* no frame events while the output is off */
+	} else if (server->output) {
 		wlr_output_schedule_frame(server->output->wlr_output);
 	}
 }
@@ -13390,13 +13485,21 @@ static void aod_render_frame(struct zt_server *server) {
 	}
 	wlr_output_state_set_buffer(&state, buffer);
 	wlr_buffer_unlock(buffer);
+	if (server->aod_parked) {
+		wlr_output_state_set_enabled(&state, true);	/* out of the park, with it */
+	}
 	if (wlr_output_commit_state(output, &state)) {
 		server->output->last_submitted = buffer;
 		server->plane_shown = false;
 		server->plane_surface = NULL;
 		server->aod_dirty = false;
 		server->aod_frames++;
+		server->aod_parked = false;
+		server->aod_minute_shown = server->aod_minute_drawn;
 		state_file_write(server);	/* (its aod_frames: one write a minute) */
+		if (server->aod_park_timer && aod_park_available()) {
+			wl_event_source_timer_update(server->aod_park_timer, AOD_PARK_MS);
+		}
 	} else {
 		wlr_log(WLR_ERROR, "aod: output commit failed");
 	}
@@ -13420,6 +13523,9 @@ static void aod_sync(struct zt_server *server) {
 	bool want = aod_wanted(server);
 	if (want == server->aod) {
 		return;
+	}
+	if (!want) {
+		aod_unpark_dark(server);	/* the panel still shows it */
 	}
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
@@ -13509,7 +13615,7 @@ static void screen_set(struct zt_server *server, bool on) {
 	if (aod) {
 		aod_bl_hold();
 	}
-	if (!aod && !(on && server->aod)) {
+	if (!aod && !(on && server->aod && !server->aod_parked)) {
 		struct wlr_output_state state;
 		wlr_output_state_init(&state);
 		wlr_output_state_set_enabled(&state, on);
@@ -13525,6 +13631,7 @@ static void screen_set(struct zt_server *server, bool on) {
 			aod_light_stop(server);
 		}
 		server->aod = false;
+		server->aod_parked = false;	/* (the output came on above) */
 		aod_bl_release();
 	}
 	server->screen_on = on;
@@ -15328,9 +15435,11 @@ static void state_file_write(struct zt_server *server) {
 		return;
 	}
 	struct wlr_output *o = server->output->wlr_output;
-	fprintf(f, "points %d %d\nscale %.2f\npixels %d %d\nscreen %s\naod %s\naod_frames %u\n", server->width,
+	fprintf(f, "points %d %d\nscale %.2f\npixels %d %d\nscreen %s\naod %s\naod_frames %u\n"
+		"aod_parked %s\naod_minute %ld\n", server->width,
 		server->height, server->scale, o->width, o->height, server->screen_on ? "on" : "off",
-		server->aod ? "on" : "off", server->aod_frames);
+		server->aod ? "on" : "off", server->aod_frames, server->aod_parked ? "yes" : "no",
+		server->aod_minute_shown);
 	fclose(f);
 	rename(tmp, path);
 }
@@ -15820,6 +15929,10 @@ static void ctl_command(struct zt_server *server, char *line) {
 		/* a new display size: greetd starts the session again at it */
 		wlr_log(WLR_INFO, "restart asked for");
 		wl_display_terminate(server->wl_display);
+	} else if (strcmp(line, "aod tick") == 0) {
+		/* zrn-sleepd, after a wake: the clock timer stood still while the SoC
+		 * slept (CLOCK_MONOTONIC), so the minute is drawn now */
+		clock_tick(server);
 	} else if (strncmp(line, "aod theme ", 10) == 0 || strncmp(line, "lock theme ", 11) == 0) {
 		/* a theme for the session (Settings' aod_theme / lock_theme last) */
 		bool lock = line[0] == 'l';
@@ -18697,6 +18810,7 @@ int main(int argc, char *argv[]) {
 	server.key_repeat_timer = wl_event_loop_add_timer(server.loop, key_repeat_fired, &server);
 	server.repeat_index = -1;
 	server.aod_light_timer = wl_event_loop_add_timer(server.loop, aod_light_tick, &server);
+	server.aod_park_timer = wl_event_loop_add_timer(server.loop, aod_park_tick, &server);
 	server.flip_timer = wl_event_loop_add_timer(server.loop, flip_frame, &server);
 	server.previews_timer = wl_event_loop_add_timer(server.loop, previews_idle, &server);
 	server.voldown_timer = wl_event_loop_add_timer(server.loop, voldown_later, &server);

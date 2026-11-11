@@ -100,6 +100,50 @@ if args.wlan:
  * providers first, including WL_REG_ON and PERST# mux/data registers. */
 &pinctrl_fsys1 { samsung,noirq-resume; };
 &pinctrl_peric0 { samsung,noirq-resume; };
+
+/*
+ * Wi-Fi through system sleep (kernel/patch-brcmfmac-d3.py, ROADMAP 8.16).
+ * WL_REG_ON (gpg0-5) holds its level while the SoC sleeps, as stock's
+ * PIN_SLP(gpg0-5, PREV, NONE): at the reset values (input, pull-down) the
+ * module lost its power in every sleep. WL_HOST_WAKE (gpa0-7, stock's
+ * wlan_host_wake: EINT, pull-down) is the dongle's line to wake the SoC,
+ * given to the PCI function's own node as a GPIO (an interrupt there would
+ * be taken for the function's INTx).
+ */
+&pinctrl_peric0 {
+	wlan_en_hold: wlan-en-hold-pins {
+		samsung,pins = "gpg0-5";
+		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_PREV>;
+		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_NONE>;
+	};
+};
+
+&pinctrl_alive {
+	wlan_host_wake: wlan-host-wake-pins {
+		samsung,pins = "gpa0-7";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+	};
+};
+
+&pcie_wlan {
+	pinctrl-0 = <&pcie0_clkreq &pcie0_perst &wlan_en_hold>;
+
+	pcie@0,0 {
+		device_type = "pci";
+		reg = <0x0 0x0 0x0 0x0 0x0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges;
+
+		wifi@0,0 {
+			reg = <0x10000 0x0 0x0 0x0 0x0>;
+			host-wake-gpios = <&gpa0 7 GPIO_ACTIVE_HIGH>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&wlan_host_wake>;
+		};
+	};
+};
 '''
 
 if not args.power:

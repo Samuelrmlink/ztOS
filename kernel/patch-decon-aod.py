@@ -3,7 +3,7 @@
 
   patch-decon-aod.py <kernel tree>
 
-NOT in build-boot.sh yet: prepared for power/aod/README.md's stage 2, untested.
+In build-boot.sh since the sleep-wifi-aod work (ROADMAP 8.16); off until set.
 
 With the module parameter aod_keep=Y (default N, so nothing changes until
 it is set), disabling the pipeline leaves the panel as it is: no black frame,

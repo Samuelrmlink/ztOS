@@ -15,8 +15,22 @@ It sleeps once all of these hold:
     short job, such as a push message handed to an app, needs no cleanup);
   - it is switched on (/var/lib/zrn-sleep/enabled).
 
+Two ways to sleep (sleep_mode in CONFIG, ROADMAP 8.16):
+  connected (the default): Wi-Fi stays associated. brcmfmac takes the
+    BCM4361 into D3 with its firmware running (kernel/patch-brcmfmac-d3.py);
+    a packet for the phone wakes it through WL_HOST_WAKE (EINT 7, gpa0-7)
+    and is delivered at once: ssh over Tailscale answers in seconds. The
+    always-on display, parked on the panel (the shell disables the output
+    with s9p_decon's aod_keep, the panel keeps the frame), is redrawn by an
+    RTC wake on every minute.
+  deep: as before 8.16: Wi-Fi off its link (unbound) for every sleep, back
+    in WIFI_WINDOW_S windows; a lit AOD keeps the phone awake.
+If the D3 cycle fails (a refused suspend naming brcmfmac) KEEP_FAIL_LIMIT
+times in a row, this boot falls back to unbinding Wi-Fi.
+
 What wakes it: the power key (EINT 20), the modem's mailbox (an incoming
 call or SMS: zrn-modem's mcu_ipc wake IRQ), Bluetooth's HOST_WAKE (EINT 19),
+Wi-Fi's WL_HOST_WAKE (EINT 7, connected mode),
 the charger and the PMIC (EINT 14, 1), the sensor hub's host_req (EINT 15,
 while lhd holds it as a wake IRQ: zrn-sleep-init's eint_follow), and an RTC
 alarm, its own every MAX_SLEEP_S at the latest, or anything sooner that
@@ -102,7 +116,22 @@ PUSH_GRACE_S = 8
 # (Android's *_WAKEUP alarms, zrn-pushd): the app's wake locks do not reach
 # the host (no CONFIG_PM_WAKELOCKS; the container's /sys/power is read-only),
 # so this is how long it gets to do its job
-AWAKE_AFTER = {'rtc': 3, 'modem': 15, 'bt': 5, 'key': 0, 'hub': 5, 'alarm': 20, 'other': 8}
+AWAKE_AFTER = {'rtc': 3, 'modem': 15, 'bt': 5, 'key': 0, 'hub': 5, 'alarm': 20, 'other': 8,
+	       'wifi': 6}
+# connected mode (see the top): what keeps Wi-Fi associated and the AOD fresh
+SLEEP_MODE = 'connected'
+WIFI_PHY = 'phy0'
+BRCMF = Path('/sys/module/brcmfmac/parameters')
+KEEP_FAIL_LIMIT = 2	# refused D3 cycles in a row before unbinding again
+# the AOD's minute: no sleep this close before the minute turns (the RTC
+# alarm has a 1 s grain and the preparations take seconds), and after a wake
+# up to AOD_REDRAW_S for the shell to put the new minute on the panel
+AOD_LEAD_S = 4
+AOD_REDRAW_S = 8
+# awake while the network is in use (an ssh session over Tailscale): this
+# many packets in or out over NET_WINDOW_S holds the phone up. 0: off.
+NET_BUSY_PKTS = 40
+NET_WINDOW_S = 10
 EARLY_RTC_S = 3		# an RTC wake this much before its own alarm is 'alarm'
 # EINT_WAKEUP_MASK (PMU 0x60c, bit = 8 x gpaN + pin, 0 = may wake): open
 # 1 PMIC (gpa0-1), 14 MAX77705 charger (gpa1-6), 19 BT HOST_WAKE (gpa2-3),
@@ -175,7 +204,9 @@ WIFI_IFACE = 'wlp1s0'
 CONFIG = STATE / 'config'
 CONFIG_KEYS = {'wake_interval_s': 'MAX_SLEEP_S', 'wifi_interval_s': 'WIFI_INTERVAL_S',
 	       'wifi_window_s': 'WIFI_WINDOW_S',
-	       'wifi_grace_s': 'WIFI_GRACE_S', 'tick_s': 'TICK_S', 'doze_sleep_s': 'DOZE_SLEEP_S'}
+	       'wifi_grace_s': 'WIFI_GRACE_S', 'tick_s': 'TICK_S', 'doze_sleep_s': 'DOZE_SLEEP_S',
+	       'net_busy_pkts': 'NET_BUSY_PKTS', 'sleep_mode': 'SLEEP_MODE'}
+CONFIG_WORDS = {'sleep_mode': ('connected', 'deep')}	# the keys that take a word
 SHELL_STATE = Path(ztos_user.RUNTIME_DIR) / 'ztmetro.state'
 INHIBIT_OLD_S = 3600	# an inhibit held this long gets a line in the log
 LOG_ROTATE_BYTES = 1 << 20	# the log moves to log.1 past this
@@ -379,6 +410,10 @@ def load_config():
 		key, sep, value = line.split('#', 1)[0].partition('=')
 		key = key.strip()
 		if sep and key in CONFIG_KEYS:
+			if key in CONFIG_WORDS:
+				if value.strip() in CONFIG_WORDS[key]:
+					values[key] = value.strip()
+				continue
 			try:
 				values[key] = int(value.strip())
 			except ValueError:
@@ -404,14 +439,107 @@ def wifi_state():
 	return state if state in ('up', 'down') else (state or 'absent')
 
 
+def shell_state():
+	"""The shell's state file as {key: value}."""
+	out = {}
+	for line in read(SHELL_STATE).splitlines():
+		key, _, value = line.partition(' ')
+		out[key] = value.strip()
+	return out
+
+
+def aod_parked():
+	"""The AOD is on the panel with the output off (aod_keep): the SoC may
+	sleep under it, and the minute is redrawn by a wake."""
+	st = shell_state()
+	return st.get('screen') == 'off' and st.get('aod') == 'on' and \
+		st.get('aod_parked') == 'yes'
+
+
 def display_state():
-	"""'on', 'aod' (the output lit, the shell's AOD showing), or 'off'."""
+	"""'on', 'aod' (the output lit, the shell's AOD showing), 'aod-kept' (the
+	AOD parked on the panel, the output off), or 'off'."""
 	if screen_off():
-		return 'off'
-	shell = read(SHELL_STATE).splitlines()
-	if 'screen off' in shell and 'aod on' in shell:
+		return 'aod-kept' if aod_parked() else 'off'
+	st = shell_state()
+	if st.get('screen') == 'off' and st.get('aod') == 'on':
 		return 'aod'
 	return 'on'
+
+
+def to_minute():
+	"""Seconds until the wall clock's next minute."""
+	return 60 - time.time() % 60
+
+
+def aod_due():
+	"""Why the parked AOD keeps the phone up now, or None: the minute is
+	about to turn, or it turned and the shell has not drawn it yet."""
+	if SLEEP_MODE != 'connected' or not aod_parked():
+		return None
+	if to_minute() < AOD_LEAD_S:
+		return 'aod minute'
+	try:
+		shown = int(shell_state().get('aod_minute', '0'))
+	except ValueError:
+		shown = 0
+	now = time.time()
+	if shown < int(now // 60) and now % 60 < AOD_REDRAW_S:
+		return 'aod redraw'
+	return None
+
+
+_keep_fails = 0		# refused D3 cycles in a row
+_keep_broken = False	# KEEP_FAIL_LIMIT reached: unbind for the rest of the boot
+
+
+def wifi_keep_ok():
+	"""Connected mode can keep Wi-Fi through this sleep: the kernel has the
+	D3 path and the host-wake line (patch-brcmfmac-d3.py)."""
+	if SLEEP_MODE != 'connected' or _keep_broken:
+		return False
+	if not (BRCMF / 'd3_acks').exists() or read(BRCMF / 'keep_assoc') != 'Y':
+		return False
+	return 'brcmf_host_wake' in read('/proc/interrupts')
+
+
+def wowlan_any():
+	"""WoWLAN 'any' on the phy, so cfg80211 keeps the association at suspend
+	(brcmfmac's keep_assoc). True when it is on."""
+	def on():
+		r = run('iw', WIFI_PHY, 'wowlan', 'show', timeout=5)
+		return bool(r and r.returncode == 0 and 'is enabled' in r.stdout), r
+	ok, r = on()
+	if ok:
+		return True
+	run('iw', WIFI_PHY, 'wowlan', 'enable', 'any', timeout=5)
+	ok, r = on()
+	log('wowlan any:', 'on' if ok else 'could not be set: ' + (r.stdout.strip() if r else ''))
+	return ok
+
+
+_net = collections.deque()	# (monotonic, packets in and out of WIFI_IFACE)
+
+
+def net_sample():
+	total = 0
+	for name in ('rx_packets', 'tx_packets'):
+		try:
+			total += int(read(f'/sys/class/net/{WIFI_IFACE}/statistics/{name}', '0') or 0)
+		except ValueError:
+			pass
+	now = time.monotonic()
+	_net.append((now, total))
+	while len(_net) > 2 and now - _net[1][0] >= NET_WINDOW_S:
+		_net.popleft()
+
+
+def net_busy():
+	"""Connected mode: packets moving on Wi-Fi (a session in use)."""
+	if SLEEP_MODE != 'connected' or not NET_BUSY_PKTS or len(_net) < 2:
+		return False
+	(t0, p0), (t1, p1) = _net[0], _net[-1]
+	return t1 - t0 >= 2 and p1 - p0 >= NET_BUSY_PKTS * min(1.0, (t1 - t0) / NET_WINDOW_S)
 
 
 def _milli(path, scale=1000):
@@ -818,6 +946,14 @@ def why_awake(ignore=(), ignore_inhibits=()):
 			if name == 'screen on' and display_state() == 'aod':
 				return 'aod showing'
 			return name
+	if 'screen on' not in ignore:
+		if SLEEP_MODE == 'deep' and aod_parked():
+			return 'aod showing'
+		due = aod_due()
+		if due:
+			return due
+	if 'network' not in ignore and net_busy():
+		return 'network'
 	held = [name for name in inhibits() if name not in ignore_inhibits]
 	if held:
 		return 'inhibit ' + ','.join(held)
@@ -1020,6 +1156,8 @@ def wake_reason(before, slept=None, early_rtc=False):
 		return 'key', stat
 	if gpa2 & (1 << 3):
 		return 'bt', stat
+	if eint and eint[0] & (1 << 7):
+		return 'wifi', stat
 	# an EINT wake with the sensor hub's host_req (gpa1-7) pending
 	if stat & 1 and len(eint) > 1 and eint[1] & 0x80:
 		return 'hub', stat
@@ -1123,6 +1261,12 @@ def cycle(ignore=(), ignore_inhibits=()):
 	if cap is not None and cap < alarm_s:
 		log(f'battery low: sleeping at most {cap}s')
 		alarm_s = cap
+	# the parked AOD's next minute: back just after it turns
+	aod_alarm = False
+	if SLEEP_MODE == 'connected' and aod_parked():
+		minute = max(1, int(to_minute()) + 1)
+		if minute < alarm_s:
+			alarm_s, aod_alarm = minute, True
 	last_sleep.clear()
 	t_start = boottime()
 	t_in = None
@@ -1134,6 +1278,10 @@ def cycle(ignore=(), ignore_inhibits=()):
 	# parked by the last wake: still ours to bind again
 	wifi_bound = (WIFI / WIFI_DEV).exists() or wifi_parked
 	wifi_before = 'parked' if wifi_parked else wifi_state()
+	# connected mode: brcmfmac stays bound and takes the dongle into D3
+	wifi_kept = bool(not wifi_parked and (WIFI / WIFI_DEV).exists() and wifi_keep_ok() and
+			 wowlan_any())
+	last_sleep['wifi_kept'] = wifi_kept
 	if not wifi_parked:
 		last_wifi['before'] = wifi_before
 	last_sleep['wifi_before'] = wifi_before
@@ -1158,7 +1306,7 @@ def cycle(ignore=(), ignore_inhibits=()):
 		old_alarm = signal.signal(signal.SIGALRM, _stalled)
 		signal.alarm(PREPARE_S)
 		try:
-			if wifi_bound and (WIFI / WIFI_DEV).exists():
+			if wifi_bound and (WIFI / WIFI_DEV).exists() and not wifi_kept:
 				settle = 3
 				step('wifi down')
 				run('ip', 'link', 'set', 'wlp1s0', 'down')
@@ -1273,6 +1421,8 @@ def cycle(ignore=(), ignore_inhibits=()):
 					reason = 'alarm-due'
 				else:
 					log('wakeup sources:', wakeup_sources())
+					if wifi_kept and WIFI_DEV in failed_device():
+						keep_failed(failed_device())
 		except Stalled as e:
 			log(f'sleep abandoned: stuck at "{read(STEP)}" for {e.seconds}s')
 			log('wakeup sources:', wakeup_sources())
@@ -1285,6 +1435,9 @@ def cycle(ignore=(), ignore_inhibits=()):
 			early = rtc_early(t_alarm, alarm_s, t_woke)
 			reason, stat = wake_reason(entries, slept, early)
 		last_sleep['entered'] = number(SLEEP / 'entries') > entries
+		if wifi_kept and last_sleep['entered']:
+			global _keep_fails
+			_keep_fails = 0
 	finally:
 		restored = True
 		def restore_write(path, value):
@@ -1303,7 +1456,7 @@ def cycle(ignore=(), ignore_inhibits=()):
 		if old_ufs:
 			restore_write(UFS, old_ufs)
 		# a wake by our own alarm before Wi-Fi is due: leave it parked
-		wifi_parked = bool(wifi_bound and WIFI_INTERVAL_S and reason == 'rtc' and
+		wifi_parked = bool(wifi_bound and not wifi_kept and WIFI_INTERVAL_S and reason == 'rtc' and
 				   last_wifi.get('next', 0) > boottime() and not audio_failed())
 		if wifi_bound and not wifi_parked and not (WIFI / WIFI_DEV).exists():
 			restore_write(WIFI / 'bind', WIFI_DEV)
@@ -1324,8 +1477,10 @@ def cycle(ignore=(), ignore_inhibits=()):
 		last_wake_boot = boottime()
 		purpose = reason
 		if reason == 'rtc':
-			purpose = 'tick' if wifi_parked else 'wifi'
+			purpose = 'aod' if aod_alarm else 'tick' if (wifi_parked or wifi_kept) else 'wifi'
 		last_sleep['purpose'] = purpose
+		if aod_parked():
+			tell_shell('aod tick')	# its own timer stood still while asleep
 		# the cycle's own cost: before the suspend, and from the return to here
 		cost = ''
 		if t_in is not None and t_woke is not None:
@@ -1341,6 +1496,17 @@ last_dozing = False
 last_wake_boot = None	# boot time of the last return from the SoC
 wifi_parked = False	# brcmfmac left unbound after a wake (WIFI_INTERVAL_S)
 last_wifi = {}		# before: its state at the last unparked sleep; bound_at, next: boot time
+
+
+def keep_failed(device):
+	"""A suspend refused by brcmfmac's D3 (no D3_ACK): after KEEP_FAIL_LIMIT
+	in a row, Wi-Fi is unbound for every sleep again, this boot."""
+	global _keep_fails, _keep_broken
+	_keep_fails += 1
+	log(f'wifi D3 refused the sleep ({device}), {_keep_fails} in a row')
+	if _keep_fails >= KEEP_FAIL_LIMIT:
+		_keep_broken = True
+		log('wifi D3 keeps failing: unbinding Wi-Fi for sleep until the next boot')
 
 
 def audio_failed():
@@ -1471,6 +1637,7 @@ def main():
 			watch = ensure_watch()
 			if watch is not None:
 				watch.drain()
+			net_sample()
 			quick = False
 			why = why_awake()
 			if why is not None and why != 'switched off':
@@ -1580,11 +1747,12 @@ def main():
 				else:
 					fails = fw_aborts = hub_aborts = 0
 					backoff = mono + AWAKE_AFTER.get(reason, 8)
-					if info.get('purpose') == 'tick':
+					if info.get('purpose') in ('tick', 'aod'):
 						backoff = mono	# nothing to do: straight back
 						quick = True
 					# Wi-Fi was up at the sleep and is bound again: give it its window
-					if (WIFI_WINDOW_S and info.get('purpose') in ('wifi', 'alarm', 'other') and
+					if (WIFI_WINDOW_S and not info.get('wifi_kept') and
+							info.get('purpose') in ('wifi', 'alarm', 'other') and
 							last_wifi.get('before') == 'up' and (WIFI / WIFI_DEV).exists()):
 						wifi_wait = (last_wifi.get('bound_at', boottime()), boottime() + WIFI_WINDOW_S)
 					if last_dozing and reason in ('rtc', 'other', 'alarm'):
