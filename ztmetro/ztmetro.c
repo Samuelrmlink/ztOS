@@ -9986,6 +9986,11 @@ static const char *over_lock_id(struct zt_server *server) {
 	return server->over_lock_app[0] ? server->over_lock_app : "ztphone";
 }
 
+/* an alarm or the timer rings, its ring screen in front (alarm_screen) */
+static bool alarm_ringing(struct zt_server *server) {
+	return server->call_over_lock && !strcmp(over_lock_id(server), "ztclock-ring");
+}
+
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
 	struct zt_server *server = toplevel->server;
@@ -13657,6 +13662,13 @@ static int idle_fired(void *data) {
 			wl_event_source_timer_update(server->idle_timer, 15000);
 			return 0;
 		}
+		/* an alarm ringing: its slide must stay where a finger can find
+		 * it (a dark screen takes no touch). It ends by itself, at the
+		 * latest after ztclockd's autostop. */
+		if (server->screen_on && alarm_ringing(server)) {
+			wl_event_source_timer_update(server->idle_timer, 15000);
+			return 0;
+		}
 		bool app = server->screen_on && app_keeps_screen_on(server);
 		if (app != server->idle_inhibit_logged) {
 			server->idle_inhibit_logged = app;
@@ -16156,8 +16168,72 @@ static int voldown_later(void *data) {
 	return 0;
 }
 
+/* The phone's keys while an alarm rings (ztclock's ring screen over the lock,
+ * alarm_screen). A key never stops an alarm: stopping takes the ring screen's
+ * slide. Volume up or down, or the power key with the screen on, snooze it
+ * when it has a snooze (ztclockd's "snooze": it rings again in its snooze
+ * minutes). The timer, or an alarm with no snooze, rings on: the key does
+ * nothing but wake the screen. With the screen off the power key only wakes
+ * it, as ever. The key's release goes with it. */
+static unsigned alarm_keys_held;	/* 1 power, 2 volume up, 4 volume down */
+
+/* the snooze minutes of what rings ($XDG_RUNTIME_DIR/ztclock.ring: kind, id,
+ * label, set for, snooze minutes; 0 for the timer or no snooze) */
+static int alarm_snooze_minutes(void) {
+	char path[300], line[128];
+	FILE *f = fopen(runtime_file(path, sizeof(path), "ztclock.ring"), "r");
+	if (!f) return 0;
+	int n = 0, minutes = 0;
+	bool alarm = false;
+	while (fgets(line, sizeof(line), f)) {
+		if (n == 0) alarm = !strncmp(line, "alarm", 5);
+		if (n == 4) minutes = atoi(line);
+		n++;
+	}
+	fclose(f);
+	return alarm ? minutes : 0;
+}
+
+static bool alarm_tell(const char *word) {
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0) return false;
+	struct sockaddr_un to = { .sun_family = AF_UNIX };
+	runtime_file(to.sun_path, sizeof(to.sun_path), "ztclock.sock");
+	bool ok = sendto(fd, word, strlen(word), MSG_DONTWAIT, (struct sockaddr *)&to, sizeof(to)) >= 0;
+	close(fd);
+	return ok;
+}
+
+static bool alarm_key(struct zt_server *server, struct wlr_keyboard_key_event *event) {
+	unsigned bit = event->keycode == KEY_POWER ? 1 : event->keycode == KEY_VOLUMEUP ? 2 :
+		event->keycode == KEY_VOLUMEDOWN ? 4 : 0;
+	if (!bit) return false;
+	if (event->state != WL_KEYBOARD_KEY_STATE_PRESSED) {
+		if (!(alarm_keys_held & bit)) return false;
+		alarm_keys_held &= ~bit;
+		return true;
+	}
+	if (!alarm_ringing(server) || (bit == 1 && !server->screen_on)) return false;
+	alarm_keys_held |= bit;
+	if (!server->screen_on) screen_set(server, true);
+	activity(server);
+	const char *key = bit == 1 ? "power" : bit == 2 ? "volume up" : "volume down";
+	int minutes = alarm_snooze_minutes();
+	if (minutes > 0 && alarm_tell("snooze")) {
+		wlr_log(WLR_INFO, "alarm: %s snoozed it for %d min", key, minutes);
+		hap(server, HAP_HEAVY, HG_SYSTEM);
+	} else {
+		wlr_log(WLR_INFO, "alarm: %s ignored (no snooze; only the slide stops it)", key);
+		hap(server, HAP_TAP, HG_SYSTEM);
+	}
+	return true;
+}
+
 /* A key, from a keyboard or (keyboard NULL) from the control pipe. */
 static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, struct wlr_keyboard_key_event *event) {
+	if (alarm_key(server, event)) {
+		return;
+	}
 	if (event->keycode == KEY_POWER) {
 		/* the power key is the shell's alone: see power/power-key.h */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
