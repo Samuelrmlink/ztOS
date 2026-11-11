@@ -45,6 +45,38 @@ if [ ! -f "$conf/xfce4-panel.xml" ]; then
 	done
 fi
 
+# A panel from before ztos-status: the phone's status and the volume are put
+# in front of its clock, once (taken out again, they stay out).
+mark=${XDG_CONFIG_HOME:-$HOME/.config}/ztmetro/desktop-panel-status
+if [ ! -e "$mark" ] && [ -f "$conf/xfce4-panel.xml" ] && command -v xfconf-query >/dev/null &&
+   ! grep -q '"ztos-status"' "$conf/xfce4-panel.xml"; then
+	ids=$(xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids 2>/dev/null | grep -E '^[0-9]+$')
+	top=$(xfconf-query -c xfce4-panel -l 2>/dev/null | sed -n 's|^/plugins/plugin-\([0-9]*\)$|\1|p' | sort -n | tail -1)
+	if [ -n "$ids" ] && [ -n "$top" ]; then
+		st=$((top + 1)) pa=$((top + 2))
+		xfconf-query -c xfce4-panel -p /plugins/plugin-$st -n -t string -s ztos-status
+		new=
+		if [ -d /usr/lib/xfce4/panel/plugins ] && [ -e /usr/lib/xfce4/panel/plugins/libpulseaudio-plugin.so ]; then
+			xfconf-query -c xfce4-panel -p /plugins/plugin-$pa -n -t string -s pulseaudio
+			xfconf-query -c xfce4-panel -p /plugins/plugin-$pa/enable-keyboard-shortcuts -n -t bool -s false
+			xfconf-query -c xfce4-panel -p /plugins/plugin-$pa/show-notifications -n -t uint -s 0
+			new="-t int -s $st -t int -s $pa"
+		else
+			new="-t int -s $st"
+		fi
+		clock=$(xfconf-query -c xfce4-panel -l -v 2>/dev/null | sed -n 's|^/plugins/plugin-\([0-9]*\) *clock$|\1|p' | head -1)
+		args= put=
+		for i in $ids; do
+			[ "$i" = "$clock" ] && [ -z "$put" ] && { args="$args $new"; put=1; }
+			args="$args -t int -s $i"
+		done
+		[ -z "$put" ] && args="$args $new"
+		# shellcheck disable=SC2086
+		xfconf-query -c xfce4-panel -p /panels/panel-1/plugin-ids --force-array $args &&
+			echo "panel: ztos-status added" && mkdir -p "$(dirname "$mark")" && : > "$mark"
+	fi
+fi
+
 # one program, started again when it dies, not more than 5 times a minute
 keep() {
 	name=$1; shift
