@@ -74,11 +74,12 @@ check "csd: dragging GTK's border makes it wider" "[ $w1 -gt $((w0 + 40)) ]" "wi
 
 # --- move: our title bar (foot asks for server-side decorations)
 c desktop pointer 10 890
+# (to 300,100 on the output: wherever it opened, its edges are clear of the panel then)
 x0=$(wx ssd); y0=$(wy ssd)
-poke "drag $((x0 + 200)) $((y0 + 14)) $((x0 - 50)) $((y0 + 120)) 300 10"
+poke "drag $((x0 + 200)) $((y0 + 14)) 500 114 300 10"
 sleep 0.4
 x1=$(wx ssd); y1=$(wy ssd)
-check "ssd: a title-bar drag moves the window" "near $((x1 - x0)) -250 2 && near $((y1 - y0)) 106 2" \
+check "ssd: a title-bar drag moves the window" "near $((x1 - x0)) $((300 - x0)) 2 && near $((y1 - y0)) $((100 - y0)) 2" \
 	"moved $((x1 - x0)),$((y1 - y0))"
 
 # --- the frame's colours: xfwm4's Default on Adwaita, not the phone's accent

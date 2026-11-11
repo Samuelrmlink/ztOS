@@ -36,12 +36,16 @@ is built this way.
      into the desktop. **keys** adds Esc, Tab, Win, Alt+Tab, Alt+F4 and the
      arrows. **fit** shows the whole desktop. **…** starts or stops XFCE, or
      removes the virtual screen.
-4. Move an app:
+4. Move an app (it keeps running):
+   - **Either way:** open **Move Apps** on either side. It lists the apps on
+     the other side to bring here, and those on its own side to send over.
    - **Phone → desktop:** open the switcher (hold Start), then pull the app's
      card down.
-   - **Desktop → phone:** use the phone button in a window's title bar, the
-     window menu's "move to phone" (right-click a title bar, or Alt+Space), or
-     Super+P.
+   - **Desktop → phone:** the window menu's "Move to Phone" (the menu
+     button at the title bar's left, a right-click on a title bar, or
+     Alt+Space), or Super+P.
+5. Window frames are xfwm4's: choose a theme, the buttons and the title font
+   in XFCE's Settings → Window Manager. They change as you choose.
 
 The control pipe's `desktop ...` lines are listed at `desk_ctl` in
 `desktop.c`. They cover:
@@ -64,6 +68,7 @@ to outlive SIGTERM).
     ztmetro/desktop/dev/run.sh                      # captures in out/desktop/
     ztmetro/desktop/dev/run.sh 'c desktop move foot; sleep 1; shot moved'
     ztmetro/desktop/dev/run.sh sh                   # a shell inside
+    ztmetro/desktop/dev/run.sh --test all           # the tests: windows, env, mover, latency
 
 This builds ztmetro in a container (Arch, wlroots 0.20, XFCE) and runs it on
 the headless backend:
