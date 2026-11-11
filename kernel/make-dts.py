@@ -23,6 +23,12 @@ block on this SoC is a silent bus hang rather than an error:
   --gpu      Mali-G72, its power domain and the G3D clock provider
   --decon    DECON scanout, taking the display from the bootloader framebuffer
   --wlan     the PCIe root complex the BCM4361 sits on
+  --dp-altmode  (with --power) the USB-C connector and what DisplayPort Alt
+             Mode needs of the board: the PCAL6524 expander on its bit-banged
+             bus as a gpiochip (shared with zrn-bt's BT_EN), the SBU/AUX
+             switch on two of its pins, the connector's DP altmode and graph.
+             docs/dp-altmode.md has the binding notes and where each value
+             comes from
 """
 import argparse
 import sys
@@ -37,6 +43,8 @@ ap.add_argument("--touch", action="store_true")
 ap.add_argument("--gpu", action="store_true")
 ap.add_argument("--decon", action="store_true")
 ap.add_argument("--wlan", action="store_true")
+ap.add_argument("--dp-altmode", action="store_true")
+ap.add_argument("--dp-tx", action="store_true")
 ap.add_argument("--fallback", choices=("boot", "recovery"), default="boot")
 args = ap.parse_args()
 
@@ -232,6 +240,224 @@ if args.power:
 			interrupts = <3>;
 		};""")
 # ---- end MAX77705 USB-C controller -----------------------------------------
+# what goes inside the USB-C node: properties first, then the connector child.
+# Inserted before the node's closing brace, so it composes with other edits
+# that add properties after "interrupts = <3>;" (the OTG branch's
+# vbus-supply / usb-role-switch): dtc wants properties before subnodes, and
+# those land above this either way.
+USBC_INSIDE = """
+			/*
+			 * Read-only: the board's CC-orientation input (stock
+			 * dp,usb_con_sel / phy,gpio_phy_port, gpg0-4). Logged
+			 * next to the orientation the MCU reports, to settle the
+			 * SBU select polarity; never driven.
+			 */
+			orientation-sense-gpios = <&gpg0 4 GPIO_ACTIVE_HIGH>;
+
+			usbc_connector: connector {
+				compatible = "usb-c-connector";
+				label = "USB-C";
+				power-role = "dual";
+				data-role = "dual";
+
+				altmodes {
+					displayport {
+						svid = /bits/ 16 <0xff01>;
+						vdo = <0x00001c46>;
+					};
+				};
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+@PORT1@					port@2 {	/* SBU */
+						reg = <2>;
+						usbc_sbu: endpoint {
+							remote-endpoint = <&sbu_mux_in>;
+						};
+					};
+				};
+			};
+"""
+
+
+def usbc_append(inside):
+    """Add to the end of the max77705_usbc node, before its closing brace."""
+    global s
+    head = "		max77705_usbc: usb-c@25 {\n"
+    if s.count(head) != 1:
+        sys.exit("make-dts: the max77705_usbc node is not there once")
+    i = s.index(head)
+    close = s.index("\n		};", i)
+    s = s[:close] + "\n" + inside.rstrip("\n") + s[close:]
+
+
+# --dp-tx: the DP TX (kernel/exynos9810-dp.c) as a mode/orientation switch on
+# the connector's SuperSpeed port. Without the driver built the port would
+# wait for that switch for ever, so the two go together.
+DP_TX_PORT = """					port@1 {	/* SuperSpeed lanes: the combo PHY, DP side */
+						reg = <1>;
+						usbc_ss: endpoint {
+							remote-endpoint = <&dp_ss_in>;
+						};
+					};
+
+"""
+DP_TX_NODE = """
+&soc {
+	/*
+	 * DP TX (kernel/exynos9810-dp.c, bring-up). Stock: displayport@0x11090000
+	 * (reg 0x11090000 size 0xffff, SPI 248, pd-dpu), the DP side of the
+	 * combo PHY at 0x110a0000 (usbdrd_phy0 reg[1]), PHY isolation PMU 0x704
+	 * bit 0 (isolation = <0x704>; 1 = not isolated). Lane maps per CC
+	 * orientation, normal first: stock displayport_reg.c:1225-1230 with
+	 * dp_sw_sel = gpg0-4, which reads 1 with CC1 (normal) on this phone; a
+	 * 2-lane assignment (pin D) uses PMA lanes 2+3 normal, 0+1 reverse
+	 * (:189-217).
+	 */
+	displayport@11090000 {
+		compatible = "samsung,exynos9810-dp";
+		reg = <0x11090000 0x10000>, <0x110a0000 0x1000>,
+		      <0x11003014 0x8>,		/* CMU_FSYS0 QCH_CON_DP_LINK_QCH, _GTC */
+		      <0x16050000 0x10000>,	/* DECON2 (stock decon_t) */
+		      <0x16072000 0x1000>,	/* DPU_DMA channel 1 (stock idma_g1 reg[1]) */
+		      <0x16022000 0x1000>,	/* DPP channel 1 (stock idma_g1 reg[0]) */
+		      <0x16070000 0x110>,	/* DPU_DMA common (stock idma_g* reg[2]) */
+		      <0x16000000 0x4000>,	/* CMU_DPU: gates and Q-channels, read only */
+		      <0x16030270 0x4>,		/* DECON0 DP_CONNECTION_CONTROL (M4 W1) */
+		      <0x16037270 0x4>,		/* its shadow copy (SHD_DECON), read only */
+		      <0x16011010 0x4>,		/* disp sysreg DISP_DPU_TE_QACTIVE_PLL_EN (W2) */
+		      <0x160310c0 0x1c>,	/* DECON0-space blender window 4, for DECON2 */
+		      <0x16073000 0x1000>,	/* DPU_DMA channel 2 (IDMA_VG0, DPU1 bus port) */
+		      <0x16023000 0x1000>;	/* DPP channel 2 (IDMA_VG0) */
+		reg-names = "link", "phy", "link-qch", "decon2", "dma1", "dpp1", "dma-common",
+			    "dpu-cmu", "decon0-dp-conn", "decon0-dp-conn-shadow", "disp-sysreg-te",
+			    "decon0-win4", "dma2", "dpp2";
+		interrupts = <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
+		samsung,usb-phy = <&usbdrd_phy>;
+		samsung,pmu-syscon = <&pmu_system_controller>;
+		samsung,phy-isolation = <0x704 0x1>;
+		samsung,link-power-status = <0x4024 0xf>;	/* pd-dpu STATUS: 0xf = on */
+		samsung,lane-map = <3 2 0 1>, <0 1 3 2>;
+		samsung,two-lane-lanes = <2 3>, <0 1>;
+		orientation-switch;
+		mode-switch;
+
+		port {
+			dp_ss_in: endpoint {
+				remote-endpoint = <&usbc_ss>;
+			};
+		};
+	};
+};
+"""
+ROOT_NODES = """
+/* ---- USB-C SBU switch and the PCAL6524 expander (make-dts.py --dp-altmode) ---- */
+/ {
+	aliases {
+		i2c96 = &expander_i2c;
+	};
+
+	expander_i2c: i2c-expander {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpp6 3 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpp6 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		expander: gpio@22 {
+			compatible = "nxp,pcal6524";
+			reg = <0x22>;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+	};
+
+	bluetooth-board {
+		compatible = "ztos,zrn-bt";
+		bt-en-gpios = <&expander 7 GPIO_ACTIVE_HIGH>;
+	};
+
+	usb-sbu-mux {
+		compatible = "gpio-sbu-mux";
+		enable-gpios = <&expander 4 GPIO_ACTIVE_LOW>;	/* AUX_SW_OE */
+		select-gpios = <&expander 1 GPIO_ACTIVE_HIGH>;	/* SBU_SW_SEL: 1 = reverse (CC2) */
+		orientation-switch;
+		mode-switch;
+
+		port {
+			sbu_mux_in: endpoint {
+				remote-endpoint = <&usbc_sbu>;
+			};
+		};
+	};
+};
+"""
+
+# ---- USB-C connector and DisplayPort Alt Mode (--dp-altmode) ----------------
+# Board wiring, all of it here and none in the drivers (docs/dp-altmode.md):
+#   PCAL6524 at 0x22: stock hsi2c@10930000 (hsi2c_25), which this kernel does
+#     not bring up; zrn-bt has reached it by bit-banging gpp6-3 SDA / gpp6-2
+#     SCL since the Bluetooth work, so the bus is the same i2c-gpio, now from
+#     the DT (alias i2c96: the number tools used so far). Pin 7 BT_EN (zrn-bt),
+#     pin 1 SBU_SW_SEL (stock dp,sbu_sw_sel), pin 4 AUX_SW_OE (stock
+#     dp,aux_sw_oe; stock drives 1 = switch off at probe and on detach, 0 =
+#     on, after selecting: active low). Pin 8 WPC_EN must stay an input: no
+#     consumer here, and gpio-pca953x leaves unclaimed pins as they are.
+#   SBU switch: mainline gpio-sbu-mux (enable = AUX_SW_OE, select = the CC
+#     orientation). Stock drives select = !gpg0-4; on the phone (dp2) gpg0-4
+#     reads 1 with CC1 (normal) and 0 with CC2 (reverse), so select is 1 for
+#     reverse: active high.
+#   connector: the usb-c-connector binding under the MAX77705 USB-C node; the
+#     typec port is registered on it. altmodes/displayport is the port's DP
+#     capability VDO: DFP_D (2) | DP signalling (bit 2) | receptacle (bit 6) |
+#     DFP_D pin assignments C, D, E (bits 10-12) = 0x1c46.
+if args.dp_altmode:
+    if not args.power:
+        sys.exit("make-dts: --dp-altmode needs --power (the MAX77705 USB-C node)")
+    usbc_append(USBC_INSIDE.replace("@PORT1@", DP_TX_PORT if args.dp_tx else ""))
+    s += ROOT_NODES
+    if args.dp_tx:
+        s += DP_TX_NODE
+elif args.dp_tx:
+    sys.exit("make-dts: --dp-tx needs --dp-altmode")
+# ---- end USB-C connector and DisplayPort Alt Mode ---------------------------
+
+# ---- USB OTG (otg agent): the board's host-mode wiring ----------------------
+# Stock wires it the same way: dwc3 dr_mode "otg" (usbdrd_dwc3), VBUS out
+# from the MAX77705 charger's CHGIN boost ("otg" power supply, stock
+# max77705_set_otg), the role from the USB-C MCU (ccic notifier -> dwc3).
+# Here: the charger's usb-otg-vbus child is the boost as a regulator
+# (kernel/patch-max77705-otg.py), the USB-C controller takes it as its
+# vbus-supply and drives dwc3's role switch (kernel/max77705-usbc.c).
+# Device mode stays the default, so the gadget is there whenever nothing
+# asks for host. Needs --power: without the USB-C driver nothing would ever
+# switch the role.
+if args.power:
+    sub("""			max77705_wireless: wireless {
+			};""", """			max77705_wireless: wireless {
+			};
+
+			max77705_otg: usb-otg-vbus {
+				regulator-name = "max77705-otg";
+				regulator-min-microvolt = <5000000>;
+				regulator-max-microvolt = <5000000>;
+			};""")
+    sub("""			compatible = "maxim,max77705-usbc";
+			reg = <0x25>;
+			interrupt-parent = <&max77705>;
+			interrupts = <3>;""", """			compatible = "maxim,max77705-usbc";
+			reg = <0x25>;
+			interrupt-parent = <&max77705>;
+			interrupts = <3>;
+			vbus-supply = <&max77705_otg>;
+			usb-role-switch = <&usb>;""")
+    sub("""		dr_mode = "peripheral";""", """		dr_mode = "otg";
+		usb-role-switch;
+		role-switch-default-mode = "peripheral";""")
+# ---- end USB OTG ------------------------------------------------------------
 
 if not args.touch:
     disable("			touchscreen-size-y = <4096>;")
@@ -247,5 +473,6 @@ if not args.gpu:
 		status = "disabled";""")
 
 Path(args.out).write_text(s)
-print("make-dts: {} (ufs={} power={} touch={} gpu={} decon={} wlan={} fallback={})".format(
-    args.out, args.ufs, args.power, args.touch, args.gpu, args.decon, args.wlan, args.fallback))
+print("make-dts: {} (ufs={} power={} touch={} gpu={} decon={} wlan={} dp_altmode={} fallback={})".format(
+    args.out, args.ufs, args.power, args.touch, args.gpu, args.decon, args.wlan, args.dp_altmode,
+    args.fallback))

@@ -222,6 +222,9 @@ struct p9320 {
 
 	/* userspace */
 	bool hv_enable;
+
+	/* the WCIN supply's changes (its OTG 5 V lock) reach the monitor */
+	struct notifier_block psy_nb;
 };
 
 /* ---- I2C, with the write allowlist ---- */
@@ -478,6 +481,14 @@ static bool p9320_hv_allowed(struct p9320 *p)
 	    v == POWER_SUPPLY_STATUS_FULL)
 		return false;
 	if (!p9320_psy_get(p->wired_name, POWER_SUPPLY_PROP_ONLINE, &v) && v)
+		return false;
+	/*
+	 * USB OTG: the charger holds WCIN at 5 V while its boost runs (it
+	 * reports input_voltage_limit then), as stock locks the receiver's
+	 * Vout at 5 V with OTG on (sec_battery.c:4853-4893, WPC_VOUT_LOCK).
+	 */
+	if (!p9320_psy_get(p->wcin_name, POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT, &v) &&
+	    v < P9320_HV_VRECT_MV * 1000)
 		return false;
 	/* without the WCIN limit under our control there is no 10 V */
 	wcin = power_supply_get_by_name(p->wcin_name);
@@ -1256,6 +1267,30 @@ static void p9320_stop(void *data)
 	destroy_workqueue(p->wq);
 }
 
+/*
+ * The WCIN supply changed (e.g. the charger's OTG 5 V lock came on): look
+ * at once rather than at the next 10 s monitor tick, so 10 V steps down.
+ */
+static int p9320_psy_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	struct p9320 *p = container_of(nb, struct p9320, psy_nb);
+	struct power_supply *psy = data;
+
+	if (event != PSY_EVENT_PROP_CHANGED || !psy->desc->name ||
+	    strcmp(psy->desc->name, p->wcin_name))
+		return NOTIFY_DONE;
+	if (READ_ONCE(p->attached) && READ_ONCE(p->hv) != P9320_HV_OFF)
+		p9320_queue(p, &p->monitor_work, 0);
+	return NOTIFY_OK;
+}
+
+static void p9320_psy_nb_remove(void *data)
+{
+	struct p9320 *p = data;
+
+	power_supply_unreg_notifier(&p->psy_nb);
+}
+
 static int p9320_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -1315,6 +1350,13 @@ static int p9320_probe(struct i2c_client *client)
 	INIT_DELAYED_WORK(&p->step_work, p9320_step_work);
 	INIT_DELAYED_WORK(&p->monitor_work, p9320_monitor_work);
 	ret = devm_add_action_or_reset(dev, p9320_stop, p);
+	if (ret)
+		return ret;
+	p->psy_nb.notifier_call = p9320_psy_event;
+	ret = power_supply_reg_notifier(&p->psy_nb);
+	if (ret)
+		return dev_err_probe(dev, ret, "power supply notifier\n");
+	ret = devm_add_action_or_reset(dev, p9320_psy_nb_remove, p);
 	if (ret)
 		return ret;
 

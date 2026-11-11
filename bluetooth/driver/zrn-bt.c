@@ -15,8 +15,19 @@
  *      device, with a 200 MHz fixed clock and its interrupt (SPI 422): it
  *      becomes /dev/ttySAC0;
  *   4. powers the chip's Bluetooth: BT_EN is pin 7 of the PCAL6524 expander
- *      (I2C 0x22, reached over a bit-banged bus on gpp6-2/gpp6-3, as
- *      zrn_btprobe did), and BT_WAKE (gpg2-0) is held high.
+ *      (I2C 0x22, on a bit-banged bus on gpp6-2/gpp6-3), and BT_WAKE (gpg2-0)
+ *      is held high.
+ *
+ * BT_EN two ways. A device tree that describes the expander (the i2c-gpio
+ * bus and an nxp,pcal6524 under it, shared with the USB-C SBU switch, see
+ * docs/dp-altmode.md) also has a node
+ *
+ *	bluetooth-board { compatible = "ztos,zrn-bt"; bt-en-gpios = <&expander 7 0>; };
+ *
+ * and then BT_EN is that GPIO, from the gpio-pca953x chip, and this module
+ * creates no bus of its own; if the GPIO cannot be had it fails, it does not
+ * guess. A tree without the node (every image before the DP work) gets the
+ * old way: its own i2c-gpio bus 96 and the expander as a dummy client.
  *
  * The host stack then attaches to the UART from userspace:
  *
@@ -81,6 +92,7 @@ static struct i2c_client *exp;
 static struct clk_hw *uart_clk;
 static struct clk_lookup *cl_uart, *cl_baud;
 static struct gpio_desc *bt_wake, *host_wake;
+static struct gpio_desc *bt_en;	/* from the DT; NULL: the old expander client */
 static int host_wake_irq = -1;
 
 /* what the gates and USI_OPTION were before we forced them, for sleep */
@@ -205,8 +217,14 @@ static int exp_update(u8 reg, u8 mask, u8 val)
 
 static int bt_power(bool on)
 {
-	int ret = exp_update(EXP_CFG0, BT_EN, 0);	/* an output */
+	int ret;
 
+	if (bt_en) {
+		ret = gpiod_direction_output(bt_en, on);
+		pr_info("zrn-bt: BT_EN %s (%d)\n", on ? "high" : "low", ret);
+		return ret;
+	}
+	ret = exp_update(EXP_CFG0, BT_EN, 0);	/* an output */
 	if (!ret)
 		ret = exp_update(EXP_OUT0, BT_EN, on ? BT_EN : 0);
 	pr_info("zrn-bt: BT_EN %s (%d)\n", on ? "high" : "low", ret);
@@ -378,6 +396,37 @@ static void host_wake_release(void)
 		gpiod_put(host_wake);
 }
 
+/*
+ * BT_EN from the device tree: the expander's gpiochip appears when i2c-gpio
+ * has probed the bus (the soft dependency loads it first; give it 3 s).
+ * 0: got it; -ENODEV: the tree has no such node (the old way); else fail.
+ */
+static int bt_en_from_dt(void)
+{
+	struct device_node *np = of_find_compatible_node(NULL, NULL, "ztos,zrn-bt");
+	int tries = 30;
+
+	if (!np)
+		return -ENODEV;
+	do {
+		bt_en = fwnode_gpiod_get_index(of_fwnode_handle(np), "bt-en", 0, GPIOD_ASIS,
+					       "bt-en");
+		if (!IS_ERR(bt_en) || PTR_ERR(bt_en) != -EPROBE_DEFER)
+			break;
+		msleep(100);
+	} while (--tries);
+	of_node_put(np);
+	if (IS_ERR(bt_en)) {
+		int ret = PTR_ERR(bt_en);
+
+		bt_en = NULL;
+		pr_err("zrn-bt: the device tree's bt-en-gpios: %d; not powering Bluetooth\n", ret);
+		return ret == -ENODEV ? -ENXIO : ret;
+	}
+	pr_info("zrn-bt: BT_EN from the device tree (expander gpiochip)\n");
+	return 0;
+}
+
 /* bisecting what keeps the SoC from sleeping: 1 no UART device, 2 chip left
  * off, 4 pins left alone, 8 clocks left alone, 16 no I2C bus at all */
 static unsigned int test_skip;
@@ -399,22 +448,28 @@ static int __init zrn_bt_init(void)
 		return 0;
 	}
 
-	gpiod_add_lookup_table(&bus_gpios);
-	bus_pdev = platform_device_register_data(NULL, "i2c-gpio", EXP_BUS, &bus_pdata, sizeof(bus_pdata));
-	if (IS_ERR(bus_pdev)) {
-		ret = PTR_ERR(bus_pdev);
-		goto err_table;
-	}
-	bus = i2c_get_adapter(EXP_BUS);
-	if (!bus) {
-		ret = -EPROBE_DEFER;
-		goto err_bus;
-	}
-	exp = i2c_new_dummy_device(bus, EXP_ADDR);
-	i2c_put_adapter(bus);
-	if (IS_ERR(exp)) {
-		ret = PTR_ERR(exp);
-		goto err_bus;
+	ret = bt_en_from_dt();
+	if (ret && ret != -ENODEV)
+		return ret;
+	if (!bt_en) {
+		gpiod_add_lookup_table(&bus_gpios);
+		bus_pdev = platform_device_register_data(NULL, "i2c-gpio", EXP_BUS, &bus_pdata,
+							 sizeof(bus_pdata));
+		if (IS_ERR(bus_pdev)) {
+			ret = PTR_ERR(bus_pdev);
+			goto err_table;
+		}
+		bus = i2c_get_adapter(EXP_BUS);
+		if (!bus) {
+			ret = -EPROBE_DEFER;
+			goto err_bus;
+		}
+		exp = i2c_new_dummy_device(bus, EXP_ADDR);
+		i2c_put_adapter(bus);
+		if (IS_ERR(exp)) {
+			ret = PTR_ERR(exp);
+			goto err_bus;
+		}
 	}
 
 	gpiod_add_lookup_table(&wake_gpios);
@@ -458,11 +513,17 @@ err_exp:
 	if (!IS_ERR_OR_NULL(self))
 		platform_device_unregister(self);
 	gpiod_remove_lookup_table(&wake_gpios);
+	if (bt_en)
+		goto err_bt_en;
 	i2c_unregister_device(exp);
 err_bus:
 	platform_device_unregister(bus_pdev);
 err_table:
 	gpiod_remove_lookup_table(&bus_gpios);
+	return ret;
+err_bt_en:
+	gpiod_put(bt_en);
+	bt_en = NULL;
 	return ret;
 }
 
@@ -480,6 +541,10 @@ static void __exit zrn_bt_exit(void)
 		gpiod_put(bt_wake);
 	platform_device_unregister(self);
 	gpiod_remove_lookup_table(&wake_gpios);
+	if (bt_en) {
+		gpiod_put(bt_en);
+		return;
+	}
 	i2c_unregister_device(exp);
 	platform_device_unregister(bus_pdev);
 	gpiod_remove_lookup_table(&bus_gpios);

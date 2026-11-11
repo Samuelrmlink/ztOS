@@ -10,18 +10,28 @@
 # without it the package installs, fetches its images and waits.
 pkgname=ztos-waydroid
 pkgver=1.0
-pkgrel=2
+pkgrel=4
 pkgdesc='ztOS: Android apps through Waydroid (optional; LineageOS 20 image fetched at set-up)'
 arch=(aarch64)
 url='https://github.com/ztos/ztos'
 license=('GPL-3.0-or-later')
 depends=(waydroid lxc python-gbinder nftables dnsmasq python python-dbus python-gobject
          curl unzip e2fsprogs util-linux sudo systemd)
+makedepends=(gcc)
 backup=()
 install=ztos-waydroid.install
 options=(!debug !strip)
 
 _src() { echo "${ZTOS_SRC:-$startdir/../..}"; }
+
+build() {
+	# the one compiled piece: ztos-bt-adwatch (advertisements as received)
+	cc $CFLAGS -std=c11 -Wall -Wextra -o "$srcdir/ztos-bt-adwatch" \
+		"$(_src)/android/waydroid/bluetooth/adwatch/ztos-bt-adwatch.c" $LDFLAGS
+	# and ztos-bt-connparam (requestConnectionPriority's LE Connection Update)
+	cc $CFLAGS -std=c11 -Wall -Wextra -o "$srcdir/ztos-bt-connparam" \
+		"$(_src)/android/waydroid/bluetooth/connparam/ztos-bt-connparam.c" $LDFLAGS
+}
 
 package() {
 	local src w
@@ -47,6 +57,29 @@ package() {
 	local u
 	for u in ztos-waydroid-session ztos-waydroid-boot ztos-waydroid-audio-reconnect; do
 		install -Dm644 "$w/$u.service" "$pkgdir/usr/lib/systemd/user/$u.service"
+	done
+
+	# Bluetooth for Android apps: the bridge to BlueZ, socket-activated by the
+	# container's Bluetooth app (docs/waydroid.md, "Bluetooth for Android apps")
+	local bt=$w/bluetooth
+	install -Dm755 "$bt/ztos-btbridge" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztos-btbridge"
+	install -Dm755 "$bt/ztbt-cli" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztbt-cli"
+	install -Dm755 "$bt/bt-images.sh" "$pkgdir/usr/lib/ztos-waydroid/btbridge/bt-images.sh"
+	for f in "$bt"/ztbt/*.py; do
+		install -Dm644 "$f" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztbt/${f##*/}"
+	done
+	install -Dm644 "$bt/ztos-btbridge.socket" "$pkgdir/usr/lib/systemd/user/ztos-btbridge.socket"
+	install -Dm644 "$bt/ztos-btbridge.service" "$pkgdir/usr/lib/systemd/user/ztos-btbridge.service"
+	# its helper for the advertisements as received: one capability, a system socket
+	install -Dm755 "$srcdir/ztos-bt-adwatch" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztos-bt-adwatch"
+	install -Dm644 "$bt/adwatch/ztos-bt-adwatch.socket" "$pkgdir/usr/lib/systemd/system/ztos-bt-adwatch.socket"
+	install -Dm644 "$bt/adwatch/ztos-bt-adwatch.service" "$pkgdir/usr/lib/systemd/system/ztos-bt-adwatch.service"
+	install -Dm755 "$srcdir/ztos-bt-connparam" "$pkgdir/usr/lib/ztos-waydroid/btbridge/ztos-bt-connparam"
+	install -Dm644 "$bt/connparam/ztos-bt-connparam.socket" "$pkgdir/usr/lib/systemd/system/ztos-bt-connparam.socket"
+	install -Dm644 "$bt/connparam/ztos-bt-connparam.service" "$pkgdir/usr/lib/systemd/system/ztos-bt-connparam.service"
+	# what patch-bluetooth.py puts into the images (pinned there by sha256)
+	for f in Bluetooth.apk libbluetooth_jni.so SOURCES; do
+		install -Dm644 "$src/prebuilts/waydroid-bt/$f" "$pkgdir/usr/share/ztos-waydroid/bt/$f"
 	done
 
 	# the recipe for the image: strip, patch, config, microG (ztos-waydroid-images

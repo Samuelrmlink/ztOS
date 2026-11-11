@@ -1,0 +1,111 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""ztos-btbridge: Android apps in Waydroid use Bluetooth through BlueZ.
+
+Android's Bluetooth stack in the container is replaced by a shim that asks
+this daemon, over a Unix socket, for what it needs: scans, GATT connections,
+reads and writes, pairing. This daemon does it with BlueZ's D-Bus API, as one
+more client of bluetoothd. Linux owns the controller and every bond; Android
+gets no HCI and no keys. The policy (devices Linux uses are hidden from
+Android, connections made for Android end when Android lets go or freezes,
+pairing goes through ztos-bt-agent's sheet) lives here, not in the shim.
+
+See docs/waydroid.md, "Bluetooth for Android apps".
+
+    ztos-btbridge [--socket PATH] [--allow-uid UID] [--no-container-check]
+
+The defaults are the ones the container uses: the socket is Android's
+/data/misc/ztos-btbridge/bridge.sock, which is the host's
+~/.local/share/waydroid/data/misc/ztos-btbridge/bridge.sock, and only the
+Bluetooth app (uid 1002) in the Waydroid container may connect. The other
+options are for testing on the host with ztbt-cli.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.environ.get("ZTOS_BTBRIDGE_LIB", "/usr/lib/ztos-waydroid/btbridge"))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+RETRY_SECONDS = 60
+IDLE_SECONDS = 300
+
+
+def main():
+    home = os.path.expanduser("~")
+    ap = argparse.ArgumentParser(description="Bluetooth for Android apps in Waydroid, through BlueZ")
+    ap.add_argument("--socket", default=os.path.join(home, ".local/share/waydroid/data/misc/ztos-btbridge/bridge.sock"))
+    ap.add_argument("--allow-uid", type=int, default=1002)
+    ap.add_argument("--no-container-check", action="store_true",
+                    help="for tests on the host: any process of --allow-uid, and the container's freezer ignored")
+    args = ap.parse_args()
+
+    import dbus
+    import dbus.mainloop.glib
+    from gi.repository import GLib
+
+    from ztbt.bluez import BlueZ
+    from ztbt.core import Bridge
+    from ztbt.server import Server, Store, log
+
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
+    state = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local/state")
+    loop = GLib.MainLoop()
+
+    backend = BlueZ(log=log)
+    bridge = Bridge(backend, Store(runtime, state, log=log), log=log)
+    backend.attach(bridge)
+    bridge.start()
+
+    # bluetoothd restarted: our picture of its objects is stale; systemd starts us again
+    owner = [None]
+
+    def owner_changed(name):
+        if owner[0] is not None and name != owner[0]:
+            log("bluetoothd went away: exiting")
+            loop.quit()
+            sys.exit(1)
+        owner[0] = name or ""
+    backend.bus.watch_name_owner("org.bluez", owner_changed)
+
+    server = Server(bridge, args.socket, allow_uid=args.allow_uid,
+                    container_check=not args.no_container_check,
+                    freezer=not args.no_container_check, log=log)
+
+    # socket activation (ztos-btbridge.socket): run while Android's Bluetooth is
+    # connected, and a while after
+    if os.environ.get("LISTEN_PID") == str(os.getpid()) and os.environ.get("LISTEN_FDS") == "1":
+        server.listen(fd=3)
+        idle = [None]
+
+        def quit_idle():
+            idle[0] = None
+            if not server.clients:
+                log("no Android stack for", IDLE_SECONDS, "s: exiting")
+                loop.quit()
+            return False
+
+        def on_empty():
+            if idle[0] is not None:
+                GLib.source_remove(idle[0])
+            idle[0] = GLib.timeout_add_seconds(IDLE_SECONDS, quit_idle)
+        server.on_empty = on_empty
+        on_empty()
+        loop.run()
+        return
+
+    def try_listen():
+        # Android's /data/misc appears at its first boot: wait for it, don't make it
+        if not os.path.isdir(os.path.dirname(os.path.dirname(args.socket))):
+            return True
+        server.listen()
+        return False
+    if try_listen():
+        log("waiting for", os.path.dirname(os.path.dirname(args.socket)))
+        GLib.timeout_add_seconds(RETRY_SECONDS, try_listen)
+    loop.run()
+
+
+if __name__ == "__main__":
+    main()

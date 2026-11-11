@@ -50,6 +50,19 @@ while its Bluetooth page is open. BlueZ doesn't say which side started a pairing
 so everything else is refused with no sheet. A pairing started in a terminal
 needs `bluetoothctl discoverable on`.
 
+**Remembered codes:** the PIN and passkey sheets have a tick box, "Use this PIN
+(passkey) for similar devices for 3 hours", off each time. Ticked, the answer
+line ends in `\tremember`, and the agent keeps the code for 3 hours, in memory
+only (never on disk or in a log; gone on restart), keyed by the set of service
+UUIDs the device advertised. It then answers a PIN or passkey request by itself
+only when the phone started the pairing (an Android app is using the device, or
+Settings' `bluetoothctl pair` for it is running), the device advertises exactly
+the same set, and that device hasn't failed with the code; each time, a
+notification says "Paired NAME with the remembered PIN". A pairing that doesn't
+end Paired marks the device failed for that code, and the sheet comes back. Never
+for a confirmation, an authorization or an unsolicited request. The agent's
+docstring has the details.
+
 **Never by itself:** nothing answers yes without a person, with one exception:
 AuthorizeService is allowed for a device whose `Trusted` is set. The agent looks
 twice, 1.5 s apart, because Settings trusts a device just after pairing it and a

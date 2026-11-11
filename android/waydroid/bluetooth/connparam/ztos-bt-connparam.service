@@ -1,0 +1,34 @@
+[Unit]
+Description=ztOS: LE connection updates for Android apps (requestConnectionPriority)
+Documentation=file:///usr/share/doc/ztos-waydroid/waydroid.md
+Requires=ztos-bt-connparam.socket
+
+[Service]
+ExecStart=/usr/lib/ztos-waydroid/btbridge/ztos-bt-connparam
+# One capability, for a raw HCI socket it sends one command on (LE Connection Update): no
+# root, no other privilege, no files.
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+ProtectSystem=strict
+# /run/user/UID must be visible (the client check); home directories need not be
+InaccessiblePaths=/home /root
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077

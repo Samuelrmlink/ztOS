@@ -89,3 +89,10 @@ ztmetro/ntfy/ztos-ntfyd
 ztmetro/ntfy/ztntfy
 score/tools/scoremm
 ztmetro/osial/ztosial
+ztmetro/desktop/*-protocol.h
+ztmetro/desktop/*-protocol.c
+ztmetro/desktop/*.xml
+ztmetro/desktop/ztdesk
+ztmetro/desktop/ztdeskmode
+ztmetro/clock/ztclock
+ztmetro/clock/ztclockd

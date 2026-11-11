@@ -1,0 +1,14 @@
+[Unit]
+Description=ztOS: LE connection updates for Android apps (requestConnectionPriority)
+
+[Socket]
+ListenSequentialPacket=/run/ztos-bt-connparam.sock
+# anyone may connect; ztos-bt-connparam keeps only root and users with a
+# session (/run/user/UID), who can already connect, pair and disconnect
+# devices through BlueZ: this only changes the timing of an existing link,
+# within the spec's limits
+SocketMode=0666
+Accept=no
+
+[Install]
+WantedBy=sockets.target

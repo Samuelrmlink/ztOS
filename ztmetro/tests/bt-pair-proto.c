@@ -95,9 +95,11 @@ static void test_entry(void) {
 
 static void test_reply(void) {
 	char out[64];
-	assert(bt_pair_reply_line(out, sizeof(out), "1f", true, "0000") == 11 && !strcmp(out, "1f\tOK\t0000\n"));
-	assert(bt_pair_reply_line(out, sizeof(out), "1f", false, NULL) == 10 && !strcmp(out, "1f\tCANCEL\n"));
-	assert(bt_pair_reply_line(out, 4, "1f", false, NULL) == -1);
+	assert(bt_pair_reply_line(out, sizeof(out), "1f", true, "0000", false) == 11 && !strcmp(out, "1f\tOK\t0000\n"));
+	assert(bt_pair_reply_line(out, sizeof(out), "1f", true, "0000", true) == 20 &&
+		!strcmp(out, "1f\tOK\t0000\tremember\n"));
+	assert(bt_pair_reply_line(out, sizeof(out), "1f", false, NULL, true) == 10 && !strcmp(out, "1f\tCANCEL\n"));
+	assert(bt_pair_reply_line(out, 4, "1f", false, NULL, false) == -1);
 }
 
 int main(void) {

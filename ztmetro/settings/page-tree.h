@@ -46,6 +46,8 @@ enum page {
 	PAGE_APP_SCALE,	/* app scaling: a size for each app */
 	PAGE_LED,	/* the front LED: what lights it, and in what colour */
 	PAGE_AOD,	/* the always-on display: shown when, its theme, its brightness */
+	PAGE_DESKTOP,	/* desktop mode: XFCE on a monitor (ztmetro/desktop/desktop-page.c) */
+	PAGE_ANDROID,	/* Android apps (Waydroid): what they may do on the phone */
 	/* Sound's pages (sound/sound-pages.h), in its order: two pivots of two tabs */
 	PAGE_SOUND_EQ, PAGE_SOUND_FX, PAGE_SOUND_OUT, PAGE_SOUND_APPS,
 	/* AirPods' (pods/pods-pages.h), in its order: four tabs */
@@ -78,6 +80,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_PERF] = PAGE_POWER,
 	[PAGE_DEV] = PAGE_SYSTEM,
 	[PAGE_INSTALLED_APPS] = PAGE_MAIN,
+	[PAGE_ANDROID] = PAGE_MAIN,
 	[PAGE_APP_DETAIL] = PAGE_INSTALLED_APPS,
 	[PAGE_APP_SCALE] = PAGE_INSTALLED_APPS,
 	[PAGE_HAPTICS] = PAGE_SOUND_TOUCH,
@@ -92,6 +95,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_TILES] = PAGE_THEME,
 	[PAGE_LOCK] = PAGE_THEME,
 	[PAGE_AOD] = PAGE_DISPLAY,
+	[PAGE_DESKTOP] = PAGE_DISPLAY,
 	[PAGE_WALLS] = PAGE_TILES,	/* or Lock Screen: see page_parent */
 	[PAGE_ANIMATION] = PAGE_THEME,
 	[PAGE_STYLE] = PAGE_THEME,
@@ -125,6 +129,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "apps", PAGE_INSTALLED_APPS },	/* an old name: there was a tab called that */
 	{ "app", PAGE_APP_DETAIL },
 	{ "app-scale", PAGE_APP_SCALE },
+	{ "android", PAGE_ANDROID },
 	{ "customization", PAGE_THEME },
 	{ "theme", PAGE_THEME },	/* its old name */
 	{ "accents", PAGE_ACCENTS },
@@ -137,6 +142,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "quick", PAGE_QUICK },
 	{ "display", PAGE_DISPLAY },
 	{ "aod", PAGE_AOD },
+	{ "desktop", PAGE_DESKTOP },
 	{ "connections", PAGE_CONNECTIONS },
 	{ "wifi", PAGE_WIFI },
 	{ "wifinet", PAGE_WIFI_NET },

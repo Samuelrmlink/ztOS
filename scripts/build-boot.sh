@@ -22,6 +22,36 @@
 #                                binder + binderfs, PSI, bridge/veth, nftables NAT,
 #                                policy routing, Android netd's xtables matches
 #                                (kernel/waydroid.config, docs/waydroid.md)
+#     --dp-altmode               DisplayPort Alt Mode in the typec class (needs --power):
+#                                the typec_displayport altmode driver built in; the
+#                                MAX77705 side stays off until max77705_usbc.dp_altmode=1.
+#                                --dp-altmode puts max77705_usbc.dp_altmode=1 on the
+#                                command line.
+#                                Its own release (-dp suffix) and module set. Only in a
+#                                private kernel tree (KSRC=, e.g. a reflink copy of
+#                                build/linux-7.1): the shared tree's out/.config is what
+#                                every other build's module ABI check reads
+#     --dp-tx                    with --dp-altmode: the DP TX bring-up driver
+#                                (kernel/exynos9810-dp.c, combo PHY DP mode + AUX by
+#                                hand through debugfs) and its DT node; on the command
+#                                line exynos9810_dp.hpd_read=1 drm_auto=1 vsync_irq=1: at HPD high the
+#                                link comes up and the DP-1 DRM card registers, which the
+#                                shell takes as a second output (docs/dp-altmode.md)
+#     --release-suffix -TAG      replaces --dp-altmode's -dp in the release
+#                                (-dp2: 7.1.0-zboot-wd-dp2): a test kernel whose ABI
+#                                differs from one on the phone gets its own release and
+#                                module set; the running kernel's set is never replaced
+#     --usb-net                  USB Ethernet adapters as modules (usbnet, CDC Ethernet
+#                                and NCM, Realtek RTL8152/8153: the USB-C docks' NICs);
+#                                the modules go into the set (build-bt-modules.sh). It
+#                                changes the module ABI: give it its own release
+#                                (--release-suffix with --dp-altmode)
+#     --hid                      USB keyboards and mice: HID, its generic driver and
+#                                USB HID built in (the boot console and the shell's
+#                                libinput need no module), UHID (BlueZ's HID profile),
+#                                multitouch and the common vendor drivers (Logitech,
+#                                Logitech receivers, Apple, Microsoft) as modules in the
+#                                set. It changes the module ABI: its own release
 #     --cmdline "..."            extra kernel command line (zboot.rescue=1 ...)
 #     --config-only              stop after the configuration: out/<name>.config,
 #                                to build the modules for it first (below)
@@ -42,7 +72,9 @@
 # structures. So:
 #   - CONFIG_COMPAT (--waydroid) changes the release: 7.1.0-zboot-wd, whose
 #     modules live in /lib/modules/7.1.0-zboot-wd; without it 7.1.0-zboot. The
-#     kernel refuses a module of the other release (vermagic).
+#     kernel refuses a module of the other release (vermagic). --dp-altmode adds
+#     -dp (7.1.0-zboot-wd-dp): a test kernel with its own modules, never
+#     mistaken for the ABI of the image it is tried against.
 #   - the image is not built unless out/modules-<release>/ABI is this config's
 #     scripts/module-abi.sh hash, i.e. its modules were built against it. For a
 #     new config: build-boot.sh <name> <options> --config-only, then
@@ -51,7 +83,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 B=$ROOT/build
-SRC=$B/linux-7.1
+SRC=$(realpath -m "${KSRC:-$B/linux-7.1}")	# KSRC=<tree>: a private copy (--dp-altmode needs one)
 PORT=$ROOT/third_party/s9plus
 TC=$B/toolchain/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu/bin
 REF=$ROOT/stock/RECOVERY.img    # TWRP for starlte: a header and DTBH sboot accepts
@@ -63,7 +95,7 @@ FALLBACK=boot
 DTS_FLAGS=()
 EXTRA=
 WIFI_NVRAM=$ROOT/firmware/nvram.txt_r02a_b2
-UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID=
+UFS=1 POWER= ACPM= CPUFREQ= GPU= DECON= WLAN= PMDEBUG= LOCKUP= WAYDROID= DPALT= DPTX= RELSUFFIX= USBNET= HID=
 CONFIG_ONLY= MODULES= MODCHECK=1
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -77,6 +109,11 @@ while [ $# -gt 0 ]; do
 	--pm-debug) PMDEBUG=1 ;;
 	--lockup) LOCKUP=1 ;;
 	--waydroid) WAYDROID=1 ;;
+	--usb-net) USBNET=1 ;;
+	--hid) HID=1 ;;
+	--dp-altmode) DTS_FLAGS+=(--dp-altmode); DPALT=1 ;;
+	--release-suffix) RELSUFFIX=$2; shift ;;
+	--dp-tx) DTS_FLAGS+=(--dp-tx); DPTX=1 ;;
 	--config-only) CONFIG_ONLY=1 ;;
 	--modules) MODULES=$(realpath -m "$2"); shift ;;
 	--no-module-check) MODCHECK= ;;
@@ -89,6 +126,16 @@ while [ $# -gt 0 ]; do
 	shift
 done
 [ -n "$UFS" ] && DTS_FLAGS+=(--ufs)
+if [ -n "$RELSUFFIX" ]; then
+	[[ "$RELSUFFIX" =~ ^-[a-z0-9]+$ ]] || { echo "--release-suffix: -[a-z0-9]+, not '$RELSUFFIX'" >&2; exit 1; }
+	[ -n "$DPALT" ] || { echo "--release-suffix is for --dp-altmode test kernels" >&2; exit 1; }
+fi
+[ -z "$DPTX" ] || [ -n "$DPALT" ] || { echo "--dp-tx needs --dp-altmode" >&2; exit 1; }
+if [ -n "$DPALT" ] && [ "$SRC" = "$(realpath -m "$B/linux-7.1")" ]; then
+	echo "--dp-altmode builds in a private tree, not the shared $SRC:" >&2
+	echo "  cp -a --reflink=always $B/linux-7.1 $B/linux-7.1-dp; KSRC=$B/linux-7.1-dp $0 ..." >&2
+	exit 1
+fi
 case "$FALLBACK" in
 boot) INFORM3=0x12345670 ;;
 recovery) INFORM3=0x12345674 ;;
@@ -146,10 +193,23 @@ python3 "$ROOT/kernel/patch-brcmfmac-roam.py" "$SRC"
 # stock-like AICL back-off (300 mA floor) instead of mainline's ratchet that
 # wraps to 3.2 A, the battery's charge current, and max77705-wireless (WCIN)
 [ -n "$POWER" ] && python3 "$ROOT/kernel/patch-max77705-charger.py" "$SRC"
+# USB OTG: the charger's CHGIN boost as the USB-C VBUS regulator (DT
+# usb-otg-vbus, --power only), and the USB 2.0 PHY's host mode for dwc3
+[ -n "$POWER" ] && python3 "$ROOT/kernel/patch-max77705-otg.py" "$SRC"
+python3 "$ROOT/kernel/patch-usbphy-host.py" "$SRC"
+# dwc3 programs GUSB2PHYCFG again after phy_init: the 9810 PHY init resets the link
+python3 "$ROOT/kernel/patch-dwc3-phy-setup.py" "$SRC"
 # the wireless charging receiver (IDT P9320), built in with --power
 python3 "$ROOT/kernel/patch-p9320.py" "$SRC"
 # the MAX77705 USB-C controller driver (replaces s9p-max77705-muic with --power)
 python3 "$ROOT/kernel/patch-max77705-usbc.py" "$SRC"
+# --dp-altmode only (its private tree): typec switch/mux lookups defer when the
+# switch is not registered yet, instead of reporting "none" (a mainline bug)
+[ -z "$DPALT" ] || python3 "$ROOT/kernel/patch-typec-mux-defer.py" "$SRC"
+# --dp-altmode: the SBU switch stays on in the USB Safe State, as on stock;
+# --dp-tx: the Exynos 9810 DP TX bring-up driver (combo PHY DP mode, AUX)
+[ -z "$DPALT" ] || python3 "$ROOT/kernel/patch-gpio-sbu-mux-safe.py" "$SRC"
+[ -z "$DPTX" ] || python3 "$ROOT/kernel/patch-exynos9810-dp.py" "$SRC"
 
 echo "=== initramfs ==="
 LIST=$B/initramfs.list
@@ -281,6 +341,23 @@ if [ -n "$POWER" ]; then
 else
 	cfg --disable CHARGER_MAX77705_USBC
 	cfg --disable TYPEC
+	[ -z "$DPALT" ] || { echo "--dp-altmode needs --power (the USB-C controller)" >&2; exit 1; }
+fi
+# DisplayPort Alt Mode: the class's DP altmode driver and the GPIO SBU switch,
+# built in (no module to ship); max77705_usbc.dp_altmode=1 on the command
+# line turns the chip side on. The board wiring is in the DT (make-dts.py).
+if [ -n "$DPALT" ]; then
+	cfg --enable TYPEC_DP_ALTMODE
+	cfg --enable TYPEC_MUX_GPIO_SBU
+	if [ -n "$DPTX" ]; then
+		cfg --enable DRM_EXYNOS9810_DP
+	else
+		cfg --disable DRM_EXYNOS9810_DP
+	fi
+else
+	cfg --disable TYPEC_DP_ALTMODE
+	cfg --disable TYPEC_MUX_GPIO_SBU
+	cfg --disable DRM_EXYNOS9810_DP
 fi
 if [ -n "$GPU" ]; then
 	cfg --enable DRM_PANFROST
@@ -351,7 +428,10 @@ cfg --set-val CMA_SIZE_MBYTES 128
 # taken over by s3c2410_wdt (tmr_atboot). The kernel pets it until userspace
 # opens /dev/watchdog, so a wedged kernel resets into the fallback target.
 # Firmware roaming stays on: kernel/patch-brcmfmac-roam.py reports its roams (ROADMAP 1.7)
-CMDLINE="console=tty0 console=ramoops-1 loglevel=7 panic=5 keep_bootcon maxcpus=8 s9p_vendor_m3_defaults s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60${EXTRA:+ $EXTRA}"
+DPCMD=
+[ -z "$DPALT" ] || DPCMD+=" max77705_usbc.dp_altmode=1"
+[ -z "$DPTX" ] || DPCMD+=" exynos9810_dp.hpd_read=1 exynos9810_dp.drm_auto=1 exynos9810_dp.vsync_irq=1"
+CMDLINE="console=tty0 console=ramoops-1 loglevel=7 panic=5 keep_bootcon maxcpus=8 s9p_vendor_m3_defaults s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60${EXTRA:+ $EXTRA}$DPCMD"
 cfg --set-str CMDLINE "$CMDLINE"
 make -s O=out olddefconfig
 grep -E '^CONFIG_(CMDLINE|SCSI_UFS_EXYNOS9810|USB_CONFIGFS_NCM|S3C2410_WATCHDOG|PSTORE_RAM|DRM_EXYNOS_BOOTFB|PHY_EXYNOS5_USBDRD|USB_DWC3_GADGET|USB_DWC3_MODE)' out/.config ||
@@ -369,10 +449,27 @@ if [ -n "$WAYDROID" ]; then
 	[ -z "$missing" ] || { echo "--waydroid: not enabled:$missing" >&2; exit 1; }
 	echo "waydroid: kernel/waydroid.config applied"
 fi
+# Bluetooth as a module in the core config: the stack itself is in the module
+# set (scripts/build-bt-modules.sh), but built-in code asks IS_ENABLED(CONFIG_BT),
+# e.g. sk_may_scm_recv() allows SO_PASSCRED on AF_BLUETOOTH sockets only then
+# (btmon needs it). No built-in Bluetooth code; it changes the module ABI.
+cfg --module BT
+# --usb-net: the docks' Ethernet (RTL8153 in the Belkin 6-in-1) as modules
+if [ -n "$USBNET" ]; then
+	cfg --enable NETDEVICES --enable USB_NET_DRIVERS --module USB_USBNET \
+		--module USB_RTL8152 --module USB_NET_CDCETHER --module USB_NET_CDC_NCM
+fi
+# --hid: keyboards and mice on USB (a dock's receiver) and, through UHID, BlueZ
+if [ -n "$HID" ]; then
+	cfg --enable INPUT --enable HID_SUPPORT --enable HID --enable HID_GENERIC --enable USB_HID --enable HIDRAW \
+		--module UHID --module HID_MULTITOUCH --module HID_LOGITECH --module HID_LOGITECH_DJ \
+		--module HID_LOGITECH_HIDPP --module HID_APPLE --module HID_MICROSOFT
+fi
 # The release names the module ABI (see the top): 32-bit compat changes
 # structures modules use, so a COMPAT kernel gets its own /lib/modules.
 LV=-zboot
 grep -q '^CONFIG_COMPAT=y$' out/.config && LV=-zboot-wd
+[ -n "$DPALT" ] && LV=$LV${RELSUFFIX:--dp}
 cfg --set-str LOCALVERSION "$LV"
 make -s O=out olddefconfig
 RELEASE=$(sh "$ROOT/scripts/module-abi.sh" --release out/.config "$(make -s kernelversion)")
