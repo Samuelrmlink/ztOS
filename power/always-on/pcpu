@@ -1,0 +1,15 @@
+#!/bin/sh
+# pcpu SECONDS: per-thread CPU ticks and context switches over SECONDS
+T=${1:-30}
+snap() {
+	for d in /proc/[0-9]*/task/[0-9]*; do
+		l=$(cat $d/stat 2>/dev/null) || continue
+		c=$(awk '/^voluntary_ctxt/{v=$2}/^nonvoluntary_ctxt/{n=$2}END{print v+n}' $d/status 2>/dev/null)
+		pc=$(cat ${d%/task/*}/comm 2>/dev/null | tr ' ' _)
+		echo "${d#/proc/} $c $pc ${l#*) }"
+	done 2>/dev/null
+}
+snap > /tmp/pc0; sleep $T; snap > /tmp/pc1
+# fields after "PID/task/TID CS PCOMM": state=$4 ... utime=$(4+11)=$15 stime=$16
+awk -v T=$T 'NR==FNR{u[$1]=$15+$16; cs[$1]=$2; next}
+($1 in u){du=$15+$16-u[$1]; dc=$2-cs[$1]; if(du>1||dc>T*2) printf "%6.1f%% %8.1f wake/s %s %s\n", du/T, dc/T, $1, $3}' /tmp/pc0 /tmp/pc1 | sort -k2 -nr | head -45
