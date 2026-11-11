@@ -14,6 +14,12 @@ cd "$(dirname "$0")/../.."
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}
 ctl() { echo "$*" > "$XDG_RUNTIME_DIR/ztmetro.ctl"; sleep 0.3; }
 state=$XDG_RUNTIME_DIR/ztmetro-desktop.state
+# the shell that runs must be one with this branch in it (another deploy may have replaced it)
+exe=$(readlink -f "/proc/$(pgrep -x -u "$(id -u)" ztmetro | head -1)/exe" 2>/dev/null)
+if ! grep -q zt_environment_manager_v1 "${exe:-/usr/local/bin/ztmetro}" 2>/dev/null; then
+	echo "the running ztmetro ($exe) has no zt_environment_v1: not this branch's build; nothing tested"
+	exit 3
+fi
 ctl desktop state
 if grep -q '^locked yes' "$state"; then
 	echo "the desktop is locked (it locked with the phone): unlock the phone, then run this again"
