@@ -146,6 +146,37 @@ DOZE_NO_NET_S = 15	# a doze window where zrn-pushd gets nowhere ends here
 BATTERY = Path('/sys/class/power_supply/max170xx_battery')
 LOW_BATTERY = ((4, 120), (10, 600))	# (at or below %, longest sleep s)
 SUMMARY_S = 3600	# a line of totals this often, and at stop
+# The battery over time: a row in SOC_CSV at every sleep entry, every wake,
+# every Wi-Fi return after a wake, and every TICK_S while it stays awake (the
+# AOD, a charger, an inhibit), so a night's drain can be plotted whatever
+# happened. One O_APPEND write a row and no fsync: the sync before each sleep
+# (the mark) puts the rows before it on the disk.
+SOC_CSV = STATE / 'soc.csv'
+SOC_FIELDS = ('time', 'epoch', 'boot_s', 'event', 'soc', 'charge_now_mah', 'charge_counter_mah',
+	      'voltage_mv', 'current_now_ma', 'current_avg_ma', 'temp_c', 'asleep_s', 'awake_s',
+	      'reason', 'wifi', 'display', 'charger', 'note')
+SOC_ROTATE_BYTES = 8 << 20
+TICK_S = 600
+# Wi-Fi after a periodic wake: brcmfmac is bound again at once, but
+# associating, DHCP and NetworkManager take seconds. When Wi-Fi was up at the
+# sleep, a wake by an RTC alarm (ours or someone's) stays up until wlp1s0 is
+# up again and WIFI_GRACE_S more (mail, a push, ssh), WIFI_WINDOW_S at most.
+# 0 switches the window off (Wi-Fi then comes back only at longer wakes).
+WIFI_WINDOW_S = 30
+WIFI_GRACE_S = 10
+# Wi-Fi need not come back at every wake: with WIFI_INTERVAL_S set, a wake by
+# our own RTC alarm before it is due leaves brcmfmac unbound ('parked') and
+# sleeps again at once (an AOD minute, a battery row). Any other wake, any
+# reason to stay up, and `once` bind it again. 0: at every wake, as before.
+WIFI_INTERVAL_S = 0
+WIFI_IFACE = 'wlp1s0'
+# key=value overrides, read at start and before each sleep (no restart):
+#   wake_interval_s=600  wifi_interval_s=0  wifi_window_s=30  wifi_grace_s=10  tick_s=600
+CONFIG = STATE / 'config'
+CONFIG_KEYS = {'wake_interval_s': 'MAX_SLEEP_S', 'wifi_interval_s': 'WIFI_INTERVAL_S',
+	       'wifi_window_s': 'WIFI_WINDOW_S',
+	       'wifi_grace_s': 'WIFI_GRACE_S', 'tick_s': 'TICK_S', 'doze_sleep_s': 'DOZE_SLEEP_S'}
+SHELL_STATE = Path(ztos_user.RUNTIME_DIR) / 'ztmetro.state'
 INHIBIT_OLD_S = 3600	# an inhibit held this long gets a line in the log
 LOG_ROTATE_BYTES = 1 << 20	# the log moves to log.1 past this
 # /sys/power/wakeup_count blocks while a wakeup source is active: past this
@@ -334,6 +365,89 @@ def show_log(lines=50):
 			pass
 	for line in text if lines is None else text[-lines:] if lines > 0 else []:
 		print(line)
+
+
+_config_seen = None
+
+
+def load_config():
+	"""CONFIG's key=value lines over the defaults; a change is logged."""
+	global _config_seen
+	text = read(CONFIG)
+	values = {}
+	for line in text.splitlines():
+		key, sep, value = line.split('#', 1)[0].partition('=')
+		key = key.strip()
+		if sep and key in CONFIG_KEYS:
+			try:
+				values[key] = int(value.strip())
+			except ValueError:
+				pass
+	if text != _config_seen:
+		for key, name in CONFIG_KEYS.items():
+			default = _defaults.setdefault(name, globals()[name])
+			globals()[name] = values.get(key, default)
+		if _config_seen is not None or values:
+			log('config:', ' '.join(f'{k}={globals()[n]}' for k, n in CONFIG_KEYS.items()))
+		_config_seen = text
+
+
+_defaults = {}
+
+
+def wifi_state():
+	"""'unbound' (asleep or off the bus), 'up' (associated and carrying),
+	'down', or 'absent'."""
+	if not (WIFI / WIFI_DEV).exists():
+		return 'unbound'
+	state = read(f'/sys/class/net/{WIFI_IFACE}/operstate', '')
+	return state if state in ('up', 'down') else (state or 'absent')
+
+
+def display_state():
+	"""'on', 'aod' (the output lit, the shell's AOD showing), or 'off'."""
+	if screen_off():
+		return 'off'
+	shell = read(SHELL_STATE).splitlines()
+	if 'screen off' in shell and 'aod on' in shell:
+		return 'aod'
+	return 'on'
+
+
+def _milli(path, scale=1000):
+	try:
+		return f'{int(read(path, "")) / scale:.1f}'
+	except ValueError:
+		return ''
+
+
+def soc_row(event, asleep=None, awake=None, reason='', note=''):
+	"""One row of SOC_CSV: what the battery says now."""
+	try:
+		temp = f'{int(read(BATTERY / "temp", "")) / 10:.1f}'
+	except ValueError:
+		temp = ''
+	row = (time.strftime('%Y-%m-%d %H:%M:%S'), f'{time.time():.0f}', f'{boottime():.1f}', event,
+	       read(BATTERY / 'capacity'), _milli(BATTERY / 'charge_now'),
+	       _milli(BATTERY / 'charge_counter'), _milli(BATTERY / 'voltage_now'),
+	       _milli(BATTERY / 'current_now'), _milli(BATTERY / 'current_avg'), temp,
+	       '' if asleep is None else f'{asleep:.1f}', '' if awake is None else f'{awake:.1f}',
+	       reason, wifi_state(), display_state(), 'yes' if plugged() else 'no',
+	       note.replace(',', ';'))
+	try:
+		try:
+			if SOC_CSV.stat().st_size > SOC_ROTATE_BYTES:
+				os.replace(SOC_CSV, SOC_CSV.with_name(SOC_CSV.name + '.1'))
+		except FileNotFoundError:
+			pass
+		fd = os.open(SOC_CSV, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+		try:
+			head = ','.join(SOC_FIELDS) + '\n' if os.fstat(fd).st_size == 0 else ''
+			os.write(fd, (head + ','.join(row) + '\n').encode())
+		finally:
+			os.close(fd)
+	except OSError:
+		pass
 
 
 STEP = Path('/run/zrn-sleepd/step')
@@ -701,6 +815,8 @@ def why_awake(ignore=(), ignore_inhibits=()):
 			('call', lambda: kv(MODEM).get('call', 'idle') not in ('', 'idle')),
 			('audio', audio)):
 		if name not in ignore and holds():
+			if name == 'screen on' and display_state() == 'aod':
+				return 'aod showing'
 			return name
 	held = [name for name in inhibits() if name not in ignore_inhibits]
 	if held:
@@ -943,11 +1059,19 @@ def cycle(ignore=(), ignore_inhibits=()):
 		log(f'battery low: sleeping at most {cap}s')
 		alarm_s = cap
 	last_sleep.clear()
+	t_start = boottime()
+	t_in = None
 	user_env = ['env', 'XDG_RUNTIME_DIR=' + ztos_user.RUNTIME_DIR]
 	user = ztos_user.USER
 	entries = int(read(SLEEP / 'entries', '0') or 0)
 	hub_refused = number(SLEEP / 'hub_refused')	# 0 with an older module
-	wifi_bound = (WIFI / WIFI_DEV).exists()
+	global wifi_parked, last_wake_boot
+	# parked by the last wake: still ours to bind again
+	wifi_bound = (WIFI / WIFI_DEV).exists() or wifi_parked
+	wifi_before = 'parked' if wifi_parked else wifi_state()
+	if not wifi_parked:
+		last_wifi['before'] = wifi_before
+	last_sleep['wifi_before'] = wifi_before
 	old_ufs = read(UFS)
 	reason, stat = 'failed', 0
 	audio_out = False
@@ -969,7 +1093,7 @@ def cycle(ignore=(), ignore_inhibits=()):
 		old_alarm = signal.signal(signal.SIGALRM, _stalled)
 		signal.alarm(PREPARE_S)
 		try:
-			if wifi_bound:
+			if wifi_bound and (WIFI / WIFI_DEV).exists():
 				settle = 3
 				step('wifi down')
 				run('ip', 'link', 'set', 'wlp1s0', 'down')
@@ -1014,6 +1138,9 @@ def cycle(ignore=(), ignore_inhibits=()):
 			step('settle')
 			time.sleep(settle)
 			step('mark and sync')
+			# the row before the sync, which puts it on the disk
+			soc_row('sleep', awake=(boottime() - last_wake_boot) if last_wake_boot else None,
+				note=f'alarm +{alarm_s}s; wifi was {wifi_before}' + ('; dozing' if dozing else ''))
 			MARK.write_text(str(time.time()))
 			os.sync()
 			step('wakeup_count')
@@ -1096,8 +1223,13 @@ def cycle(ignore=(), ignore_inhibits=()):
 		restore_write('/sys/class/rtc/rtc0/wakealarm', 0)
 		if old_ufs:
 			restore_write(UFS, old_ufs)
-		if wifi_bound and not (WIFI / WIFI_DEV).exists():
+		# a wake by our own alarm before Wi-Fi is due: leave it parked
+		wifi_parked = bool(wifi_bound and WIFI_INTERVAL_S and reason == 'rtc' and
+				   last_wifi.get('next', 0) > boottime() and not audio_failed())
+		if wifi_bound and not wifi_parked and not (WIFI / WIFI_DEV).exists():
 			restore_write(WIFI / 'bind', WIFI_DEV)
+			last_wifi['bound_at'] = boottime()
+			last_wifi['next'] = boottime() + WIFI_INTERVAL_S
 		if audio_out and read('/sys/module/snd_zrn_abox/parameters/pm_ready') != 'Y':
 			restored = False
 			log('audio restore failed')
@@ -1109,10 +1241,47 @@ def cycle(ignore=(), ignore_inhibits=()):
 			tell_shell('notify Power|Sleep switched off|Device recovery failed after sleep.')
 	global last_dozing
 	last_dozing = dozing
+	if last_sleep.get('entered'):
+		last_wake_boot = boottime()
+		purpose = reason
+		if reason == 'rtc':
+			purpose = 'tick' if wifi_parked else 'wifi'
+		last_sleep['purpose'] = purpose
+		# the cycle's own cost: before the suspend, and from the return to here
+		cost = ''
+		if t_in is not None and t_woke is not None:
+			cost = f'prep {t_in - t_start:.1f}s; restore {last_wake_boot - t_woke:.1f}s'
+		rx = last_sleep.get('modem_rx', '')
+		soc_row('wake', asleep=slept, reason=purpose, note=cost + (f'; modem {rx}' if rx else ''))
+	elif reason not in ('cancelled',):
+		soc_row('nosleep', reason=reason)
 	return reason, stat
 
 
 last_dozing = False
+last_wake_boot = None	# boot time of the last return from the SoC
+wifi_parked = False	# brcmfmac left unbound after a wake (WIFI_INTERVAL_S)
+last_wifi = {}		# before: its state at the last unparked sleep; bound_at, next: boot time
+
+
+def audio_failed():
+	return read('/sys/module/snd_zrn_abox/parameters/pm_ready') != 'Y'
+
+
+def unpark_wifi(why):
+	"""Bind Wi-Fi again if a wake left it parked."""
+	global wifi_parked, last_wake_boot
+	if not wifi_parked:
+		return
+	wifi_parked = False
+	if not (WIFI / WIFI_DEV).exists():
+		try:
+			write(WIFI / 'bind', WIFI_DEV)
+		except OSError as e:
+			log('wifi bind failed:', e)
+		last_wifi['bound_at'] = boottime()
+		last_wifi['next'] = boottime() + WIFI_INTERVAL_S
+	log(f'wifi back: {why}')
 
 
 # ---- the loop --------------------------------------------------------------------
@@ -1167,7 +1336,8 @@ class Totals:
 		causes = f' ({causes.strip()})' if causes else ''
 		return (f'summary: {total / 3600:.2f} h, cycles={self.cycles} fw-aborts={self.fw_aborts}{causes} '
 			f'wakes={reasons} awake={100 * (total - self.asleep_s) / total:.0f}% '
-			f'mAh asleep={mah(self.asleep_uah)} awake={mah(awake_uah)}')
+			f'mAh asleep={mah(self.asleep_uah)} awake={mah(awake_uah)} '
+			f'soc={read(BATTERY / "capacity", "?")}%')
 
 
 def bits(word):
@@ -1210,6 +1380,11 @@ def main():
 	last = {}
 	totals = Totals()
 	summary_at = time.monotonic() + SUMMARY_S
+	load_config()
+	soc_row('start', note=f'wake_interval {MAX_SLEEP_S}s; wifi_interval {WIFI_INTERVAL_S}s; '
+		f'enabled {ENABLED.exists()}')
+	tick_at = time.monotonic() + TICK_S
+	wifi_wait = None	# after a wake: (woke, boot time, deadline) until Wi-Fi is back
 	try:
 		while True:
 			# an inhibit change while awake is no reason to stay awake:
@@ -1217,7 +1392,28 @@ def main():
 			watch = ensure_watch()
 			if watch is not None:
 				watch.drain()
+			quick = False
 			why = why_awake()
+			if why is not None and why != 'switched off':
+				unpark_wifi(why)
+			if wifi_wait:
+				woke_b, deadline = wifi_wait
+				state = wifi_state()
+				if state == 'up':
+					took = boottime() - woke_b
+					soc_row('wifi', reason='up', note=f'reassociated {took:.1f}s after the wake')
+					log(f'wifi up {took:.1f}s after the wake')
+					wifi_wait = None
+					backoff = max(backoff, time.monotonic() + WIFI_GRACE_S)
+				elif boottime() >= deadline:
+					soc_row('wifi', reason='timeout', note=f'not up {WIFI_WINDOW_S}s after the wake ({state})')
+					log(f'wifi not back {WIFI_WINDOW_S}s after the wake ({state})')
+					wifi_wait = None
+				elif why is None:
+					why = 'wifi window'
+			if time.monotonic() >= tick_at:
+				soc_row('awake', reason=why or 'waiting')
+				tick_at = time.monotonic() + TICK_S
 			if screen_off():
 				off_since = off_since or time.monotonic()
 			else:
@@ -1247,8 +1443,10 @@ def main():
 						ENABLED.unlink(missing_ok=True)
 						tell_shell('notify Power|Sleep switched off|Its driver did not load.')
 						continue
+				load_config()
 				t0 = boottime()
 				reason, stat = cycle()
+				tick_at = time.monotonic() + TICK_S
 				sleeps += 1
 				slept = round(boottime() - t0)
 				info = dict(last_sleep)
@@ -1303,6 +1501,13 @@ def main():
 				else:
 					fails = fw_aborts = hub_aborts = 0
 					backoff = mono + AWAKE_AFTER.get(reason, 8)
+					if info.get('purpose') == 'tick':
+						backoff = mono	# nothing to do: straight back
+						quick = True
+					# Wi-Fi was up at the sleep and is bound again: give it its window
+					if (WIFI_WINDOW_S and info.get('purpose') in ('wifi', 'alarm', 'other') and
+							last_wifi.get('before') == 'up' and (WIFI / WIFI_DEV).exists()):
+						wifi_wait = (last_wifi.get('bound_at', boottime()), boottime() + WIFI_WINDOW_S)
 					if last_dozing and reason in ('rtc', 'other', 'alarm'):
 						backoff = mono + max(DOZE_AWAKE_S, AWAKE_AFTER.get(reason, 8))
 						window = (mono, time.time(), mono + DOZE_AWAKE_MAX_S)
@@ -1333,7 +1538,8 @@ def main():
 			if time.monotonic() >= summary_at:
 				log(totals.line())
 				summary_at = time.monotonic() + SUMMARY_S
-			time.sleep(2)
+			# a tick wake goes straight back; a Wi-Fi window is timed closely
+			time.sleep(0.1 if quick else 0.5 if wifi_wait else 2)
 	finally:
 		log(totals.line())
 
@@ -1359,6 +1565,7 @@ def once(argv):
 			rest.append(word)
 	STATE.mkdir(parents=True, exist_ok=True)
 	repair_log()
+	load_config()
 	if rest:
 		MAX_SLEEP_S = int(rest[0])
 	if not setup():

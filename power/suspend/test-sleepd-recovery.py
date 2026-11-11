@@ -709,5 +709,47 @@ class LogTest(unittest.TestCase):
                 self.assertEqual(printed, ['old 1', 'old 2', 'new 1', 'new 2', 'new 3'])
 
 
+class SocCsvTest(unittest.TestCase):
+    def test_header_once_then_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            battery = base / 'battery'
+            battery.mkdir()
+            for name, value in (('capacity', '57'), ('charge_now', '1234000'), ('charge_counter', '2000000'),
+                                ('voltage_now', '3812000'), ('current_now', '-12500'),
+                                ('current_avg', '-15000'), ('temp', '281')):
+                (battery / name).write_text(value + '\n')
+            csv = base / 'soc.csv'
+            with patch.object(sleepd, 'SOC_CSV', csv), patch.object(sleepd, 'BATTERY', battery), \
+                    patch.object(sleepd, 'wifi_state', lambda: 'unbound'), \
+                    patch.object(sleepd, 'display_state', lambda: 'off'), \
+                    patch.object(sleepd, 'plugged', lambda: False):
+                sleepd.soc_row('sleep', awake=3.25, note='alarm +60s, x')
+                sleepd.soc_row('wake', asleep=59.94, reason='tick')
+            lines = csv.read_text().splitlines()
+            self.assertEqual(lines[0], ','.join(sleepd.SOC_FIELDS))
+            self.assertEqual(len(lines), 3)
+            row = dict(zip(sleepd.SOC_FIELDS, lines[2].split(',')))
+            self.assertEqual(len(lines[1].split(',')), len(sleepd.SOC_FIELDS))
+            self.assertEqual((row['event'], row['soc'], row['charge_now_mah'], row['voltage_mv'],
+                              row['current_now_ma'], row['temp_c'], row['asleep_s'], row['reason']),
+                             ('wake', '57', '1234.0', '3812.0', '-12.5', '28.1', '59.9', 'tick'))
+
+
+class ConfigTest(unittest.TestCase):
+    def test_override_and_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'config'
+            default = sleepd.MAX_SLEEP_S
+            with patch.object(sleepd, 'CONFIG', config), patch.object(sleepd, 'log', lambda *a: None):
+                sleepd._config_seen = None
+                config.write_text('wake_interval_s=60\nwifi_interval_s = 300 # comment\nbogus=1\n')
+                sleepd.load_config()
+                self.assertEqual((sleepd.MAX_SLEEP_S, sleepd.WIFI_INTERVAL_S), (60, 300))
+                config.write_text('')
+                sleepd.load_config()
+                self.assertEqual((sleepd.MAX_SLEEP_S, sleepd.WIFI_INTERVAL_S), (default, 0))
+
+
 if __name__ == '__main__':
     unittest.main()
