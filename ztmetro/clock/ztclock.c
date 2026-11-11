@@ -11,7 +11,7 @@
  * The alarms and the timer ring from ztclockd (a user service), with this
  * app closed and the screen off; this only writes what they are
  * (clock/clock-store.h). When something rings, the shell shows
- * `ztclock --ring` over the lock screen: snooze and dismiss.
+ * `ztclock --ring` over the lock screen: slide left to snooze, right to stop.
  *
  *	ztclock				alarms
  *	ztclock --ring			the ring screen (the shell or ztclockd start it)
@@ -60,7 +60,6 @@ enum action {
 	ACT_ZONE_MENU, ACT_ZONE_MENU_CLOSE,
 	ACT_T_START, ACT_T_PAUSE, ACT_T_RESET, ACT_T_PLUS,
 	ACT_S_GO, ACT_S_LAP,
-	ACT_R_SNOOZE, ACT_R_DISMISS,
 	ACT_AMPM,
 };
 
@@ -777,6 +776,190 @@ static bool ring_read(void) {
 	return i >= 4;
 }
 
+/* Stopping takes a slide, not a tap: a finger that lands on the ring screen
+ * by chance (a pocket, a hand feeling for the phone in the dark) must not end
+ * the alarm. Two tracks, each with a handle that a finger drags along it:
+ *
+ *	snooze	the upper track, its handle at the right, slid LEFT past
+ *		RS_SNOOZE_AT of the way: easy, and the alarm rings again anyway
+ *	stop	the lower track, its handle at the left, slid RIGHT past
+ *		RS_STOP_AT of the way: almost the whole track
+ *
+ * The handle follows the finger by how far it has moved, not by where it is,
+ * so a touch at the far end of a track does nothing. Let go short of the
+ * mark, or cancelled, the handle springs home; a tap only nudges it, as a
+ * hint. Past the mark a click is felt: letting go there does it. The moving
+ * parts are drawn on the GPU (.overlay), the page itself once. */
+#define RS_H		72	/* a track's height, and its square handle */
+#define RS_GAP		18
+#define RS_STOP_AT	0.85
+#define RS_SNOOZE_AT	0.60
+#define RS_BACK_MS	220	/* the spring home */
+#define RS_NUDGE	28	/* a tap moves the handle this far, then back */
+
+enum { RS_STOP, RS_SNOOZE, RS_N };
+static struct {
+	double pos[RS_N];	/* 0 home .. 1 the far end */
+	int held, id;		/* the track a finger has (-1 none), and its finger */
+	double x0, pos0;
+	bool moved, armed;
+	double from[RS_N];	/* springing home from here, since `since` */
+	uint32_t since[RS_N];
+	bool done;		/* sent: nothing moves any more */
+} rs = { .held = -1 };
+static cairo_surface_t *rs_glyph[RS_N];
+
+static bool ring_snoozes(void) { return strcmp(rung.kind, "timer") && rung.snooze > 0; }
+static double rs_w(void) { return zmc.width - 2 * MARGIN; }
+static double rs_travel(void) { return rs_w() - RS_H; }
+static double rs_y(int t) { return zmc.height - 40 - RS_H - (t == RS_SNOOZE ? RS_H + RS_GAP : 0); }
+/* where the handle's left edge is */
+static double rs_handle_x(int t) {
+	double d = rs.pos[t] * rs_travel();
+	return t == RS_STOP ? MARGIN + d : MARGIN + rs_travel() - d;
+}
+
+/* the handle: a square with two chevrons pointing the way it goes */
+static void rs_draw_handle(cairo_t *cr, int t, double x, double y) {
+	if (t == RS_STOP) zmc_accent(cr);
+	else cairo_set_source_rgb(cr, 0.42, 0.42, 0.42);
+	cairo_rectangle(cr, x, y, RS_H, RS_H);
+	cairo_fill(cr);
+	white(cr);
+	cairo_set_line_width(cr, 3);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
+	cairo_set_line_join(cr, CAIRO_LINE_JOIN_MITER);
+	double dir = t == RS_STOP ? 1 : -1, cx = x + RS_H / 2.0, cy = y + RS_H / 2.0;
+	for (int i = 0; i < 2; i++) {
+		double tip = cx + dir * (i * 11 + 1);
+		cairo_move_to(cr, tip - dir * 9, cy - 11);
+		cairo_line_to(cr, tip, cy);
+		cairo_line_to(cr, tip - dir * 9, cy + 11);
+		cairo_stroke(cr);
+	}
+}
+
+static cairo_surface_t *rs_glyph_of(int t) {
+	if (!rs_glyph[t]) {
+		int k = zmc.scale > 0 ? zmc.scale : 1;
+		rs_glyph[t] = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, RS_H * k, RS_H * k);
+		cairo_t *cr = cairo_create(rs_glyph[t]);
+		cairo_scale(cr, k, k);
+		rs_draw_handle(cr, t, 0, 0);
+		cairo_destroy(cr);
+		cairo_surface_flush(rs_glyph[t]);
+	}
+	return rs_glyph[t];
+}
+
+/* the track: grey, with its words where the handle is not */
+static void rs_draw_track(cairo_t *cr, int t, const char *words) {
+	double y = rs_y(t);
+	cairo_set_source_rgb(cr, 0.20, 0.20, 0.20);
+	cairo_rectangle(cr, MARGIN, y, rs_w(), RS_H);
+	cairo_fill(cr);
+	cairo_set_source_rgb(cr, 0.72, 0.72, 0.72);
+	double free_x = t == RS_STOP ? MARGIN + RS_H : MARGIN;
+	zmc_text_centred(cr, words, FONT_SEMILIGHT, 24, free_x + rs_travel() / 2, y + 19);
+	if (sample) rs_draw_handle(cr, t, rs_handle_x(t), y);	/* a PNG has no overlay */
+}
+
+static void rs_overlay(int page) {
+	if (page != P_RING) return;
+	uint32_t c = zmc.accent;
+	double ar = ((c >> 16) & 255) / 255.0, ag = ((c >> 8) & 255) / 255.0, ab = (c & 255) / 255.0;
+	for (int t = 0; t < RS_N; t++) {
+		if (t == RS_SNOOZE && !ring_snoozes()) continue;
+		double y = rs_y(t), hx = rs_handle_x(t), d = rs.pos[t] * rs_travel();
+		/* the way it has come, filled in behind it */
+		if (d > 0.5) {
+			if (t == RS_STOP) zmc_gpu_rect(MARGIN, y, d, RS_H, ar, ag, ab);
+			else zmc_gpu_rect(hx + RS_H, y, d, RS_H, 0.32, 0.32, 0.32);
+		}
+		double q[4][3] = { { hx, y, 0 }, { hx + RS_H, y, 0 }, { hx, y + RS_H, 0 }, { hx + RS_H, y + RS_H, 0 } };
+		zmc_gpu_quad(rs_glyph_of(t), 1, q, 1);
+	}
+}
+
+static double ease_out(double k) { return 1 - (1 - k) * (1 - k) * (1 - k); }
+
+/* every frame while a handle is on its way home */
+static void rs_spring(void) {
+	bool moving = false;
+	uint32_t now = zmc_now_ms();
+	for (int t = 0; t < RS_N; t++) {
+		if (!rs.since[t] || t == rs.held) continue;
+		double k = (double)(now - rs.since[t]) / RS_BACK_MS;
+		if (k >= 1) {
+			rs.pos[t] = 0;
+			rs.since[t] = 0;
+		} else {
+			rs.pos[t] = rs.from[t] * (1 - ease_out(k));
+			moving = true;
+		}
+	}
+	if (!moving) zmc_on_frame(NULL);
+	zmc_present();
+}
+
+static void rs_home(int t, double from) {
+	rs.pos[t] = from;
+	rs.from[t] = from;
+	rs.since[t] = zmc_now_ms();
+	zmc_on_frame(rs_spring);
+}
+
+static void rs_commit(int t) {
+	rs.done = true;
+	rs.pos[t] = 1;
+	zmc_haptic("heavy");
+	clock_tell(t == RS_SNOOZE ? "snooze" : "dismiss");
+	zmc_quit();
+}
+
+static bool ring_touch(int phase, int id, double x, double y, uint32_t time) {
+	(void)time;
+	if (phase == 0) {
+		if (rs.done || rs.held >= 0) return false;
+		for (int t = 0; t < RS_N; t++) {
+			if (t == RS_SNOOZE && !ring_snoozes()) continue;
+			double ty = rs_y(t);
+			if (x < MARGIN || x >= MARGIN + rs_w() || y < ty - 10 || y >= ty + RS_H + 10) continue;
+			rs.held = t;
+			rs.id = id;
+			rs.x0 = x;
+			rs.since[t] = 0;	/* caught on its way home */
+			rs.pos0 = rs.pos[t];
+			rs.moved = rs.armed = false;
+			return true;
+		}
+		return false;
+	}
+	if (rs.held < 0 || id != rs.id) return false;
+	int t = rs.held;
+	double at = t == RS_STOP ? RS_STOP_AT : RS_SNOOZE_AT;
+	if (phase == 1) {
+		if (!rs.moved && fabs(x - rs.x0) > 8) {
+			rs.moved = true;
+			zmc_haptic("tick");
+		}
+		double p = rs.pos0 + (x - rs.x0) * (t == RS_STOP ? 1 : -1) / rs_travel();
+		rs.pos[t] = p < 0 ? 0 : p > 1 ? 1 : p;
+		bool armed = rs.pos[t] >= at;
+		if (armed != rs.armed) {
+			rs.armed = armed;
+			if (armed) zmc_haptic("click");	/* far enough: letting go does it */
+		}
+		zmc_present();
+		return true;
+	}
+	rs.held = -1;
+	if (phase == 2 && rs.moved && rs.pos[t] >= at) rs_commit(t);
+	else if (phase == 2 && !rs.moved) rs_home(t, fmax(rs.pos[t], RS_NUDGE / rs_travel()));	/* a tap: this way */
+	else rs_home(t, rs.pos[t]);
+	return true;
+}
+
 static double draw_ring(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.10, 0.10, 0.10);
 	cairo_paint(cr);
@@ -801,23 +984,12 @@ static double draw_ring(cairo_t *cr) {
 		grey(cr);
 		zmc_text(cr, line, FONT_REGULAR, 18, MARGIN, y, w);
 	}
-	double bottom = zmc.height - 170;
-	if (!is_timer && rung.snooze > 0) {
-		zmc_accent(cr);
-		cairo_rectangle(cr, MARGIN, bottom, w, 70);
-		cairo_fill(cr);
-		white(cr);
+	if (ring_snoozes()) {
 		char s[48];
 		snprintf(s, sizeof(s), "snooze %d min", rung.snooze);
-		zmc_text_centred(cr, s, FONT_SEMILIGHT, 26, zmc.width / 2, bottom + 16);
-		zmc_add_hit(MARGIN, bottom, w, 70, ACT_R_SNOOZE, 0);
+		rs_draw_track(cr, RS_SNOOZE, s);
 	}
-	cairo_set_source_rgb(cr, .25, .25, .25);
-	cairo_rectangle(cr, MARGIN, bottom + 82, w, 62);
-	cairo_fill(cr);
-	white(cr);
-	zmc_text_centred(cr, "dismiss", FONT_SEMILIGHT, 24, zmc.width / 2, bottom + 96);
-	zmc_add_hit(MARGIN, bottom + 82, w, 62, ACT_R_DISMISS, 0);
+	rs_draw_track(cr, RS_STOP, "slide to stop");
 	return zmc.height;
 }
 
@@ -1037,14 +1209,6 @@ static void activate(int action, int arg) {
 		}
 		sw_save();
 		break;
-	case ACT_R_SNOOZE:
-		clock_tell("snooze");
-		zmc_quit();
-		break;
-	case ACT_R_DISMISS:
-		clock_tell("dismiss");
-		zmc_quit();
-		break;
 	}
 	zmc_redraw();
 }
@@ -1150,7 +1314,7 @@ static void ring_tick(void) {
 	}
 }
 
-static bool ring_back(void) { return true; }	/* only snooze or dismiss end it */
+static bool ring_back(void) { return true; }	/* only a slide ends it */
 
 static const struct zmc_app clock_app = {
 	.app_id = "ztclock", .title = "Alarms + Clock", .caps = "ALARMS + CLOCK",
@@ -1161,6 +1325,7 @@ static const struct zmc_app clock_app = {
 static const struct zmc_app ring_app = {
 	.app_id = "ztclock-ring", .title = "Alarm", .caps = "ALARM",
 	.render = render, .activate = activate, .back = ring_back, .fixed = true,
+	.touch = ring_touch, .overlay = rs_overlay,
 };
 
 static void make_sample(void) {
