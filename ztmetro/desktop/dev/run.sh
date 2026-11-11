@@ -49,7 +49,7 @@ EOF
 tty=; [ -t 0 ] && tty=-it
 podman run --rm $tty --privileged --device /dev/dri/renderD128 --group-add keep-groups \
 	-v "$root:/src:Z" -v "$root/out/desktop:/out:Z" -w /src/ztmetro $img sh -c '
-	make ztmetro desktop/zt-deskpoke desktop/zt-desklat pods/ztpods >/dev/null
+	make ztmetro desktop/zt-deskpoke desktop/zt-desklat desktop/ztmove pods/ztpods >/dev/null
 	export XDG_RUNTIME_DIR=/tmp/rt HOME=/tmp/home PATH=/src/ztmetro/desktop:$PATH
 	mkdir -p $XDG_RUNTIME_DIR $HOME && chmod 700 $XDG_RUNTIME_DIR
 	dbus-uuidgen > /etc/machine-id

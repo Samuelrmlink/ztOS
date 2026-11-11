@@ -118,12 +118,19 @@ desktop/zt-desklat: desktop/zt-desklat.c $(DESK_CLIENT) $(DESK_CLIENT_H)
 	$(CC) $(CFLAGS) $(WARN) -Idesktop $(shell pkg-config --cflags wayland-client gbm) -o $@ desktop/zt-desklat.c \
 		$(DESK_CLIENT) $(shell pkg-config --libs wayland-client gbm) -lm
 
+# ztMove: running apps between the phone and the desktop (both sides)
+desktop/ztmove: desktop/ztmove.c $(CORE_DEPS)
+	$(APP_BUILD) -o $@ desktop/ztmove.c $(CORE) $(APP_LIBS)
+
 # ztDeskMode: desktop mode's controls (Settings' page) as an app with a tile
 desktop/ztdeskmode: desktop/ztdeskmode.c desktop/desktop-page.c desktop/desktop-page.h $(CORE_DEPS)
 	$(APP_BUILD) -Idesktop -o $@ desktop/ztdeskmode.c desktop/desktop-page.c $(CORE) $(APP_LIBS)
 
 .PHONY: install-desktop
-install-desktop: desktop/ztdesk desktop/ztdeskmode
+install-desktop: desktop/ztdesk desktop/ztdeskmode desktop/ztmove
+	install -Dm755 desktop/ztmove /usr/local/bin/ztmove
+	install -Dm644 desktop/ztmove.desktop /usr/local/share/applications/ztmove.desktop
+	install -Dm644 desktop/ztmove.svg /usr/local/share/icons/hicolor/scalable/apps/ztmove.svg
 	install -Dm755 desktop/ztdeskmode /usr/local/bin/ztdeskmode
 	install -Dm644 desktop/ztdeskmode.desktop /usr/local/share/applications/ztdeskmode.desktop
 	install -Dm644 desktop/ztdeskmode.svg /usr/local/share/icons/hicolor/scalable/apps/ztdeskmode.svg
