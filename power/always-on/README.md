@@ -69,9 +69,43 @@ On the phone in `/var/tmp/always-on/` (root, under `ztlock`):
 - `pcpu SECONDS`: per-thread CPU and context switches.
 - `mifread.py`: the MIF PLL and dividers, read only.
 
-## Still to measure (charger out, screen off, nobody at the phone)
+## The A/B, 2026-11-11 08:43-09:19 (run2, kernel #62, on battery, screen off)
 
-    sh /var/tmp/always-on/launch.sh run1 B sensors B daemons B apps B pipewire B tailscale B dwc3 B wifi B
+`current_now`, 90 x 1 s after 40 s settling per case; each case against
+the mean of the baselines either side. The coulomb counter moves in ~40 mA
+steps over 90 s and is too coarse here. The baselines themselves wander
+467-536 mA (other agents' work on the phone, 14-31 % CPU busy): a
+difference under ~25 mA is not a finding.
 
-then, if `B` is far above 342 mA, `pcpu 60` and the interrupt rates in the
-`meas` lines say where; the floor's share of each case is `B - case`.
+| case | B before / after | case | B - case | verdict |
+| --- | --- | --- | --- | --- |
+| Wi-Fi radio off | 535.6 / 532.5 | 458.0 | **76 mA (~300 mW)** | real: 2.4 GHz at -70 dBm, 3-9 frames/s, each holding the radio up 200 ms; the model had 65 mW (the 11-08 bench, 5 GHz, quiet) |
+| tailscaled stopped | 508.9 / 507.3 | 483.6 | 25 mA | at the noise; CPU busy also fell 20 -> 13 % |
+| daemons stopped (ztacctd, zrnperfd, audiod, bt-state, notifyd, pushd, ntfyd, ledd, corenetworkingd, iald) | 480.5 / 467.6 | 456.3 | 18 mA | noise; busy 17 -> 5 % (that CPU is modelled) |
+| sensor hub (lhd, ztoscsf-sensord) | 496.8 / 480.5 | 473.1 | 16 mA | noise (October: 28 mA); inside the base anyway |
+| pipewire, pipewire-pulse, wireplumber | 507.3 / 508.9 | 497.3 | 11 mA | noise; the DSP ticks on without them |
+| apps (ztusage, ztpower, ztdesk, ztdeskmode, portal) | 467.6 / 507.3 | 534.9 | -47 mA | nothing: baseline drift |
+| dwc3 `power/control=auto` | 507.3 / 535.6 | 492.5 | (29 mA) | nothing: it stayed `active` (device mode keeps it awake), so this is the noise level |
+
+Rechecked: the "decon" rates in `meas` lines before this commit were wrong
+(three interrupt lines share the name; the last, always 0, set the start
+value, so the rate was the total count). Read directly, DECON gives 0
+interrupts/s with the screen off, 15/s in the seconds after it goes off.
+
+So of the 480 mW floor, **~235 mW is Wi-Fi** (300 measured against the 65
+modelled). The profile now has `wifi_idle_off_mw 300`; refitted with it
+(138 windows, accessories held), the floor is **365 mW**, Unaccounted
+2.7 %. The floor does not leave with Wi-Fi: on 11-10 04:23-06:39 Wi-Fi was
+not associated (Ethernet on the dock) and the windows still show it; and
+with the radio off the phone drew 458 mA against the bench's 325.
+
+## Still to measure (charger out, screen off, nobody else on the phone)
+
+The 365 mW left is below this run's noise case by case. A quiet phone (no
+agents, no ssh traffic but the run's own) and longer windows split it:
+
+    SETTLE=60 N=300 sh /var/tmp/always-on/launch.sh run3 B wifi B tailscale B daemons B sensors B
+
+Then the parts only a kernel change or approval can test: the audio DSP
+powered off when idle, MIF at 421 MHz awake (ACPM), cpuidle (zrn-cpuidle),
+the fuel gauge's interrupt, and UFS runtime PM.

@@ -119,7 +119,11 @@ static struct {
 	 * black on an AMOLED panel, and the floor below now takes what the
 	 * screen-on windows used to blame on it */
 	.screen_mw = 80, .screen_full_mw = 400,
-	.wifi_idle_on_mw = 315, .wifi_idle_off_mw = 65,
+	/* Wi-Fi associated, screen off: 65 mW on the 11-08 bench (5 GHz, quiet
+	 * LAN), 300 mW in daily use on 11-11 (2.4 GHz at -70 dBm, 3-9 frames/s
+	 * each keeping the radio up 200 ms): radio off 76 mA below the baselines
+	 * either side, power/always-on/README.md. The daily figure is used */
+	.wifi_idle_on_mw = 315, .wifi_idle_off_mw = 300,
 	.wifi_pkt_mj = 0.07, .wifi_byte_uj = 0.1,	/* per byte: a 1.2 GB download, 2026-11-08; per packet: 2026-11-11 */
 	.mobile_idle_mw = 40, .mobile_active_mw = 900, .mobile_tail_s = 5, .mobile_pkt_s = 0.002,
 	.wake_mj = 300,
@@ -130,8 +134,10 @@ static struct {
 	 * 1673 mW against the 1190 measured (Wi-Fi off, panel asleep, 150 s on
 	 * the bench); the gauge agrees with current_now to 1 % (checked
 	 * 2026-11-11), so the difference is real draw that no state we read
-	 * tells apart (bench vs daily use: see README.md) */
-	.base_extra_mw = 480,
+	 * tells apart (bench vs daily use: see README.md). Refitted 2026-11-11
+	 * (138 windows) with Wi-Fi idle at its measured 300 mW and the
+	 * accessories held: 365 (was 480; the rest was Wi-Fi) */
+	.base_extra_mw = 365,
 	/* the Belkin 6-in-1 dock on the phone's VBUS (hub, hub, RTL8153
 	 * Ethernet without a cable, card reader, billboard, HDMI converter,
 	 * keyboard/mouse dongle): 1.5-1.6 W in all, the gauge's step when it was

@@ -191,7 +191,7 @@ def main():
     if not args or args[0].startswith("-"):
         print(__doc__)
         return 2
-    wifi_on, wifi_off = 315.0, 65.0
+    wifi_on, wifi_off = 315.0, 300.0	# screen off: measured 2026-11-11 (power/always-on)
     if "--wifi-on" in args:
         wifi_on = float(args[args.index("--wifi-on") + 1])
     if "--wifi-off" in args:
