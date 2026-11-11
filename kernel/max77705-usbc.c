@@ -45,6 +45,7 @@
 #include <linux/completion.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/ktime.h>
@@ -52,13 +53,20 @@
 #include <linux/mutex.h>
 #include <linux/mfd/max77705-private.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <linux/seq_file.h>
 #include <linux/spinlock.h>
 #include <linux/unaligned.h>
 #include <linux/usb/pd.h>
+#include <linux/usb/pd_vdo.h>
+#include <linux/usb/role.h>
 #include <linux/usb/typec.h>
+#include <linux/usb/typec_altmode.h>
+#include <linux/usb/typec_dp.h>
 #include <linux/workqueue.h>
 
 #define REG_HW_REV		0x00
@@ -123,7 +131,9 @@
 #define UIC_INT_M_INIT		0x04
 #define CC_INT_M_INIT		0x20	/* AttachSrcErr */
 #define PD_INT_M_INIT		0x1c	/* the three DP alt-mode bits */
+#define PD_INT_M_DP		0x00	/* stock at ALTERNATE_MODE_START */
 #define VDM_INT_M_INIT		0xff
+#define VDM_INT_M_DISCOVERY	0xf0	/* Discover ID/SVIDs/Modes, Enter Mode open */
 
 #define STATUS_FIRST		REG_USBC_STATUS1
 #define STATUS_N		8	/* 0x06..0x0d */
@@ -163,6 +173,10 @@
 #define  VDM_SUB_IDENTITY	0x01
 #define  VDM_SUB_SVIDS		0x02
 #define  VDM_SUB_MODES		0x03
+#define  VDM_SUB_ENTER		0x04	/* VDM_INT b3 */
+#define  VDM_SUB_ATTENTION	0x06	/* PD_INT b4 */
+#define  VDM_SUB_DP_STATUS	0x10	/* PD_INT b2 */
+#define  VDM_SUB_DP_CONFIGURE	0x11	/* PD_INT b3 */
 #define  VDM_RESP_LEN		31
 #define OP_SET_ALTMODE		0x55	/* 3: the firmware runs discovery itself */
 #define  ALTMODE_SRC_VDM	0x03
@@ -173,6 +187,8 @@
 #define PROBE_DRAIN_MS		2000
 #define OP_CONTROL1_R		0x05
 #define OP_CONTROL1_W		0x06
+#define OP_AUTO_VBUS		0x54	/* raw 0x54 in S9: who drives VBUS out */
+#define  AUTO_VBUS_OFF		0x00	/* the AP does (stock, at probe) */
 #define OP_FW_AUTOIBUS		0x57	/* OPCODE_SAMSUNG_FW_AUTOIBUS */
 #define  AUTOIBUS_AT_OFF	0x01	/* MCU firmware on, automatic IBUS off */
 
@@ -218,6 +234,27 @@ MODULE_PARM_DESC(vdm_debugfs,
 		 "debugfs vdm file: 0 off, 1 Discover Identity/SVIDs/Modes only, 2 any VDM (default 0)");
 
 /*
+ * dp_altmode: DisplayPort Alt Mode through the typec class, default off; see
+ * "DisplayPort Alt Mode" further down. Implies vdm_discovery, opens the
+ * three DP bits of PD_INT (stock's PD_INT_M = 0 at alternate-mode start),
+ * registers a DP port altmode (DFP_D, pins C/D/E) and, when the firmware's
+ * Discover Modes finds SVID 0xff01 on a partner while we are DFP, the
+ * partner's altmode. The mainline typec_displayport driver then drives the
+ * mode: Enter Mode and Configure go out through 0x48 (only those two
+ * headers, and a Configure VDO checked here), the partner's DP Status,
+ * Configure ACK and Attention come back through PD_INT b2/b3/b4 + 0x4b, as
+ * on stock. HPD ends up in /sys/bus/typec/devices/port0-partner.0/displayport/hpd
+ * and in drm_connector_oob_hotplug_event() for a DP connector, which ztOS
+ * does not have yet. Nothing here touches the DP controller, the PHY or the
+ * SBU switches.
+ */
+static bool dp_altmode;
+module_param(dp_altmode, bool, 0444);
+MODULE_PARM_DESC(dp_altmode,
+		 "DisplayPort Alt Mode: firmware discovery, Enter Mode/Configure via the typec DP altmode driver, HPD to the typec class (default 0)");
+
+
+/*
  * test_cmds: debugfs pd_request (ask for one fixed PDO by hand) and probe
  * (a fixed list of read-only opcodes FW 0x32 is not known to answer). For
  * hand-run tests only; set on the kernel command line.
@@ -225,6 +262,17 @@ MODULE_PARM_DESC(vdm_debugfs,
 static bool test_cmds;
 module_param(test_cmds, bool, 0444);
 MODULE_PARM_DESC(test_cmds, "debugfs pd_request and probe files for hand-run tests (default 0)");
+
+/*
+ * otg: USB host role and VBUS out. With a sink partner (CC Rd: a USB drive,
+ * an unpowered dock) the phone is the source: VBUS from the DT's vbus-supply
+ * (the charger's boost) and dwc3 to host through the DT's usb-role-switch.
+ * Also host when PD makes the phone DFP as a sink (a powered dock). Off:
+ * device mode only, never VBUS out.
+ */
+static bool otg = true;
+module_param(otg, bool, 0644);
+MODULE_PARM_DESC(otg, "USB host role and VBUS out to a sink partner (default 1)");
 
 #define CHG_DETAILS_00_ILIM_BY_CHG	BIT(7)
 #define AUTOIBUS_CHECK_MS	2000	/* at most one DETAILS_00 check per */
@@ -317,6 +365,36 @@ struct pd_caps {
 	u32 pdo[PD_MAX_PDO];
 };
 
+#define OTG_VBUS_RETRY_MS	2000	/* charger refused (an input there): again */
+
+/* USB OTG: host role and VBUS out; all in the ordered work */
+struct usbc_otg {
+	struct regulator *vbus;		/* vbus-supply, got on first need */
+	bool vbus_absent;		/* the DT has none: no VBUS out */
+	bool vbus_on;			/* we hold it enabled */
+	bool vbus_fault;		/* refused/over-current: off until detach */
+	bool vbus_ext_warned;		/* VBUS already there at a sink attach */
+	struct notifier_block nb;
+	struct usb_role_switch *sw;	/* usb-role-switch, got on first need */
+	bool sw_absent;
+	bool sw_waiting;		/* said once: dwc3 not there yet */
+	enum usb_role want;		/* what the CC/PD state says */
+	enum usb_role role;		/* what the switch was last set to */
+	bool dr_seen;			/* a DataRole interrupt in this attach */
+	u8 ccstat;			/* last seen, for the log */
+	bool autovbus_sent;		/* 0x54 since probe / MCU reboot */
+	/* PD events that take VBUS away while we are the source (stock
+	 * max77705_pd.c:455-553): held off until the CC state changes, or
+	 * until hold_until (hard reset, SenderResponse timeout) */
+	bool vbus_held;
+	unsigned long hold_until;	/* jiffies; 0 = none */
+	bool path_due;			/* write CONTROL1 = USB on this run */
+	bool path_again;		/* the recheck is the 1 s CONTROL1 one */
+	bool vbus_retry_logged;		/* charger refused (an input): retrying */
+	bool off;			/* shutdown/remove: nothing turns back on */
+	struct delayed_work recheck;	/* a later look: hold end, path again */
+};
+
 /* USB-PD as a sink, one CC attach */
 struct usbc_pd {
 	bool have_first;
@@ -342,6 +420,8 @@ struct usbc_pd {
 	char last_event[200];
 	char last_hard_reset[256];
 };
+
+#define DP_Q_N			8	/* replies/attentions not yet taken by the DP driver */
 
 #define LOG_N			256
 #define LOG_DATA		33
@@ -429,6 +509,8 @@ struct max77705_usbc {
 	struct usb_power_delivery_capabilities *partner_src_caps;
 	unsigned int partner_pd_gen;
 
+	struct usbc_otg otg;		/* USB OTG (host role, VBUS out) */
+
 	/* VDMs (vdm_discovery / vdm_debugfs) */
 	bool altmode_sent;		/* 0x55 since probe / MCU reboot */
 	struct usb_pd_identity partner_ident;
@@ -441,6 +523,49 @@ struct max77705_usbc {
 	int vdm_ret;
 	unsigned long vdm_sent;		/* jiffies */
 
+	/* DisplayPort Alt Mode (dp_altmode); all but dp_lock'd fields on u->wq */
+	bool dp_on;			/* dp_altmode and the DT describes the DP altmode */
+	u32 dp_port_vdo;		/* the port's DP capabilities, from the DT */
+	struct fwnode_handle *conn;	/* the usb-c-connector child, if the DT has one */
+	struct delayed_work typec_work;	/* typec port registration, while its switches defer */
+	unsigned int typec_tries;
+	struct gpio_desc *orient_sense;	/* DT orientation-sense-gpios: read, never driven */
+	u8 orient_last;			/* CCPinStat at the last log, 0xff: none yet */
+	u16 dp_svid0;			/* first SVID of Discover SVIDs, this attach */
+	bool dp_mode_found;		/* Discover Modes ACK for 0xff01 */
+	u32 dp_mode_vdo;
+	bool dp_was_dfp;		/* data role at the last look: DFP edges */
+	bool dp_id_pending;		/* our Discover Identity still to be ACKed */
+	unsigned int dp_id_tries;
+	unsigned long dp_id_next;	/* jiffies: not before (retry backoff) */
+	struct delayed_work dp_id_work;
+	u32 dp_tx_hdr;			/* Enter Mode / Configure due, 0: none */
+	u32 dp_tx_conf;
+	unsigned int dp_tx_tries;
+	unsigned long dp_tx_next;
+	struct delayed_work dp_tx_work;
+	bool dp_entered;		/* Enter Mode ACKed, this attach */
+	u32 dp_status;			/* the partner's last DP Status VDO */
+	bool dp_status_valid;
+	bool dp_status_wanted;		/* the altmode driver asked; answer on PD_INT b2 */
+	bool dp_status_given;		/* it has had its Status Update answer */
+	struct typec_altmode *dp_port;	/* port altmode, SVID 0xff01 */
+	struct typec_altmode *dp_partner;
+	bool dp_sbu_early;		/* SBU switch set on at SVID discovery */
+	unsigned long dp_gate_t0;	/* jiffies then: Enter Mode waits from here */
+	bool dp_gate_logged;
+	struct delayed_work dp_gate_work;
+	struct delayed_work dp_work;
+	spinlock_t dp_lock;		/* dp_req, dp_req_conf (the ops' context) */
+	unsigned int dp_req;		/* DP_REQ_*, from the altmode driver */
+	u32 dp_req_conf;
+	struct usbc_dp_msg {		/* replies to deliver, u->wq only */
+		u32 hdr, vdo;
+		u8 cnt;			/* objects incl. the header */
+		bool attention;
+	} dp_q[DP_Q_N];
+	unsigned int dp_q_n, dp_tries;
+
 	struct power_supply *psy;
 	struct mutex pub_lock;		/* pub, and pd's caps/strings for readers */
 	struct usbc_pub pub;
@@ -451,6 +576,11 @@ struct max77705_usbc {
 	unsigned int log_head, log_count;
 	struct dentry *debugfs;
 };
+
+static bool usbc_discovery(struct max77705_usbc *u)
+{
+	return vdm_discovery || u->dp_on;
+}
 
 /* ---- event log (debugfs) ------------------------------------------------ */
 
@@ -706,9 +836,12 @@ static int usbc_set_masks(struct max77705_usbc *u)
 	u8 m[4] = { UIC_INT_M_INIT, CC_INT_M_INIT, PD_INT_M_INIT, VDM_INT_M_INIT };
 	int ret;
 
-	/* Samsung's alt-mode value: Discover ID/SVIDs/Modes/Enter Mode open */
-	if (vdm_discovery)
-		m[3] = 0xf0;
+	/* Samsung's alt-mode values: Discover ID/SVIDs/Modes/Enter Mode open,
+	 * and with DP the DP Status/Configure/Attention bits of PD_INT too */
+	if (usbc_discovery(u))
+		m[3] = VDM_INT_M_DISCOVERY;
+	if (u->dp_on)
+		m[2] = PD_INT_M_DP;
 	ret = usbc_write(u, REG_UIC_INT_M, m, 4);
 
 	if (!ret)
@@ -803,6 +936,114 @@ static bool usbc_vdm_allowed(const u8 *w, int wlen)
 	       VDM_HDR_CMD(h) >= 1 && VDM_HDR_CMD(h) <= 3;
 }
 
+/*
+ * dp_altmode: the three VDMs the kernel itself sends, byte for byte what stock
+ * sends (max77705_alternate.c:46-116, :268-316; Structured VDM version
+ * field 0, byte 0 = Num_Of_VDO | Cmd_Type 1 << 3):
+ *   Discover Identity  09 | ff008001          (as sink after becoming DFP, pd.c:772)
+ *   Enter Mode         09 | ff018104          (SVID 0xff01, object position 1)
+ *   DP Configure       0a | ff018111 | conf   (conf checked by usbc_dp_conf_ok)
+ */
+#define DP_VDM_DISC_ID		0xff008001
+#define DP_VDM_ENTER		0xff018104
+#define DP_VDM_CONFIGURE	0xff018111
+
+/*
+ * Only "configure the partner as UFP_D (we are the DP source), DP signalling,
+ * exactly one pin assignment the board's port supports" (the DT's DFP_D pin
+ * mask), reserved bits clear. Stock sends the same shape (SEL 2,
+ * Select_DP_V1p3, one pin bit in byte 1). Never USB configuration (0): stock
+ * never sends it and the firmware's reaction is unknown.
+ */
+static bool usbc_dp_conf_ok(struct max77705_usbc *u, u32 conf)
+{
+	u32 pins = DP_CONF_GET_PIN_ASSIGN(conf);
+
+	return DP_CONF_CURRENTLY(conf) == DP_CONF_UFP_U_AS_UFP_D &&
+	       FIELD_GET(DP_CONF_SIGNALLING_MASK, conf) == DP_CONF_SIGNALLING_HBR3 &&
+	       hweight32(pins) == 1 && (pins & DP_CAP_PIN_ASSIGN_DFP_D(u->dp_port_vdo)) &&
+	       !(conf & ~(GENMASK(5, 0) | GENMASK(15, 8)));
+}
+
+static bool usbc_dp_vdm_allowed(struct max77705_usbc *u, const u8 *w, int wlen)
+{
+	u32 h;
+
+	if (!u->dp_on || wlen < 5)
+		return false;
+	h = get_unaligned_le32(&w[1]);
+	if (wlen == 5 && w[0] == (1 | 1 << 3))
+		return h == DP_VDM_DISC_ID || h == DP_VDM_ENTER;
+	if (wlen == 9 && w[0] == (2 | 1 << 3))
+		return h == DP_VDM_CONFIGURE && usbc_dp_conf_ok(u, get_unaligned_le32(&w[5]));
+	return false;
+}
+
+static void usbc_put_conn(void *data)
+{
+	fwnode_handle_put(data);
+}
+
+/*
+ * Board data, at probe. The connector: a usb-c-connector child node of ours
+ * (the typec port is registered on it, so its graph reaches the orientation
+ * and mode switches). DP: with dp_altmode=1 the connector must carry the
+ * standard altmodes/displayport node (svid 0xff01, vdo = the port's DP
+ * capabilities: DFP_D, DP signalling, the pin assignments the board's lanes
+ * and switches carry). Without it DP stays off and nothing DP-related is
+ * written to the chip: no guessing at another board's wiring.
+ */
+static void usbc_dp_from_dt(struct max77705_usbc *u)
+{
+	struct fwnode_handle *conn, *alt, *dp;
+	const char *why = NULL;
+	u16 svid = 0;
+	u32 vdo = 0;
+
+	conn = device_get_named_child_node(u->dev, "connector");
+	if (conn && !fwnode_device_is_compatible(conn, "usb-c-connector")) {
+		fwnode_handle_put(conn);
+		conn = NULL;
+	}
+	if (conn && !devm_add_action_or_reset(u->dev, usbc_put_conn, conn))
+		u->conn = conn;
+	if (!dp_altmode)
+		return;
+
+	alt = u->conn ? fwnode_get_named_child_node(u->conn, "altmodes") : NULL;
+	dp = alt ? fwnode_get_named_child_node(alt, "displayport") : NULL;
+	if (!u->conn)
+		why = "no usb-c-connector child node";
+	else if (!dp)
+		why = "no connector/altmodes/displayport node";
+	else if (fwnode_property_read_u16(dp, "svid", &svid) || svid != USB_TYPEC_DP_SID)
+		why = "displayport: svid is not 0xff01";
+	else if (fwnode_property_read_u32(dp, "vdo", &vdo))
+		why = "displayport: no vdo";
+	else if (!(DP_CAP_CAPABILITY(vdo) & DP_CAP_DFP_D))
+		why = "displayport vdo: not DFP_D capable";
+	else if (!(DP_CAP_DP_SIGNALLING(vdo) & DP_CAP_SIGNALLING_HBR3))
+		why = "displayport vdo: no DP signalling";
+	else if (!DP_CAP_PIN_ASSIGN_DFP_D(vdo) ||
+		 (DP_CAP_PIN_ASSIGN_DFP_D(vdo) &
+		  ~(BIT(DP_PIN_ASSIGN_C) | BIT(DP_PIN_ASSIGN_D) | BIT(DP_PIN_ASSIGN_E))))
+		why = "displayport vdo: DFP_D pins must be a non-empty set of C/D/E";
+	fwnode_handle_put(dp);
+	fwnode_handle_put(alt);
+	if (why) {
+		dev_err(u->dev, "dp_altmode=1, but the device tree does not describe DP (%s): DP off\n",
+			why);
+		return;
+	}
+	if (!IS_ENABLED(CONFIG_TYPEC)) {
+		dev_err(u->dev, "dp_altmode=1 without CONFIG_TYPEC: DP off\n");
+		return;
+	}
+	u->dp_port_vdo = vdo;
+	u->dp_on = true;
+	dev_info(u->dev, "DP Alt Mode on: port vdo %08x from the device tree\n", vdo);
+}
+
 /* ---- mailbox ------------------------------------------------------------ */
 
 /*
@@ -810,7 +1051,8 @@ static bool usbc_vdm_allowed(const u8 *w, int wlen)
  * too, so these are the opcodes and data stock sends to this firmware).
  * Data is checked as well as the opcode. Never on it, by design: 0xd0
  * (firmware update), 0x50 (key revocation), 0xd1 (RAM BIST), 0x74 (debug),
- * 0x70 (GRL/FW clear), 0x1b, 0x20, 0x33, 0x54, 0x55, 0x16/0x18 and every
+ * 0x70 (GRL/FW clear), 0x1b, 0x20, 0x33, 0x54 other than 0 (auto VBUS on,
+ * water detect), 0x55 other than 3, 0x16/0x18 and every
  * other write whose effect is not known.
  */
 static bool usbc_op_allowed(struct max77705_usbc *u, u8 op, const u8 *w, int wlen)
@@ -820,6 +1062,10 @@ static bool usbc_op_allowed(struct max77705_usbc *u, u8 op, const u8 *w, int wle
 		return wlen == 0;
 	case OP_CONTROL1_W:
 		return wlen == 1 && (w[0] == COM_USB || w[0] == COM_OPEN);
+	case OP_AUTO_VBUS:
+		/* only stock's probe value: the firmware never drives VBUS out
+		 * itself (max77705_usbc_disable_auto_vbus) */
+		return otg && wlen == 1 && w[0] == AUTO_VBUS_OFF;
 	case OP_FW_AUTOIBUS:
 		/* only "USBC fw on, auto IBUS off": stock's AUTOIBUS_AT_OFF */
 		return wlen == 1 && w[0] == AUTOIBUS_AT_OFF;
@@ -840,14 +1086,14 @@ static bool usbc_op_allowed(struct max77705_usbc *u, u8 op, const u8 *w, int wle
 		return wlen == 1 && usbc_pdo_allowed(u, w[0]);
 	case OP_SET_ALTMODE:
 		/* stock's ALTERNATE_MODE_START, and only when asked for */
-		return vdm_discovery && wlen == 1 && w[0] == ALTMODE_SRC_VDM;
+		return usbc_discovery(u) && wlen == 1 && w[0] == ALTMODE_SRC_VDM;
 	case OP_GET_VDM_RESP:
 		/* reads of what the firmware received; Samsung's sub-ids */
 		return wlen == 1 && (w[0] == 1 || w[0] == 2 || w[0] == 3 ||
 				     w[0] == 4 || w[0] == 6 || w[0] == 0x10 ||
 				     w[0] == 0x11);
 	case OP_SET_VDM_REQ:
-		return usbc_vdm_allowed(w, wlen);
+		return usbc_vdm_allowed(w, wlen) || usbc_dp_vdm_allowed(u, w, wlen);
 	default:
 		return false;
 	}
@@ -1455,6 +1701,9 @@ static void usbc_route(struct max77705_usbc *u)
 {
 	u8 want = usbc_path_for(usbc_bc_kind(u->st[ST(REG_BC_STATUS)]));
 
+	if (u->otg.role == USB_ROLE_HOST)	/* usbc_otg_update() set it */
+		return;
+
 	if (!want) {
 		if (u->path)
 			return;
@@ -1772,8 +2021,11 @@ static void usbc_pd_hard_reset(struct max77705_usbc *u, u8 code)
 }
 
 /* one PD event code (PD_STATUS0), in the order they came */
+static void usbc_otg_pd_event(struct max77705_usbc *u, u8 code);
+
 static void usbc_pd_event(struct max77705_usbc *u, u8 code)
 {
+	usbc_otg_pd_event(u, code);
 	switch (code) {
 	case 0x16:	/* HARDRESET_RECEIVED */
 	case 0x19:	/* HARDRESET_SENT */
@@ -2132,6 +2384,649 @@ static void usbc_hv_work(struct work_struct *work)
  */
 #define PD_REV_PORT	0x0300
 
+/* ---- DisplayPort Alt Mode (dp_altmode) ------------------------------------ */
+
+/*
+ * What firmware 0x32 does and what the AP does, from stock
+ * (max77705_alternate.c, max77705_usbc.c; charging/max77705-opcodes.md §4):
+ *
+ *   firmware  Discover Identity/SVIDs/Modes as DFP once 0x55 = 3   VDM_INT b0/b1/b2
+ *   AP        reads each with 0x4b 1/2/3; on SVID 0xff01 sends Enter Mode (0x48)
+ *   firmware  Enter Mode ACK/NAK                                    VDM_INT b3 -> 0x4b 4
+ *   firmware  sends DP Status Update by itself, the partner's VDO   PD_INT b2 -> 0x4b 0x10
+ *   AP        picks the pin assignment, sends DP Configure (0x48)
+ *   firmware  Configure ACK/NAK                                     PD_INT b3 -> 0x4b 0x11
+ *   firmware  each Attention (HPD changes, IRQ_HPD)                 PD_INT b4 -> 0x4b 6
+ *
+ * Mapped onto the typec class the way ucsi/displayport.c does for a PD
+ * stack it does not own: the port altmode's ops take the DP altmode
+ * driver's requests; Enter Mode and Configure go out as stock sends them;
+ * the driver's own Status Update request is not sent (the firmware already
+ * did that) but answered with the partner's DP Status VDO. Every answer is
+ * delivered from our workqueue, never from inside an op: the DP driver holds
+ * its lock and is not idle while it calls us, so it would refuse it (-EBUSY).
+ *
+ * The phone must be DFP: either a source (an adapter or dock fed from us:
+ * needs VBUS, i.e. OTG on the charger, which ztOS does not do yet) or a
+ * sink that the partner made DFP by DR_Swap (a monitor or dock that charges
+ * the phone). In the second case the firmware's discovery does not start by
+ * itself; stock then sends Discover Identity from the AP (max77705_pd.c:772)
+ * and so does this.
+ */
+enum { DP_REQ_ENTER = BIT(0), DP_REQ_STATUS = BIT(1), DP_REQ_CONFIGURE = BIT(2) };
+
+#define DP_DELIVER_RETRY_MS	20
+#define DP_DELIVER_TRIES	50	/* one second of -EBUSY, then the message is dropped */
+
+static u32 usbc_dp_hdr(int cmd, int cmdt)
+{
+	return VDO(USB_TYPEC_DP_SID, 1, SVDM_VER_1_0, cmd) |
+	       VDO_OPOS(USB_TYPEC_DP_MODE) | VDO_CMDT(cmdt);
+}
+
+/* a reply or Attention for the DP driver, sent from usbc_dp_work (u->wq only) */
+static void usbc_dp_queue(struct max77705_usbc *u, u32 hdr, u32 vdo, u8 cnt, bool attention)
+{
+	if (u->dp_q_n >= DP_Q_N) {
+		dev_warn(u->dev, "DP: queue full, %08x dropped\n", hdr);
+		return;
+	}
+	u->dp_q[u->dp_q_n++] = (struct usbc_dp_msg){ hdr, vdo, cnt, attention };
+	mod_delayed_work(u->wq, &u->dp_work, 0);
+}
+
+/* per attach, on u->wq; the partner altmode is unregistered by the caller */
+static void usbc_dp_forget(struct max77705_usbc *u)
+{
+	unsigned long flags;
+
+	u->dp_svid0 = 0;
+	u->dp_mode_found = false;
+	u->dp_mode_vdo = 0;
+	u->dp_was_dfp = false;
+	u->dp_id_pending = false;
+	u->dp_id_tries = 0;
+	u->dp_tx_hdr = 0;
+	u->dp_tx_tries = 0;
+	u->dp_entered = false;
+	u->dp_status = 0;
+	u->dp_status_valid = false;
+	u->dp_status_wanted = false;
+	u->dp_status_given = false;
+	if (u->dp_sbu_early && u->port)
+		typec_set_mode(u->port, TYPEC_STATE_USB);
+	u->dp_sbu_early = false;
+	u->dp_gate_logged = false;
+	u->dp_q_n = 0;
+	u->dp_tries = 0;
+	spin_lock_irqsave(&u->dp_lock, flags);
+	u->dp_req = 0;
+	spin_unlock_irqrestore(&u->dp_lock, flags);
+}
+
+static void usbc_dp_unregister_partner(struct max77705_usbc *u)
+{
+	if (!u->dp_partner)
+		return;
+	typec_unregister_altmode(u->dp_partner);
+	u->dp_partner = NULL;
+	dev_info(u->dev, "DP: partner altmode gone\n");
+}
+
+/* 0x4b [sub]: r = [sub, PD header LE16, VDM header LE32, VDOs]; rlen as stock */
+static int usbc_vdm_get(struct max77705_usbc *u, u8 sub, u8 *r, int rlen, u32 *hdr)
+{
+	int ret = usbc_cmd(u, OP_GET_VDM_RESP, &sub, 1, r, rlen);
+
+	if (!ret)
+		*hdr = get_unaligned_le32(&r[3]);
+	return ret;
+}
+
+static void usbc_dp_log_status(struct max77705_usbc *u, const char *what, u32 vdo)
+{
+	static const char * const con[] = { "disabled", "DFP_D", "UFP_D", "both" };
+
+	dev_info(u->dev, "DP %s %08x: connected %s,%s%s%s HPD %s%s\n", what, vdo,
+		 con[DP_STATUS_CONNECTION(vdo)],
+		 vdo & DP_STATUS_ENABLED ? " enabled," : "",
+		 vdo & DP_STATUS_PREFER_MULTI_FUNC ? " prefers multi-function," : "",
+		 vdo & DP_STATUS_EXIT_DP_MODE ? " asks exit," : "",
+		 vdo & DP_STATUS_HPD_STATE ? "high" : "low",
+		 vdo & DP_STATUS_IRQ_HPD ? " + IRQ_HPD" : "");
+}
+
+/* the Status Update answer, once per entry; later VDOs are Attentions */
+static void usbc_dp_status_answer(struct max77705_usbc *u)
+{
+	u->dp_status_wanted = false;
+	u->dp_status_given = true;
+	usbc_dp_queue(u, usbc_dp_hdr(DP_CMD_STATUS_UPDATE, CMDT_RSP_ACK), u->dp_status, 2, false);
+}
+
+/*
+ * A DP Status VDO from the partner. The firmware sends its own Status Update
+ * right after Enter Mode, usually before the DP driver has asked for one:
+ * kept until it asks (as an Attention it would arrive mid-request: "ATTENTION
+ * while processing state 3"). After that answer, every new VDO is news.
+ */
+static void usbc_dp_status(struct max77705_usbc *u, const char *what, u32 vdo)
+{
+	usbc_dp_log_status(u, what, vdo);
+	u->dp_status = vdo;
+	u->dp_status_valid = true;
+	if (u->dp_status_wanted)
+		usbc_dp_status_answer(u);
+	else if (u->dp_entered && u->dp_status_given)
+		usbc_dp_queue(u, 0, vdo, 1, true);
+}
+
+/*
+ * Our VDMs go out only while no PD Request of ours is outstanding and, as a
+ * sink, once PS_RDY is in: on the powered Belkin dock both our Discover
+ * Identity (dp8) and our Enter Mode (dp11) got no reply when they crossed
+ * our own 9 V Request. As a source we send no Requests, and PS_RDY there is
+ * the partner's, so only the first condition.
+ */
+static bool usbc_dp_contract_settled(struct max77705_usbc *u)
+{
+	if (u->pd.req_pos)
+		return false;
+	if (FIELD_GET(CC0_CCSTAT, u->st[ST(REG_CC_STATUS0)]) == CCSTAT_SINK &&
+	    !(u->st[ST(REG_PD_STATUS1)] & PD1_PSRDY))
+		return false;
+	return true;
+}
+
+#define DP_ID_TRIES		4		/* the first and three retries */
+static const unsigned int dp_id_backoff_ms[DP_ID_TRIES - 1] = { 300, 700, 1000 };
+
+/*
+ * Our Discover Identity as a sink made DFP (stock max77705_pd.c:772). Stock
+ * sends it on the data-role event and does not look at the contract; on the
+ * powered Belkin dock that collided with our own 9 V Request (dp8: no reply,
+ * all-ff, and no discovery after it). So: only while no Request of ours is
+ * outstanding and PS_RDY is in, and anything but an ACK (no reply, NAK,
+ * BUSY, a mailbox error) is retried after 300 ms, 700 ms, 1 s. The firmware's
+ * SVIDs/Modes discovery follows the ACK by itself. On u->wq only.
+ */
+static void usbc_dp_disc_id(struct max77705_usbc *u)
+{
+	u8 w[5] = { 1 | 1 << 3 }, rep[10] = {};
+	bool ack;
+	u32 hdr;
+	int ret;
+
+	if (!u->dp_id_pending)
+		return;
+	if (u->dp_svid0 || u->dp_partner || !u->mbox_allowed || u->mbox_dead) {
+		u->dp_id_pending = false;	/* discovery is under way, or cannot be */
+		return;
+	}
+	if (!usbc_dp_contract_settled(u) || time_before(jiffies, u->dp_id_next)) {
+		unsigned long wait = time_before(jiffies, u->dp_id_next) ?
+				     u->dp_id_next - jiffies : msecs_to_jiffies(200);
+
+		mod_delayed_work(u->wq, &u->dp_id_work, wait);
+		return;
+	}
+
+	put_unaligned_le32(DP_VDM_DISC_ID, &w[1]);
+	ret = usbc_cmd(u, OP_SET_VDM_REQ, w, sizeof(w), rep, sizeof(rep));
+	hdr = get_unaligned_le32(&rep[1]);
+	ack = !ret && rep[0] != 0xff && VDM_HDR_CMDTYPE(hdr) == CMDT_RSP_ACK;
+	u->dp_id_tries++;
+	dev_info(u->dev, "DP: sink and DFP: Discover Identity (try %u) %s, reply %*phN\n",
+		 u->dp_id_tries, ack ? "ACK" : ret ? "failed" : "not ACKed", (int)sizeof(rep), rep);
+	if (ack) {
+		u->dp_id_pending = false;
+		return;
+	}
+	if (u->dp_id_tries >= DP_ID_TRIES) {
+		dev_warn(u->dev, "DP: Discover Identity not ACKed after %u tries; replug to retry\n",
+			 u->dp_id_tries);
+		u->dp_id_pending = false;
+		return;
+	}
+	u->dp_id_next = jiffies + msecs_to_jiffies(dp_id_backoff_ms[u->dp_id_tries - 1]);
+	mod_delayed_work(u->wq, &u->dp_id_work, u->dp_id_next - jiffies);
+}
+
+static void usbc_dp_id_work(struct work_struct *work)
+{
+	struct max77705_usbc *u = container_of(to_delayed_work(work),
+					       struct max77705_usbc, dp_id_work);
+
+	if (READ_ONCE(u->stopping) || usbc_read_status(u))
+		return;
+	usbc_dp_disc_id(u);
+}
+
+/*
+ * The firmware's DP interrupts and results. Called from event_work after the
+ * VDM flags; vdm_int b0-b2 (discovery) are usbc_vdm_events()'s.
+ */
+static void usbc_dp_events(struct max77705_usbc *u, u8 pd_int, u8 vdm_int)
+{
+	u8 cc0 = u->st[ST(REG_CC_STATUS0)], pd1 = u->st[ST(REG_PD_STATUS1)];
+	u8 r[VDM_RESP_LEN];
+	u32 hdr;
+
+	if (!u->dp_on || !u->mbox_allowed || u->mbox_dead)
+		return;
+
+	/*
+	 * A sink that the partner has just made DFP (DR_Swap): stock's Discover
+	 * Identity, due when the data role changes to DFP while we sink
+	 * (max77705_pd.c:756-775). Only on that edge: a PR_Swap that leaves us
+	 * DFP and makes us the sink is not one (the mode stays entered). Sent
+	 * by usbc_dp_disc_id() once the contract is settled, retried until ACKed.
+	 */
+	if (FIELD_GET(CC0_CCSTAT, cc0) == CCSTAT_SINK && (pd1 & PD1_DATAROLE) &&
+	    !u->dp_was_dfp && u->altmode_sent) {
+		u->dp_id_pending = true;
+		u->dp_id_tries = 0;
+		u->dp_id_next = jiffies;
+	}
+	if (FIELD_GET(CC0_CCSTAT, cc0) != CCSTAT_SINK || !(pd1 & PD1_DATAROLE))
+		u->dp_id_pending = false;
+	u->dp_was_dfp = pd1 & PD1_DATAROLE;
+	usbc_dp_disc_id(u);
+
+	if ((vdm_int & BIT(3)) && !usbc_vdm_get(u, VDM_SUB_ENTER, r, 7, &hdr)) {
+		bool ack = VDM_HDR_CMDTYPE(hdr) == CMDT_RSP_ACK;
+
+		dev_info(u->dev, "DP: Enter Mode %s (header %08x)\n", ack ? "ACK" : "NAK/BUSY", hdr);
+		if (VDM_HDR_SVID(hdr) == USB_TYPEC_DP_SID) {
+			u->dp_entered = ack;
+			u->dp_status_given = false;
+			usbc_dp_queue(u, usbc_dp_hdr(CMD_ENTER_MODE, ack ? CMDT_RSP_ACK : CMDT_RSP_NAK),
+				      0, 1, false);
+		}
+	}
+	if ((pd_int & PD_DP_STATUS) && !usbc_vdm_get(u, VDM_SUB_DP_STATUS, r, 11, &hdr)) {
+		if (VDM_HDR_CMDTYPE(hdr) == CMDT_RSP_ACK)
+			usbc_dp_status(u, "Status", get_unaligned_le32(&r[7]));
+		else
+			dev_info(u->dev, "DP: Status Update not ACKed (header %08x)\n", hdr);
+	}
+	if ((pd_int & PD_DP_CONFIGURE) && !usbc_vdm_get(u, VDM_SUB_DP_CONFIGURE, r, 11, &hdr)) {
+		bool ack = VDM_HDR_CMDTYPE(hdr) == CMDT_RSP_ACK;
+
+		dev_info(u->dev, "DP: Configure %s (header %08x)\n", ack ? "ACK" : "NAK/BUSY", hdr);
+		usbc_dp_queue(u, usbc_dp_hdr(DP_CMD_CONFIGURE, ack ? CMDT_RSP_ACK : CMDT_RSP_NAK),
+			      0, 1, false);
+	}
+	if ((pd_int & PD_DP_ATTENTION) && !usbc_vdm_get(u, VDM_SUB_ATTENTION, r, 11, &hdr))
+		usbc_dp_status(u, "Attention", get_unaligned_le32(&r[7]));
+}
+
+/*
+ * A PD hard reset exits every alternate mode (USB PD 3.x 6.8.3): the partner
+ * is no longer in DP mode, whatever typec_displayport believes. Drop its
+ * altmode and the per-attach DP state; the firmware's discovery after the
+ * new contract (and our Discover Identity on the DFP edge) start over, and
+ * the partner altmode is registered and entered again. A PR_Swap is not a
+ * reset: the mode stays.
+ */
+static void usbc_dp_hard_reset(struct max77705_usbc *u)
+{
+	if (!u->dp_on || (!u->dp_partner && !u->dp_mode_found && !u->dp_sbu_early))
+		return;
+	dev_info(u->dev, "DP: PD hard reset: the partner left DP mode; discovery again\n");
+	usbc_dp_unregister_partner(u);
+	usbc_dp_forget(u);
+}
+
+/* Discover SVIDs / Modes results (usbc_vdm_read): is DP there? */
+static void usbc_dp_discovered(struct max77705_usbc *u, u8 sub, const u8 *r)
+{
+	u32 hdr = get_unaligned_le32(&r[3]);
+	unsigned int nobj = (get_unaligned_le16(&r[1]) >> 12) & 0x7;
+
+	if (!u->dp_on || VDM_HDR_CMDTYPE(hdr) != CMDT_RSP_ACK || nobj < 2)
+		return;
+	if (sub == VDM_SUB_SVIDS) {
+		/* the firmware looks at the first SVID only, as stock does */
+		u->dp_svid0 = get_unaligned_le32(&r[7]) >> 16;
+		dev_info(u->dev, "DP: first SVID %04x%s\n", u->dp_svid0,
+			 u->dp_svid0 == USB_TYPEC_DP_SID ? " (DisplayPort)" : "");
+	} else if (sub == VDM_SUB_MODES && VDM_HDR_SVID(hdr) == USB_TYPEC_DP_SID) {
+		u->dp_mode_vdo = get_unaligned_le32(&r[7]);
+		u->dp_mode_found = true;
+		dev_info(u->dev, "DP: partner mode %08x: %s%s, UFP_D pins %02lx, DFP_D pins %02lx\n",
+			 u->dp_mode_vdo,
+			 DP_CAP_CAPABILITY(u->dp_mode_vdo) == DP_CAP_UFP_D ? "UFP_D" :
+			 DP_CAP_CAPABILITY(u->dp_mode_vdo) == DP_CAP_DFP_D ? "DFP_D" : "DFP_D+UFP_D",
+			 u->dp_mode_vdo & DP_CAP_RECEPTACLE ? " receptacle" : " plug",
+			 DP_CAP_UFP_D_PIN_ASSIGN(u->dp_mode_vdo),
+			 DP_CAP_DFP_D_PIN_ASSIGN(u->dp_mode_vdo));
+	}
+}
+
+#define DP_TX_TRIES		4
+
+/*
+ * Enter Mode and DP Configure, as stock sends them (0x48), one at a time,
+ * when usbc_dp_contract_settled(). The mailbox answer carries the partner's
+ * reply header: ACK or NAK means the partner answered, and its result
+ * reaches typec_displayport as before (VDM_INT b3 / PD_INT b3, 0x4b). No
+ * reply (all-ff), BUSY or a mailbox error: again after 300 ms, 700 ms, 1 s.
+ * Four times nothing: typec_displayport gets a NAK, so it is not left
+ * waiting. On u->wq; dp_tx_work drives the waits.
+ */
+static void usbc_dp_tx(struct max77705_usbc *u)
+{
+	bool cfg = u->dp_tx_hdr == DP_VDM_CONFIGURE;
+	u8 w[9] = { (cfg ? 2 : 1) | 1 << 3 }, r[14] = {};
+	int wlen = cfg ? 9 : 5, rlen = cfg ? 14 : 10, ret, type;
+	const char *what = cfg ? "Configure" : "Enter Mode";
+	u32 hdr;
+
+	if (!u->dp_tx_hdr)
+		return;
+	if (!u->dp_partner) {
+		u->dp_tx_hdr = 0;	/* detached, or the altmode went with a reset */
+		return;
+	}
+	if (!usbc_dp_contract_settled(u) || time_before(jiffies, u->dp_tx_next)) {
+		mod_delayed_work(u->wq, &u->dp_tx_work, time_before(jiffies, u->dp_tx_next) ?
+				 u->dp_tx_next - jiffies : msecs_to_jiffies(200));
+		return;
+	}
+	put_unaligned_le32(u->dp_tx_hdr, &w[1]);
+	if (cfg)
+		put_unaligned_le32(u->dp_tx_conf, &w[5]);
+	ret = usbc_cmd(u, OP_SET_VDM_REQ, w, wlen, r, rlen);
+	hdr = get_unaligned_le32(&r[1]);
+	type = ret || r[0] == 0xff ? -1 : VDM_HDR_CMDTYPE(hdr);
+	u->dp_tx_tries++;
+	if (cfg)
+		dev_info(u->dev, "DP: Configure %08x (pin %c, try %u) sent, 0x48 reply %*phN\n",
+			 u->dp_tx_conf, 'A' + __ffs(DP_CONF_GET_PIN_ASSIGN(u->dp_tx_conf)),
+			 u->dp_tx_tries, rlen, r);
+	else
+		dev_info(u->dev, "DP: Enter Mode (try %u) sent, 0x48 reply %*phN\n",
+			 u->dp_tx_tries, rlen, r);
+	if (type == CMDT_RSP_ACK || type == CMDT_RSP_NAK) {
+		u->dp_tx_hdr = 0;	/* answered: the result comes by interrupt */
+		return;
+	}
+	if (u->dp_tx_tries >= DP_TX_TRIES) {
+		dev_warn(u->dev, "DP: %s not answered after %u tries; replug to retry\n", what,
+			 u->dp_tx_tries);
+		usbc_dp_queue(u, usbc_dp_hdr(cfg ? DP_CMD_CONFIGURE : CMD_ENTER_MODE, CMDT_RSP_NAK),
+			      0, 1, false);
+		u->dp_tx_hdr = 0;
+		return;
+	}
+	u->dp_tx_next = jiffies + msecs_to_jiffies(dp_id_backoff_ms[u->dp_tx_tries - 1]);
+	mod_delayed_work(u->wq, &u->dp_tx_work, u->dp_tx_next - jiffies);
+}
+
+static void usbc_dp_tx_start(struct max77705_usbc *u, u32 hdr, u32 conf)
+{
+	u->dp_tx_hdr = hdr;
+	u->dp_tx_conf = conf;
+	u->dp_tx_tries = 0;
+	u->dp_tx_next = jiffies;
+	usbc_dp_tx(u);
+}
+
+static void usbc_dp_tx_work(struct work_struct *work)
+{
+	struct max77705_usbc *u = container_of(to_delayed_work(work),
+					       struct max77705_usbc, dp_tx_work);
+
+	if (READ_ONCE(u->stopping) || usbc_read_status(u))
+		return;
+	usbc_dp_tx(u);
+}
+
+static void usbc_dp_send_enter(struct max77705_usbc *u)
+{
+	usbc_dp_tx_start(u, DP_VDM_ENTER, 0);
+}
+
+static void usbc_dp_send_configure(struct max77705_usbc *u, u32 conf)
+{
+	if (!usbc_dp_conf_ok(u, conf)) {
+		dev_warn(u->dev, "DP: Configure %08x refused\n", conf);
+		usbc_dp_queue(u, usbc_dp_hdr(DP_CMD_CONFIGURE, CMDT_RSP_NAK), 0, 1, false);
+		return;
+	}
+	usbc_dp_tx_start(u, DP_VDM_CONFIGURE, conf);
+}
+
+/* hand the queued replies to the DP driver, oldest first */
+static void usbc_dp_deliver(struct max77705_usbc *u)
+{
+	while (u->dp_q_n) {
+		struct usbc_dp_msg m = u->dp_q[0];
+		int ret;
+
+		if (!u->dp_port || !u->dp_partner) {
+			u->dp_q_n = 0;
+			break;
+		}
+		if (m.attention)
+			ret = typec_altmode_attention(u->dp_port, m.vdo);
+		else
+			ret = typec_altmode_vdm(u->dp_port, m.hdr, m.cnt > 1 ? &m.vdo : NULL, m.cnt);
+		if (ret == -EBUSY && ++u->dp_tries < DP_DELIVER_TRIES) {
+			queue_delayed_work(u->wq, &u->dp_work, msecs_to_jiffies(DP_DELIVER_RETRY_MS));
+			return;
+		}
+		if (ret && ret != -EOPNOTSUPP)
+			dev_warn(u->dev, "DP: %s %08x to the altmode driver: %d\n",
+				 m.attention ? "Attention" : "reply", m.attention ? m.vdo : m.hdr, ret);
+		u->dp_tries = 0;
+		memmove(u->dp_q, u->dp_q + 1, --u->dp_q_n * sizeof(u->dp_q[0]));
+	}
+}
+
+static void usbc_dp_work(struct work_struct *work)
+{
+	struct max77705_usbc *u = container_of(to_delayed_work(work),
+					       struct max77705_usbc, dp_work);
+	unsigned long flags;
+	unsigned int req;
+	u32 conf;
+
+	if (READ_ONCE(u->stopping))
+		return;
+	spin_lock_irqsave(&u->dp_lock, flags);
+	req = u->dp_req;
+	conf = u->dp_req_conf;
+	u->dp_req = 0;
+	spin_unlock_irqrestore(&u->dp_lock, flags);
+
+	if (req && !u->dp_partner)
+		req = 0;	/* detached since */
+	if (req & DP_REQ_ENTER)
+		usbc_dp_send_enter(u);
+	if (req & DP_REQ_STATUS) {
+		/* the firmware's own Status Update may be in already */
+		if (u->dp_status_valid)
+			usbc_dp_status_answer(u);
+		else
+			u->dp_status_wanted = true;
+	}
+	if (req & DP_REQ_CONFIGURE)
+		usbc_dp_send_configure(u, conf);
+	usbc_dp_deliver(u);
+}
+
+/* port altmode ops: called by the DP altmode driver with its lock held */
+static void usbc_dp_request(struct max77705_usbc *u, unsigned int req, u32 conf)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&u->dp_lock, flags);
+	u->dp_req |= req;
+	if (req & DP_REQ_CONFIGURE)
+		u->dp_req_conf = conf;
+	spin_unlock_irqrestore(&u->dp_lock, flags);
+	mod_delayed_work(u->wq, &u->dp_work, 0);
+}
+
+static int usbc_dp_enter(struct typec_altmode *alt, u32 *vdo)
+{
+	usbc_dp_request(typec_altmode_get_drvdata(alt), DP_REQ_ENTER, 0);
+	return 0;
+}
+
+/* stock never sends Exit Mode; the partner leaves the mode on detach */
+static int usbc_dp_exit(struct typec_altmode *alt)
+{
+	struct max77705_usbc *u = typec_altmode_get_drvdata(alt);
+
+	dev_info(u->dev, "DP: Exit Mode not supported (unplug to leave the mode)\n");
+	return -EOPNOTSUPP;
+}
+
+static int usbc_dp_vdm(struct typec_altmode *alt, u32 hdr, const u32 *vdo, int cnt)
+{
+	struct max77705_usbc *u = typec_altmode_get_drvdata(alt);
+
+	if (PD_VDO_CMDT(hdr) != CMDT_INIT)
+		return 0;
+	switch (PD_VDO_CMD(hdr)) {
+	case DP_CMD_STATUS_UPDATE:
+		usbc_dp_request(u, DP_REQ_STATUS, 0);
+		return 0;
+	case DP_CMD_CONFIGURE:
+		if (cnt < 2 || !vdo)
+			return -EINVAL;
+		usbc_dp_request(u, DP_REQ_CONFIGURE, *vdo);
+		return 0;
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
+static const struct typec_altmode_ops usbc_dp_ops = {
+	.enter = usbc_dp_enter,
+	.exit = usbc_dp_exit,
+	.vdm = usbc_dp_vdm,
+};
+
+/*
+ * The port's DP altmode, as the DT describes it (connector/altmodes/displayport,
+ * the usb-c-connector binding: svid 0xff01 and the DP capabilities VDO with
+ * the pin assignments this board's wiring carries). usbc_dp_from_dt() has
+ * checked it at probe. -EPROBE_DEFER while the connector's mode switch has
+ * no driver yet.
+ */
+static int usbc_dp_register_port(struct max77705_usbc *u)
+{
+	struct typec_altmode_desc desc = {
+		.svid = USB_TYPEC_DP_SID,
+		.mode = USB_TYPEC_DP_MODE,
+		.vdo = u->dp_port_vdo,
+		.roles = TYPEC_PORT_DRD,
+	};
+	int ret;
+
+	if (!u->dp_on || u->dp_port)
+		return 0;
+	u->dp_port = typec_port_register_altmode(u->port, &desc);
+	if (IS_ERR(u->dp_port)) {
+		ret = PTR_ERR(u->dp_port);
+		u->dp_port = NULL;
+		return ret;
+	}
+	typec_altmode_set_drvdata(u->dp_port, u);
+	typec_altmode_set_ops(u->dp_port, &usbc_dp_ops);
+	dev_info(u->dev, "DP: port altmode registered (vdo %08x: DFP_D pins %02lx)\n",
+		 u->dp_port_vdo, DP_CAP_PIN_ASSIGN_DFP_D(u->dp_port_vdo));
+	return 0;
+}
+
+static bool usbc_otg_host_up(struct max77705_usbc *u);
+
+#define DP_SBU_SETTLE_MS	100	/* stock: aux_onoff(1), then msleep(100) */
+#define DP_HOST_WAIT_MS		10000	/* stock: host_turn_on_wait_time, 10 s */
+
+/*
+ * After usbc_typec_update(), on the workqueue. Stock's order before Enter
+ * Mode (max77705_alternate.c:350-413, displayport_drv.c:2960-2975):
+ *
+ *  1. at Discover SVIDs with 0xff01, the SBU switch on (select from the
+ *     orientation, then output enable) and 100 ms;
+ *  2. the USB host up: stock forces it and blocks up to 10 s for it;
+ *  3. only then Discover Modes' result is acted on: Enter Mode.
+ *
+ * Here: 1 by putting the port's mux in a DP state through the class (the DT
+ * says what that mux is: the gpio-sbu-mux on the SBU port); 2 and 3 by
+ * registering the partner's DP altmode, which is what makes typec_displayport
+ * send Enter Mode, only once 100 ms have passed and the USB host is up
+ * (usbc_otg_host_up), or 10 s have passed without it, as stock goes on then
+ * too. Rechecked from dp_gate_work until then.
+ */
+static void usbc_dp_update(struct max77705_usbc *u)
+{
+	struct typec_altmode_desc desc = {
+		.svid = USB_TYPEC_DP_SID,
+		.mode = USB_TYPEC_DP_MODE,
+	};
+	unsigned long settle, waited;
+	bool host;
+
+	if (!u->dp_port || !u->partner || u->dp_partner)
+		return;
+	if (!(u->st[ST(REG_PD_STATUS1)] & PD1_DATAROLE))
+		return;
+	if (!u->dp_sbu_early && (u->dp_svid0 == USB_TYPEC_DP_SID || u->dp_mode_found)) {
+		int ret = typec_set_mode(u->port, TYPEC_DP_STATE_D);
+
+		u->dp_sbu_early = true;
+		u->dp_gate_t0 = jiffies;
+		dev_info(u->dev, "DP: SBU switch on at SVID discovery, as stock (%d)\n", ret);
+	}
+	if (!u->dp_mode_found || !u->dp_sbu_early)
+		return;
+
+	settle = u->dp_gate_t0 + msecs_to_jiffies(DP_SBU_SETTLE_MS);
+	if (time_before(jiffies, settle)) {
+		mod_delayed_work(u->wq, &u->dp_gate_work, settle - jiffies);
+		return;
+	}
+	host = usbc_otg_host_up(u);
+	waited = jiffies_to_msecs(jiffies - u->dp_gate_t0);
+	if (!host && waited < DP_HOST_WAIT_MS) {
+		if (!u->dp_gate_logged)
+			dev_info(u->dev, "DP: Enter Mode waits for the USB host (up to %d s, as stock)\n",
+				 DP_HOST_WAIT_MS / 1000);
+		u->dp_gate_logged = true;
+		mod_delayed_work(u->wq, &u->dp_gate_work, msecs_to_jiffies(200));
+		return;
+	}
+	if (host)
+		dev_info(u->dev, "DP: USB host up %lu ms after SVID discovery\n", waited);
+	else
+		dev_warn(u->dev, "DP: no USB host after %lu ms; entering the mode anyway, as stock\n",
+			 waited);
+
+	desc.vdo = u->dp_mode_vdo;
+	u->dp_partner = typec_partner_register_altmode(u->partner, &desc);
+	if (IS_ERR(u->dp_partner)) {
+		dev_warn(u->dev, "DP: partner altmode: %ld\n", PTR_ERR(u->dp_partner));
+		u->dp_partner = NULL;
+		return;
+	}
+	dev_info(u->dev, "DP: partner altmode registered (mode %08x)\n", u->dp_mode_vdo);
+}
+
+static void usbc_dp_gate_work(struct work_struct *work)
+{
+	struct max77705_usbc *u = container_of(to_delayed_work(work),
+					       struct max77705_usbc, dp_gate_work);
+
+	if (!READ_ONCE(u->stopping))
+		usbc_dp_update(u);
+}
+
 static void usbc_typec_drop_pd(struct max77705_usbc *u)
 {
 	if (!u->partner_pd)
@@ -2148,6 +3043,7 @@ static void usbc_typec_detach(struct max77705_usbc *u)
 {
 	if (!u->partner)
 		return;
+	usbc_dp_unregister_partner(u);
 	usbc_typec_drop_pd(u);
 	typec_unregister_partner(u->partner);
 	u->partner = NULL;
@@ -2188,7 +3084,7 @@ static void usbc_typec_pd(struct max77705_usbc *u)
 
 static void usbc_typec_update(struct max77705_usbc *u)
 {
-	u8 cc0 = u->st[ST(REG_CC_STATUS0)], pd1 = u->st[ST(REG_PD_STATUS1)];
+	u8 cc0 = u->st[ST(REG_CC_STATUS0)];
 	u8 ccstat = FIELD_GET(CC0_CCSTAT, cc0);
 	enum typec_pwr_opmode mode;
 
@@ -2216,7 +3112,7 @@ static void usbc_typec_update(struct max77705_usbc *u)
 	}
 
 	typec_set_pwr_role(u->port, ccstat == CCSTAT_SOURCE ? TYPEC_SOURCE : TYPEC_SINK);
-	typec_set_data_role(u->port, (pd1 & PD1_DATAROLE) ? TYPEC_HOST : TYPEC_DEVICE);
+	typec_set_data_role(u->port, u->otg.want == USB_ROLE_HOST ? TYPEC_HOST : TYPEC_DEVICE);
 	typec_set_vconn_role(u->port, (cc0 & CC0_CCVCNSTAT) ? TYPEC_SOURCE : TYPEC_SINK);
 	switch (FIELD_GET(CC0_CCPINSTAT, cc0)) {
 	case 1:
@@ -2248,12 +3144,27 @@ static void usbc_typec_remove(void *data)
 {
 	struct max77705_usbc *u = data;
 
+	cancel_delayed_work_sync(&u->typec_work);
+	if (!u->port)
+		return;
 	usbc_typec_detach(u);
+	if (u->dp_port)
+		typec_unregister_altmode(u->dp_port);
+	u->dp_port = NULL;
 	typec_unregister_port(u->port);
 	u->port = NULL;
 }
 
-static void usbc_typec_init(struct max77705_usbc *u)
+#define TYPEC_RETRY_MS		1000
+#define TYPEC_RETRIES		120	/* the switches' bus is a module: give it 2 min */
+
+/*
+ * The port, on the DT's usb-c-connector child when there is one (its graph
+ * names the orientation and mode switches, e.g. the SBU mux), else on our
+ * own node. While a switch has no driver the class defers; charging does
+ * not wait for that, the port is retried from the workqueue.
+ */
+static int usbc_typec_try(struct max77705_usbc *u)
 {
 	struct typec_capability cap = {
 		.type = TYPEC_PORT_DRP,
@@ -2264,19 +3175,60 @@ static void usbc_typec_init(struct max77705_usbc *u)
 		.accessory = { TYPEC_ACCESSORY_AUDIO, TYPEC_ACCESSORY_DEBUG },
 		.orientation_aware = 1,
 	};
+	struct typec_port *port;
 
-	cap.fwnode = dev_fwnode(u->dev);
-	u->port = typec_register_port(u->dev, &cap);
-	if (IS_ERR(u->port)) {
-		dev_warn(u->dev, "typec port: %ld (power_supply only)\n", PTR_ERR(u->port));
-		u->port = NULL;
+	if (!u->port) {
+		cap.fwnode = u->conn ?: dev_fwnode(u->dev);
+		port = typec_register_port(u->dev, &cap);
+		if (IS_ERR(port))
+			return PTR_ERR(port);
+		typec_set_pwr_role(port, TYPEC_SINK);
+		typec_set_data_role(port, TYPEC_DEVICE);
+		u->port = port;
+	}
+	return usbc_dp_register_port(u);
+}
+
+static void usbc_typec_work(struct work_struct *work)
+{
+	struct max77705_usbc *u = container_of(to_delayed_work(work),
+					       struct max77705_usbc, typec_work);
+	int ret;
+
+	if (READ_ONCE(u->stopping))
+		return;
+	ret = usbc_typec_try(u);
+	if (ret == -EPROBE_DEFER && ++u->typec_tries < TYPEC_RETRIES) {
+		queue_delayed_work(u->wq, &u->typec_work, msecs_to_jiffies(TYPEC_RETRY_MS));
 		return;
 	}
-	typec_set_pwr_role(u->port, TYPEC_SINK);
-	typec_set_data_role(u->port, TYPEC_DEVICE);
-	if (devm_add_action_or_reset(u->dev, usbc_typec_remove, u))
-		u->port = NULL;
+	if (ret)
+		dev_warn(u->dev, "typec %s: %d after %u tries; %s\n",
+			 u->port ? "DP altmode" : "port", ret, u->typec_tries,
+			 u->port ? "no DP" : "power_supply only");
+	else
+		dev_info(u->dev, "typec port registered after %u tries\n", u->typec_tries);
+	queue_work(u->wq, &u->event_work);	/* the partner, if one is there */
 }
+
+static void usbc_typec_init(struct max77705_usbc *u)
+{
+	int ret;
+
+	INIT_DELAYED_WORK(&u->typec_work, usbc_typec_work);
+	if (devm_add_action_or_reset(u->dev, usbc_typec_remove, u))
+		return;
+	ret = usbc_typec_try(u);
+	if (ret == -EPROBE_DEFER) {
+		dev_info(u->dev, "typec %s: a switch is not there yet, retrying\n",
+			 u->port ? "DP altmode" : "port");
+		queue_delayed_work(u->wq, &u->typec_work, msecs_to_jiffies(TYPEC_RETRY_MS));
+	} else if (ret) {
+		dev_warn(u->dev, "typec %s: %d (%s)\n", u->port ? "DP altmode" : "port", ret,
+			 u->port ? "no DP" : "power_supply only");
+	}
+}
+
 static void usbc_typec_identity(struct max77705_usbc *u)
 {
 	if (u->partner)
@@ -2286,6 +3238,15 @@ static void usbc_typec_identity(struct max77705_usbc *u)
 static void usbc_typec_update(struct max77705_usbc *u) { }
 static void usbc_typec_init(struct max77705_usbc *u) { }
 static void usbc_typec_identity(struct max77705_usbc *u) { }
+static void usbc_dp_forget(struct max77705_usbc *u) { }
+static void usbc_dp_events(struct max77705_usbc *u, u8 pd_int, u8 vdm_int) { }
+static void usbc_dp_hard_reset(struct max77705_usbc *u) { }
+static void usbc_dp_discovered(struct max77705_usbc *u, u8 sub, const u8 *r) { }
+static void usbc_dp_update(struct max77705_usbc *u) { }
+static void usbc_dp_work(struct work_struct *work) { }
+static void usbc_dp_gate_work(struct work_struct *work) { }
+static void usbc_dp_id_work(struct work_struct *work) { }
+static void usbc_dp_tx_work(struct work_struct *work) { }
 #endif
 
 /* ---- VDM results (vdm_discovery) ------------------------------------------ */
@@ -2309,7 +3270,10 @@ static void usbc_vdm_read(struct max77705_usbc *u, u8 sub)
 	u32 hdr;
 
 	u->vdm_resp_ok[sub - 1] = false;
-	if (usbc_cmd(u, OP_GET_VDM_RESP, &sub, 1, r, VDM_RESP_LEN))
+	memset(r, 0, VDM_RESP_LEN);
+	/* stock's read lengths: 31, 31, and 11 for Discover Modes (one mode VDO) */
+	if (usbc_cmd(u, OP_GET_VDM_RESP, &sub, 1, r,
+		     sub == VDM_SUB_MODES ? 11 : VDM_RESP_LEN))
 		return;
 	u->vdm_resp_ok[sub - 1] = true;
 	hdr = get_unaligned_le32(&r[3]);
@@ -2320,6 +3284,7 @@ static void usbc_vdm_read(struct max77705_usbc *u, u8 sub)
 		 hdr, VDM_HDR_CMDTYPE(hdr) == 1 ? "ACK" :
 		 VDM_HDR_CMDTYPE(hdr) == 2 ? "NAK" : "BUSY/REQ",
 		 nobj ? nobj - 1 : 0);
+	usbc_dp_discovered(u, sub, r);
 	if (sub != VDM_SUB_IDENTITY || VDM_HDR_CMDTYPE(hdr) != 1 || nobj < 4)
 		return;
 
@@ -2337,7 +3302,7 @@ static void usbc_vdm_read(struct max77705_usbc *u, u8 sub)
 
 static void usbc_vdm_events(struct max77705_usbc *u, u8 vdm_int)
 {
-	if (!vdm_discovery)
+	if (!usbc_discovery(u))
 		return;
 	if (!u->altmode_sent && u->mbox_allowed && !u->mbox_dead) {
 		u8 v = ALTMODE_SRC_VDM;
@@ -2352,6 +3317,385 @@ static void usbc_vdm_events(struct max77705_usbc *u, u8 vdm_int)
 		usbc_vdm_read(u, VDM_SUB_SVIDS);
 	if (vdm_int & BIT(2))
 		usbc_vdm_read(u, VDM_SUB_MODES);
+}
+
+/*
+ * The board's own orientation input next to the MCU's: stock selects the SBU
+ * switch from gpg0-4 (dp,usb_con_sel), the typec class from the CC chip.
+ * Logged at each change of CCPinStat, so one plug each way round says which
+ * select level goes with which orientation. GPIOD_ASIS: the pin's
+ * configuration is left alone, only its data register is read.
+ */
+static const char * const ccpin_name[4] = { "none", "CC1 (normal)", "CC2 (reverse)", "?" };
+
+static int usbc_orient_sense(struct max77705_usbc *u)
+{
+	return u->orient_sense ? gpiod_get_value_cansleep(u->orient_sense) : -ENODEV;
+}
+
+static void usbc_orient_log(struct max77705_usbc *u)
+{
+	u8 pin = FIELD_GET(CC0_CCPINSTAT, u->st[ST(REG_CC_STATUS0)]);
+
+	if (!u->orient_sense || pin == u->orient_last)
+		return;
+	u->orient_last = pin;
+	dev_info(u->dev, "orientation: MCU CCPinStat %s, orientation-sense %d\n",
+		 ccpin_name[pin], usbc_orient_sense(u));
+}
+
+/* ---- USB OTG: host role and VBUS out ------------------------------------ */
+
+/*
+ * Stock (max77705_cc.c:517-698, max77705_pd.c:152-240, :712-790): on
+ * CCStat = SOURCE (the partner presents Rd: a sink) the AP turns VBUS on
+ * through the charger's "otg" supply (CHGIN boost, max77705_set_otg); on
+ * CCStat = SINK or no connection it turns it off; the firmware's own VBUS
+ * control is off from probe (0x54 = 0, max77705_usbc.c:2962). The data role
+ * follows PD_STATUS1.DataRole on the DataRole interrupt (DFP = host,
+ * max77705_notify_dr_status), and the MUIC puts D+/D- on the AP for an OTG
+ * attach. Here VBUS is the DT's vbus-supply and the role the DT's
+ * usb-role-switch (dwc3); without either, that half is simply not done.
+ *
+ * The DataRole bit is not cleared on detach (0x87 read with nothing
+ * attached), so it is believed only after a DataRole interrupt in this
+ * attach, or with a PD contract (PSRDY). Without either the Type-C default
+ * holds: source = host, sink = device.
+ *
+ * Safety: VBUS goes on only for CCStat = SOURCE, only with no VBUS on the
+ * connector already (VBUSDET), and the charger refuses on its side if CHGIN
+ * or WCIN has an input. It goes off on any other CC state, on a regulator
+ * error or over-current (until the next detach), at remove and at shutdown.
+ */
+static int usbc_otg_vbus_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	struct max77705_usbc *u = container_of(nb, struct max77705_usbc, otg.nb);
+
+	if (!(event & (REGULATOR_EVENT_OVER_CURRENT | REGULATOR_EVENT_FAIL)))
+		return NOTIFY_DONE;
+	WRITE_ONCE(u->otg.vbus_fault, true);
+	if (!READ_ONCE(u->stopping))
+		queue_work(u->wq, &u->event_work);
+	return NOTIFY_OK;
+}
+
+static void usbc_otg_get(struct max77705_usbc *u)
+{
+	struct usbc_otg *o = &u->otg;
+
+	if (!o->vbus && !o->vbus_absent) {
+		struct regulator *r = regulator_get_optional(u->dev, "vbus");
+
+		if (!IS_ERR(r)) {
+			o->vbus = r;
+			o->nb.notifier_call = usbc_otg_vbus_event;
+			if (regulator_register_notifier(r, &o->nb))
+				o->nb.notifier_call = NULL;
+		} else if (PTR_ERR(r) != -EPROBE_DEFER) {
+			o->vbus_absent = true;
+			dev_info(u->dev, "OTG: no vbus-supply (%ld): no VBUS out\n", PTR_ERR(r));
+		}
+	}
+	if (!o->sw && !o->sw_absent) {
+		struct usb_role_switch *sw = usb_role_switch_get(u->dev);
+
+		if (IS_ERR(sw)) {
+			if (PTR_ERR(sw) != -EPROBE_DEFER) {
+				o->sw_absent = true;
+				dev_warn(u->dev, "OTG: usb-role-switch: %ld\n", PTR_ERR(sw));
+			} else if (!o->sw_waiting) {
+				o->sw_waiting = true;
+				dev_info(u->dev, "OTG: waiting for the USB controller's role switch\n");
+			}
+		} else if (!sw) {
+			o->sw_absent = true;
+			dev_info(u->dev, "OTG: no usb-role-switch: USB stays in device mode\n");
+		} else {
+			o->sw = sw;
+		}
+	}
+}
+
+static void usbc_otg_set_vbus(struct max77705_usbc *u, bool on)
+{
+	struct usbc_otg *o = &u->otg;
+	int ret;
+
+	if (on == o->vbus_on || !o->vbus)
+		return;
+	if (on) {
+		ret = regulator_enable(o->vbus);
+		if (ret == -EBUSY || ret == -EAGAIN) {
+			/* the charger has an input in the way: look again */
+			if (!o->vbus_retry_logged)
+				dev_warn(u->dev, "OTG: VBUS out refused (%d): trying again every %d ms\n",
+					 ret, OTG_VBUS_RETRY_MS);
+			o->vbus_retry_logged = true;
+			mod_delayed_work(u->wq, &o->recheck, msecs_to_jiffies(OTG_VBUS_RETRY_MS));
+			return;
+		}
+		if (ret) {
+			o->vbus_fault = true;
+			dev_warn(u->dev, "OTG: VBUS out refused (%d): not again until detach\n", ret);
+			return;
+		}
+		if (o->vbus_retry_logged)
+			dev_info(u->dev, "OTG: VBUS out allowed now\n");
+		o->vbus_retry_logged = false;
+		o->vbus_on = true;
+		dev_info(u->dev, "OTG: VBUS out on (sink partner)\n");
+	} else {
+		ret = regulator_disable(o->vbus);
+		if (ret)
+			dev_err(u->dev, "OTG: VBUS out off failed: %d\n", ret);
+		o->vbus_on = false;
+		dev_info(u->dev, "OTG: VBUS out off\n");
+	}
+}
+
+static void usbc_otg_set_role(struct max77705_usbc *u, enum usb_role role)
+{
+	struct usbc_otg *o = &u->otg;
+	int ret;
+
+	if (!o->sw || role == o->role)
+		return;
+	ret = usb_role_switch_set_role(o->sw, role);
+	if (ret) {
+		dev_warn(u->dev, "OTG: USB role %s: %d\n", usb_role_string(role), ret);
+		return;
+	}
+	o->role = role;
+	dev_info(u->dev, "OTG: USB role %s\n", usb_role_string(role));
+}
+
+/*
+ * PD events that move VBUS while we source (stock max77705_pd.c:455-553,
+ * max77705_usbc.c:240-248): PR_Swap source-to-sink (0x1a, 0x1b) and
+ * Get_Vbus_turn_off (0x18) turn it off until the CC state changes (the
+ * swap ends as CCStat = SINK); a hard reset (0x16, 0x19) turns it off for
+ * 760 ms and a source SenderResponse timeout (0x06) for 800 ms, then back
+ * on if we are still the source; PR_Swap sink-to-source (0x1d) lets it on.
+ */
+#define OTG_HR_OFF_MS		760	/* stock vbus_hard_reset_work delay */
+#define OTG_SRT_OFF_MS		800
+#define OTG_PATH_AGAIN_MS	1000	/* CONTROL1 once more after host starts */
+
+static void usbc_otg_hold(struct max77705_usbc *u, unsigned int ms)
+{
+	struct usbc_otg *o = &u->otg;
+
+	o->hold_until = jiffies + msecs_to_jiffies(ms) ?: 1;
+	mod_delayed_work(u->wq, &o->recheck, msecs_to_jiffies(ms) + 1);
+}
+
+static void usbc_otg_pd_event(struct max77705_usbc *u, u8 code)
+{
+	struct usbc_otg *o = &u->otg;
+
+	if (!o->vbus_on && !o->vbus_held && !o->hold_until && code != 0x1d)
+		return;
+	switch (code) {
+	case 0x18:	/* Get_Vbus_turn_off */
+	case 0x1a:	/* PRSWAP_SRCTOSWAP */
+	case 0x1b:	/* PRSWAP_SWAPTOSNK */
+		dev_info(u->dev, "OTG: PD %s: VBUS out off\n", pdmsg_name(code));
+		o->vbus_held = true;
+		break;
+	case 0x1d:	/* PRSWAP_SWAPTOSRC */
+		o->vbus_held = false;
+		break;
+	case 0x16:	/* HARDRESET_RECEIVED */
+	case 0x19:	/* HARDRESET_SENT */
+		if (o->vbus_on)
+			usbc_otg_hold(u, OTG_HR_OFF_MS);
+		break;
+	case 0x06:	/* SRC SenderResponseTimer timeout */
+		if (o->vbus_on)
+			usbc_otg_hold(u, OTG_SRT_OFF_MS);
+		break;
+	default:
+		break;
+	}
+}
+
+static void usbc_otg_recheck(struct work_struct *work)
+{
+	struct usbc_otg *o = container_of(to_delayed_work(work), struct usbc_otg, recheck);
+	struct max77705_usbc *u = container_of(o, struct max77705_usbc, otg);
+
+	o->path_due = o->path_again && o->role == USB_ROLE_HOST;
+	o->path_again = false;
+	if (!READ_ONCE(u->stopping))
+		queue_work(u->wq, &u->event_work);
+}
+
+/*
+ * D+/D- to the AP for the host, as stock's MUIC does for an OTG attach
+ * (com_to_usb_ap) and again on every duplicate OTG event ("W/A for setting
+ * usb path", drivers/muic/max77705-muic.c:1357-1362): the MCU's own BC1.2
+ * run on VBUS (ours too) moves the switch, so the value we wrote before is
+ * no proof. Written on entering host, after each BC/VBUS event while host,
+ * and once more a second later; read back (0x05) when it differs.
+ */
+static void usbc_otg_path(struct max77705_usbc *u, const char *why)
+{
+	u8 v = 0;
+
+	if (usbc_set_path(u, COM_USB))
+		return;
+	u->path_tried = COM_USB;
+	if (!usbc_cmd(u, OP_CONTROL1_R, NULL, 0, &v, 1) && v != COM_USB)
+		dev_warn(u->dev, "OTG: CONTROL1 reads %02x after writing %02x (%s)\n",
+			 v, COM_USB, why);
+	else
+		dev_dbg(u->dev, "OTG: CONTROL1 %02x (%s)\n", v, why);
+}
+
+static void usbc_otg_update(struct max77705_usbc *u, u8 pd_int, u8 uic_int)
+{
+	struct usbc_otg *o = &u->otg;
+	u8 cc0 = u->st[ST(REG_CC_STATUS0)], pd1 = u->st[ST(REG_PD_STATUS1)];
+	u8 ccstat = FIELD_GET(CC0_CCSTAT, cc0);
+	bool attached = ccstat == CCSTAT_SINK || ccstat == CCSTAT_SOURCE;
+	bool dfp = pd1 & PD1_DATAROLE;
+	bool want_vbus;
+	enum usb_role role;
+
+	if (ccstat != o->ccstat) {
+		dev_info(u->dev, "CC: %s (cc0 %02x pd1 %02x bc %02x)\n",
+			 ccstat == CCSTAT_NONE ? "detached" :
+			 ccstat == CCSTAT_SINK ? "attached as sink (Rp partner)" :
+			 ccstat == CCSTAT_SOURCE ? "attached as source (Rd partner)" :
+			 ccstat == 3 ? "audio accessory" : ccstat == 4 ? "debug accessory" :
+			 "error/disabled", cc0, pd1, u->st[ST(REG_BC_STATUS)]);
+		o->ccstat = ccstat;
+	}
+	if (ccstat != CCSTAT_SOURCE) {
+		o->vbus_held = false;
+		o->hold_until = 0;
+	}
+	if (o->hold_until && time_after_eq(jiffies, o->hold_until))
+		o->hold_until = 0;
+	if (!attached) {
+		o->dr_seen = false;
+		o->vbus_retry_logged = false;
+		o->vbus_fault = false;
+		o->vbus_ext_warned = false;
+	} else if (pd_int & PD_DATAROLE) {
+		o->dr_seen = true;
+	}
+
+	if (!attached)
+		role = USB_ROLE_NONE;
+	else if (ccstat == CCSTAT_SOURCE)
+		role = o->dr_seen && !dfp ? USB_ROLE_DEVICE : USB_ROLE_HOST;
+	else
+		role = dfp && (o->dr_seen || (pd1 & PD1_PSRDY)) ? USB_ROLE_HOST : USB_ROLE_DEVICE;
+	o->want = role;
+	if ((!otg && role == USB_ROLE_HOST) || READ_ONCE(o->off))
+		role = USB_ROLE_NONE;
+
+	if (otg && (attached || o->vbus_on || o->role != USB_ROLE_NONE))
+		usbc_otg_get(u);
+
+	/* stock's probe-time 0x54 = 0: the firmware leaves VBUS out to us */
+	if (otg && !o->autovbus_sent && u->mbox_allowed && !u->mbox_dead) {
+		u8 v = AUTO_VBUS_OFF, r = 0;
+		int ret;
+
+		o->autovbus_sent = true;
+		ret = usbc_cmd(u, OP_AUTO_VBUS, &v, 1, &r, 1);
+		if (ret)
+			dev_warn(u->dev, "OTG: auto VBUS off (0x54 = 0): %d\n", ret);
+		else
+			dev_info(u->dev, "OTG: auto VBUS off (0x54 = 0)\n");
+	}
+
+	want_vbus = otg && ccstat == CCSTAT_SOURCE && !o->vbus_fault && o->autovbus_sent &&
+		    !o->vbus_held && !o->hold_until && !o->off && u->mbox_allowed &&
+		    !READ_ONCE(u->stopping);
+	if (want_vbus && !o->vbus_on && (u->st[ST(REG_BC_STATUS)] & BC_VBUSDET)) {
+		/* someone else's VBUS on the connector: never boost into it */
+		if (!o->vbus_ext_warned)
+			dev_warn(u->dev, "OTG: VBUS already present as source (bc %02x): no VBUS out\n",
+				 u->st[ST(REG_BC_STATUS)]);
+		o->vbus_ext_warned = true;
+		want_vbus = false;
+	}
+
+	if (!want_vbus)
+		usbc_otg_set_vbus(u, false);
+	if (role == USB_ROLE_HOST) {
+		if (o->role != USB_ROLE_HOST) {
+			usbc_otg_path(u, "host attach");
+			o->path_again = true;
+			mod_delayed_work(u->wq, &o->recheck,
+					 msecs_to_jiffies(OTG_PATH_AGAIN_MS));
+		} else if (uic_int & (UIC_CHGTYP | UIC_DCDTMO | UIC_VBUSDET)) {
+			usbc_otg_path(u, "BC/VBUS event");
+		} else if (o->path_due || u->path != COM_USB) {
+			usbc_otg_path(u, "recheck");
+		}
+	}
+	o->path_due = false;
+	usbc_otg_set_role(u, role);
+	if (want_vbus)
+		usbc_otg_set_vbus(u, true);
+}
+
+/* remove (put too) and shutdown: VBUS out off, the role back to the default */
+static void usbc_otg_stop(struct max77705_usbc *u, bool put)
+{
+	struct usbc_otg *o = &u->otg;
+
+	WRITE_ONCE(o->off, true);	/* no event turns anything back on */
+	cancel_delayed_work_sync(&o->recheck);
+	usbc_otg_set_vbus(u, false);
+	usbc_otg_set_role(u, USB_ROLE_NONE);
+	if (!put)
+		return;
+	if (o->vbus) {
+		if (o->nb.notifier_call)
+			regulator_unregister_notifier(o->vbus, &o->nb);
+		regulator_put(o->vbus);
+		o->vbus = NULL;
+	}
+	if (o->sw) {
+		usb_role_switch_put(o->sw);
+		o->sw = NULL;
+	}
+}
+
+static int usbc_xhci_bound(struct device *dev, void *unused)
+{
+	return !strncmp(dev_name(dev), "xhci-hcd", 8) && device_is_bound(dev);
+}
+
+/*
+ * The USB host is up: our role is host and the controller's xHCI device
+ * (a child of the dwc3 our usb-role-switch phandle names) has its driver.
+ * What DP's Enter Mode waits on (stock: host_turn_on_event). The OTG work
+ * may refine what "up" means here; callers only need the bool.
+ */
+static bool __maybe_unused usbc_otg_host_up(struct max77705_usbc *u)
+{
+	struct platform_device *pdev;
+	struct device_node *np;
+	bool up;
+
+	if (u->otg.role != USB_ROLE_HOST)
+		return false;
+	np = of_parse_phandle(u->dev->of_node, "usb-role-switch", 0);
+	if (!np)
+		return true;	/* nothing more to look at: the role is set */
+	pdev = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!pdev)
+		return false;
+	up = device_for_each_child(&pdev->dev, NULL, usbc_xhci_bound) > 0;
+	put_device(&pdev->dev);
+	return up;
 }
 
 /* ---- events --------------------------------------------------------------- */
@@ -2371,6 +3715,7 @@ static void usbc_handle_sysmsg(struct max77705_usbc *u, u8 msg)
 		u->path_tried = 0;
 		u->autoibus_sent = false;
 		u->altmode_sent = false;
+		u->otg.autovbus_sent = false;
 		break;
 	case SYSMSG_CC_5V_SHORT:
 	case SYSMSG_SBU_GND_SHORT:
@@ -2410,14 +3755,17 @@ static void usbc_event_work(struct work_struct *work)
 	dcp_was_open = usbc_dcp_attached(u);
 	if (usbc_read_status(u))
 		return;
-	vbus = u->st[ST(REG_BC_STATUS)] & BC_VBUSDET;
 	ccstat = FIELD_GET(CC0_CCSTAT, u->st[ST(REG_CC_STATUS0)]);
+	/* as the source, VBUS is our own: not an input */
+	vbus = (u->st[ST(REG_BC_STATUS)] & BC_VBUSDET) && ccstat != CCSTAT_SOURCE;
 
 	/* detach: PD per CC attach, AFC/QC2 per VBUS */
 	if (ccstat != CCSTAT_SINK && (u->pd.have_first || u->pd.pos))
 		usbc_pd_forget(u);
-	if (ccstat == CCSTAT_NONE)
+	if (ccstat == CCSTAT_NONE) {
 		usbc_vdm_forget(u);
+		usbc_dp_forget(u);
+	}
 	if (!vbus) {
 		u->hv_mode = HV_NONE;
 		u->hv_dcp_done = false;
@@ -2432,21 +3780,27 @@ static void usbc_event_work(struct work_struct *work)
 		usbc_pd_event(u, pdq[i]);
 		if (pdq[i] == 0x01)	/* SNK_PSRDY_RECEIVED */
 			psrdy = true;
+		if (pdq[i] == 0x16 || pdq[i] == 0x19)	/* HARDRESET_RECEIVED/_SENT */
+			usbc_dp_hard_reset(u);
 	}
 	if (pend[2] & PD_PSRDY)
 		psrdy = true;
 
+	usbc_otg_update(u, pend[2], pend[0]);
 	usbc_route(u);
 	if (!vbus)
 		u->path_tried = 0;	/* the next attach writes it again */
 	usbc_autoibus(u, vbus);
 	usbc_vdm_events(u, pend[3]);
+	usbc_dp_events(u, pend[2], pend[3]);
 
 	/* a contract as a sink (or one already there at probe): its caps */
 	if (ccstat == CCSTAT_SINK && (u->st[ST(REG_PD_STATUS1)] & PD1_PSRDY) &&
 	    (psrdy || !u->pd.have_first))
 		usbc_pd_read_caps(u);
 	usbc_typec_update(u);
+	usbc_dp_update(u);
+	usbc_orient_log(u);
 
 	usbc_publish(u);
 
@@ -2637,7 +3991,8 @@ static int usbc_vdm_show(struct seq_file *s, void *unused)
 	int i;
 
 	mutex_lock(&u->vdm_lock);
-	seq_printf(s, "vdm_debugfs %d, vdm_discovery %d\n", vdm_debugfs, vdm_discovery);
+	seq_printf(s, "vdm_debugfs %d, vdm_discovery %d, dp_altmode %d\n", vdm_debugfs,
+		   vdm_discovery, dp_altmode);
 	if (u->vdm_req_len) {
 		seq_printf(s, "request: %*phN, ret %d\n", u->vdm_req_len, u->vdm_req,
 			   u->vdm_ret);
@@ -2654,6 +4009,14 @@ static int usbc_vdm_show(struct seq_file *s, void *unused)
 	for (i = 0; i < 3; i++)
 		if (u->vdm_resp_ok[i])
 			seq_printf(s, "0x4b %s: %*phN\n", what[i], VDM_RESP_LEN, u->vdm_resp[i]);
+	/* racy snapshot of wq-owned state: for reading by eye only */
+	if (u->dp_on)
+		seq_printf(s, "dp: port altmode %s, first svid %04x, mode %s%08x, partner altmode %s, entered %d, status %s%08x (HPD %s), queued %u\n",
+			   u->dp_port ? "yes" : "no", u->dp_svid0,
+			   u->dp_mode_found ? "" : "none ", u->dp_mode_vdo,
+			   u->dp_partner ? "yes" : "no", u->dp_entered,
+			   u->dp_status_valid ? "" : "none ", u->dp_status,
+			   u->dp_status & DP_STATUS_HPD_STATE ? "high" : "low", u->dp_q_n);
 	return 0;
 }
 
@@ -2842,6 +4205,17 @@ static const struct file_operations usbc_probe_fops = {
 	.release = single_release,
 };
 
+static int usbc_orientation_show(struct seq_file *s, void *unused)
+{
+	struct max77705_usbc *u = s->private;
+	u8 pin = FIELD_GET(CC0_CCPINSTAT, u->st[ST(REG_CC_STATUS0)]);
+
+	seq_printf(s, "MCU CCPinStat %s, orientation-sense %d\n", ccpin_name[pin],
+		   usbc_orient_sense(u));
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(usbc_orientation);
+
 static void usbc_debugfs_init(struct max77705_usbc *u)
 {
 	u->debugfs = debugfs_create_dir("max77705-usbc", NULL);
@@ -2852,7 +4226,9 @@ static void usbc_debugfs_init(struct max77705_usbc *u)
 		debugfs_create_file("pd_request", 0600, u->debugfs, u, &usbc_pd_request_fops);
 		debugfs_create_file("probe", 0600, u->debugfs, u, &usbc_probe_fops);
 	}
-	if (vdm_debugfs > 0 || vdm_discovery)
+	if (u->orient_sense)
+		debugfs_create_file("orientation", 0400, u->debugfs, u, &usbc_orientation_fops);
+	if (vdm_debugfs > 0 || usbc_discovery(u))
 		debugfs_create_file("vdm", vdm_debugfs > 0 ? 0600 : 0400,
 				    u->debugfs, u, &usbc_vdm_fops);
 }
@@ -2869,6 +4245,13 @@ static void usbc_stop_work(void *data)
 	cancel_delayed_work_sync(&u->poll_work);
 	cancel_work_sync(&u->event_work);
 	cancel_delayed_work_sync(&u->hv_work);
+	cancel_delayed_work_sync(&u->dp_work);
+	cancel_delayed_work_sync(&u->dp_gate_work);
+	cancel_delayed_work_sync(&u->dp_id_work);
+	cancel_delayed_work_sync(&u->dp_tx_work);
+	if (IS_ENABLED(CONFIG_TYPEC))
+		cancel_delayed_work_sync(&u->typec_work);
+	usbc_otg_stop(u, true);
 }
 
 static void usbc_destroy_wq(void *data)
@@ -2902,6 +4285,12 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	INIT_WORK(&u->event_work, usbc_event_work);
 	INIT_DELAYED_WORK(&u->poll_work, usbc_poll_work);
 	INIT_DELAYED_WORK(&u->hv_work, usbc_hv_work);
+	INIT_DELAYED_WORK(&u->otg.recheck, usbc_otg_recheck);
+	INIT_DELAYED_WORK(&u->dp_work, usbc_dp_work);
+	INIT_DELAYED_WORK(&u->dp_gate_work, usbc_dp_gate_work);
+	INIT_DELAYED_WORK(&u->dp_id_work, usbc_dp_id_work);
+	INIT_DELAYED_WORK(&u->dp_tx_work, usbc_dp_tx_work);
+	spin_lock_init(&u->dp_lock);
 	i2c_set_clientdata(client, u);
 	u->log = devm_kcalloc(dev, LOG_N, sizeof(*u->log), GFP_KERNEL);
 
@@ -2935,6 +4324,14 @@ static int max77705_usbc_probe(struct i2c_client *client)
 	if (!usbc_read(u, REG_UIC_INT_M, mask, 4))
 		dev_info(dev, "masks were %02x %02x %02x %02x\n",
 			 mask[0], mask[1], mask[2], mask[3]);
+	usbc_dp_from_dt(u);	/* before the masks: DP opens PD_INT's DP bits */
+	u->orient_last = 0xff;
+	u->orient_sense = devm_gpiod_get_optional(dev, "orientation-sense", GPIOD_ASIS);
+	if (IS_ERR(u->orient_sense)) {
+		/* a debug readout: never a reason to fail charging */
+		dev_warn(dev, "orientation-sense-gpios: %ld, not read\n", PTR_ERR(u->orient_sense));
+		u->orient_sense = NULL;
+	}
 	ret = usbc_set_masks(u);
 	if (ret)
 		return dev_err_probe(dev, ret, "mask write failed\n");
@@ -3007,6 +4404,7 @@ static void max77705_usbc_shutdown(struct i2c_client *client)
 		 u->pd.pos, u->mbox_allowed && !u->mbox_dead ? "on" : "off");
 	cancel_delayed_work_sync(&u->hv_work);
 	cancel_work_sync(&u->event_work);
+	usbc_otg_stop(u, false);	/* VBUS out off before anything else */
 	if (u->mbox_allowed && !u->mbox_dead) {
 		if (u->hv_mode != HV_NONE) {
 			usbc_dcp_5v(u);

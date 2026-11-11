@@ -322,21 +322,52 @@ Android 13's Bluetooth is split into three layers:
    `BluetoothGattServer`, `BluetoothLeAdvertiser`).
 2. Binder (system_server's `BluetoothManagerService`, then the Bluetooth
    app's `AdapterService`, `GattService` and `ScanManager`).
-3. JNI, into the native stack `libbluetooth.so` (Fluoride/GD), through its C
-   and C++ interfaces: `bt_interface_t`, `btgatt_interface_t` (client and
-   server), `BleScannerInterface`, `BleAdvertiserInterface` and
-   `btsock_interface_t`. Below that is the HCI HAL.
+3. JNI, into the native stack (Fluoride/GD), through its C and C++
+   interfaces: `bt_interface_t`, `btgatt_interface_t` (client and server),
+   `BleScannerInterface`, `BleAdvertiserInterface` and `btsock_interface_t`.
+   Below that is the HCI HAL.
 
-The shim **replaces `libbluetooth.so`** in the system image. It implements
-those interfaces and keeps the Java Bluetooth app, permissions, scan filters
-and callbacks unchanged, so apps see stock Android behaviour.
+The shim implements layer 3's interfaces and keeps the Java Bluetooth app,
+permissions, scan filters and callbacks unchanged, so apps see stock Android
+behaviour.
+
+**What the pinned image has** (system.img of 20260927, `TQ3A.230901.001`,
+read with debugfs on 8 Nov):
+
+- `com.android.btservices` is a *flattened* APEX directory,
+  `/system/apex/com.android.btservices/`, so `strip-image.sh` can change it
+  like any other file.
+- There is **no `libbluetooth.so`**. In Android 13 the stack is linked
+  statically into `lib64/libbluetooth_jni.so` (13.8 MB). The JNI code reaches
+  it only through `hal_util_load_bt_library()`, which returns
+  `&bluetoothInterface` (no `dlopen`; `DYNAMIC_LOAD_BLUETOOTH` is off).
+  `bluetoothInterface` (328 bytes) and `JNI_OnLoad` are exported dynamic
+  symbols. Every profile interface, GATT, scanner, advertiser and sockets
+  included, is fetched through `bluetoothInterface.get_profile_interface`.
+- There is **no Bluetooth app** (`com.android.bluetooth`, `Bluetooth.apk`):
+  no `app/` in the APEX and none in any app directory. The LineageOS waydroid
+  target leaves it out. `framework-bluetooth.jar`, `service-bluetooth.jar`
+  (with its odex) and the app's privapp allowlist are there. Without the app,
+  `BluetoothManagerService` has nothing to bind, and without the
+  `android.hardware.bluetooth*` features system_server doesn't start it.
+
+So the shim does not replace a `libbluetooth.so`. It goes in as a **wrapper
+`libbluetooth_jni.so`**: the stock library is renamed
+`libbluetooth_jni_stock.so` in the same APEX directory, and the wrapper's
+`JNI_OnLoad` `dlopen`s it, makes the page of its `bluetoothInterface`
+writable, copies the shim's `bt_interface_t` over it, and calls the stock
+`JNI_OnLoad`, which registers the stock JNI methods. From then on the JNI
+code calls the shim. The stock stack stays in memory but is never
+initialised (`init` and `enable` are the shim's). This keeps the JNI layer
+the exact one the image was built with. The only ABI the shim must match is
+that of the interface structs and classes of `packages/modules/Bluetooth` at
+`lineage-20.0`. See "Shim build" below.
 
 Below the interfaces, it speaks a small framed protocol over a Unix socket.
-The socket is bind-mounted into the container the way the location bridge
-reaches the host. On the other end is a host daemon, **`ztos-btbridge`**, a
-user of BlueZ's D-Bus API. It runs on the host (BlueZ and `AF_BLUETOOTH` are
-there), as part of the ztos-waydroid package. It is not a stack: BlueZ does
-SMP, SSP, encryption and key storage.
+On the other end is a host daemon, **`ztos-btbridge`**, a user of BlueZ's
+D-Bus API. It runs on the host (BlueZ and `AF_BLUETOOTH` are there), as the
+user's systemd service, and is part of the ztos-waydroid package. It is not
+a stack: BlueZ does SMP, SSP, encryption and key storage.
 
 Rejected alternatives at other layers:
 
@@ -344,6 +375,42 @@ Rejected alternatives at other layers:
   while BlueZ also drives the real one. It can't honour BlueZ's ownership.
 - **Replacing the Java Bluetooth app.** That would mean reimplementing about
   ten AIDL interfaces, and it breaks with every Android release.
+- **Interposing `bluetoothInterface` by symbol** (loading a library first
+  that defines it). It doesn't work: the JNI code's reference is resolved at
+  link time, and no dynamic relocation names it.
+
+### Socket and trust
+
+- **Where.** The host's `~/.local/share/waydroid/data` is Android's `/data`
+  (Waydroid's session bind mount). The host user is uid 1000, which is
+  Android's `system` and owns `/data/misc`. The bridge makes
+  `/data/misc/ztos-btbridge/` (mode 0711) and listens on `bridge.sock` in
+  it. This needs no Waydroid change, and the path survives a bridge restart.
+- **Who.** The socket is `SOCK_SEQPACKET`. The bridge checks `SO_PEERCRED`
+  of every connection: the uid must be 1002 (`AID_BLUETOOTH`, the Bluetooth
+  app; the container has no user namespace, so uids are the host's), and the
+  pid must be in the `lxc.payload.waydroid` cgroup. Anything else is closed
+  at once. Apps can't reach the socket. The bridge doesn't trust the shim
+  anyway: all policy is on the host.
+- **What Android never gets.** No HCI: the container's network namespace
+  has no `AF_BLUETOOTH`, and the bridge has no op that sends raw HCI or mgmt
+  commands. No link keys or LTKs: no op returns them, and BlueZ's D-Bus API
+  doesn't expose them either. No agent role: the shim never raises Android's
+  pairing dialog. RFCOMM connections (stage 3) are handed over as an
+  already-connected socket fd (`SCM_RIGHTS`), which carries data only.
+
+### Protocol
+
+Each message is one `SOCK_SEQPACKET` packet of at most 64 KiB. It starts
+with a header `op:u16, flags:u16, id:u32` (little endian), followed by the
+arguments, each a type byte and its value (`y` u8, `q` u16, `u` u32, `i`
+i32, `B` bool, `a` address in 6 bytes, `U` 128-bit UUID, `s` UTF-8 string,
+`b` bytes, `L` list, `T` tuple). Requests carry an id. The answer is a
+`REPLY` with that id and a status first. Events carry id 0. The table of ops
+and their argument signatures is in
+`android/waydroid/bluetooth/ztbt/proto.py`, and a test checks the shim's
+C++ header against it. The bridge refuses a packet whose arguments don't
+match its op's signature.
 
 ### Mapping
 
@@ -357,27 +424,38 @@ Rejected alternatives at other layers:
 | `discoverServices` → `search_service` / `get_gatt_db` | the GattService1 / GattCharacteristic1 / GattDescriptor1 tree under the device (handles from their `Handle` property) |
 | `readCharacteristic`, `readDescriptor` | GattCharacteristic1/GattDescriptor1 `ReadValue({offset})` |
 | `writeCharacteristic` (with/without response, signed) | `WriteValue(value, {type: request/command/reliable})` (`AcquireWrite` for high-rate write-without-response) |
-| `setCharacteristicNotification` + CCCD write → `register_for_notification` | `StartNotify()`/`StopNotify()`, or `AcquireNotify()` for an fd; `PropertiesChanged(Value)` → `notify_cb` |
-| `requestMtu` → `configure_mtu` | read-only: BlueZ negotiates the MTU itself; the shim reports `MTU` from GattCharacteristic1 (BlueZ ≥ 5.62) |
+| `setCharacteristicNotification` (local only), then the app's CCCD (0x2902) write → `register_for_notification`, `write_descriptor` | the CCCD write becomes `StartNotify()`/`StopNotify()` on its characteristic (BlueZ refuses direct CCCD writes); `PropertiesChanged(Value)` → `notify_cb`; a CCCD read answers the last value written |
+| `requestMtu` → `configure_mtu` | BlueZ exchanges the MTU itself (it asks for 517 on every LE connection); the shim answers with GattCharacteristic1 `MTU` |
 | `readRemoteRssi`, `requestConnectionPriority`, `setPreferredPhy` | Device1 `RSSI`; no-op with success; `Adapter1`/mgmt PHY configuration, read-only at first |
 | `BluetoothDevice.createBond` → `bt_interface_t::create_bond` | Device1 `Pair()`; **BlueZ's agent** (ztOS's `ztos-bt-agent`, the shell's sheet) asks the user; the result → `bond_state_changed_cb`. The Android pairing dialog is never shown: the shim never calls `ssp_request_cb`/`pin_request_cb` |
 | encrypted characteristic (insufficient authentication) | BlueZ itself pairs on the ATT error (its agent again), retries, and returns the value; Android only sees a slower read |
-| `removeBond` | refused for bonds BlueZ made outside Android; allowed only for a bond an Android app created, and only after the shell's confirmation (Device1 `RemoveDevice` is never called silently) |
+| `removeBond` | Adapter1 `RemoveDevice`, for any bond (Settings-made too) unless Linux is using the device, while Settings > Android apps > "Let Android apps remove Bluetooth pairings" is on (the default); refused for everything when it's off |
 | `BluetoothLeAdvertiser.startAdvertisingSet` → `BleAdvertiserInterface::StartAdvertisingSet` | LEAdvertisingManager1 `RegisterAdvertisement` of an `org.bluez.LEAdvertisement1` object exported by `ztos-btbridge` (Type, ServiceUUIDs, ManufacturerData, ServiceData, LocalName, Includes `tx-power`, MinInterval/MaxInterval, `SecondaryChannel` for extended); 5 instances shared with Linux |
 | `openGattServer`, `addService` → `btgatt_server_interface_t::add_service` | GattManager1 `RegisterApplication` of an ObjectManager tree (GattService1/Characteristic1/Descriptor1) that `ztos-btbridge` exports per Android server; `ReadValue`/`WriteValue` calls from BlueZ → `request_read_*_cb`/`request_write_*_cb`, Android's `sendResponse` → the D-Bus reply; `notifyCharacteristicChanged` → `PropertiesChanged(Value)` or the `AcquireNotify` fd |
-| `listenUsingRfcommWithServiceRecord`, `createRfcommSocketToServiceRecord` → `btsock_interface_t::listen/connect` | ProfileManager1 `RegisterProfile(uuid, {Role, Channel})`; `Profile1.NewConnection(fd)` → the socket fd passed into Android over the Unix socket (SCM_RIGHTS), which is what `btsock` returns to Java anyway; outgoing: Device1 `ConnectProfile(uuid)` |
+| `createRfcommSocketToServiceRecord(uuid)`, the hidden `createRfcommSocket(channel)`, `connect()` → `btsock_interface_t::connect` | by UUID: Profile1 (client role) for that UUID + Device1 `ConnectProfile(uuid)`, BlueZ does SDP and security, `Profile1.NewConnection(fd)`; by channel: an RFCOMM socket from the bridge. The RFCOMM socket stays in the bridge, which relays it to Android's stream (see "Classic RFCOMM") |
+| `listenUsingRfcommWithServiceRecord` → `btsock_interface_t::listen` | not yet: ProfileManager1 `RegisterProfile(uuid, {Role: server})`, `NewConnection` per incoming connection |
 | `BluetoothLeScanner` with `PendingIntent`, batch scan, `BluetoothHeadset`/A2DP profiles | not offered (A2DP/HFP stay Linux's: audio goes through PipeWire anyway) |
 
 ### Policy (`ztos-btbridge`, on the host)
 
 The policy lives in the host daemon, so Android can't get around it.
 
-- **Hidden while Linux uses it.** A device with `Connected=true` that the
-  bridge did not connect for Android (the AirPods, the Fold6) is left out of
+- **Hidden while Linux uses it.** A device that Linux is connected to and
+  using, and that the bridge did not connect for Android, is left out of
   scan and discovery results and the bonded list. Android's `connect`,
   `connectGatt` and `createBond` to it fail with "device busy" (GATT 0x85).
-  When Linux disconnects it, a bonded device shows again as bonded and
-  disconnected and can be used.
+  "Using" means:
+  - any Classic (BR/EDR) device: its profiles are Linux's (the AirPods,
+    the Fold6);
+  - an LE device with a Linux profile on it: input (HID over GATT), audio or
+    network (BlueZ's `Input1`, `MediaControl1`, `MediaTransport1`,
+    `MediaPlayer1`, `Network1` on the device or its children).
+
+  An LE device that is merely connected, for example left connected after a
+  pairing in Settings with only GATT on it (RM_2685, 8 Nov), is not in use.
+  An Android app may connect to it and shares the link, and the bridge never
+  disconnects a link it didn't make. When Linux disconnects a hidden device,
+  a bonded one shows again as bonded and disconnected and can be used.
 - **Connected on both sides.** The bridge's `Device1.Connect()` makes BlueZ
   show the device as connected. The shell's Bluetooth page marks it "in use
   by Android". The bridge keeps a reference per Android client. When the
@@ -388,26 +466,444 @@ The policy lives in the host daemon, so Android can't get around it.
   passes keys into Android. Android's `bt_config.conf` holds addresses and
   names only, and the shim rebuilds it from BlueZ at every start.
 - **Pairing UI is ztOS's.** All pairing goes through BlueZ's registered agent
-  (`ztos-bt-agent`). Today the agent accepts only while the phone is
-  discoverable, so a request that started from an Android app needs one
-  rule: accept it while the bridge has a `Pair()` outstanding for that
-  device.
-- **Frozen Android.** A freeze or the screen-off policy ends discovery and
-  advertising started by Android, and keeps GATT connections only for
-  `keep_awake` apps.
+  (`ztos-bt-agent`, the default agent; the bridge's `Pair()` uses it too,
+  since BlueZ falls back to the default agent for a caller without one).
+  The agent asks about any device only while the phone is discoverable.
+  Otherwise it asks only about the devices this phone is dealing with for
+  Android:
+  - those the bridge holds (connected for an app);
+  - those in the bridge's own `Pair()`.
+
+  The bridge lists them in `$XDG_RUNTIME_DIR/ztos-btbridge/expected`, one
+  `ADDRESS EXPIRY` line each (60 s ahead, refreshed every 30 s while held,
+  cleared when let go). The agent takes the file only if it is a regular
+  file of its own user that nobody else can write. Counting connections, not
+  just `Pair()`, matters: a device that needs a PIN or passkey often asks for
+  pairing itself when an app reads something encrypted (a security request).
+  The RM_2685 did that on 8 Nov, and the old rule refused it without a sheet
+  ("not discoverable"), four times. All other requests are still refused
+  without a sheet, and the agent never says yes by itself. LE "Just Works"
+  pairing started from the phone asks nobody: the kernel runs it alone.
+- **Bonded list.** The list Android gets at start leaves out bonded devices
+  that Linux is connected to. If Linux connects one later, Android keeps it
+  as bonded (a bond state change would make apps think it was unpaired), but
+  its connects fail with "busy" until Linux lets go.
+- **Frozen Android.** The bridge watches the container's cgroup
+  (`/sys/fs/cgroup/lxc.payload.waydroid/cgroup.events`, `frozen 1`). On a
+  freeze it ends Android's discovery and advertising and disconnects every
+  connection it made for Android. A `keep_awake` app keeps the container
+  thawed, so its connections stay. While Android can't read, scan results
+  are dropped and the other events are queued (bounded) until it thaws. A
+  stopped container closes the socket, which releases everything too.
+- **Removing bonds.** The user's decision (9 Nov): Android apps may
+  remove pairings, behind a switch in Settings > Android apps ("Let
+  Android apps remove Bluetooth pairings", config key
+  `android_bt_remove_bond=on|off` in `~/.config/ztmetro/config`, default
+  on, read by the bridge at each request). On, `removeBond` removes the
+  BlueZ device for any bond, Settings-made ones included, except a device
+  Linux is using (hidden from Android anyway); off, every `removeBond` is
+  refused. No confirm sheet. A refusal sends BOND_BONDED with a failure
+  status. Either way Android hears BOND_NONE when a bond goes, also when
+  it is removed on Linux (Settings, `bluetoothctl remove`: BlueZ just
+  drops the object, so `device_removed` sends it). The bridge still
+  records the bonds Android made in
+  `~/.local/state/ztos-btbridge/android-bonds`, for the log.
 
 ### Container side
 
 - Add `android.hardware.bluetooth.xml` and `android.hardware.bluetooth_le.xml`
   to the vendor permissions (`patch-vendor.sh`). Without them, apps see no
-  Bluetooth.
-- Install the shim as `/system/lib64/libbluetooth.so` (and
-  `libbluetooth_jni`'s dependency), with `strip-image.sh` and a checksum
-  pin, as for init and the composer.
+  Bluetooth and system_server doesn't start `BluetoothManagerService`.
+- Add the Bluetooth app as `app/Bluetooth/Bluetooth.apk` in the flattened
+  APEX directory, where `lineage-20.0` installs it. It must come from a build
+  of the same release (see "Shim build").
+- Rename the stock `libbluetooth_jni.so` to `libbluetooth_jni_stock.so` and
+  install the wrapper under the old name. Use `strip-image.sh` and checksum
+  pins, as for init and the composer.
+- Switch off the profiles the bridge doesn't offer (A2DP, HFP, AVRCP, HID,
+  PAN, LE Audio, hearing aids and so on) with the app's `profile_supported`
+  config (a runtime resource overlay) and the `bluetooth.profile.*.enabled`
+  properties. Then the Java side never asks for their native interfaces.
+- Grant the app its Nearby-devices runtime permissions (`BLUETOOTH_CONNECT`,
+  `_SCAN`, `_ADVERTISE`) with a default-permissions file in
+  `product/etc/default-permissions`. Without them its ProfileService refuses
+  to start ("Permission denied!"), GattService never runs, and Android times
+  out turning Bluetooth on (`BLE_START_TIMEOUT`) without ever asking the
+  stack. Android applies default grants only at a set-up's first boot or
+  after a fingerprint change. So an installation whose Android booted before
+  the app was added needs them once with `pm grant com.android.bluetooth
+  android.permission.BLUETOOTH_CONNECT` (and `_SCAN`, `_ADVERTISE`), as on
+  the test phone on 8 Nov.
 - No HCI HAL service is needed: the shim never opens one.
-- The shim must be built against the LineageOS 20 `packages/modules/Bluetooth`
-  headers of the pinned build, because the C++ interface vtables have to
-  match. That needs the NDK plus those headers, built off the phone.
+
+### Shim build
+
+The wrapper and shim are C++ for aarch64 bionic. They are built on the PC
+with NDK r25c (API 33) and:
+
+- the interface headers of LineageOS `android_packages_modules_Bluetooth`
+  at `lineage-20.0` (`system/include/hardware/bluetooth.h`, `bt_gatt*.h`,
+  `ble_scanner.h`, `ble_advertiser.h`, `bt_sock.h`, `types/`), fetched by a
+  script at a pinned commit;
+- AOSP `external/libchrome` (r576279) headers at `android-13.0.0_r75`.
+  These are needed because `BleScannerInterface`, `BleAdvertiserInterface`
+  and the GATT client take `base::Callback`s. The shim only runs and copies
+  callbacks the JNI code made. The few out-of-line functions that takes
+  (libchrome's `callback_internal.cc` and `memory/ref_counted.cc`) are
+  compiled into the shim. It can't link against the stock library, because
+  both have the soname `libbluetooth_jni.so`;
+- the NDK's libc++ headers compiled with `_LIBCPP_ABI_NAMESPACE=__1`, and
+  linked against the image's own `libc++.so`, not the NDK's
+  `libc++_shared` (`std::__ndk1`). `std::vector` and `std::string` cross the
+  interface, so both sides must use the same libc++. NDK r25c's clang is
+  r450784d1, the compiler Android 13 itself is built with, so its libc++
+  headers are the platform's.
+- the flags AOSP builds arm64 platform code with: `-fsanitize=shadow-call-stack`,
+  `-fno-exceptions`, `-fno-rtti`, `NDEBUG` (libchrome's
+  `RefCountedThreadSafeBase` has extra members when DCHECKs are on).
+
+`shim/fetch.sh` gets the pinned sources (`shim/sources.conf`), the NDK
+(sha256-checked) and, from the system image with debugfs, `libc++.so`,
+`liblog.so` and the stock `libbluetooth_jni.so`. `shim/build.sh` builds
+`out/libbluetooth_jni.so` (125 KB; the build is reproducible) and fails
+unless:
+
+- it exports only `JNI_OnLoad` and needs only `libc++`, `liblog`, `libdl`,
+  `libc` and `libm`;
+- it links with no undefined symbol against the image's libraries;
+- `sizeof(bt_interface_t)` is the size of the stock `bluetoothInterface`
+  symbol (328). The wrapper also checks the stock `size` field at run time,
+  and refuses to patch on a mismatch;
+- the libchrome callback functions built into the shim use the same field
+  offsets as the stock library's (`shim/abi-check.sh` compares the
+  disassembly).
+
+The built library is kept in `prebuilts/waydroid-bt/`, with its sha256.
+
+**The Bluetooth app** comes from AndyYan's LineageOS 20 GSI (lineage-20-td,
+20251021, `TQ3A.230901.001`), the one `Bluetooth.apk` from its btservices
+APEX. Source URL and hashes are in `prebuilts/waydroid-bt/SOURCES`.
+`bluetooth/tools/check-bt-app.py` reads the app's dex files and the stock
+library's `JNINativeMethod` tables (through their RELR relocations). All 23
+classes with native methods match the Waydroid library's tables. As in stock
+AOSP 13, AdapterService declares three natives that no library registers.
+The GSI's `framework-bluetooth.jar` is byte-identical to the Waydroid
+image's, and its JNI library looks up the same Java callbacks.
+
+**Testing without Android.** `tests/test_shim_host.py` builds the shim for
+the PC (g++, the same sources and headers, `shim/tests/host-build.sh`) and
+drives it the way Android's JNI does (`shim/tests/host_test.cc`). It runs
+against the bridge's real core and socket, with a fake BlueZ that answers at
+once and plays the radio. The test covers:
+
+- enable, and the bonded list without the Linux-connected device;
+- LE scan results and Classic discovery;
+- GATT connect, database, reads (including an ATT error), the CCCD write and
+  the notification it brings, writes, MTU and PHY;
+- the Linux-connected device refused (133);
+- pairing through `Pair()`, removing a Linux bond refused, removing the
+  Android-made one allowed;
+- disable;
+- that no PIN or SSP request ever reaches Android, and that every callback
+  comes on the one thread that announced itself with `ASSOCIATE_JVM`.
+
+### Classic RFCOMM (stage 3, ahead of stage 2)
+
+The user's thermal printers (the Nelko app) use BLE or Classic SPP
+(`00001101-...`, RFCOMM). Classic comes before the peripheral stage.
+
+**What Android expects.** `BluetoothSocket.connect()` gets an fd from
+`btsock_interface_t::connect` at once: Fluoride's end of a Unix stream
+socketpair. It then reads a channel (`int`), then `sock_connect_signal_t`
+(packed, 20 bytes: size 20, address, channel, status, max tx and rx packet
+sizes; native order, which is little endian), and a non-zero status or the
+end of the stream fails with `IOException`. After that, the stream is the
+data.
+
+**How the bridge does it.**
+
+1. The shim makes the socketpair and returns one end to Android as the
+   socket. It sends the other end to the bridge in `RFCOMM_CONNECT`
+   (address, UUID or zero, channel or -1, Android's `SEC_FLAG_*`), as
+   `SCM_RIGHTS` with the packet (header flag `FLAG_FD`; the bridge closes the
+   connection on any packet whose fds don't fit its op). The shim keeps no
+   copy.
+2. The bridge applies the same policy as for GATT: Linux connected → busy,
+   adapter off or container frozen → refused. Otherwise it holds the device
+   for Android. If the device isn't bonded yet, it writes the agent's pairing
+   note: BlueZ pairs it (SSP) with its own agent and the shell's sheet, and
+   the bond is BlueZ's.
+3. **By UUID** (`createRfcommSocketToServiceRecord`, what printer apps use):
+   the bridge registers an `org.bluez.Profile1` for that UUID, once, client
+   role (no SDP record of ours), and calls `Device1.ConnectProfile(uuid)`.
+   BlueZ does the SDP lookup, connects with its security and keys, and calls
+   `NewConnection(device, fd)` (accepted only from bluetoothd's bus name).
+   The bridge reads the channel from the socket.
+   **By channel** (the hidden `createRfcommSocket(int)`, a common fallback in
+   printer apps): the bridge opens the RFCOMM socket itself
+   (`BT_SECURITY` medium when Android asked for a secure socket). The kernel
+   uses BlueZ's link keys for that link.
+4. Up: the bridge writes the channel and the connect signal into Android's
+   stream and relays both ways (`ztbt/relay.py`: GLib, non-blocking, at most
+   256 KiB waiting each way, so a slow printer slows the app instead of
+   filling memory). Failed: it closes Android's end (`IOException`).
+5. Down: when either side closes, what is still owed to the other side is
+   written out, both are closed, and the device is let go as for GATT (the
+   bridge disconnects only what it connected). A freeze closes every stream.
+
+**Why not pass the RFCOMM socket into Android.** fd passing would work
+across the namespaces, but then Android would hold an `AF_BLUETOOTH` socket
+(socket options, its security level). With the relay, Android holds only a
+Unix stream. For printers' rates (kB/s) the extra copy costs nothing.
+
+**Not yet:** listening sockets (`listenUsingRfcommWithServiceRecord`, a
+server-role Profile1), L2CAP and SCO sockets (refused), and `control_req`.
+Insecure sockets are connected with BlueZ's default security: SSP makes
+encryption mandatory for RFCOMM anyway.
+
+**Tested without Android or a printer:**
+
+- the core against a fake BlueZ (`tests/test_rfcomm.py`): the signal bytes,
+  the relay set-up, failures, busy, freeze, remote disconnect, a connect
+  finishing after its stream ended, the fd rules;
+- the relay with socketpairs (`tests/test_relay.py`), including a 1 MiB job to
+  a slow reader;
+- the Profile1 flow in both orders of reply and `NewConnection`
+  (`tests/test_bluez.py`);
+- the shim end to end (`test_shim_host.py`): `btsock connect` to an echoing
+  fake SPP printer by UUID, the signal read as Java reads it, a job written
+  and answered, the AirPods refused (end of stream), L2CAP refused.
+
+### LE advertising (stage 2, first half)
+
+`BluetoothLeAdvertiser.startAdvertisingSet` reaches the shim's
+`BleAdvertiserInterface::StartAdvertisingSet`. The shim sends `ADV_START`
+(connectable, scannable, intervals, tx power, the AD bytes, scan response,
+duration). The bridge reads Android's AD structures back into the properties
+of an `org.bluez.LEAdvertisement1` that it exports and registers with
+`LEAdvertisingManager1`:
+
+- Type: `peripheral` for a connectable set, `broadcast` otherwise.
+- Fields: `ServiceUUIDs` (16, 32 and 128 bit), `ManufacturerData`,
+  `ServiceData`, `LocalName`, `Appearance`, `Includes: tx-power`.
+- Other AD types go into `Data`.
+- `Discoverable` comes from the flags, but only for a connectable set: BlueZ
+  refuses flags on a broadcast ("Broadcast cannot set flags", found on the
+  phone).
+- `Timeout` comes from the duration.
+- Advertising data and scan response are merged, and BlueZ lays them out.
+
+New data (`SetData`) and `Enable` register the set again. When a duration
+runs out, BlueZ calls `Release`, and the shim calls the set's timeout
+callback.
+
+Policy:
+
+- Android gets at most 4 of BlueZ's 5 instances; the shim reports 4 as
+  `max_adv_instance`.
+- A freeze, the adapter going off, Android's Bluetooth going off, or the
+  shim going away stops Android's sets.
+- Legacy advertising only. Periodic advertising and the old single
+  `StartAdvertising` path are refused (unsupported). `SetParameters` is
+  accepted, but BlueZ keeps choosing intervals and power.
+- Sets advertise with BlueZ's address, not one Android picks.
+
+On the phone, `ztbt-cli SOCKET adv` registered a "ztOS-btbridge-test"
+broadcast through BlueZ 5.87 (`ActiveInstances` 0 → 1 → 0). The shim's path
+is covered by `test_shim_host.py`. Not tested inside Android yet: the image
+on the phone still has the RFCOMM build of the wrapper.
+
+### GATT server (stage 2, second half)
+
+`BluetoothGattServer.addService` reaches `btgatt_server_interface_t::add_service`.
+
+**Services.** The shim sends `SERVER_ADD` with the service's elements (type,
+UUID, properties, permissions). The bridge (`ztbt/gatts.py`) exports them as
+one BlueZ GATT application (`ztbt/gattapp.py`: an ObjectManager root, a
+`GattService1`, its `GattCharacteristic1`s and `GattDescriptor1`s) and
+registers it with `GattManager1.RegisterApplication`.
+
+- Properties become BlueZ flags. The permissions add `encrypt-read`,
+  `encrypt-write` and the authenticated variants: BlueZ enforces them, and
+  pairs through its own agent if it must.
+- The handles Android sees are the bridge's. The ATT handles on the air are
+  BlueZ's.
+- One service per application; deleting it unregisters it. Included
+  services are refused.
+
+**Requests.** bluetoothd's `ReadValue`/`WriteValue` calls (only taken from
+bluetoothd's bus name) become `request_read_*`/`request_write_*`, carrying a
+request id that the app answers with `sendResponse` (`SERVER_RESPONSE`). An
+ATT status from the app becomes the matching BlueZ error. Unanswered after
+25 s, BlueZ gets "unlikely error". Write-without-response is acknowledged at
+once.
+
+**Notifications.** BlueZ owns every CCCD (it makes one for each
+characteristic that notifies or indicates), so the 0x2902 descriptors Android
+declares aren't exported. BlueZ's `StartNotify`/`StopNotify` (first central
+subscribed, last one left) become the CCCD writes (`01 00`, `02 00`, `00 00`)
+Android apps wait for, attributed to the connected central. With several
+centrals that is a guess: BlueZ doesn't say which one subscribed.
+`notifyCharacteristicChanged` becomes a `Value` change, and BlueZ notifies or
+indicates each subscribed central as it subscribed. The indication-sent
+callback comes when the value is handed to BlueZ, not on each central's
+confirmation.
+
+**Connections.** A remote central becomes a connection of Android's servers
+only when it first touches one of their attributes (`EV_SERVER_CONN`, with
+the MTU). Devices that only use Linux's services, such as the AirPods, never
+show up in Android. Disconnection comes from BlueZ's `Connected`. A server
+can't connect out (`connect` refused); `cancelConnection` does nothing.
+
+**Lifetime.** A freeze or the adapter going off unregisters Android's
+services (centrals see Service Changed), and a thaw registers them again.
+Android's Bluetooth going off or the shim going away removes them.
+
+**Tested on the PC:**
+
+- the core against the fake BlueZ (`tests/test_gatts.py`);
+- the D-Bus objects on a private bus (`tests/test_gattapp.py`): what
+  bluetoothd reads with `GetManagedObjects`, async reads and writes, only
+  bluetoothd's calls taken, the `Value` signal;
+- the shim end to end (`test_shim_host.py`): a heart-rate service added,
+  a central's read answered by the app, its subscription seen as a CCCD
+  write, a notification sent, the service deleted.
+
+Not on the phone yet.
+
+### Found with real devices (8 Nov)
+
+The user tested Nelko with two Classic printers (PL70e-BT, PM220) and
+nRF Connect with a BLE printer (P21, 8C:D0:0D:AB:11:9A). Classic printed.
+BLE failed.
+
+- **GATT INVALID HANDLE, and nothing working the first time** (fixed). Android
+  13's `GattService.onGetGattDb` gives every service, characteristic and
+  descriptor `el.id` as its handle (instance id), and the app's reads and
+  writes come back with it. Fluoride sets `id` to the attribute handle. The
+  shim set it to a running index, so reads and the CCCD writes went to index
+  numbers: no attribute (INVALID HANDLE), or a wrong one. The shim now sets
+  `id` to the handle, and the host test checks it. The bridge's own mapping
+  was right: BlueZ's `Handle` on a remote characteristic is its declaration
+  handle (`chrc->handle`), used the same way for the database, reads and
+  CCCD writes (`test_bluez.py` replays a P21-like layout).
+- **Slow first RFCOMM connect** (fixed). After Nelko's pairing, the bridge
+  disconnected the printer that `Pair()` had connected, just as Nelko opened
+  its RFCOMM socket (1.3 s later): bluetoothd logged "Transport endpoint is
+  not connected" and Nelko retried 8 s later. A device the bridge connected
+  now stays up `LINGER_SECONDS` (4 s) after Android's last use. A new use
+  cancels the disconnect. A freeze, Android's Bluetooth going off or the
+  shim going away still lets go at once. The same helps nRF Connect's
+  close-and-reconnect around a bond.
+- **The BLE bond failed** (the device, not the bridge, as far as the logs
+  show). `Pair()` from the bridge uses ztOS's default agent: BlueZ's
+  `agent_get(sender)` falls back to it, so the bridge needs no agent of its
+  own. The P21 has no input or output, so LE pairing is Just Works. Started
+  from the phone, Just Works never asks user space, so no sheet and no PIN
+  is expected. The agent logged no request. `Pair()` ended after 33 s with
+  `AuthenticationFailed`, the kernel's 30 s SMP timeout: the printer never
+  answered the pairing request. Android's "Failed to remove device" after it
+  is Android's own bookkeeping; the bridge's `removeBond` wasn't called.
+- **Error mapping** (fixed): BlueZ's "Not paired" (`NotPermitted`) is now
+  ATT 0x05, so Android asks to bond. `InvalidArguments` "Invalid offset" and
+  "Invalid Length" are now 0x07 and 0x0d.
+- The bridge logs how long connects, pairings and RFCOMM connects take.
+
+### Scan results as received (9 Nov)
+
+The user's requirement: an app gets what it would see on a phone, the
+device's own advertising bytes, not a record rebuilt from BlueZ's parsed and
+merged properties. The rebuilt one went wrong in practice: once RM_2685 had
+connected, BlueZ's `UUIDs` held every resolved service, the rebuilt record
+ran to 125 bytes, Android kept 62 and cut the UUID list, and iTi's
+UUID-filtered scan found nothing (98bb663 rebuilt from the advertised UUIDs,
+capped at 62 bytes, as a stopgap; it stays as the fallback).
+
+- **Where the bytes are.** Not in BlueZ's D-Bus API. The kernel's management
+  interface has them: its Device Found event carries the advertising data
+  followed by the scan response (as the kernel merged them), the RSSI, and
+  flags: not connectable, scan response only.
+- **Who reads them: `ztos-bt-adwatch`** (`bluetooth/adwatch/`, about 150
+  lines of C). Device Found reaches only a *trusted* management socket,
+  which takes CAP_NET_ADMIN, so it's a program of its own, not python3 with
+  a capability. Its privileges:
+  - a system service started by its socket
+    (`/run/ztos-bt-adwatch.sock`, SOCK_SEQPACKET, 0666), running as a
+    systemd `DynamicUser` with **only CAP_NET_ADMIN** (ambient and bounding
+    set), `NoNewPrivileges`, address families AF_UNIX and AF_BLUETOOTH only,
+    `ProtectSystem=strict`, no home directories, the `@system-service`
+    syscall set without `@privileged`;
+  - a client must be root or a user with a session (`/run/user/UID` theirs);
+  - it opens the management socket only while a client is connected, and
+    exits after 30 s without one;
+  - it **never writes** to the management socket: no command, so it can't
+    change the adapter, scan, pair or connect. Events come only while
+    something scans (bluetoothd, for the bridge's discovery);
+  - it passes on Device Found and nothing else, unchanged (controller index,
+    then the event's parameters), dropping any that don't add up;
+  - what clients send is ignored.
+
+  The same advertisements are readable by any local user through BlueZ's
+  D-Bus API already, parsed: the socket being open to session users gives
+  away nothing new.
+- **The bridge** connects to it only while Android scans LE
+  (`rawads.Watch`), and keeps the last record per device (256 devices at
+  most, forgotten with the device). A scan result carries, in this order:
+  the record as received (a lone scan response goes after the last
+  advertisement heard); else, until one arrives, the rebuilt record
+  within 62 bytes. Hidden (Linux's) devices are never reported. A connected
+  device Linux holds (the 2 s reports) gets its last advertisement as
+  received, or the rebuilt one if none was heard. The exact bytes go
+  through, padding and malformed structures included, as a phone would pass
+  them.
+- **The event type.** Version 2 of the protocol adds `EV_DEVICE_FOUND2`
+  with Android's event type: 0x13 connectable, 0x10 not, 0x1b/0x1a for a
+  scan response on its own. The bridge accepts a version 1 shim and sends it
+  `EV_DEVICE_FOUND` as before (always 0x13), so the bridge can go first and
+  the shim with the next image swap.
+- Without the helper (not installed, or not running) the bridge logs it
+  once per scan and falls back to rebuilt records.
+
+### Connection priority (9 Nov)
+
+iTi's firmware update ran at 2.3 KB/s: 146-byte Write Commands, about one
+per connection event at BlueZ's 48.75 ms interval. On a phone an updater
+calls `BluetoothGatt.requestConnectionPriority(CONNECTION_PRIORITY_HIGH)`,
+and Android 13 asks its stack for 11.25-15 ms, latency 0 (BALANCED 30-50 ms,
+LOW_POWER 100-125 ms with latency 2; a 5 s supervision timeout each). The
+shim ignored the HAL's `conn_parameter_update`.
+
+- **Shim:** `conn_parameter_update` sends `CONN_UPDATE` (protocol version 3);
+  `EV_CONN_UPDATED` comes back with what the link now has, or the HCI status,
+  and the shim gives it to every open link to that device
+  (`conn_updated_cb`).
+- **Bridge:** only for a device one of the asking client's own links holds,
+  and no faster than HIGH (min interval 9); within the spec otherwise. When
+  Android is done and Linux keeps the link (it was connected before), the
+  bridge puts BALANCED back. A link the bridge made is disconnected anyway.
+- **`ztos-bt-connparam`** (`bluetooth/connparam/`, a sibling of adwatch):
+  BlueZ has no D-Bus call for a central's connection update. The kernel's
+  route, mgmt Load Connection Parameters with one entry, would also store the
+  parameters for every later connection to the device, drops the other
+  devices' stored ones when it has none for this one, and doesn't say what
+  the peripheral settled on. So the helper sends the HCI command itself:
+  - socket-activated (`/run/ztos-bt-connparam.sock`), a `DynamicUser` with
+    **only CAP_NET_RAW** (a raw HCI socket that may send commands), the same
+    sandbox as adwatch; clients: root or session users;
+  - one request at a time: an address and the four values, checked against
+    the Core spec; it finds the LE connection to that address
+    (HCIGETCONNINFO) and refuses unless this side is the central;
+  - it sends **one command, LE Connection Update (0x2013)**, for that
+    handle, and nothing else ever; it reads only that command's Command
+    Status and its LE Connection Update Complete (5 s at most), and answers
+    with the status and the interval, latency and timeout now in use. The
+    kernel sees the same event and keeps its own record right.
+- **Supervision timeout** (the iTi drop before, 9 Nov): BlueZ's
+  `[LE] ConnectionSupervisionTimeout` and the debugfs value only reach
+  connection parameters the kernel creates afterwards. The ones made at boot
+  for known devices (hci_conn_params) kept 420 ms until the phone restarted,
+  so a change there needs a restart of Bluetooth or the phone to apply to
+  every device.
 
 ### Stages
 
@@ -421,6 +917,40 @@ The policy lives in the host daemon, so Android can't get around it.
 Effort is roughly 2 to 3 weeks for stage 1 (shim, bridge and policy),
 1 week for stage 2 and 1 week for stage 3. Each stage needs the container
 running, which needs the `--waydroid` kernel.
+
+### The bridge (built)
+
+`android/waydroid/bluetooth/`:
+
+| File | What |
+|---|---|
+| `ztos-btbridge` | the daemon (Python, dbus-python, GLib) |
+| `ztbt/proto.py` | the wire format and the table of ops |
+| `ztbt/core.py` | the policy and the ops, with no D-Bus or socket in it |
+| `ztbt/bluez.py` | BlueZ: Adapter1, Device1, the GATT objects |
+| `ztbt/server.py` | the socket, the `SO_PEERCRED` and cgroup checks, the freezer watch, the store |
+| `ztos-btbridge.socket`, `.service` | user units. The socket is enabled by the package; the daemon starts on the first connection and exits 5 minutes after the last one |
+| `ztbt-cli` | the shim's side of the protocol, for tests on the host |
+| `tests/` | `python3 -m unittest` in that directory: the wire format, the policy and BLE central ops against a fake BlueZ, the backend's bookkeeping, the socket |
+
+The package installs it in `/usr/lib/ztos-waydroid/btbridge/`.
+`ztos-bt-agent` (base system) reads the bridge's pairing note.
+
+The bridge carries stage 1's ops now: adapter, bonded list, LE scan and
+Classic discovery, GATT client (connect, database, read, write,
+notifications through the CCCD), MTU, RSSI, and bonds through BlueZ. On the
+phone it was run against BlueZ 5.87 with `ztbt-cli`
+(`ztos-btbridge --socket /tmp/... --allow-uid $(id -u) --no-container-check`):
+`HELLO`, the bonded list, and LE and auto scans found 15 advertisers, with
+the AD structures rebuilt. Connecting and pairing were not tried on the
+phone, because of the testing rules below.
+
+Not done yet: reliable (prepared) writes, `AcquireNotify` (a notification
+that arrives while the same characteristic is being read is lost, because
+BlueZ's `Value` change can't be told apart from the read's), background
+(`autoConnect`) connections (the bridge always connects directly), PHY and
+connection priority, advertising and the GATT server (stage 2), and RFCOMM
+(stage 3).
 
 ### Testing rules
 

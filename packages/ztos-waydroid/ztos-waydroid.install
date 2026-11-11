@@ -2,13 +2,14 @@
 # before: no units enabled, no sudo rule, no nftables tables, no images. The
 # user's Android data (~/.local/share/waydroid: apps, chats) is kept and named.
 
-_user_units='ztos-waydroid-boot.service ztos-waydroid-audio-reconnect.service'
+_user_units='ztos-waydroid-boot.service ztos-waydroid-audio-reconnect.service ztos-btbridge.socket'
 
 post_install() {
 	ztos-user-dropins > /dev/null || echo 'ztos-waydroid: ztos-user-dropins failed: no sudo rule for the user'
 	systemctl daemon-reload
 	systemctl --global enable $_user_units > /dev/null 2>&1
 	systemctl enable ztos-waydroid-images.service > /dev/null 2>&1
+	systemctl enable --now ztos-bt-adwatch.socket ztos-bt-connparam.socket > /dev/null 2>&1
 	# fetch the images now, in the background (about 1 GB; then set-up, once
 	# the kernel has binder): journalctl -u ztos-waydroid-images
 	systemctl start --no-block ztos-waydroid-images.service
@@ -21,6 +22,8 @@ post_install() {
 post_upgrade() {
 	ztos-user-dropins > /dev/null || true
 	systemctl daemon-reload
+	systemctl --global enable ztos-btbridge.socket > /dev/null 2>&1 || true
+	systemctl enable --now ztos-bt-adwatch.socket ztos-bt-connparam.socket > /dev/null 2>&1 || true
 }
 
 pre_remove() {
@@ -30,7 +33,7 @@ pre_remove() {
 		ztos_as_user timeout 25 waydroid session stop > /dev/null 2>&1 || true
 	fi
 	systemctl --global disable $_user_units > /dev/null 2>&1 || true
-	systemctl disable --now ztos-waydroid-images.service ztos-waydroid-network.service \
+	systemctl disable --now ztos-waydroid-images.service ztos-waydroid-network.service ztos-bt-adwatch.socket ztos-bt-adwatch.service ztos-bt-connparam.socket ztos-bt-connparam.service \
 		waydroid-container.service > /dev/null 2>&1 || true
 	# the network: ztos-waydroid-network's NAT table, and waydroid-net.sh's
 	# bridge and tables if the container left them
@@ -53,6 +56,7 @@ post_remove() {
 		rm -f "$ZTOS_HOME"/.local/share/applications/waydroid.*.desktop \
 			"$ZTOS_HOME"/.local/share/applications/ztos-android-*-waydroid.desktop
 		rm -f "$ZTOS_RUNTIME_DIR"/ztos-waydroid-* 2> /dev/null || true
+		rm -rf "$ZTOS_RUNTIME_DIR"/ztos-btbridge 2> /dev/null || true
 	fi
 	systemctl daemon-reload
 	if [ -n "$ZTOS_HOME" ] && [ -d "$ZTOS_HOME/.local/share/waydroid" ]; then

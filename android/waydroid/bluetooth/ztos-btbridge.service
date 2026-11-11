@@ -1,0 +1,11 @@
+[Unit]
+Description=ztOS: Bluetooth for Android apps, through BlueZ
+Documentation=file:///usr/share/doc/ztos-waydroid/waydroid.md
+Requires=ztos-btbridge.socket
+After=ztos-btbridge.socket dbus.socket
+
+[Service]
+ExecStart=/usr/lib/ztos-waydroid/btbridge/ztos-btbridge
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes

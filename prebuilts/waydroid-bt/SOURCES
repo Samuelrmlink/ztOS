@@ -1,0 +1,27 @@
+Bluetooth for Android apps in Waydroid (docs/waydroid.md, "Bluetooth for Android apps")
+
+Bluetooth.apk  sha256 9c19c7d494699b64fa20fea16029efaf11a7c67b37b4a01bd44f8143780bdfbf
+  The Android Bluetooth app (com.android.bluetooth, AOSP, Apache-2.0), which
+  the pinned Waydroid image (LineageOS 20, TQ3A.230901.001) leaves out.
+  From: AndyYan's LineageOS 20 GSI (TrebleDroid), lineage-20-td,
+    https://sourceforge.net/projects/andyyan-gsi/files/lineage-20-td/lineage-20.0-20251021-UNOFFICIAL-arm64_bvN.img.gz
+    fetched 8 Nov 2026 from master.dl.sourceforge.net
+    sha1   5564d646e67e64b096c10e3210bac86aa37df777 (the one SourceForge lists)
+    sha256 7b2b92393efe83e21c35c6063c33006257947e791455a44681edc22852599408
+    build  google/lineage_arm64_bvN/tdgsi_arm64_ab:13/TQ3A.230901.001/crossgate10220007:userdebug/test-keys
+  Path in it: /system/apex/com.android.btservices.apex -> apex_payload.img ->
+    /app/Bluetooth@TQ3A.230901.001/Bluetooth.apk (read with debugfs and unzip;
+    nothing from the image was run).
+  Checked with android/waydroid/bluetooth/tools/check-bt-app.py against the
+  Waydroid image's own libbluetooth_jni.so: all 23 classes with native methods
+  match the library's RegisterNatives tables (AdapterService declares three
+  natives no library registers, as in stock AOSP 13). The same GSI's
+  framework-bluetooth.jar is byte-identical to the Waydroid image's, and its
+  libbluetooth_jni.so registers the same methods and looks up the same Java
+  callbacks (names and signatures) as the Waydroid image's.
+
+libbluetooth_jni.so  sha256 9261051a146bb252041e1c2cd80a9457bf8271a6e6610ed640d86d85fa41cb29
+  The shim's wrapper, built by android/waydroid/bluetooth/shim/build.sh
+  (sources pinned in shim/sources.conf; NDK r25c sha256
+  769ee342ea75f80619d985c2da990c48b3d8eaf45f48783a2d48870d04b46108).
+  Goes in next to the stock library, renamed libbluetooth_jni_stock.so.

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Desktop mode
+Comment=Start and stop XFCE on a monitor or a virtual screen
+Exec=ztdeskmode
+Terminal=false
+Type=Application
+Icon=ztdeskmode
+Categories=System;Settings;

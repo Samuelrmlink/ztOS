@@ -79,6 +79,7 @@ static void bt_pair_show(struct zt_server *server) {
 		return;
 	}
 	bt_pair_wipe_entry(b);
+	b->remember = false;	/* never ticked by itself */
 	snprintf(b->status, sizeof(b->status), "%s", r->mode == BT_PAIR_PIN ? "Letters and digits, up to 16" :
 		r->mode == BT_PAIR_PASSKEY ? "6 digits" : "");
 	/* the tiles' own modals take every touch while they are up */
@@ -155,7 +156,7 @@ static void bt_pair_end(struct zt_server *server) {
 }
 
 /* To the agent, on a connection of its own, never blocking the compositor. */
-static bool bt_pair_tell(struct zt_server *server, bool ok, const char *value) {
+static bool bt_pair_tell(struct zt_server *server, bool ok, const char *value, bool remember) {
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
 	if (!runtime || snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/ztos-bt-agent.sock", runtime) >= (int)sizeof(addr.sun_path))
@@ -168,7 +169,7 @@ static bool bt_pair_tell(struct zt_server *server, bool ok, const char *value) {
 	if (!connect(fd, (struct sockaddr *)&addr, sizeof(addr)) &&
 			!getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &size) && cred.uid == getuid()) {
 		char line[64];
-		int n = bt_pair_reply_line(line, sizeof(line), server->bt_pair.req.id, ok, value);
+		int n = bt_pair_reply_line(line, sizeof(line), server->bt_pair.req.id, ok, value, remember);
 		sent = n > 0 && send(fd, line, n, MSG_NOSIGNAL) == n;
 		explicit_bzero(line, sizeof(line));
 	}
@@ -189,9 +190,9 @@ static void bt_pair_answer(struct zt_server *server, bool ok) {
 			damage(server);
 			return;
 		}
-		bt_pair_tell(server, true, b->entry);
+		bt_pair_tell(server, true, b->entry, b->remember);
 	} else {
-		bt_pair_tell(server, ok, "");
+		bt_pair_tell(server, ok, "", false);
 	}
 	bt_pair_end(server);
 }
@@ -221,9 +222,26 @@ static bool bt_pair_action(struct zt_server *server, const char *act) {
 	return false;
 }
 
+/* The tick box under a PIN or passkey: the agent keeps the code, in memory,
+ * for devices that advertise the same services, for 3 hours. */
+#define BT_PAIR_CHECK_H 48.0
+#define BT_PAIR_CHECK_BOX 24.0
+
+/* A tap on the tick box's row, at (x, dy) in the dialog: true if it took it. */
+static bool bt_pair_touch(struct zt_server *server, double x, double dy) {
+	struct bt_pair *b = &server->bt_pair;
+	(void)x;
+	if (!b->shown || !bt_pair_entry(b) || dy < b->check_y || dy > b->check_y + BT_PAIR_CHECK_H) return false;
+	b->remember = !b->remember;
+	hap(server, HAP_TAP, HG_SYSTEM);
+	draw_dialog(server);
+	damage(server);
+	return true;
+}
+
 /* The space the sheet leaves between its text and its buttons. */
 static double bt_pair_field_h(struct zt_server *server) {
-	return bt_pair_entry(&server->bt_pair) ? 90 :
+	return bt_pair_entry(&server->bt_pair) ? 90 + BT_PAIR_CHECK_H + 8 :
 		server->bt_pair.req.mode == BT_PAIR_SHOW_PIN || server->bt_pair.req.mode == BT_PAIR_SHOW_PASSKEY ||
 		server->bt_pair.req.mode == BT_PAIR_CONFIRM ? 76 : 0;
 }
@@ -237,6 +255,26 @@ static void bt_pair_draw(struct zt_server *server, cairo_t *cr, double x, double
 		draw_text(cr, b->entry, FONT_REGULAR, 20, x + 12, y, w - 24, 42, false);
 		cairo_set_source_rgb(cr, .8, .8, .8);
 		draw_text(cr, b->status, FONT_REGULAR, 13, x, y + 50, w, 24, false);
+		/* the tick box: a white square, filled and ticked when on */
+		double cy = y + 84, by = cy + (BT_PAIR_CHECK_H - BT_PAIR_CHECK_BOX) / 2;
+		b->check_y = cy;
+		cairo_set_line_width(cr, 2.0);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		cairo_rectangle(cr, x + 1, by + 1, BT_PAIR_CHECK_BOX - 2, BT_PAIR_CHECK_BOX - 2);
+		if (b->remember) {
+			cairo_fill(cr);
+			cairo_set_source_rgb(cr, 31.0 / 255.0, 31.0 / 255.0, 31.0 / 255.0);
+			cairo_set_line_width(cr, 3.0);
+			cairo_move_to(cr, x + 5, by + 12);
+			cairo_line_to(cr, x + 10, by + 18);
+			cairo_line_to(cr, x + 19, by + 6);
+		}
+		cairo_stroke(cr);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		/* two lines on a narrow screen: wrapped, not cut */
+		wrap_text(cr, b->req.mode == BT_PAIR_PIN ? "Use this PIN for similar devices for 3 hours" :
+			"Use this passkey for similar devices for 3 hours",
+			FONT_REGULAR, 14, x + BT_PAIR_CHECK_BOX + 12, cy + 4, w - BT_PAIR_CHECK_BOX - 12, false);
 	} else if (bt_pair_field_h(server) > 0) {
 		cairo_set_source_rgb(cr, 1, 1, 1);
 		draw_text(cr, b->req.value, FONT_SEMIBOLD, 34, x, y, w, 46, false);
