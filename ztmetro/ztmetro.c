@@ -6812,13 +6812,19 @@ static void note_clear_start(struct zt_server *server);
  * and gets no frame callbacks; this is what lets one stop the work behind them: a
  * browser engine can drop a video's picture and keep its sound. The Android
  * runtimes have a freeze policy of their own. */
+static const char *over_lock_id(struct zt_server *server);
+
 static void apps_suspend_sync(struct zt_server *server) {
 	struct zt_toplevel *t;
 	wl_list_for_each(t, &server->toplevels, link) {
 		if (!t->xdg_toplevel->base->initialized || t->android_runtime) {
 			continue;
 		}
-		bool hidden = t != server->shown || server->locked || !server->screen_on;
+		/* the app shown over the lock (a call's ztphone, an alarm's ring
+		 * screen) is in sight although the phone is locked */
+		bool over_lock = server->call_over_lock && t == server->shown && t->xdg_toplevel->app_id &&
+			!strcmp(t->xdg_toplevel->app_id, over_lock_id(server));
+		bool hidden = t != server->shown || (server->locked && !over_lock) || !server->screen_on;
 		if (hidden != t->suspended_sent) {
 			t->suspended_sent = hidden;
 			wlr_xdg_toplevel_set_suspended(t->xdg_toplevel, hidden);
@@ -9989,6 +9995,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	if (server->shown == toplevel && toplevel->xdg_toplevel->app_id &&
 			!strcmp(toplevel->xdg_toplevel->app_id, over_lock_id(server))) {
 		server->call_over_lock = false;
+		apps_suspend_sync(server);
 		draw_status(server);
 	}
 	toplevel->mapped = false;
@@ -15487,6 +15494,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (!strcmp(line, "alarm_screen end")) {
 		if (server->call_over_lock && !strcmp(over_lock_id(server), "ztclock-ring")) {
 			server->call_over_lock = false;
+			apps_suspend_sync(server);
 			draw_status(server);
 			damage(server);
 		}
@@ -15516,6 +15524,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 		char mark_path[256];
 		unlink(runtime_file(mark_path, sizeof(mark_path), "ztmetro-call-locked"));
 		server->call_over_lock = false;
+		apps_suspend_sync(server);
 		draw_status(server);
 		damage(server);
 	} else if (strncmp(line, "launch ", 7) == 0) {
