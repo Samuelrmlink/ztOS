@@ -1,7 +1,7 @@
 # ztOS fork roadmap
 
 Working list for development on an SM-G960F (Exynos) from a Rocky Linux 10 PC.
-Last updated 2026-11-07.
+Last updated 2026-11-11.
 
 **Evidence:** **Confirmed** = seen in logs or code. **Likely** = strong reading of the evidence, not yet
 proven. **Unknown** = symptom seen, cause not found. **Review** = found by reading code, not seen failing.
@@ -157,6 +157,7 @@ proven. **Unknown** = symptom seen, cause not found. **Review** = found by readi
 | 7.29 | **Tidying found on 2026-11-07.** Align licence headers (new files GPL-3.0-or-later, older `ztmetro/` files GPL-2.0-or-later, README 3.0). Remove the upstream phone's Bluetooth address from docs and logs (it stays in git history). Decide on Waydroid's `SM-G960N` model string. Remove the unused `ztoscorenetworking-wifi`. Give `scripts/build-arch-root.sh` the tarball signature check. Fix `sensors/test-sensorhub-watch.py`'s path. `test-flash-root.sh` failed once, unexplained, then passed three times. | S | Each small; none urgent. |
 | 7.30 | **Setting: tabs loop or stop at the ends.** A Settings toggle for apps with tabs across the top. Looping: swiping keeps going round all the tabs. Not looping: swiping stops at the first and last tab, and you swipe back the other way to return. Applies to the whole kit, not per app. | S | Depends on the two-way tab fix, under way on `track-pivot-fix`. The default isn't decided; looping is today's behaviour. |
 
+
 ### Building these in parallel
 
 Items that edit the same code can't run in parallel without conflicts. Two files are the bottleneck: `ztmetro/ztmetro.c` (status bar, pull-down menu) and `settings/ztsettings.c`.
@@ -178,3 +179,30 @@ A, B, C, D and E can start together, each in its own worktree. Only one track ca
 - **Settings tree (7.7):** plain "all settings" root with no tabs. Remove the Battery Saver switch, which does nothing, keeping the real battery info. Lock-on-wake and slow motion leave the developer page only if they work. Developer stays visible under system. No one-tap "add to the other wallpaper list" for now.
 - **A new boot image is allowed** when a change needs one, because USB has been stable since the port was cleaned and the DHCP loop fixed. Check the partition table on the G960F and confirm `stock/` backups before any flash (2.6).
 - **Quick tiles:** any number, including none (7.5).
+
+## 8. Desktop mode, sleep and clock (added 2026-11-11)
+
+Status words as above. **Agent** names the branch where an agent is working on it now.
+
+| # | Item | Size | Status |
+|---|---|---|---|
+| 8.1 | **DP Alt Mode to an external display.** 1080p60 on DP-1 through a USB-C dock, automatic from boot, with EDID modes and VSYNC (kernel dp42). | L | Confirmed. dp42 powers the link down when the dock is unplugged (about 220 mW); not yet checked with a real unplug. |
+| 8.2 | **XFCE desktop on DP-1**, with ztMETRO as the compositor; XFCE off at boot; `ztdeskmode` app to start and stop it; USB HID; windows move phone↔desktop. | L | Confirmed. The keyboard dongle sent no reports in testing: check it's on and paired. |
+| 8.3 | **Dock-aware desktop lock.** Locking the phone locks the desktop unless a dock is attached; unplugging locks it and it stays locked. | M | Built. The lock screen has only a swipe, no PIN, which weakens it (8.17). |
+| 8.4 | **XFCE-style window decorations.** Replace the red server-side title bars (Grayjay, Brave) with xfwm4-style ones; give every desktop window a title bar (the AirPods app has none). | M | Agent: `feature/desktop-windows` |
+| 8.5 | **Move and resize windows in XFCE** with mouse and touch, by title bar, border, Alt+drag and client request. Doesn't work today. | M | Agent: `feature/desktop-windows` |
+| 8.6 | **Apps know whether they're on the desktop or in ztShell** and adapt live when moved (an API for this). The AirPods app should use desktop layout on XFCE. | M | Agent: `feature/desktop-windows` |
+| 8.7 | **Lag when driving XFCE from the phone's Desktop mode app.** Profile and fix, with latency numbers. | M | Agent: `feature/desktop-windows` |
+| 8.8 | **Window mover app** on the phone and in XFCE, each suited to its side: move running windows between them without restarting. | M | Agent: `feature/desktop-windows` |
+| 8.9 | **Tests for desktop mode**: decorations, move/resize, environment API, mover. In the dev container and on the device. | M | Agent: `feature/desktop-windows` |
+| 8.10 | **XFCE idles at zero.** Not drawn when not viewed; no idle tick; essentially no CPU or wakeups from XFCE or anything we autostart in it; never blocks sleep, including in maximum power saving. | M | Agent: `feature/desktop-power` |
+| 8.11 | **XFCE panel widgets**: Wi-Fi, cellular, VPN (WireGuard, Tailscale), battery, audio, Bluetooth status. Event-driven, measured for wakeups and sleep impact. | M | Agent: `feature/desktop-power` |
+| 8.12 | **Vibration settings that work.** Duration and strength settings have little effect; buzzes run long with a "reverb" tail. | M | Agent: `fix/vibration`. Haptic register writes on the MAX77705 need the owner's approval. |
+| 8.13 | **Clock and alarm app** (`ztclockd`, clock app). Alarms ring with the screen off, over the lock screen and from deep sleep. | M | Confirmed. The 05:45 and 06:15 alarms rang on 2026-11-11. |
+| 8.14 | **Alarm slide-to-stop.** Stop: slide right past 85%. Snooze: slide left past 60%. Short slides spring back. Keys never stop an alarm: volume and power snooze it (when it has a snooze), power with the screen off only wakes the screen. The screen stays on while ringing. | S | Confirmed on the phone with synthetic touch (`feature/alarm-slide`, merged). Owner to feel-test thresholds and haptics. |
+| 8.15 | **Deep sleep on.** SYS_SLEEP with a Wi-Fi window every 5 minutes, and `soc.csv` logging at each wake. With AOD on the phone never sleeps (about 440 mA measured 2026-11-11). | L | Confirmed. The overnight drain test is still to do off the charger (the 2026-11-11 run was on the charger). |
+| 8.16 | **Sleep that keeps Wi-Fi connected and updates AOD every minute** (owner's preferred mode). Needs PCIe suspend with OOB host-wake and wowlan for the BCM4361, and AOD that keeps its picture while the SoC sleeps (stage 2, `kernel/patch-decon-aod.py`), then the panel's own clock. | L | Agent: `power/sleep-wifi-aod` |
+| 8.17 | **Lock screen PIN**, so the dock-aware lock (8.3) means something. | M | Proposed, not decided. |
+| 8.18 | **Battery accounting**: "Unaccounted" down from 33% to 1.9%. About 480 mW is still one "Always-on" lump. | M | Agent: `power/always-on` |
+| 8.19 | **Owner checks still open**: real dock unplug for 8.1; Ethernet through the dock (DHCP); gadget/deadman check with the dock unplugged; keyboard dongle; whether a plain OTG adapter counts as a dock for 8.3. | S | Waiting on the owner. |
+| 8.20 | **Volume streams: Media, Alarm, Calls/Notification ring.** All three sliders in the audio tile's modal. Volume keys change ring/notification when nothing is playing, media when something is, and show a minimal one-slider overlay with a caret that expands to all three. | M | Agent: `feature/volume-streams` |
