@@ -19,6 +19,7 @@ license=('GPL-3.0-or-later')
 # xfwm4 never runs (X11 only; the shell is the window manager), but its
 # themes are the frames the shell draws, and its settings dialog chooses them.
 depends=(xfce4-panel xfdesktop xfce4-settings xfconf thunar xfce4-terminal garcon tumbler
+         xfce4-pulseaudio-plugin
          gtk-layer-shell adwaita-icon-theme xorg-xwayland mesa gtk3 libxkbcommon wayland xfwm4)
 makedepends=(gcc make pkgconf wayland-protocols)
 optdepends=('mesa-utils: glxinfo and eglinfo, to check the GPU'
@@ -31,7 +32,7 @@ _src() { echo "${ZTOS_SRC:-$startdir/../..}"; }
 
 build() {
 	cd "$(_src)/ztmetro"
-	make desktop/ztdesk desktop/ztdeskmode desktop/ztmove
+	make desktop/ztdesk desktop/ztdeskmode desktop/ztmove desktop/panel/libztos-status.so
 }
 
 package() {
@@ -49,6 +50,9 @@ package() {
 	install -Dm644 "$z/desktop/ztdeskmode.svg" "$pkgdir/usr/local/share/icons/hicolor/scalable/apps/ztdeskmode.svg"
 	install -Dm755 "$z/desktop/ztos-desktop-session" "$pkgdir/usr/local/bin/ztos-desktop-session"
 	install -Dm755 "$z/desktop/ztos-desktop-hotplug" "$pkgdir/usr/local/bin/ztos-desktop-hotplug"
+	install -Dm755 "$z/desktop/panel/libztos-status.so" "$pkgdir/usr/lib/xfce4/panel/plugins/libztos-status.so"
+	install -Dm644 "$z/desktop/panel/ztos-status.desktop" "$pkgdir/usr/share/xfce4/panel/plugins/ztos-status.desktop"
+	install -Dm644 "$z/desktop/panel/xfce4-panel.xml" "$pkgdir/usr/share/ztos-desktop/xfce4-panel.xml"
 	install -dm755 "$pkgdir/usr/lib/ztos/desktop-hotplug.d"
 	install -Dm644 "$z/desktop/DESIGN.md" "$pkgdir/usr/share/doc/ztos-desktop/DESIGN.md"
 }

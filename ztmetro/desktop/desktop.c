@@ -191,7 +191,8 @@ struct zt_desk {
 	uint32_t last_input_ms;		/* the last pointer or key that went to the desktop */
 	uint32_t phone_touch_ms;	/* and the last finger on the phone */
 	uint32_t watch_until;		/* someone is looking at a virtual output (ztdesk, wayvnc, grim) */
-	struct wl_event_source *idle_timer;	/* frames for a virtual output nobody looks at */
+	struct wl_event_source *watch_timer;	/* the end of "desktop watch N" */
+	bool viewed, viewed_known;	/* desk_view_sync's last answer */
 	pid_t session_pid;		/* ztos-desktop-session, while it runs */
 	bool session_wanted;
 	pid_t session_pgid;		/* its process group, kept after the script itself ends */
@@ -2674,6 +2675,7 @@ static void desk_new_input(struct zt_server *server, struct wlr_input_device *de
  * keyboard (the phone's own on-screen one too) types into the desktop. */
 static void desk_app_shown(struct zt_server *server, struct zt_toplevel *top) {
 	struct zt_desk *desk = server->desk;
+	desk_phone_view(server);	/* ztdesk in front, or no longer */
 	if (!desk || !desk->out || !top) {
 		return;
 	}
@@ -3008,6 +3010,22 @@ static void desk_spawn(const char *program, const char *a1, const char *a2) {
 	}
 }
 
+/* ---- whether anyone sees the desktop --------------------------------------------------------------
+ *
+ * The desktop is drawn only while it is viewed: a monitor that is on, ztdesk in
+ * front on a lit phone screen, or a "desktop watch N" (wayvnc, grim). Unviewed,
+ * an output's frame events commit nothing and no client gets a frame callback,
+ * so GTK (the panel, xfdesktop, apps) stops drawing after its next commit and
+ * nothing in the shell wakes for the desktop: there is no timer. Becoming
+ * viewed again schedules a frame, whose frame_done lets every client draw.
+ * desk_view_sync is called wherever "viewed" can change: an app shown and the
+ * phone's own frames (ztdesk in front or not), the screen on or off, an output
+ * coming, going or switching, the watch and its end. Its state is in
+ * $XDG_RUNTIME_DIR/ztmetro-desktop/viewed (1 or 0, replaced whole) for the
+ * session's own pieces (ztos-panel-status) to sleep on. */
+
+static void desk_view_sync(struct zt_desk *desk);
+
 static bool desk_watched(struct zt_desk *desk) {
 	struct zt_server *server = desk->server;
 	if ((int32_t)(desk->watch_until - now_ms()) > 0) {
@@ -3018,12 +3036,19 @@ static bool desk_watched(struct zt_desk *desk) {
 		!strcmp(server->shown->xdg_toplevel->app_id, "ztdesk");
 }
 
+/* a monitor that is on is seen (the phone's screen has nothing to do with it);
+ * a virtual output only while watched */
+static bool desk_output_viewed(struct desk_output *o) {
+	return o->virtual ? desk_watched(o->desk) : o->wo->enabled;
+}
+
 static void desk_output_frame(struct wl_listener *l, void *data) {
 	struct desk_output *o = wl_container_of(l, o, frame);
 	struct zt_desk *desk = o->desk;
-	if (o->virtual && !desk_watched(desk)) {
-		/* a virtual desktop nobody looks at: its apps get a frame a second
-		 * (desk_idle_tick), not 60, and the GPU draws nothing */
+	if (!desk_output_viewed(o)) {
+		/* nobody looks: nothing drawn and no frame callbacks, so the
+		 * clients go quiet; desk_view_sync brings the frames back */
+		desk_view_sync(desk);
 		return;
 	}
 	wlr_scene_output_commit(o->so, NULL);
@@ -3032,30 +3057,71 @@ static void desk_output_frame(struct wl_listener *l, void *data) {
 	wlr_scene_output_send_frame_done(o->so, &now);
 }
 
-static int desk_idle_tick(void *data) {
-	struct zt_desk *desk = data;
-	struct desk_output *o;
-	bool any = false;
-	wl_list_for_each(o, &desk->outputs, link) {
-		any = any || o->virtual;
-		if (o->virtual && !desk_watched(desk)) {
-			wlr_scene_output_commit(o->so, NULL);
-			struct timespec now;
-			clock_gettime(CLOCK_MONOTONIC, &now);
-			wlr_scene_output_send_frame_done(o->so, &now);
-		} else if (o->virtual) {
-			wlr_output_schedule_frame(o->wo);	/* watched again: back to every frame */
+/* "desktop watch N" ran out */
+static int desk_watch_end(void *data) {
+	desk_view_sync(data);
+	return 0;
+}
+
+static void desk_viewed_write(bool viewed) {
+	char dir[256], path[300], tmp[300];
+	runtime_file(dir, sizeof(dir), "ztmetro-desktop");
+	mkdir(dir, 0700);
+	snprintf(path, sizeof(path), "%s/viewed", dir);
+	snprintf(tmp, sizeof(tmp), "%s/.viewed.new", dir);
+	FILE *f = fopen(tmp, "w");
+	if (!f) {
+		return;
+	}
+	fputs(viewed ? "1\n" : "0\n", f);
+	fclose(f);
+	rename(tmp, path);
+}
+
+static void desk_view_sync(struct zt_desk *desk) {
+	if (!desk) {
+		return;
+	}
+	bool viewed = desk->out && desk_output_viewed(desk->out);
+	/* xdg's "suspended" for the desktop's windows while unseen (GTK 4,
+	 * Firefox and Qt slow their timers on it); Metro does the same for
+	 * its own apps (apps_suspend_sync), and takes over on a move */
+	struct desk_view *v;
+	wl_list_for_each(v, &desk->views, link) {
+		if (v->top && v->top->xdg_toplevel->base->initialized && v->top->suspended_sent == viewed) {
+			v->top->suspended_sent = !viewed;
+			wlr_xdg_toplevel_set_suspended(v->top->xdg_toplevel, !viewed);
 		}
 	}
-	/* only while there is a virtual output: the phone asleep is not woken for nothing */
-	wl_event_source_timer_update(desk->idle_timer, any ? 1000 : 0);
-	return 0;
+	if (desk->viewed_known && viewed == desk->viewed) {
+		return;
+	}
+	desk->viewed_known = true;
+	desk->viewed = viewed;
+	desk_viewed_write(viewed);
+	wlr_log(WLR_INFO, "desktop: %s", viewed ? "viewed: drawn" : "not viewed: not drawn, no frame callbacks");
+	if (viewed) {
+		struct desk_output *o;
+		wl_list_for_each(o, &desk->outputs, link) {
+			if (desk_output_viewed(o)) wlr_output_schedule_frame(o->wo);
+		}
+	}
+}
+
+/* ztmetro.c: the phone's screen went on or off, or the phone drew a frame
+ * (an app shown, Start, the switcher: whether ztdesk is in front) */
+static void desk_phone_view(struct zt_server *server) {
+	struct zt_desk *desk = server->desk;
+	if (desk && desk->out) {
+		desk_view_sync(desk);
+	}
 }
 
 static void desk_output_request_state(struct wl_listener *l, void *data) {
 	struct desk_output *o = wl_container_of(l, o, request_state);
 	const struct wlr_output_event_request_state *e = data;
 	wlr_output_commit_state(o->wo, e->state);
+	desk_view_sync(o->desk);	/* a monitor switched on or off */
 }
 
 static void desk_use_output(struct zt_desk *desk, struct desk_output *o);
@@ -3075,6 +3141,7 @@ static void desk_output_destroy(struct wl_listener *l, void *data) {
 	snprintf(name, sizeof(name), "%s", o->wo->name);
 	if (was_active) {
 		desk->out = NULL;
+		desk_view_sync(desk);	/* (and again for the output that takes over) */
 	}
 	if (o->so) {
 		wlr_scene_output_destroy(o->so);
@@ -3178,6 +3245,7 @@ static void desk_use_output(struct zt_desk *desk, struct desk_output *o) {
 		/* panels on the old output were closed: the session puts them up again */
 		desk_spawn("ztos-desktop-session", "--refresh", NULL);
 	}
+	desk_view_sync(desk);
 	desk_state_write(desk);
 }
 
@@ -3249,9 +3317,6 @@ static void desk_new_output(struct zt_server *server, struct wlr_output *wo) {
 	o->destroy.notify = desk_output_destroy;
 	wl_signal_add(&wo->events.destroy, &o->destroy);
 	wl_list_insert(desk->outputs.prev, &o->link);
-	if (virtual) {
-		wl_event_source_timer_update(desk->idle_timer, 1000);
-	}
 	/* right of the phone's panel in the session's layout (what xdg-output
 	 * tells clients), and at the same place in the desktop's own */
 	struct wlr_output_layout_output *lo = wlr_output_layout_add_auto(server->output_layout, wo);
@@ -3628,10 +3693,9 @@ static void desk_ctl(struct zt_server *server, const char *args) {
 		if (v) desk_give_to_phone(v);
 	} else if (sscanf(args, "watch %d", &n) == 1 && n >= 0 && n <= 3600) {
 		desk->watch_until = now_ms() + (uint32_t)n * 1000u;
-		struct desk_output *o;
-		wl_list_for_each(o, &desk->outputs, link) {
-			if (o->virtual) wlr_output_schedule_frame(o->wo);
-		}
+		/* one wake at its end, to stop drawing again (+50 ms: past it) */
+		wl_event_source_timer_update(desk->watch_timer, n ? n * 1000 + 50 : 0);
+		desk_view_sync(desk);
 	} else if (sscanf(args, "pointer %lf %lf", &x, &y) == 2 && desk->out) {
 		struct wlr_box b;
 		wlr_output_layout_get_box(desk->layout, desk->out->wo, &b);
@@ -3845,7 +3909,7 @@ static void desk_init(struct zt_server *server, struct wlr_compositor *composito
 		}
 	}
 #endif
-	desk->idle_timer = wl_event_loop_add_timer(server->loop, desk_idle_tick, desk);	/* (armed by a virtual output) */
+	desk->watch_timer = wl_event_loop_add_timer(server->loop, desk_watch_end, desk);
 	(void)desk_session_reap;
 }
 

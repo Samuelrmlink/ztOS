@@ -53,6 +53,9 @@ static void desk_phone_touched(struct zt_server *server);
 /* the phone locked or unlocked: the desktop locks with it once no dock is
  * there, and stays locked until the phone is unlocked */
 static void desk_phone_lock(struct zt_server *server, bool locked);
+/* the phone's screen went on or off, or the phone drew a frame: whether anyone
+ * sees the desktop (ztdesk in front on a lit screen) may have changed */
+static void desk_phone_view(struct zt_server *server);
 
 /* the control pipe's "desktop ..." lines, and SIGHUP */
 static void desk_ctl(struct zt_server *server, const char *args);

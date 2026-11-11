@@ -96,9 +96,9 @@ With Waydroid also running, that leaves about 1 GB free on the 3.5 GB phone.
 
 **CPU and battery:**
 
-- A virtual desktop that nobody looks at is drawn once a second, and its
-  apps get one frame callback a second. The shell measured 0% of a core
-  over 10 s.
+- A desktop that nobody looks at is not drawn at all, and its apps get no
+  frame callbacks until it is seen again. There is no timer in the shell for
+  it (DESIGN.md, "Not drawn while nobody looks").
 - With ztdesk in front, the desktop runs at 60 Hz, but only redraws when
   something on it changed. ztdesk captures only changed frames, at most
   30 a second.

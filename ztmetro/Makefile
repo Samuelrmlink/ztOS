@@ -126,11 +126,20 @@ desktop/ztmove: desktop/ztmove.c $(CORE_DEPS)
 desktop/ztdeskmode: desktop/ztdeskmode.c desktop/desktop-page.c desktop/desktop-page.h $(CORE_DEPS)
 	$(APP_BUILD) -Idesktop -o $@ desktop/ztdeskmode.c desktop/desktop-page.c $(CORE) $(APP_LIBS)
 
+# ztos-status: the phone's network, Bluetooth and battery in XFCE's panel (an
+# internal panel plugin; asleep while nobody sees the desktop)
+desktop/panel/libztos-status.so: desktop/panel/ztos-status.c
+	$(CC) $(CFLAGS) $(WARN) -shared -fPIC $(shell pkg-config --cflags libxfce4panel-2.0 gtk+-3.0 gio-unix-2.0) \
+		-o $@ $< $(shell pkg-config --libs libxfce4panel-2.0 gtk+-3.0 gio-unix-2.0)
+
 .PHONY: install-desktop
-install-desktop: desktop/ztdesk desktop/ztdeskmode desktop/ztmove
+install-desktop: desktop/ztdesk desktop/ztdeskmode desktop/ztmove desktop/panel/libztos-status.so
 	install -Dm755 desktop/ztmove /usr/local/bin/ztmove
 	install -Dm644 desktop/ztmove.desktop /usr/local/share/applications/ztmove.desktop
 	install -Dm644 desktop/ztmove.svg /usr/local/share/icons/hicolor/scalable/apps/ztmove.svg
+	install -Dm755 desktop/panel/libztos-status.so /usr/lib/xfce4/panel/plugins/libztos-status.so
+	install -Dm644 desktop/panel/ztos-status.desktop /usr/share/xfce4/panel/plugins/ztos-status.desktop
+	install -Dm644 desktop/panel/xfce4-panel.xml /usr/share/ztos-desktop/xfce4-panel.xml
 	install -Dm755 desktop/ztdeskmode /usr/local/bin/ztdeskmode
 	install -Dm644 desktop/ztdeskmode.desktop /usr/local/share/applications/ztdeskmode.desktop
 	install -Dm644 desktop/ztdeskmode.svg /usr/local/share/icons/hicolor/scalable/apps/ztdeskmode.svg
