@@ -645,7 +645,8 @@ struct zt_server {
 	double wall_h;			/* points: the start photo's height */
 	cairo_surface_t *lock_wall;
 	bool locked;
-	bool call_over_lock;	/* only the phone call may cover the lock */
+	bool call_over_lock;	/* only the phone call, or a ringing alarm, may cover the lock */
+	char over_lock_app[24];	/* which of them: its app_id, "ztphone" or "ztclock-ring" */
 	/* app switcher: the apps as a row of cards, newest on the right */
 	bool switcher;
 	float switch_t;			/* 0 the app at full size, 1 cards */
@@ -6505,6 +6506,48 @@ static void retro_paint_lock(struct zt_server *server, cairo_t *cr) {
 #define LOCK_NOTE_Y(server) ((double)(server)->height - 100)	/* the row layer's top */
 #define LOCK_NOTE_H 80.0
 
+/* The next alarm (ztclockd's $XDG_RUNTIME_DIR/ztclock.next, `alarm EPOCH`), as
+ * Windows Phone has it: a small bell and its time after the date, with the
+ * day when it is not within the next day. Nothing when none is set. */
+static void lock_next_alarm(struct zt_server *server, cairo_t *cr, time_t now, double x, double y) {
+	char path[256], row[64], key[16];
+	long long at = 0, v;
+	FILE *f = fopen(runtime_file(path, sizeof(path), "ztclock.next"), "r");
+	while (f && fgets(row, sizeof(row), f)) {
+		if (sscanf(row, "%15s %lld", key, &v) == 2 && !strcmp(key, "alarm")) at = v;
+	}
+	if (f) fclose(f);
+	if (at <= now) return;
+	time_t t = (time_t)at;
+	struct tm tm;
+	localtime_r(&t, &tm);
+	char hm[24], text[40];
+	zt_clock_text(&tm, server->clock_24h, hm, sizeof(hm));
+	if (t - now >= 24 * 3600) {
+		char day[8];
+		strftime(day, sizeof(day), "%a", &tm);
+		snprintf(text, sizeof(text), "%s %s", day, hm);
+	} else {
+		snprintf(text, sizeof(text), "%s", hm);
+	}
+	double size = 30;
+	while (size > 18 && x + 30 + text_width(text, FONT_SEMILIGHT, size) > server->width - 12) size -= 2;
+	/* the bell: a dome, its rim and the clapper */
+	double cx = x + 11, cy = y + size * 0.62;
+	cairo_save(cr);
+	cairo_set_line_width(cr, 2);
+	cairo_new_path(cr);
+	cairo_move_to(cr, cx - 9, cy + 5);
+	cairo_curve_to(cr, cx - 7, cy + 1, cx - 8, cy - 11, cx, cy - 11);
+	cairo_curve_to(cr, cx + 8, cy - 11, cx + 7, cy + 1, cx + 9, cy + 5);
+	cairo_close_path(cr);
+	cairo_stroke(cr);
+	cairo_arc(cr, cx, cy + 8, 2.2, 0, 2 * M_PI);
+	cairo_fill(cr);
+	cairo_restore(cr);
+	draw_text(cr, text, FONT_SEMILIGHT, size, x + 28, y + (30 - size) * 0.7, 0, 0, false);
+}
+
 /* The lock screen's clock in theme `theme`, in screen coordinates (at rest,
  * low), turning from `from` at `t` (the flip clock; 1 still). */
 static void lock_clock_paint(struct zt_server *server, cairo_t *cr, const struct clock_theme *theme,
@@ -6535,6 +6578,7 @@ static void lock_clock_paint(struct zt_server *server, cairo_t *cr, const struct
 	draw_text(cr, line, FONT_SEMILIGHT, 30, 20, server->height - 156, 0, 0, false);
 	strftime(line, sizeof(line), "%B %-d", &tm);
 	draw_text(cr, line, FONT_SEMILIGHT, 30, 20, server->height - 120, 0, 0, false);
+	lock_next_alarm(server, cr, now, 20 + text_width(line, FONT_SEMILIGHT, 30) + 26, server->height - 120);
 }
 
 static void damage(struct zt_server *server);
@@ -9915,11 +9959,17 @@ static bool waydroid_rewake(struct zt_server *server, struct zt_toplevel *toplev
 	return true;
 }
 
+/* The app allowed over the lock screen while call_over_lock: ztphone for a
+ * call (call_screen), ztclock's ring screen for an alarm (alarm_screen). */
+static const char *over_lock_id(struct zt_server *server) {
+	return server->over_lock_app[0] ? server->over_lock_app : "ztphone";
+}
+
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
 	struct zt_server *server = toplevel->server;
 	if (server->shown == toplevel && toplevel->xdg_toplevel->app_id &&
-			!strcmp(toplevel->xdg_toplevel->app_id, "ztphone")) {
+			!strcmp(toplevel->xdg_toplevel->app_id, over_lock_id(server))) {
 		server->call_over_lock = false;
 		draw_status(server);
 	}
@@ -14181,7 +14231,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 	}
 	if (server->call_over_lock && server->shown && server->shown->mapped &&
 			server->shown->xdg_toplevel->app_id &&
-			!strcmp(server->shown->xdg_toplevel->app_id, "ztphone")) {
+			!strcmp(server->shown->xdg_toplevel->app_id, over_lock_id(server))) {
 		double sx, sy;
 		struct wlr_surface *surface = surface_at(server, x, y, &sx, &sy);
 		if (surface) {
@@ -15365,8 +15415,36 @@ static void ctl_command(struct zt_server *server, char *line) {
 				break;
 			}
 		}
+	} else if (!strcmp(line, "alarm_screen")) {
+		/* ztclockd: an alarm or the timer rings. Its ring screen (ztclock
+		 * --ring, app_id ztclock-ring) shows over the lock as a call does;
+		 * a call under way keeps the screen (the alarm still sounds). */
+		if (!server->call_over_lock || strcmp(over_lock_id(server), "ztphone")) {
+			server->call_over_lock = true;
+			snprintf(server->over_lock_app, sizeof(server->over_lock_app), "ztclock-ring");
+			draw_status(server);
+			struct zt_toplevel *t;
+			bool found = false;
+			wl_list_for_each(t, &server->toplevels, link) {
+				const char *id = t->xdg_toplevel->app_id;
+				if (t->mapped && id && !strcmp(id, "ztclock-ring")) {
+					show_toplevel(server, t);
+					found = true;
+					break;
+				}
+			}
+			if (!found) launch(server, "ztclock --ring");
+			damage(server);
+		}
+	} else if (!strcmp(line, "alarm_screen end")) {
+		if (server->call_over_lock && !strcmp(over_lock_id(server), "ztclock-ring")) {
+			server->call_over_lock = false;
+			draw_status(server);
+			damage(server);
+		}
 	} else if (!strcmp(line, "call_screen")) {
 		server->call_over_lock = true;
+		snprintf(server->over_lock_app, sizeof(server->over_lock_app), "ztphone");
 		draw_status(server);
 		char mark_path[256];
 		runtime_file(mark_path, sizeof(mark_path), "ztmetro-call-locked");
@@ -17328,7 +17406,7 @@ static void render_frame(struct zt_server *server) {
 	}
 	if (server->call_over_lock && server->shown && server->shown->mapped &&
 			server->shown->xdg_toplevel->app_id &&
-			!strcmp(server->shown->xdg_toplevel->app_id, "ztphone")) {
+			!strcmp(server->shown->xdg_toplevel->app_id, over_lock_id(server))) {
 		/* Opaque margins keep the lock clock and navigation behind the call. */
 		float m[16];
 		mat_identity(m);
