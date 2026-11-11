@@ -129,10 +129,57 @@ adds and removes the virtual output:
     echo 'desktop remove'          > $XDG_RUNTIME_DIR/ztmetro.ctl
 
 It is rendered on the GPU like any output: the scene, GLES2, and GBM buffers
-from the session's allocator. **Battery:** a virtual output that no one looks
-at gets no frames. Its apps get one frame callback a second instead of 60, and
-nothing is drawn. It counts as "looked at" while ztdesk is in front on a lit
-screen, or for the seconds given by `desktop watch N` (for wayvnc or grim).
+from the session's allocator.
+
+## Not drawn while nobody looks
+
+The desktop is drawn only while it is **viewed**:
+
+- a monitor that is on;
+- ztdesk in front on a lit phone screen;
+- the seconds given by `desktop watch N` (for wayvnc or grim).
+
+Unviewed, the output's frame events commit nothing, and no client gets a
+frame callback. GTK (the panel, xfdesktop, apps) makes one commit and then
+waits for a callback that doesn't come, so it stops drawing. The desktop's
+windows are also told xdg_toplevel `suspended`, which GTK 4, Firefox and Qt
+use to slow their timers. The shell has no timer for the desktop (the old 1 Hz
+`desk_idle_tick` is gone). `desk_view_sync` recomputes "viewed" when it can
+change:
+
+- Metro shows an app, or draws a frame (ztdesk in front or not);
+- the screen goes on or off;
+- an output comes, goes or is switched;
+- `desktop watch` starts, and its one-shot timer ends it.
+
+Becoming viewed schedules a frame, and its `frame_done` lets every client draw
+again.
+
+The state is in `$XDG_RUNTIME_DIR/ztmetro-desktop/viewed` (`1` or `0`). The
+session's own pieces sleep on it: `ztos-status`, the panel's phone status
+(`desktop/panel/`), closes every watch, subscription and timer while it is `0`.
+
+## The panel
+
+The session's panel layout (`desktop/panel/xfce4-panel.xml`) is XFCE's
+default, with two plugins added before the clock:
+
+- **ztos-status** (ours, internal to the panel), with these icons and where
+  each gets its state:
+  - mobile: `/run/ztoscorenetworking/status` (inotify);
+  - Wi-Fi: the network from NetworkManager over D-Bus (its PropertiesChanged),
+    and the bars from the same status file;
+  - VPN, WireGuard: rtnetlink link messages, and `DEVTYPE=wireguard` in sysfs;
+  - VPN, Tailscale: tailscaled's LocalAPI `watch-ipn-bus`, one line per state
+    change (it runs with userspace networking, so there is no tun device);
+  - Bluetooth: BlueZ over D-Bus, read only;
+  - battery: sysfs, on a `power_supply` uevent and once a minute.
+- **xfce4-pulseaudio-plugin** (stock): volume, the output device, and MPRIS.
+  libpulse events from pipewire-pulse.
+
+The clock is XFCE's: one timer a minute, on CLOCK_MONOTONIC, which never wakes
+a sleeping phone. An existing panel gets the two plugins added once by
+`ztos-desktop-session` (the marker is `~/.config/ztmetro/desktop-panel-status`).
 
 ## ztdesk, the controller
 
