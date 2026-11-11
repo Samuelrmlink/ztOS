@@ -15,10 +15,12 @@ arch=(aarch64)
 url='https://github.com/ztos/ztos'
 license=('GPL-3.0-or-later')
 # the panel, the desktop, settings, files, a terminal; X11 apps through
-# Xwayland; the rest of XFCE (mousepad, ristretto, ...) is the user's choice
+# Xwayland; the rest of XFCE (mousepad, ristretto, ...) is the user's choice.
+# xfwm4 never runs (X11 only; the shell is the window manager), but its
+# themes are the frames the shell draws, and its settings dialog chooses them.
 depends=(xfce4-panel xfdesktop xfce4-settings xfconf thunar xfce4-terminal garcon tumbler
          xfce4-pulseaudio-plugin
-         gtk-layer-shell adwaita-icon-theme xorg-xwayland mesa gtk3 libxkbcommon wayland)
+         gtk-layer-shell adwaita-icon-theme xorg-xwayland mesa gtk3 libxkbcommon wayland xfwm4)
 makedepends=(gcc make pkgconf wayland-protocols)
 optdepends=('mesa-utils: glxinfo and eglinfo, to check the GPU'
             'glmark2: the GPU benchmark (wayland and x11)'
@@ -30,7 +32,7 @@ _src() { echo "${ZTOS_SRC:-$startdir/../..}"; }
 
 build() {
 	cd "$(_src)/ztmetro"
-	make desktop/ztdesk desktop/ztdeskmode desktop/panel/libztos-status.so
+	make desktop/ztdesk desktop/ztdeskmode desktop/ztmove desktop/panel/libztos-status.so
 }
 
 package() {
@@ -40,6 +42,9 @@ package() {
 	install -Dm755 "$z/desktop/ztdesk" "$pkgdir/usr/local/bin/ztdesk"
 	install -Dm644 "$z/desktop/ztdesk.desktop" "$pkgdir/usr/local/share/applications/ztdesk.desktop"
 	install -Dm644 "$z/desktop/ztdesk.svg" "$pkgdir/usr/local/share/icons/hicolor/scalable/apps/ztdesk.svg"
+	install -Dm755 "$z/desktop/ztmove" "$pkgdir/usr/local/bin/ztmove"
+	install -Dm644 "$z/desktop/ztmove.desktop" "$pkgdir/usr/local/share/applications/ztmove.desktop"
+	install -Dm644 "$z/desktop/ztmove.svg" "$pkgdir/usr/local/share/icons/hicolor/scalable/apps/ztmove.svg"
 	install -Dm755 "$z/desktop/ztdeskmode" "$pkgdir/usr/local/bin/ztdeskmode"
 	install -Dm644 "$z/desktop/ztdeskmode.desktop" "$pkgdir/usr/local/share/applications/ztdeskmode.desktop"
 	install -Dm644 "$z/desktop/ztdeskmode.svg" "$pkgdir/usr/local/share/icons/hicolor/scalable/apps/ztdeskmode.svg"

@@ -54,15 +54,60 @@ renderer is not used.
   `_commit`, `_unmap`, `_destroy`, `_fullscreen`).
 - **Window management:** stacking, click-to-focus and raise. Move by the title
   bar, with Alt+drag, or when the app asks (`xdg_toplevel.move`). Resize from
-  the border (8 px), with Alt+right-drag, or when the app asks. Also maximize
-  (double click, Super+Up), minimize, full screen, Alt+Tab and Alt+F4. A window
-  menu opens from a right-click on the title bar, from Alt+Space, or from the
-  app's own `show_window_menu` (GTK's right-click on its header bar). Its items
-  are "move to phone", "minimize", "maximize", "close".
-- **Decorations:** apps that ask for server-side decorations (xdg-decoration:
-  foot, Qt, Firefox) get our title bar. The buttons are: to phone, minimize,
-  maximize, close. GTK 3 and 4 always draw their own (client-side) title bars,
-  so for them, "move to phone" is in the window menu.
+  the frame's sides and bottom, the top 2 points of the title bar, a 6-point
+  margin outside, with Alt+right-drag, or when the app asks, within the
+  app's min and max sizes. Also maximize (double click, Super+Up), minimize,
+  roll up (the wheel on the title bar), send to the back (middle click), full
+  screen, Alt+Tab and Alt+F4. A window menu opens from the frame's menu
+  button, a right-click on the title bar, Alt+Space, or the app's own
+  `show_window_menu` (GTK's right-click on its header bar). It has: Move to
+  Phone, Minimize, Maximize, Roll Window Up, Move, Resize, Close.
+  - **The pointer as any desktop has it:** a button held on a surface keeps
+    the pointer there until it is let go (the implicit grab). Without it,
+    GTK's header-bar drag got a leave as soon as the pointer left the window.
+  - **A slow app's move:** an app's move or resize must name its press (the
+    serial) and come while a button is down. It starts from where that press
+    was, so the window does not jump. A move that comes up to 1.5 s after the
+    release is done in one step, to where the pointer let go. GTK on the
+    phone can take a frame or more to ask. A request with no button down
+    starts no grab: before, the window followed the pointer until the next
+    click.
+- **Decorations: xfwm4's, from the theme XFCE chooses** (`desktop/deco.c`).
+  Apps that ask for server-side decorations (xdg-decoration: foot, Qt,
+  Chromium and Electron apps such as Brave and Grayjay, and our own apps)
+  get the frame xfwm4 would draw. It reads the theme, `button_layout`,
+  `title_alignment` and `title_font` from xfconf's xfwm4 channel. It finds
+  the theme's `xfwm4/` directory (`~/.themes`, `~/.local/share/themes`,
+  `/usr/share/themes`), reads `themerc`, and draws the XPM pieces with their
+  symbolic colours filled from the GTK theme: Adwaita or Adwaita-dark, the
+  colours xfwm4 itself gives them, measured under Xvfb. There are corners,
+  title pieces 1 to 5, sides, a bottom, and buttons for menu (with the app's
+  icon), shade, hide, maximize and close in four states, acting on release.
+  Without a theme on disk it draws Default's look itself. The ztos-desktop
+  package depends on xfwm4 for its themes and its settings dialog; the X11
+  window manager itself never runs. `ztos-desktop-session` follows xfconf
+  live (`xfconf-query -m`). It writes `$XDG_RUNTIME_DIR/ztmetro-xfwm4` and
+  says `desktop theme` on the control pipe. Before this, the bar was Metro's,
+  in the phone's accent: the user's crimson made it red. GTK 3 and 4 always
+  draw their own (client-side) title bars, so for them, Move to Phone is in
+  the window menu.
+- **Where a window is, told to its app** (`desktop/protocols/zt-environment-v1.xml`):
+  `zt_environment_manager_v1.get_environment(xdg_toplevel)` gives an object
+  whose `environment(kind, input, output)` event says phone or desktop. It
+  comes first with the window's first configure, then at every move, before
+  the configure that comes with the move, so an app can change its chrome
+  and layout in the same frame. The fallbacks:
+  - `$XDG_RUNTIME_DIR/ztmetro-env/PID`, a line a window
+    (`APP_ID phone|desktop OUTPUT`), rewritten at every move, to watch with
+    inotify;
+  - the xdg states: maximized and tiled on all edges means the phone.
+
+  ZrnMetroCore uses it, so every Metro app does. On a desktop an app has
+  xfwm4's frame (it always asks for server-side decorations, and the phone
+  draws none), a window's sizes (340×420 up to 900 wide), the mouse (a
+  pointer acts as a finger, the wheel scrolls, the back button goes back),
+  and `zmc_on_desktop()` and an `environment` callback for the app's own
+  changes. Before, the AirPods app on the desktop had no frame and no mouse.
 - **Layers:** wlr-layer-shell (background, bottom, top, overlay). Exclusive
   zones shrink the area that maximized windows get. Layer popups (the panel's
   menus) are drawn above the windows. A layer surface asking for the phone's
@@ -111,8 +156,11 @@ renderer is not used.
   The scene sends it the desktop output's `enter`, its preferred buffer scale
   and its fractional scale (1.0). We send `leave` for the panel, so GTK 3
   stops drawing at 4×.
-- **Desktop → phone:** use the title bar's phone button, the window menu,
-  Super+P, or `desktop phone APP|focused`. The scene node goes. The window
+- **Either way, from either side:** **Move Apps** (`ztmove`) lists the apps
+  on the other side ("bring here") and on its own ("send"). It turns round
+  when it is moved itself.
+- **Desktop → phone:** use the window menu's Move to Phone, Super+P,
+  Move Apps, or `desktop phone APP|focused`. The scene node goes. The window
   gets `leave` for the desktop, `enter` for the panel, Metro's scale (with the
   per-app zoom), maximized and tiled at the app area's size. Metro then shows
   it as the app in front.
@@ -190,8 +238,13 @@ works against the same desktop.
 - **View:** wlr-screencopy of the desktop output. It asks for linux-dmabuf
   buffers when the shell offers them: the copy is a GPU blit, and ztdesk shows
   the frame as a texture, with no CPU pixel copy. Shared memory is the
-  fallback. It captures at most 30 frames a second, and only with damage
-  (`copy_with_damage`), so a still desktop costs nothing.
+  fallback. It captures only with damage (`copy_with_damage`), so a still
+  desktop costs nothing. The next frame is asked for as soon as one is
+  ready, so one is always waiting for the next change. It used to ask at
+  most every 33 ms, on its tick, after the last one: 18 frames a second, and
+  28 ms (p95 62 ms) from a pointer move to the frame that shows it. Now it
+  is 57 frames a second and 9 ms (p95 16 ms), measured with `zt-desklat` in
+  `desktop/dev`. `ZTDESK_TRACE=1` prints the same figures for real fingers.
 - **Input:** wlr-virtual-pointer and zwp-virtual-keyboard. The shell routes
   both to the desktop, never to the phone.
   - **Touchpad mode:** relative motion and a pointer. Tap to click, two-finger
@@ -288,4 +341,8 @@ Measured on the S9 (Mali-G72 MC18, Mesa 26.2.6 Panfrost):
 | `desktop/ztos-desktop-session` | the XFCE session |
 | `desktop/ztos-desktop-hotplug` | the DP hook stub |
 | `desktop/ztdesk.c` | the controller app |
-| `desktop/dev/` | a container that runs the whole thing headless on a PC |
+| `desktop/deco.c` | window frames: xfwm4's themes and settings, drawn |
+| `desktop/protocols/zt-environment-v1.xml` | apps told whether a window is on the phone or a desktop |
+| `desktop/ztmove.c` | Move Apps: running apps between the two |
+| `desktop/zt-deskpoke.c`, `zt-desklat.c` | test tools: ztdesk's kind of pointer, scripted; capture latency |
+| `desktop/dev/` | a container that runs the whole thing headless on a PC, and its tests (`run.sh --test all`) |

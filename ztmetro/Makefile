@@ -39,13 +39,19 @@ DM_WRAP = retro/dm-wrap.c
 DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
 
 # desktop mode (desktop/): the outputs after the panel, in the same session
-DESK_DEPS = desktop/desktop.c desktop/desktop.h desktop/wlr-layer-shell-unstable-v1-protocol.h
+DESK_DEPS = desktop/desktop.c desktop/deco.c desktop/desktop.h desktop/wlr-layer-shell-unstable-v1-protocol.h \
+	desktop/zt-environment-v1-protocol.h $(ZTENV_CODE)
 desktop/wlr-layer-shell-unstable-v1-protocol.h: desktop/protocols/wlr-layer-shell-unstable-v1.xml
+	wayland-scanner server-header $< $@
+# zt_environment_v1: apps are told whether a window is on the phone or a desktop
+ZTENV = desktop/protocols/zt-environment-v1.xml
+ZTENV_CODE = core/zt-environment-v1-protocol.c core/xdg-shell-protocol.c
+desktop/zt-environment-v1-protocol.h: $(ZTENV)
 	wayland-scanner server-header $< $@
 
 ztmetro: ztmetro.c core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o $@ ztmetro.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+		-o $@ ztmetro.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
 # the DotMatrix screens rendered offscreen to PNG files, to check them without a phone
 retro/dm-test: retro/dm-test.c $(RETRO_DEPS)
@@ -63,8 +69,10 @@ apps/ztapps: apps/ztapps.c
 # ZrnMetroCore: the window, motion and widgets our own apps share
 VIEWPORTER := $(WP)/stable/viewporter/viewporter.xml
 CORE = core/zrnmetrocore.c core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c \
+	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c \
 	retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
-CORE_DEPS = $(CORE) core/zt-clock.h core/zrnboard.h retro/dotmatrix.h retro/dm-chrome.h retro/dm-glyphs.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h
+CORE_DEPS = $(CORE) core/zt-clock.h core/zrnboard.h retro/dotmatrix.h retro/dm-chrome.h retro/dm-glyphs.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h \
+	core/zt-environment-v1-client-protocol.h core/xdg-decoration-unstable-v1-client-protocol.h
 APP_BUILD = $(CC) $(CFLAGS) $(WARN) -Icore $(shell pkg-config --cflags $(APP_PKGS)) $(IAL_FLAGS)
 APP_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(APP_PKGS)) $(IAL_LIBS) -lm
 
@@ -97,6 +105,23 @@ desktop/ztdesk: desktop/ztdesk.c $(DESK_CLIENT) $(DESK_CLIENT_H) $(CORE_DEPS)
 	$(APP_BUILD) -Idesktop $(shell pkg-config --cflags gbm) -o $@ desktop/ztdesk.c $(DESK_CLIENT) $(CORE) $(APP_LIBS) \
 		$(shell pkg-config --libs gbm)
 
+# zt-deskpoke: the desktop's pointer driven as ztdesk drives it, for tests
+desktop/zt-deskpoke: desktop/zt-deskpoke.c desktop/wlr-virtual-pointer-unstable-v1-protocol.c \
+		desktop/wlr-virtual-pointer-unstable-v1-client-protocol.h desktop/virtual-keyboard-unstable-v1-protocol.c \
+		desktop/virtual-keyboard-unstable-v1-client-protocol.h
+	$(CC) $(CFLAGS) $(WARN) -Idesktop $(shell pkg-config --cflags wayland-client xkbcommon) -o $@ desktop/zt-deskpoke.c \
+		desktop/wlr-virtual-pointer-unstable-v1-protocol.c desktop/virtual-keyboard-unstable-v1-protocol.c \
+		$(shell pkg-config --libs wayland-client xkbcommon)
+
+# zt-desklat: a pointer move to a captured frame, ztdesk's way, timed
+desktop/zt-desklat: desktop/zt-desklat.c $(DESK_CLIENT) $(DESK_CLIENT_H)
+	$(CC) $(CFLAGS) $(WARN) -Idesktop $(shell pkg-config --cflags wayland-client gbm) -o $@ desktop/zt-desklat.c \
+		$(DESK_CLIENT) $(shell pkg-config --libs wayland-client gbm) -lm
+
+# ztMove: running apps between the phone and the desktop (both sides)
+desktop/ztmove: desktop/ztmove.c $(CORE_DEPS)
+	$(APP_BUILD) -o $@ desktop/ztmove.c $(CORE) $(APP_LIBS)
+
 # ztDeskMode: desktop mode's controls (Settings' page) as an app with a tile
 desktop/ztdeskmode: desktop/ztdeskmode.c desktop/desktop-page.c desktop/desktop-page.h $(CORE_DEPS)
 	$(APP_BUILD) -Idesktop -o $@ desktop/ztdeskmode.c desktop/desktop-page.c $(CORE) $(APP_LIBS)
@@ -108,7 +133,10 @@ desktop/panel/libztos-status.so: desktop/panel/ztos-status.c
 		-o $@ $< $(shell pkg-config --libs libxfce4panel-2.0 gtk+-3.0 gio-unix-2.0)
 
 .PHONY: install-desktop
-install-desktop: desktop/ztdesk desktop/ztdeskmode desktop/panel/libztos-status.so
+install-desktop: desktop/ztdesk desktop/ztdeskmode desktop/ztmove desktop/panel/libztos-status.so
+	install -Dm755 desktop/ztmove /usr/local/bin/ztmove
+	install -Dm644 desktop/ztmove.desktop /usr/local/share/applications/ztmove.desktop
+	install -Dm644 desktop/ztmove.svg /usr/local/share/icons/hicolor/scalable/apps/ztmove.svg
 	install -Dm755 desktop/panel/libztos-status.so /usr/lib/xfce4/panel/plugins/libztos-status.so
 	install -Dm644 desktop/panel/ztos-status.desktop /usr/share/xfce4/panel/plugins/ztos-status.desktop
 	install -Dm644 desktop/panel/xfce4-panel.xml /usr/share/ztos-desktop/xfce4-panel.xml
@@ -334,6 +362,18 @@ core/viewporter-client-protocol.h:
 core/viewporter-protocol.c:
 	wayland-scanner private-code $(VIEWPORTER) $@
 
+# where a window is, phone or desktop (desktop/protocols/zt-environment-v1.xml),
+# and xdg-decoration: on a desktop our apps take the shell's frames
+XDGDECO := $(WP)/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
+core/zt-environment-v1-client-protocol.h: $(ZTENV)
+	wayland-scanner client-header $< $@
+core/zt-environment-v1-protocol.c: $(ZTENV)
+	wayland-scanner private-code $< $@
+core/xdg-decoration-unstable-v1-client-protocol.h:
+	wayland-scanner client-header $(XDGDECO) $@
+core/xdg-decoration-unstable-v1-protocol.c:
+	wayland-scanner private-code $(XDGDECO) $@
+
 # A program built on another machine (a laptop's x86-64 build copied over with
 # the sources) looks up to date to make and would be installed as it is, and
 # then fails with "Exec format error". Refuse it: the built programs must be for
@@ -521,7 +561,8 @@ check-slider-gesture:
 # the real core, with Wayland and GL as stubs that count (tests/swipe-cost/)
 SWIPE_BUILD = $(CC) -std=gnu11 -O1 -g -w -Itests/swipe-cost -Icore -Iretro $(shell pkg-config --cflags $(APP_PKGS) json-c)
 SWIPE_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs cairo pangocairo gdk-pixbuf-2.0 xkbcommon json-c) -lm -lpthread
-SWIPE_CORE = core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
+SWIPE_CORE = core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c \
+	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
 .PHONY: check-slider-touch check-swipe-cost check-pivot-wheel
 check-pivot-wheel: $(CORE_DEPS)
 	$(SWIPE_BUILD) -o /tmp/ztmetro-pivot-wheel-test tests/pivot-wheel.c $(SWIPE_CORE) $(SWIPE_LIBS)

@@ -102,6 +102,28 @@ keep xfsettingsd xfsettingsd --no-daemon --replace
 keep thunar thunar --daemon
 keep xfdesktop xfdesktop
 keep xfce4-panel xfce4-panel
+# Window frames as xfwm4's (the shell draws them, ztmetro/desktop/deco.c):
+# what XFCE's "Window Manager" and "Appearance" settings choose, told to the
+# shell as it changes. xfconfd writes its files late, so the shell is given
+# the values themselves, in $XDG_RUNTIME_DIR/ztmetro-xfwm4.
+deco_state() {
+	f=${XDG_RUNTIME_DIR:-/tmp}/ztmetro-xfwm4
+	{
+		for p in theme button_layout title_alignment title_font; do
+			printf '%s=%s\n' "$p" "$(xfconf-query -c xfwm4 -p /general/$p 2>/dev/null)"
+		done
+		printf 'gtk_theme=%s\n' "$(xfconf-query -c xsettings -p /Net/ThemeName 2>/dev/null)"
+		printf 'gtk_font=%s\n' "$(xfconf-query -c xsettings -p /Gtk/FontName 2>/dev/null)"
+	} > "$f.new" && mv "$f.new" "$f"
+	echo 'desktop theme' > "${XDG_RUNTIME_DIR:-/tmp}/ztmetro.ctl" 2>/dev/null || true
+}
+if command -v xfconf-query >/dev/null 2>&1; then
+	deco_state
+	for ch in xfwm4 xsettings; do
+		(xfconf-query -c $ch -m 2>/dev/null | while read -r _; do deco_state; done) &
+	done
+fi
+
 # anything the user wants with it (one command per line)
 auto=${XDG_CONFIG_HOME:-$HOME/.config}/ztmetro/desktop-autostart
 [ -f "$auto" ] && while IFS= read -r line; do

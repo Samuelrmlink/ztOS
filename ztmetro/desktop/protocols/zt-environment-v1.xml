@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="zt_environment_v1">
+  <copyright>
+    SPDX-License-Identifier: GPL-2.0-or-later
+    Copyright 2026 the ztOS authors
+  </copyright>
+
+  <description summary="where a window is: the phone or a desktop">
+    ztMETRO is two environments in one Wayland session: the phone (Metro's
+    shell: one app at a time, full screen, touch, the on-screen keyboard)
+    and a desktop (XFCE on a monitor or a virtual screen: stacking windows
+    with frames, a pointer, a keyboard). A window can move from one to the
+    other while it runs, with the same surface and the same process
+    (ztmetro/desktop/DESIGN.md).
+
+    This protocol tells an app, for each of its toplevels, which one it is
+    in, and tells it again every time the window moves, so that it can
+    change its chrome and layout as it goes: frames and resizable windows
+    on the desktop, the phone's full-screen layout on the phone.
+
+    An app without it can look at the toplevel's states: on the phone it is
+    maximized and tiled on all four edges, on the desktop it is not. Or it
+    can watch $XDG_RUNTIME_DIR/ztmetro-env/PID, which the shell keeps for
+    every process with a window ("APP_ID phone|desktop OUTPUT" per window,
+    rewritten when one moves).
+  </description>
+
+  <interface name="zt_environment_manager_v1" version="1">
+    <description summary="gives each toplevel its environment object">
+      A global. One zt_environment_v1 per xdg_toplevel the client wants
+      to know about.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="the manager goes; the objects it made stay"/>
+    </request>
+
+    <request name="get_environment">
+      <description summary="the environment of a toplevel">
+        The new object's first environment event comes with the toplevel's
+        first configure (at once, if that configure has been sent already).
+        Asking twice for the same toplevel is allowed; each object gets
+        the events.
+      </description>
+      <arg name="id" type="new_id" interface="zt_environment_v1"/>
+      <arg name="toplevel" type="object" interface="xdg_toplevel"/>
+    </request>
+  </interface>
+
+  <interface name="zt_environment_v1" version="1">
+    <description summary="where one toplevel is">
+      Events about one toplevel. When the toplevel is destroyed, the object
+      is inert: no more events; destroy it.
+    </description>
+
+    <enum name="kind">
+      <entry name="phone" value="0" summary="the phone's shell: full screen, one app in front"/>
+      <entry name="desktop" value="1" summary="a desktop: a window among others, framed and resizable"/>
+    </enum>
+
+    <enum name="input" bitfield="true">
+      <entry name="touch" value="1" summary="fingers on the screen the window is on"/>
+      <entry name="pointer" value="2" summary="a pointer (a mouse, or ztdesk's on the phone)"/>
+      <entry name="keyboard" value="4" summary="a keyboard with every key (not only the phone's)"/>
+    </enum>
+
+    <event name="environment">
+      <description summary="the toplevel is in this environment now">
+        Sent first with the toplevel's first configure, then each time it
+        moves, before the xdg_toplevel.configure that comes with the move
+        (its new size and states). The client can apply both at that
+        configure, in one frame.
+
+        output is the name of the wl_output the window is shown on (as
+        wl_output.name gives it), or empty when it is shown on none.
+      </description>
+      <arg name="kind" type="uint" enum="kind"/>
+      <arg name="input" type="uint" enum="input"/>
+      <arg name="output" type="string"/>
+    </event>
+
+    <request name="destroy" type="destructor">
+      <description summary="no more events"/>
+    </request>
+  </interface>
+</protocol>
