@@ -5,8 +5,11 @@
  *
  *  - the view: wlr-screencopy of the desktop's output, into DMA-BUFs (a GPU
  *    copy, drawn as a texture: no pixel passes through the CPU) when the
- *    driver can, shared memory otherwise; only when the desktop has changed,
- *    at most 30 times a second, and never while ztdesk is out of sight
+ *    driver can, shared memory otherwise; only when the desktop has changed
+ *    (copy_with_damage), as often as it changes (up to its refresh), and
+ *    never while ztdesk is out of sight. The next frame is asked for as soon
+ *    as one is ready, so one is always waiting for the next change: a move
+ *    of the pointer is in ztdesk's hands one desktop frame later.
  *  - input: wlr-virtual-pointer on the desktop's output, zwp-virtual-keyboard;
  *    the shell routes both to the desktop. The shell's own keyboard types into
  *    the desktop too while ztdesk is in front.
@@ -40,7 +43,7 @@
 
 #define BAR_H		64	/* the app bar, at the bottom */
 #define KEYS_H		44	/* the row of keys the phone's keyboard lacks, over it */
-#define FRAME_MS	33	/* at most 30 captures a second */
+#define TICK_MS		33	/* the clock: the state file, a held finger */
 #define HOLD_MS		500	/* direct mode: a finger held this long clicks right */
 #define TAP_MS		250
 #define MOVE_SLOP	8.0	/* points a finger may wander and still tap */
@@ -104,6 +107,11 @@ static struct {
 	unsigned shm_rev;
 	bool shm_ready, y_invert;
 	unsigned frames;
+	/* ZTDESK_TRACE: a move of ours to the frame that shows it, timed */
+	bool trace;
+	uint32_t moved_ms;		/* the oldest move not yet in a frame; 0: none */
+	uint32_t trace_since, trace_frames, trace_n;
+	uint32_t trace_lat[256];
 
 	/* the view: the desktop point at the middle of the view, and how much
 	 * nearer than "the whole desktop fits" */
@@ -277,6 +285,7 @@ static void pointer_to(double x, double y, uint32_t time) {
 	zwlr_virtual_pointer_v1_motion_absolute(d.ptr, time, (uint32_t)lround(d.px), (uint32_t)lround(d.py),
 		(uint32_t)lround(d.lw), (uint32_t)lround(d.lh));
 	zwlr_virtual_pointer_v1_frame(d.ptr);
+	if (d.trace && !d.moved_ms) d.moved_ms = time ? time : 1;
 	view_follow();
 	zmc_present();
 }
@@ -471,10 +480,35 @@ static void frame_flags(void *data, struct zwlr_screencopy_frame_v1 *f, uint32_t
 	d.y_invert = flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT;
 }
 
+static int trace_cmp(const void *a, const void *b) {
+	return (int)*(const uint32_t *)a - (int)*(const uint32_t *)b;
+}
+
+/* every 2 s while the finger moves: frames a second, move to frame (median, p95) */
+static void trace_frame(void) {
+	uint32_t now = zmc_now_ms();
+	if (!d.trace_since) d.trace_since = now;
+	d.trace_frames++;
+	if (d.moved_ms && d.trace_n < 256) {
+		d.trace_lat[d.trace_n++] = now - d.moved_ms;
+	}
+	d.moved_ms = 0;
+	if (now - d.trace_since >= 2000) {
+		if (d.trace_n) {
+			qsort(d.trace_lat, d.trace_n, sizeof(d.trace_lat[0]), trace_cmp);
+			fprintf(stderr, "ztdesk: %.1f frames/s, move to frame: median %u ms, p95 %u ms (%u moves)\n",
+				d.trace_frames * 1000.0 / (now - d.trace_since), d.trace_lat[d.trace_n / 2],
+				d.trace_lat[d.trace_n * 95 / 100], d.trace_n);
+		}
+		d.trace_since = now, d.trace_frames = 0, d.trace_n = 0;
+	}
+}
+
 static void frame_ready(void *data, struct zwlr_screencopy_frame_v1 *f, uint32_t hi, uint32_t lo, uint32_t ns) {
 	zwlr_screencopy_frame_v1_destroy(f);
 	d.frame = NULL;
 	d.frames++;
+	if (d.trace) trace_frame();
 	if (d.dma_offered && !d.dma_failed && d.bufs[d.writing].image) {
 		d.showing = d.writing;
 		d.writing ^= 1;
@@ -506,17 +540,17 @@ static const struct zwlr_screencopy_frame_v1_listener frame_listener = {
 	.damage = frame_damage, .linux_dmabuf = frame_dmabuf, .buffer_done = frame_done,
 };
 
-/* the next frame, when there is a desktop to see and we are in front */
+/* The next frame, when there is a desktop to see and we are in front. Asked
+ * for at once (it was at most every 33 ms, after the last was ready, on the
+ * tick: 18 frames a second and 28 ms from a move to its frame, median;
+ * zt-desklat measures both ways). copy_with_damage holds it until the desktop
+ * changes, so a still desktop still costs nothing. */
 static void capture_request(void) {
 	if (d.frame || !d.sc || !d.output || !d.available || !zmc.active) {
 		d.want_frame = !d.frame;
 		return;
 	}
 	uint32_t now = zmc_now_ms();
-	if (now - d.asked_ms < FRAME_MS) {
-		d.want_frame = true;	/* the tick asks */
-		return;
-	}
 	d.want_frame = false;
 	d.asked_ms = now;
 	d.dma_offered = false;
@@ -1060,7 +1094,7 @@ static void arrived(int page) {
 	d.reg = wl_display_get_registry(zmc.display);
 	wl_registry_add_listener(d.reg, &reg_listener, NULL);
 	state_read();
-	zmc_every(FRAME_MS, tick);
+	zmc_every(TICK_MS, tick);
 }
 
 static bool back(void) {
@@ -1086,6 +1120,7 @@ static const struct zmc_app app = {
 
 int main(int argc, char **argv) {
 	for (int i = 0; i < 2; i++) d.bufs[i].fd = -1;
+	d.trace = getenv("ZTDESK_TRACE") != NULL;
 	config_load();
 	d.chrome_stale = true;
 	if (argc == 3 && !strcmp(argv[1], "--render")) {

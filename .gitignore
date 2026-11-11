@@ -96,5 +96,6 @@ ztmetro/desktop/*.xml
 ztmetro/desktop/ztdesk
 ztmetro/desktop/ztdeskmode
 ztmetro/desktop/zt-deskpoke
+ztmetro/desktop/zt-desklat
 ztmetro/clock/ztclock
 ztmetro/clock/ztclockd

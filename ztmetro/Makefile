@@ -113,6 +113,11 @@ desktop/zt-deskpoke: desktop/zt-deskpoke.c desktop/wlr-virtual-pointer-unstable-
 		desktop/wlr-virtual-pointer-unstable-v1-protocol.c desktop/virtual-keyboard-unstable-v1-protocol.c \
 		$(shell pkg-config --libs wayland-client xkbcommon)
 
+# zt-desklat: a pointer move to a captured frame, ztdesk's way, timed
+desktop/zt-desklat: desktop/zt-desklat.c $(DESK_CLIENT) $(DESK_CLIENT_H)
+	$(CC) $(CFLAGS) $(WARN) -Idesktop $(shell pkg-config --cflags wayland-client gbm) -o $@ desktop/zt-desklat.c \
+		$(DESK_CLIENT) $(shell pkg-config --libs wayland-client gbm) -lm
+
 # ztDeskMode: desktop mode's controls (Settings' page) as an app with a tile
 desktop/ztdeskmode: desktop/ztdeskmode.c desktop/desktop-page.c desktop/desktop-page.h $(CORE_DEPS)
 	$(APP_BUILD) -Idesktop -o $@ desktop/ztdeskmode.c desktop/desktop-page.c $(CORE) $(APP_LIBS)
