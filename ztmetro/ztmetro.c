@@ -6788,6 +6788,7 @@ static void lock(struct zt_server *server) {
 		return;
 	}
 	server->locked = true;
+	desk_phone_lock(server, true);	/* the desktop too, once no dock is there */
 	apps_suspend_sync(server);
 	server->switcher = false;
 	server->switch_t = 0.0f;
@@ -14892,6 +14893,7 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		}
 		if (dm_swiped || (!retro_on(server) && !cancelled && p->y - p->y0 < -server->height / 5.0)) {
 			server->locked = false;
+			desk_phone_lock(server, false);	/* the only way the desktop's lock lifts */
 			apps_suspend_sync(server);
 			bt_pair_sync(server);
 			if (!server->boot_logo_done) {
@@ -16207,6 +16209,16 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 	}
 	if (!keyboard) {
 		return;	/* the pipe's keys are all the phone's own, handled above */
+	}
+	if (server->locked && !keyboard->force) {
+		/* The phone locked: a keyboard's keys go to the desktop (docked, not
+		 * locked itself) or nowhere, never to the lock screen, a password
+		 * prompt or the phone's app behind them. */
+		if (desk_keyboard_live(server) && !desk_key(server, keyboard->wlr_keyboard, event)) {
+			wlr_seat_set_keyboard(server->seat, keyboard->wlr_keyboard);
+			wlr_seat_keyboard_notify_key(server->seat, event->time_msec, event->keycode, event->state);
+		}
+		return;
 	}
     if (server->auth_active) {
         if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
@@ -17823,6 +17835,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 
 	/* Lockscreen starts above the screen, off the top */
 	server->locked = true;
+	desk_phone_lock(server, true);
 	server->switcher = false;
 	server->switch_t = 0.0f;
 	server->lock_y = (float)-server->height;

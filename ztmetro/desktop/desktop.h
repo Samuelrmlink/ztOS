@@ -50,6 +50,9 @@ static bool desk_key(struct zt_server *server, struct wlr_keyboard *keyboard,
 	const struct wlr_keyboard_key_event *event);
 static void desk_app_shown(struct zt_server *server, struct zt_toplevel *toplevel);
 static void desk_phone_touched(struct zt_server *server);
+/* the phone locked or unlocked: the desktop locks with it once no dock is
+ * there, and stays locked until the phone is unlocked */
+static void desk_phone_lock(struct zt_server *server, bool locked);
 
 /* the control pipe's "desktop ..." lines, and SIGHUP */
 static void desk_ctl(struct zt_server *server, const char *args);

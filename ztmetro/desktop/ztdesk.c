@@ -75,7 +75,7 @@ static struct {
 	int n_outs;
 
 	/* the desktop, from $XDG_RUNTIME_DIR/ztmetro-desktop.state */
-	bool available, session;
+	bool available, session, locked;
 	char name[32];
 	int px_w, px_h;		/* its pixels */
 	double lw, lh;		/* and points */
@@ -179,7 +179,7 @@ static void state_read(void) {
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
 	char path[300], line[512];
 	snprintf(path, sizeof(path), "%s/ztmetro-desktop.state", runtime ? runtime : "/tmp");
-	bool available = false, session = false;
+	bool available = false, session = false, locked = false;
 	char name[32] = "";
 	int w = 0, h = 0;
 	double scale = 1;
@@ -190,13 +190,18 @@ static void state_read(void) {
 			available = w > 0 && h > 0;
 		} else if (!strncmp(line, "session running", 15)) {
 			session = true;
+		} else if (!strncmp(line, "locked yes", 10)) {
+			locked = true;
 		}
 	}
 	if (f) fclose(f);
-	bool changed = available != d.available || session != d.session || strcmp(name, d.name) ||
+	/* a locked desktop is not shown (the shell covers it, and refuses our clicks) */
+	available = available && !locked;
+	bool changed = available != d.available || session != d.session || locked != d.locked || strcmp(name, d.name) ||
 		w != d.px_w || h != d.px_h;
 	d.available = available;
 	d.session = session;
+	d.locked = locked;
 	if (!changed) return;
 	snprintf(d.name, sizeof(d.name), "%s", name);
 	d.px_w = w, d.px_h = h;
@@ -783,6 +788,14 @@ static double render(cairo_t *cr, int page) {
 	}
 	double y = zmc_header(cr, "desktop");
 	cairo_set_source_rgb(cr, 1, 1, 1);
+	if (d.locked) {
+		y += zmc_text(cr, "The desktop is locked.", FONT_SEMILIGHT, 20, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN);
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		y += 12 + zmc_text(cr, "It locked with the phone when the dock was unplugged. Its apps are still "
+			"running; unlocking the phone unlocks it.", FONT_REGULAR, 15, ZMC_MARGIN, y + 12,
+			zmc.width - 2 * ZMC_MARGIN);
+		return y;
+	}
 	y += zmc_text(cr, "No desktop is running.", FONT_SEMILIGHT, 20, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	y += 12 + zmc_text(cr, "Plug in a monitor, or start one here on a virtual screen and use it from this app.",

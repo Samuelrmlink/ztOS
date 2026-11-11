@@ -175,6 +175,12 @@ struct zt_desk {
 	pid_t session_pid;		/* ztos-desktop-session, while it runs */
 	bool session_wanted;
 	pid_t session_pgid;		/* its process group, kept after the script itself ends */
+	/* the lock (desk_lock_eval): the phone locked and no dock locks the
+	 * desktop, and only the phone's unlock lifts it */
+	bool locked, phone_locked;
+	int dock_test;			/* "desktop dock on|off|auto": -1 auto, else forced */
+	struct wlr_scene_rect *cover;	/* over everything while locked */
+	struct wl_event_source *dock_timer;	/* while the phone is locked and the desktop not */
 	pid_t session_pgid_dying;	/* a stopped session's process group, killed if it lingers */
 	struct wl_event_source *session_kill_timer;
 	char x_display[16];
@@ -203,6 +209,8 @@ static void desk_give_to_phone(struct desk_view *view);
 static void desk_session_start(struct zt_desk *desk);
 static void desk_session_stop(struct zt_desk *desk);
 static void desk_state_write(struct zt_desk *desk);
+static bool desk_docked(struct zt_desk *desk);
+static void desk_lock_eval(struct zt_desk *desk);
 static void desk_view_set_minimized(struct desk_view *view, bool minimized);
 static void desk_view_set_maximized(struct desk_view *view, bool maximized);
 static void desk_view_set_fullscreen(struct desk_view *view, bool fullscreen);
@@ -1162,6 +1170,10 @@ static void desk_set_hover(struct zt_desk *desk, struct desk_view *view, int but
 static void desk_pointer_refocus(struct zt_desk *desk, uint32_t time) {
 	struct wlr_seat *seat = desk->server->seat;
 	double lx = desk->cursor->x, ly = desk->cursor->y;
+	if (desk->locked) {
+		wlr_seat_pointer_clear_focus(seat);	/* nothing under the cover gets the pointer */
+		return;
+	}
 	if (desk->grab != GRAB_NONE) {
 		desk_grab_motion(desk);
 		return;
@@ -1228,6 +1240,9 @@ static void desk_cursor_button(struct wl_listener *l, void *data) {
 	struct wlr_pointer_button_event *e = data;
 	struct wlr_seat *seat = desk->server->seat;
 	bool pressed = e->state == WL_POINTER_BUTTON_STATE_PRESSED;
+	if (desk->locked) {
+		return;
+	}
 	desk->last_input_ms = now_ms();
 	if (!pressed) {
 		desk->buttons_down &= ~(1u << (e->button & 31));
@@ -1323,6 +1338,9 @@ static void desk_cursor_button(struct wl_listener *l, void *data) {
 static void desk_cursor_axis(struct wl_listener *l, void *data) {
 	struct zt_desk *desk = wl_container_of(l, desk, cursor_axis);
 	struct wlr_pointer_axis_event *e = data;
+	if (desk->locked) {
+		return;
+	}
 	desk->last_input_ms = now_ms();
 	wlr_seat_pointer_notify_axis(desk->server->seat, e->time_msec, e->orientation, e->delta,
 		e->delta_discrete, e->source, e->relative_direction);
@@ -1409,6 +1427,9 @@ static void desk_vkbd_key(struct wl_listener *l, void *data) {
 	struct desk_vkbd *k = wl_container_of(l, k, key);
 	struct wlr_keyboard_key_event *e = data;
 	struct wlr_seat *seat = k->desk->server->seat;
+	if (k->desk->locked) {
+		return;	/* ztdesk's keyboard: nothing while the desktop is locked */
+	}
 	desk_take_keyboard(k->desk);
 	wlr_seat_set_keyboard(seat, &k->vk->keyboard);
 	wlr_seat_keyboard_notify_key(seat, e->time_msec, e->keycode, e->state);
@@ -2206,7 +2227,7 @@ static void desk_phone_touched(struct zt_server *server) {
 /* The desktop is on a monitor and its window (or layer) has the keyboard. */
 static bool desk_keyboard_live(struct zt_server *server) {
 	struct zt_desk *desk = server->desk;
-	return desk && desk->out && !desk->out->virtual && desk_has_keyboard(desk);
+	return desk && desk->out && !desk->out->virtual && !desk->locked && desk_has_keyboard(desk);
 }
 
 static bool desk_key(struct zt_server *server, struct wlr_keyboard *keyboard,
@@ -2214,6 +2235,9 @@ static bool desk_key(struct zt_server *server, struct wlr_keyboard *keyboard,
 	struct zt_desk *desk = server->desk;
 	if (!desk || !desk->out || !desk_has_keyboard(desk)) {
 		return false;
+	}
+	if (desk->locked) {
+		return true;	/* taken, and dropped */
 	}
 	desk->last_input_ms = now_ms();
 	if (event->state != WL_KEYBOARD_KEY_STATE_PRESSED) {
@@ -2847,6 +2871,95 @@ static void desk_session_stop(struct zt_desk *desk) {
 	desk->session_pgid = 0;
 }
 
+/* ---- the lock ------------------------------------------------------------------------------------ */
+
+/* A dock is there while the desktop has a monitor, or while the USB-C port
+ * is the host to a partner (a hub, a dock; also a keyboard or a stick on an
+ * OTG adapter). A charger is a partner with the port as the device: no dock. */
+static bool desk_docked(struct zt_desk *desk) {
+	if (desk->dock_test >= 0) {
+		return desk->dock_test;
+	}
+	struct desk_output *o;
+	wl_list_for_each(o, &desk->outputs, link) {
+		if (!o->virtual) return true;
+	}
+	for (int i = 0; i < 4; i++) {
+		char p[96], role[64] = "";
+		snprintf(p, sizeof(p), "/sys/class/typec/port%d-partner", i);
+		if (access(p, F_OK) != 0) continue;
+		snprintf(p, sizeof(p), "/sys/class/typec/port%d/data_role", i);
+		FILE *f = fopen(p, "r");
+		if (f) {
+			if (!fgets(role, sizeof(role), f)) role[0] = 0;
+			fclose(f);
+		}
+		if (strstr(role, "[host]")) return true;
+	}
+	return false;
+}
+
+static void desk_set_locked(struct zt_desk *desk, bool locked) {
+	if (desk->locked == locked) {
+		return;
+	}
+	desk->locked = locked;
+	if (desk->cover) {
+		wlr_scene_node_set_enabled(&desk->cover->node, locked);
+		wlr_scene_node_raise_to_top(&desk->cover->node);
+	}
+	struct wlr_seat *seat = desk->server->seat;
+	if (locked) {
+		desk_menu_close(desk);
+		wlr_seat_pointer_clear_focus(seat);
+		if (desk_has_keyboard(desk)) {
+			/* the phone's own keyboard again: no desktop client keeps the focus */
+			wlr_seat_set_keyboard(seat, &desk->server->vkbd);
+			wlr_seat_keyboard_notify_clear_focus(seat);
+		}
+		wlr_cursor_unset_image(desk->cursor);
+		desk->cursor_name = NULL;
+	} else {
+		desk->cursor_name = NULL;
+		desk_cursor_set(desk, "default");
+	}
+	struct desk_output *o;
+	wl_list_for_each(o, &desk->outputs, link) {
+		wlr_output_schedule_frame(o->wo);
+	}
+	wlr_log(WLR_INFO, "desktop: %s", locked ? "locked" : "unlocked");
+	desk_state_write(desk);
+}
+
+/* The phone locked and no dock: the desktop locks, whichever came last. */
+static void desk_lock_eval(struct zt_desk *desk) {
+	if (desk->phone_locked && !desk->locked && !desk_docked(desk)) {
+		desk_set_locked(desk, true);
+	}
+	bool watch = desk->phone_locked && !desk->locked;
+	if (desk->dock_timer) {
+		wl_event_source_timer_update(desk->dock_timer, watch ? 1000 : 0);
+	}
+}
+
+static int desk_dock_tick(void *data) {
+	desk_lock_eval(data);
+	return 0;
+}
+
+/* lock() and the lock screen's unlock in ztmetro.c */
+static void desk_phone_lock(struct zt_server *server, bool locked) {
+	struct zt_desk *desk = server->desk;
+	if (!desk) {
+		return;
+	}
+	desk->phone_locked = locked;
+	if (!locked) {
+		desk_set_locked(desk, false);	/* only this lifts the desktop's lock */
+	}
+	desk_lock_eval(desk);
+}
+
 /* ---- state for tools, and the control pipe ------------------------------------------------------- */
 
 /* $XDG_RUNTIME_DIR/ztmetro-desktop.state: the desktop output and its windows,
@@ -2872,6 +2985,8 @@ static void desk_state_write(struct zt_desk *desk) {
 		fprintf(f, "output none\n");
 	}
 	fprintf(f, "session %s\n", desk_session_alive(desk) ? "running" : "stopped");
+	fprintf(f, "locked %s\n", desk->locked ? "yes" : "no");
+	fprintf(f, "dock %s%s\n", desk_docked(desk) ? "yes" : "no", desk->dock_test >= 0 ? " (test)" : "");
 	struct desk_view *v;
 	wl_list_for_each(v, &desk->views, link) {
 		if (!v->mapped || (
@@ -2923,6 +3038,19 @@ static void desk_ctl(struct zt_server *server, const char *args) {
 		return;
 	}
 	while (*args == ' ') args++;
+	if (desk->locked && (!strncmp(args, "click", 5) || !strncmp(args, "pointer", 7) ||
+			!strncmp(args, "move", 4) || !strncmp(args, "phone", 5))) {
+		wlr_log(WLR_INFO, "desktop: locked, '%s' refused", args);
+		return;
+	}
+	if (!strncmp(args, "dock ", 5)) {
+		/* tests: the dock as if (un)plugged. Forcing "on" never unlocks a
+		 * locked desktop; only the phone's unlock does. */
+		desk->dock_test = !strcmp(args + 5, "on") ? 1 : !strcmp(args + 5, "off") ? 0 : -1;
+		desk_lock_eval(desk);
+		desk_state_write(desk);
+		return;
+	}
 	int w, h, hz, n;
 	char name[128];
 	double x, y;
@@ -3132,6 +3260,15 @@ static void desk_init(struct zt_server *server, struct wlr_compositor *composito
 	desk->layer_tree[DL_OVERLAY] = wlr_scene_tree_create(&desk->scene->tree);
 	desk->menu_tree = wlr_scene_tree_create(&desk->scene->tree);
 	desk->drag_tree = wlr_scene_tree_create(&desk->scene->tree);
+	/* the lock's cover: over every output (the layout is far smaller) */
+	static const float cover_rgba[4] = { 0.06f, 0.06f, 0.08f, 1.0f };
+	desk->cover = wlr_scene_rect_create(&desk->scene->tree, 65536, 65536, cover_rgba);
+	if (desk->cover) {
+		wlr_scene_node_set_position(&desk->cover->node, -32768, -32768);
+		wlr_scene_node_set_enabled(&desk->cover->node, false);
+	}
+	desk->dock_test = -1;
+	desk->dock_timer = wl_event_loop_add_timer(server->loop, desk_dock_tick, desk);
 
 	desk->layer_shell = wlr_layer_shell_v1_create(server->wl_display, 4);
 	desk->new_layer.notify = desk_new_layer;

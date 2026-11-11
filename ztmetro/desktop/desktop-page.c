@@ -43,7 +43,7 @@ static struct {
 	int mode;		/* index in modes */
 	char other[256];	/* lines of the file this page doesn't set, kept */
 	/* the shell's state */
-	bool output, monitor, session;
+	bool output, monitor, session, locked;
 	char output_name[32];
 	int w, h, mhz;
 	int open_picker;
@@ -103,7 +103,7 @@ static void state(void) {
 	char p[300], line[512];
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
 	snprintf(p, sizeof(p), "%s/ztmetro-desktop.state", runtime ? runtime : "/tmp");
-	pg.output = pg.session = pg.monitor = false;
+	pg.output = pg.session = pg.monitor = pg.locked = false;
 	pg.mhz = 0;
 	FILE *f = fopen(p, "r");
 	while (f && fgets(line, sizeof(line), f)) {
@@ -114,6 +114,8 @@ static void state(void) {
 		} else if (sscanf(line, "mode %*d %*d %d", &pg.mhz) == 1) {
 		} else if (!strncmp(line, "session running", 15)) {
 			pg.session = true;
+		} else if (!strncmp(line, "locked yes", 10)) {
+			pg.locked = true;
 		}
 	}
 	if (f) fclose(f);
@@ -153,8 +155,8 @@ double desktop_page_render(cairo_t *cr) {
 	double y = zmc_header(cr, "desktop mode");
 	/* where it is now: XFCE, and the monitor */
 	char now[128], mon[128];
-	if (pg.session && pg.output) snprintf(now, sizeof(now), "Running on %s (%s)", pg.output_name,
-		pg.monitor ? "the monitor" : "a virtual screen");
+	if (pg.session && pg.output) snprintf(now, sizeof(now), "Running on %s (%s)%s", pg.output_name,
+		pg.monitor ? "the monitor" : "a virtual screen", pg.locked ? ", locked" : "");
 	else if (pg.output) snprintf(now, sizeof(now), "Not running; %s %s is ready", pg.monitor ? "monitor" : "virtual screen",
 		pg.output_name);
 	else snprintf(now, sizeof(now), "Not running");
