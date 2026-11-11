@@ -54,6 +54,7 @@
 
 #include "clock-store.h"
 #include "zrnvibe.h"
+#include "../volume-streams.h"
 
 #ifndef TFD_TIMER_CANCEL_ON_SET
 #define TFD_TIMER_CANCEL_ON_SET (1 << 1)
@@ -235,12 +236,13 @@ static pid_t sound_start(const char *file, int volume) {
 	for (;;) {
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		double s = (double)(now.tv_sec - t0.tv_sec), share = 0.3 + 0.7 * (s >= RAMP_S ? 1 : s / RAMP_S);
-		char vol[24];
-		snprintf(vol, sizeof(vol), "%.2f", volume / 100.0 * share);
 		pid_t child = fork();
 		if (child == 0) {
 			prctl(PR_SET_PDEATHSIG, SIGTERM);
-			execlp("pw-play", "pw-play", "--volume", vol, path, (char *)NULL);
+			/* the alarm's stream at the alarm's level (volume-streams.h),
+			 * read again each time round: the output turned up if
+			 * needed, so it is heard whatever Media is at */
+			vs_exec_play(VS_ALARM, share, true, path);
 			_exit(127);
 		}
 		int status = 0;
@@ -317,10 +319,9 @@ static void ring_start(char kind, const struct clock_alarm *a, time_t for_time) 
 	tell_shell("screen on\n");
 	tell_shell("alarm_screen\n");
 	ring.screen_told = ring.started;
-	int volume = clock_setting("volume", CLOCK_VOLUME_DEFAULT);
-	if (volume < 0) volume = 0;
-	if (volume > 100) volume = 100;
-	if (volume > 0) ring.sound_pid = sound_start(ring.sound, volume);
+	/* never under VS_ALARM_MIN: an alarm is always heard */
+	int volume = vs_level_read(VS_ALARM);
+	ring.sound_pid = sound_start(ring.sound, volume);
 	if (ring.vibrate) {
 		int r, s;
 		char pattern[40];

@@ -36,6 +36,7 @@
 #include "zrnmetrocore.h"
 #include "zt-clock.h"
 #include "clock-store.h"
+#include "../volume-streams.h"
 
 #define MARGIN ZMC_MARGIN
 
@@ -419,13 +420,13 @@ static void preview_stop(void) {
 static void preview(const char *file) {
 	preview_stop();
 	if (sample) return;
-	char path[300], vol[16];
+	char path[300];
 	snprintf(path, sizeof(path), "%s%s", CLOCK_SOUNDS, file);
-	snprintf(vol, sizeof(vol), "%.2f", clock_setting("volume", CLOCK_VOLUME_DEFAULT) / 100.0);
 	pid_t pid = fork();
 	if (pid == 0) {
 		prctl(PR_SET_PDEATHSIG, SIGTERM);
-		execlp("pw-play", "pw-play", "--volume", vol, path, (char *)NULL);
+		/* as it will ring: the alarm's stream and level (volume-streams.h) */
+		vs_exec_play(VS_ALARM, 1.0, false, path);
 		_exit(127);
 	}
 	preview_pid = pid > 0 ? pid : 0;

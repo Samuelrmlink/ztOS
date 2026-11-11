@@ -11,6 +11,11 @@ WirePlumber remembers the volumes:
     an app's stream               stream-properties  (Output/Audio:application.*)
     the global output             default-nodes
 This daemon adds what WirePlumber doesn't do:
+  - plays the ring's and the alarm's sounds at their own levels, whatever the
+    output's volume (Media) is: see ztmetro/volume-streams.h. Each such stream
+    (node property ztos.stream) gets its level over the output's as its own
+    gain, again whenever either changes; an alarm or a ringing call that the
+    output is too low to carry has the output turned up while it plays;
   - tells the shell the active device's volume, so the volume banner follows
     the speaker's own buttons and the next output when a device goes away;
   - sends an app back to its chosen output when that output returns.
@@ -36,6 +41,7 @@ address gets a reply, "ok" or "err WHY". `ztos-audiod ctl COMMAND...` does this.
     app-output APP OUTPUT       send an app to OUTPUT, even one not connected now
     app-output APP default      the app follows the global output again
     refresh                     look again now
+    levels                      the ring's or the alarm's level changed: read them again
     hello                       tell the shell the volume again (it just started)
 
 OUTPUT is a node name from "outputs" below; APP is a "key" from "apps".
@@ -50,6 +56,10 @@ STATE: $XDG_RUNTIME_DIR/ztos-audio-state.json, replaced whole on any change:
                "output_desc": its name for people, known even while it's away,
                "output_present": bool,
                "playing_on": OUTPUT or null}]}
+
+Also "streams": {"ring": {"percent", "playing"}, "alarm": {"percent", "playing"},
+"boost": bool}: the two levels of ztmetro/volume-streams.h and how many sounds play
+at each, and whether the output is turned up for one just now.
 
 kind is speaker, headphones or bluetooth. An app's percent is null if nothing
 is known yet. An app with a pending change shows the pending values.
@@ -94,6 +104,20 @@ TOOL_APP_NAMES = {"pw-play", "pw-cat", "paplay", "aplay", "speaker-test", "gst-l
 FLATPAK_EXPORTS = ("/var/lib/flatpak/exports/share/applications",
                    os.path.join(HOME, ".local/share/flatpak/exports/share/applications"))
 TOOL_TIMEOUT = 5
+
+# ---- the ring's and the alarm's levels (ztmetro/volume-streams.h has the same)
+RING_CONFIG = os.path.join(HOME, ".config/ztmetro/config")
+ALARM_CONFIG = os.path.join(HOME, ".config/ztclock/settings")
+BOOST_FILE = os.path.join(RUN, "ztos-volume-boost.json")
+RING_DEFAULT = 70
+ALARM_DEFAULT = 70
+ALARM_MIN = 20                 # an alarm is never silent by accident
+GAIN_MAX = 100.0               # a stream's own gain, through a software volume (+40 dB)
+VOLUME_MAX = 10.0              # what PipeWire takes for "volume" and for each channelVolume
+GAIN_MAX_HW = 1.0              # through an output whose volume is the device's (Bluetooth)
+GAIN_TOLERANCE = 0.03          # closer than this is right already
+BOOST_HOLD = 3.0               # the alarm's loop starts a new pw-play each time round
+ROLE_STREAMS = ("ring", "alarm")
 
 
 def log(*a):
@@ -249,6 +273,8 @@ def takeover_target(known, sinks):
 def is_app_stream(props):
     if props.get("media.class") != "Stream/Output/Audio":
         return False
+    if props.get("ztos.stream"):
+        return False             # the ring's and the alarm's sounds: not apps
     # filter chains (ztos-speaker.out, ztos-eq.out) and system sounds are not apps
     if props.get("node.link-group") or props.get("node.virtual") in (True, "true"):
         return False
@@ -259,7 +285,7 @@ def is_app_stream(props):
 
 def read_graph(dump):
     """pw-dump's objects as what this daemon needs."""
-    g = {"sinks": {}, "default": None, "streams": [], "targets": {}, "links": [], "chains": {}}
+    g = {"sinks": {}, "default": None, "streams": [], "targets": {}, "links": [], "chains": {}, "roles": []}
     routes, nodes = {}, []
     for o in dump:
         t = o.get("type", "")
@@ -309,6 +335,10 @@ def read_graph(dump):
                 "percent": percent_of_gain(vols[0]) if vols else None,
                 "mute": bool(_props_of(info).get("mute", False)),
             }
+        elif p.get("media.class") == "Stream/Output/Audio" and p.get("ztos.stream") in ROLE_STREAMS:
+            r = role_stream(o["id"], p, _props_of(info))
+            if r:
+                g["roles"].append(r)
         elif is_app_stream(p):
             vols = _props_of(info).get("channelVolumes") or []
             g["streams"].append({
@@ -327,6 +357,105 @@ def _props_of(info):
         if isinstance(p, dict) and ("channelVolumes" in p or "mute" in p):
             return p
     return {}
+
+
+def prop_bool(v):
+    return v is True or str(v).lower() in ("true", "1", "yes")
+
+
+def prop_float(v, default):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if f == f and f >= 0 else default
+
+
+def role_stream(node_id, props, params):
+    """A ring or alarm sound as {"id", "stream", "share", "boost", "master", "channel"}:
+    master is the stream's own "volume" (pw-play's --volume), channel its
+    channelVolumes (what wpctl sets); PipeWire plays it at their product."""
+    vols = params.get("channelVolumes") or []
+    return {
+        "id": node_id, "stream": props["ztos.stream"],
+        "share": min(1.0, prop_float(props.get("ztos.volume.share"), 1.0)),
+        "boost": prop_bool(props.get("ztos.volume.boost")),
+        "master": prop_float(params.get("volume"), 1.0),
+        "channel": prop_float(vols[0], 1.0) if vols else 1.0,
+    }
+
+
+def cube(percent):
+    return (max(0.0, float(percent)) / 100.0) ** 3
+
+
+def clamp_level(stream, v):
+    low = ALARM_MIN if stream == "alarm" else 0
+    return max(low, min(100, int(v)))
+
+
+def parse_levels(ring_text, alarm_text):
+    """{"ring", "alarm"} out of the shell's config and ztclock's settings."""
+    ring, alarm = RING_DEFAULT, ALARM_DEFAULT
+    for line in (ring_text or "").splitlines():
+        k, _, v = line.partition("=")
+        if k.strip() == "ring_volume":
+            try:
+                ring = int(v.strip())
+            except ValueError:
+                pass
+    for line in (alarm_text or "").splitlines():
+        w = line.split()
+        if len(w) == 2 and w[0] == "volume":
+            try:
+                alarm = int(w[1])
+            except ValueError:
+                pass
+    return {"ring": clamp_level("ring", ring), "alarm": clamp_level("alarm", alarm)}
+
+
+def gain_cap(dev):
+    return GAIN_MAX_HW if dev and dev.get("kind") == "bluetooth" else GAIN_MAX
+
+
+def stream_gain(level, dev):
+    """A stream's own gain for a level through dev ({"percent", "mute", "kind"})."""
+    target = cube(level)
+    if level <= 0:
+        return 0.0
+    if not dev or dev.get("percent") is None:
+        return target
+    out = 0.0 if dev.get("mute") else cube(dev["percent"])
+    if out <= 0:
+        return gain_cap(dev)
+    return min(gain_cap(dev), target / out)
+
+
+def needs_boost(level, dev):
+    if level <= 0 or not dev or dev.get("percent") is None:
+        return False
+    out = 0.0 if dev.get("mute") else cube(dev["percent"])
+    return out * gain_cap(dev) < cube(level) * 0.97
+
+
+def boost_percent(level, dev):
+    """The least the output can be at to carry level at the stream's most."""
+    p = int(((cube(level) / gain_cap(dev)) ** (1.0 / 3.0)) * 100.0 + 0.999)
+    return max(1, min(100, p))
+
+
+def role_actions(roles, levels, dev):
+    """[(stream id, channel gain)] that bring each ring and alarm sound to its level."""
+    out = []
+    for r in roles:
+        want = stream_gain(levels.get(r["stream"], 0), dev) * r["share"]
+        master = r["master"] if r["master"] > 0 else 1.0
+        want = min(want, master * VOLUME_MAX)      # what this stream can come to
+        have = master * r["channel"]
+        if abs(have - want) <= GAIN_TOLERANCE * max(want, 1e-6):
+            continue
+        out.append((r["id"], min(VOLUME_MAX, want / master)))
+    return out
 
 
 def real_output(default, sinks, sound_state):
@@ -493,6 +622,18 @@ class Daemon:
         self.pushed = None           # (percent, name) the shell was last told
         self.sink_seen = None        # output name: when last seen
         self.force_push = True
+        self.levels = parse_levels("", "")
+        self.streams = None          # the state's "streams", kept for publish
+        self.levels_mtime = None
+        self.boost = None            # {"name", "percent", "mute"}: the output as it was before
+        self.boost_seen = 0.0        # when a sound that wants it last played
+        try:
+            with open(BOOST_FILE) as f:
+                b = json.load(f)
+            if isinstance(b, dict) and b.get("name"):
+                self.boost = b       # this daemon stopped during an alarm: put it back
+        except (OSError, ValueError):
+            pass
 
     # ---- what is held for apps
     def load(self):
@@ -567,7 +708,97 @@ class Daemon:
             log("%s connected: it takes the audio" % arrived)
             self.cmd_output(arrived)
         self.publish(g)
+        self.apply_roles(g)
         return True
+
+    # ---- the ring's and the alarm's sounds
+    def read_levels(self, force=False):
+        stamp = []
+        for path in (RING_CONFIG, ALARM_CONFIG):
+            try:
+                stamp.append(os.stat(path).st_mtime_ns)
+            except OSError:
+                stamp.append(None)
+        if not force and stamp == self.levels_mtime:
+            return
+        texts = []
+        for path in (RING_CONFIG, ALARM_CONFIG):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    texts.append(f.read())
+            except OSError:
+                texts.append("")
+        self.levels = parse_levels(*texts)
+        self.levels_mtime = stamp
+
+    def apply_roles(self, g):
+        self.read_levels()
+        now = time.time()
+        dev = dict(self.active) if self.active else None
+        wanting = [self.levels[r["stream"]] for r in g["roles"] if r["boost"]]
+        if wanting:
+            self.boost_seen = now
+        need = max(wanting) if wanting else 0
+        if need and dev and needs_boost(need, dev) and dev["name"] in g["sinks"]:
+            to = boost_percent(need, dev)
+            if self.boost is None:
+                self.boost = {"name": dev["name"], "percent": dev["percent"], "mute": dev["mute"]}
+                try:
+                    write_atomic(BOOST_FILE, json.dumps(self.boost))
+                except OSError as e:
+                    log("boost file", e)
+            sid = str(g["sinks"][dev["name"]]["id"])
+            self.commanded()
+            self.tool("wpctl", "set-volume", sid, "%d%%" % to)
+            if dev["mute"]:
+                self.tool("wpctl", "set-mute", sid, "0")
+            log("output %s up from %s%% to %d%%: a ring or an alarm at %d%%" % (dev["name"], dev["percent"], to, need))
+            dev["percent"], dev["mute"] = to, False
+        elif self.boost and not wanting:
+            if now - self.boost_seen >= BOOST_HOLD:
+                self.boost_restore(g)
+            else:
+                self.eval_at = self.eval_at or self.boost_seen + BOOST_HOLD + 0.1
+        for sid, gain in role_actions(g["roles"], self.levels, dev):
+            self.tool("wpctl", "set-volume", str(sid), "%.4f" % (gain ** (1.0 / 3.0)))
+        streams = {k: {"percent": self.levels[k], "playing": sum(1 for r in g["roles"] if r["stream"] == k)}
+                   for k in ROLE_STREAMS}
+        streams["boost"] = self.boost is not None
+        if streams != self.streams and self.state_text:
+            self.streams = streams
+            try:
+                state = json.loads(self.state_text)
+            except ValueError:
+                state = None
+            if state is not None:
+                state["streams"] = streams
+                self.state_text = json.dumps(state)
+                write_atomic(STATE, self.state_text)
+
+    def boost_restore(self, g):
+        b, self.boost = self.boost, None
+        try:
+            os.unlink(BOOST_FILE)
+        except OSError:
+            pass
+        s = g["sinks"].get(b.get("name"))
+        if not s or b.get("percent") is None:
+            return
+        self.commanded()
+        self.tool("wpctl", "set-volume", str(s["id"]), "%d%%" % int(b["percent"]))
+        if b.get("mute"):
+            self.tool("wpctl", "set-mute", str(s["id"]), "1")
+        log("output %s back to %s%%" % (b["name"], b["percent"]))
+        self.eval_at = self.eval_at or time.time() + SETTLE
+
+    def drop_boost(self):
+        """Media set by hand while it was turned up: that level is the one to keep."""
+        if self.boost:
+            self.boost = None
+            try:
+                os.unlink(BOOST_FILE)
+            except OSError:
+                pass
 
     def apply_intents(self, g):
         """Bring running streams in line; a held volume or mute is spent once it is set,
@@ -641,6 +872,8 @@ class Daemon:
         apps = build_apps(g["streams"], self.stored, self.intents, g["sinks"], on, self.names, self.output_descs)
         state = {"version": 1, "active": active and {k: active[k] for k in ("name", "desc", "kind", "percent", "mute")},
                  "outputs": outputs, "apps": apps}
+        if self.streams is not None:
+            state["streams"] = self.streams
         text = json.dumps(state)
         if text != self.state_text:
             write_atomic(STATE, text)
@@ -689,13 +922,16 @@ class Daemon:
             raise ValueError("empty")
         cmd, args = words[0], words[1:]
         need = {"volume": (1, 2), "mute": (1, 2), "output": (1, 1), "app-volume": (2, 2), "app-mute": (2, 2),
-                "app-output": (2, 2), "refresh": (0, 0), "hello": (0, 0)}.get(cmd)
+                "app-output": (2, 2), "refresh": (0, 0), "hello": (0, 0), "levels": (0, 0)}.get(cmd)
         if need is None:
             raise ValueError("unknown command %s" % cmd)
         if not need[0] <= len(args) <= need[1]:
             raise ValueError("%s: wrong arguments" % cmd)
         if cmd == "refresh":
             self.outputs_text = None     # the shell may have written the file itself
+            self.eval_at = time.time()
+        elif cmd == "levels":
+            self.read_levels(force=True)
             self.eval_at = time.time()
         elif cmd == "hello":
             self.force_push = True
@@ -732,6 +968,7 @@ class Daemon:
     def cmd_volume(self, percent, name=None):
         p = clamp_percent(percent)
         s = self.find_output(name)
+        self.drop_boost()
         self.commanded()
         if not self.tool("wpctl", "set-volume", str(s["id"]), "%d%%" % p):
             raise ValueError("wpctl failed")

@@ -23,7 +23,7 @@ all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztse
 	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
 	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
 
-sounds/ztos-sounds: sounds/ztos-sounds.c
+sounds/ztos-sounds: sounds/ztos-sounds.c volume-streams.h
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libpulse) -o $@ $< $(shell pkg-config --libs libpulse) -lm
 
 # ztOSIAL (libztos-ial) when this system has it: the phone's backlight and
@@ -43,7 +43,7 @@ DESK_DEPS = desktop/desktop.c desktop/desktop.h desktop/wlr-layer-shell-unstable
 desktop/wlr-layer-shell-unstable-v1-protocol.h: desktop/protocols/wlr-layer-shell-unstable-v1.xml
 	wayland-scanner server-header $< $@
 
-ztmetro: ztmetro.c core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+ztmetro: ztmetro.c volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -128,7 +128,7 @@ gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
 EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c desktop/desktop-page.c
 EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
-settings/ztsettings: settings/ztsettings.c pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
+settings/ztsettings: settings/ztsettings.c volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h $(CORE_DEPS)
@@ -173,10 +173,10 @@ acct/ztusage: acct/ztusage.c acct/acct-common.h $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Iacct -o $@ acct/ztusage.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 # Alarms + Clock: the app, and the user service that rings (clock/README.md)
-clock/ztclock: clock/ztclock.c clock/clock-store.h $(CORE_DEPS)
+clock/ztclock: clock/ztclock.c clock/clock-store.h volume-streams.h $(CORE_DEPS)
 	$(APP_BUILD) -Wno-format-truncation -Iclock -o $@ clock/ztclock.c $(CORE) $(APP_LIBS)
 
-clock/ztclockd: clock/ztclockd.c clock/clock-store.h core/zrnvibe.h
+clock/ztclockd: clock/ztclockd.c clock/clock-store.h volume-streams.h core/zrnvibe.h
 	$(CC) $(CFLAGS) $(WARN) -Wno-format-truncation -Wno-unused-function -Iclock -Icore -o $@ clock/ztclockd.c -lm
 
 # only the clock, for installing it by itself. ztclockd needs CAP_WAKE_ALARM
@@ -255,7 +255,7 @@ ntfy/ztntfy: ntfy/ztntfy.c ntfy/ntfy-model.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ ntfy/ztntfy.c $(CORE) $(APP_LIBS)
 
 # the phone's own three: calls, messages, people (comm.h is what they share)
-phone/ztphone: phone/ztphone.c comm/comm.h $(CORE_DEPS)
+phone/ztphone: phone/ztphone.c comm/comm.h volume-streams.h $(CORE_DEPS)
 	$(APP_BUILD) -Icomm -o $@ phone/ztphone.c $(CORE) $(APP_LIBS)
 
 messages/ztmessages: messages/ztmessages.c comm/comm.h $(CORE_DEPS)
@@ -551,6 +551,14 @@ check-audio-state:
 .PHONY: check-audiod
 check-audiod:
 	python3 tests/audiod.py
+
+# the three volumes (volume-streams.h): the keys' choice, media playing, the gains,
+# the levels' files; and ztos-audiod's side of them
+.PHONY: check-volume-streams
+check-volume-streams:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-volume-streams-test tests/volume-streams.c -lm
+	/tmp/ztmetro-volume-streams-test
+	python3 tests/volume_streams.py
 
 # ztos-audiod with a real PipeWire and WirePlumber, private to the test: null sinks
 # and silence, nothing reaches a live session or a sound card

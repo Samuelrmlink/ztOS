@@ -35,6 +35,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "zrnvibe.h"
+#include "../volume-streams.h"
 
 #include "zrnmetrocore.h"
 #include "zrnboard.h"
@@ -144,8 +145,7 @@ static void sound_play(const char *file, bool loop) {
 	if (sample) return;
 	if (loop && !strcmp(loop_sound, file)) return;
 	if (loop) sound_stop();
-	char path[512], volume[24];
-	snprintf(volume, sizeof(volume), "%.2f", ring_volume() / 100.0);
+	char path[512];
 	snprintf(path, sizeof(path), "%s%s", PHONE_SOUNDS, file);
 	if (access(path, R_OK)) return;
 	pid_t pid = fork();
@@ -158,7 +158,9 @@ static void sound_play(const char *file, bool loop) {
 			if (child == 0) {
 				prctl(PR_SET_PDEATHSIG, SIGTERM);
 				if (getppid() == 1) _exit(0);
-				execlp("pw-play", "pw-play", "--volume", volume, path, (char *)NULL);
+				/* the ring's stream; the ringing (the loop) has the
+				 * output turned up if it is too low to be heard */
+				vs_exec_play(VS_RING, 1.0, loop, path);
 				_exit(127);
 			}
 			int status = 0;
@@ -180,8 +182,9 @@ static void key_tone(int key) {
 	if (sample) return;
 	static int fd = -1;
 	int index = 10 + (key == '*' ? 10 : key == '#' ? 11 : key - '0');
-	int volume = ring_volume() * 60 / 100;
-	if (volume < 1) return;
+	/* a share of the ring's level, which is the stream's own (volume-streams.h) */
+	int volume = 60;
+	if (ring_volume() < 1) return;
 	if (fd < 0) fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 	struct sockaddr_un to = { .sun_family = AF_UNIX };
 	snprintf(to.sun_path, sizeof(to.sun_path), "%s/ztos-sounds.sock", getenv("XDG_RUNTIME_DIR") ?: "/run/user/1000");

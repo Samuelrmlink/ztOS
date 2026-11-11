@@ -15,6 +15,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include "../volume-streams.h"
 
 #define VOICES 4
 #define RATE 48000
@@ -175,11 +176,17 @@ static void create_stream(void) {
  pa_proplist *props=pa_proplist_new();
  pa_proplist_sets(props,PA_PROP_MEDIA_ROLE,"event");
  pa_proplist_sets(props,PA_PROP_APPLICATION_ID,"os.ztos.sounds");
+ // the ring's stream (volume-streams.h): ztos-audiod sets its volume to the
+ // ring's level, and each voice is a share of that
+ pa_proplist_sets(props,"ztos.stream","ring");
+ pa_proplist_sets(props,"state.restore-props","false");
  stream=pa_stream_new_with_proplist(context,"Keyboard taps (4 voices)",&spec,NULL,props);
  pa_proplist_free(props);if(!stream)return;
  pa_stream_set_write_callback(stream,write_audio,NULL);
  pa_stream_set_state_callback(stream,stream_state,NULL);corked=true;
- if(pa_stream_connect_playback(stream,NULL,&attr,PA_STREAM_START_CORKED|PA_STREAM_ADJUST_LATENCY,NULL,NULL)<0) {
+ // started at the ring's level: ztos-audiod may not be there yet
+ pa_cvolume start;pa_cvolume_set(&start,2,pa_sw_volume_from_linear(vs_play_volume(VS_RING,1.0)));
+ if(pa_stream_connect_playback(stream,NULL,&attr,PA_STREAM_START_CORKED|PA_STREAM_ADJUST_LATENCY,&start,NULL)<0) {
   pa_stream_set_state_callback(stream,NULL,NULL);pa_stream_unref(stream);stream=NULL;
  }
 }
@@ -202,8 +209,7 @@ static void input_info(pa_context *c,const pa_sink_input_info *info,int eol,void
  // ztOS's own routing (ztos-speaker.out, a loopback with no role) uncorks
  // whenever anything plays, the volume pip too: it is not media playing.
  const char *node=pa_proplist_gets(info->proplist,"node.name");
- if(node && !strncmp(node,"ztos-",5))return;
- if(!info->corked && (!role || (strcmp(role,"event") && strcmp(role,"phone"))))playing++;
+ if(vs_counts_as_media(role,pa_proplist_gets(info->proplist,"ztos.stream"),node,info->corked))playing++;
 }
 static void scan(void) {
  if(scanning){again=true;return;}

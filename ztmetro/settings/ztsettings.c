@@ -28,6 +28,7 @@
 #include <sys/wait.h>
 #include "ztos-hw.h"
 #include "zrnvibe.h"
+#include "../volume-streams.h"
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <sys/sysinfo.h>
@@ -3077,10 +3078,9 @@ static void vibe_preview_play(bool with_sound) {
 	if (with_sound && match) {
 		ringtone_preview = fork();
 		if (ringtone_preview == 0) {
-			char volume[24], path[512];
-			snprintf(volume, sizeof(volume), "%.2f", app.ring_vol / 100.0);
+			char path[512];
 			snprintf(path, sizeof(path), "/usr/local/share/sounds/ztos/phone/%s", file);
-			execlp("pw-play", "pw-play", "--volume", volume, path, (char *)NULL);
+			vs_exec_play_at(VS_RING, app.ring_vol, 1.0, false, path);
 			_exit(127);
 		}
 	}
@@ -3101,10 +3101,8 @@ static void ringtone_choose(int index) {
 	vibe_stop(&vibe_preview);
 	ringtone_preview = fork();
 	if (ringtone_preview == 0) {
-		char volume[24];
-		snprintf(volume, sizeof(volume), "%.2f", app.ring_vol / 100.0);
 		snprintf(path, sizeof(path), "/usr/local/share/sounds/ztos/phone/%s", ringtone_files[index]);
-		execlp("pw-play", "pw-play", "--volume", volume, path, (char *)NULL);
+		vs_exec_play_at(VS_RING, app.ring_vol, 1.0, false, path);
 		_exit(127);
 	}
 	/* a pattern that follows the tune is made from the tune just chosen */
