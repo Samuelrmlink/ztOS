@@ -1,0 +1,189 @@
+Oops#1 Part1
+<3>[  208.046926] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  208.046958] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  212.205662] binder: 3081:5018 cannot find target node
+<6>[  212.205691] binder: 3081:5018 transaction call to 0:0 failed 47884/29189/-22, code 1 size 220-0 line 3236
+<6>[  212.206618] binder: 3081:5018 cannot find target node
+<6>[  212.206644] binder: 3081:5018 transaction call to 0:0 failed 47885/29189/-22, code 32 size 92-0 line 3236
+<14>[  212.313584] init: Untracked pid 621 received signal 9
+<14>[  212.313633] init: Untracked pid 621 did not have an associated service entry and will not be reaped
+<3>[  214.030804] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  214.030829] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  214.249426] mif: LNK-RX(29): f8 eb 1d 00 19 00 36 00 07 06 03 55 63 63 1a 55 ...
+<6>[  215.529502] mif: LNK-RX(29): f8 eb 1d 00 19 00 37 00 07 06 03 57 63 63 18 57 ...
+<14>[  215.798107] init: service 'idmap2d' requested start, but it is already running (flags: 4)
+<14>[  215.798164] init: Control message: Processed ctl.start for 'idmap2d' from pid: 1731 (system_server)
+<6>[  216.592602] binder: 5194:5194 ioctl c00c620f ffffdb061498 returned -22
+<6>[  216.795343] binder: 1594:4310 cannot find target node
+<6>[  216.795371] binder: 1594:4310 transaction call to 0:0 failed 50187/29189/-22, code 1 size 188-0 line 3236
+<14>[  216.915965] init: processing action (sys.sysctl.extra_free_kbytes=*) from (/system/etc/init/hw/init.rc:1195)
+<14>[  216.916132] init: starting service 'exec 22 (/system/bin/extra_free_kbytes.sh 45360)'...
+<11>[  216.922382] libprocessgroup: Failed to make and chown /sys/fs/cgroup/uid_0: Read-only file system
+<11>[  216.922482] init: createProcessGroup(0, 1841) failed for service 'exec 22 (/system/bin/extra_free_kbytes.sh 45360)': Read-only file system
+<14>[  216.922563] init: SVC_EXEC service 'exec 22 (/system/bin/extra_free_kbytes.sh 45360)' pid 1841 (uid 0 gid 0+0 context default) started; waiting...
+<14>[  217.805915] init: Service 'exec 22 (/system/bin/extra_free_kbytes.sh 45360)' (pid 1841) exited with status 1 waiting took 0.884000 seconds
+<14>[  217.805976] init: Sending signal 9 to service 'exec 22 (/system/bin/extra_free_kbytes.sh 45360)' (pid 1841) process group...
+<14>[  217.806084] libprocessgroup: Successfully killed process cgroup uid 0 pid 1841 in 0ms
+<6>[  218.861984] binder: 3126:5082 cannot find target node
+<6>[  218.862012] binder: 3126:5082 transaction call to 0:0 failed 54355/29189/-22, code 6 size 184-0 line 3236
+<3>[  220.046816] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  220.046839] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<3>[  226.036700] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  226.036724] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<14>[  226.191814] init: Sending signal 9 to service 'idmap2d' (pid 142) process group...
+<14>[  226.191926] libprocessgroup: Successfully killed process cgroup uid 1000 pid 142 in 0ms
+<14>[  226.200937] init: Control message: Processed ctl.stop for 'idmap2d' from pid: 1731 (system_server)
+<6>[  227.049607] mif: LNK-RX(29): f8 eb 1d 00 19 00 38 00 07 06 03 59 63 63 16 59 ...
+<6>[  230.048135] binder: 3126:3482 cannot find target node
+<6>[  230.048168] binder: 3126:3482 transaction call to 0:0 failed 67485/29189/-22, code 2 size 212-0 line 3236
+<3>[  232.046868] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  232.046918] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  232.169571] mif: LNK-RX(29): f8 eb 1d 00 19 00 39 00 07 06 03 54 63 63 1b 54 ...
+<6>[  233.449455] mif: LNK-RX(29): f8 eb 1d 00 19 00 3a 00 07 06 03 52 63 63 1d 52 ...
+<6>[  234.729397] mif: LNK-RX(29): f8 eb 1d 00 19 00 3b 00 07 06 03 4f 63 63 20 4f ...
+<6>[  236.009375] mif: LNK-RX(29): f8 eb 1d 00 19 00 3c 00 07 06 03 4d 63 63 22 4d ...
+<6>[  237.289616] mif: LNK-RX(29): f8 eb 1d 00 19 00 3d 00 07 06 03 50 63 63 1f 50 ...
+<3>[  238.030922] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  238.030974] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  239.849459] mif: LNK-RX(29): f8 eb 1d 00 19 00 3e 00 07 06 03 56 63 63 19 56 ...
+<6>[  241.129444] mif: LNK-RX(29): f8 eb 1d 00 19 00 3f 00 07 06 03 5a 63 63 15 5a ...
+<6>[  242.409413] mif: LNK-RX(29): f8 eb 1d 00 19 00 40 00 07 06 03 5c 63 63 13 5c ...
+<3>[  244.046947] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  244.046999] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  244.969522] mif: LNK-RX(29): f8 eb 1d 00 19 00 41 00 07 06 03 5a 63 63 15 5a ...
+<6>[  246.249481] mif: LNK-RX(29): f8 eb 1d 00 19 00 42 00 07 06 03 56 63 63 19 56 ...
+<6>[  247.529449] mif: LNK-RX(29): f8 eb 1d 00 19 00 43 00 07 06 03 54 63 63 1b 54 ...
+<3>[  250.030887] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  250.030940] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  250.089463] mif: LNK-RX(29): f8 eb 1d 00 19 00 44 00 07 06 03 52 63 63 1d 52 ...
+<6>[  253.929433] mif: LNK-RX(29): f8 eb 1d 00 19 00 45 00 07 06 03 50 63 63 1f 50 ...
+<3>[  256.046858] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  256.046912] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  261.609519] mif: LNK-RX(29): f8 eb 1d 00 19 00 46 00 07 06 03 52 63 63 1d 52 ...
+<3>[  262.031078] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  262.031133] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  262.889522] mif: LNK-RX(29): f8 eb 1d 00 19 00 47 00 07 06 03 54 63 63 1b 54 ...
+<3>[  264.050780] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  264.050847] ieee80211 phy0: _brcmf_set_multicast_list: Setting mcast_list failed, -5
+<14>[  264.207840] init: processing action (sys.boot_completed=1) from (/system/etc/init/hw/init.rc:1186)
+<14>[  264.411254] init: starting service 'exec 23 (/bin/rm -rf /data/per_boot)'...
+<11>[  264.495101] libprocessgroup: Failed to make and chown /sys/fs/cgroup/uid_1000: Read-only file system
+<11>[  264.495215] init: createProcessGroup(1000, 2314) failed for service 'exec 23 (/bin/rm -rf /data/per_boot)': Read-only file system
+<14>[  264.495336] init: SVC_EXEC service 'exec 23 (/bin/rm -rf /data/per_boot)' pid 2314 (uid 1000 gid 1000+0 context default) started; waiting...
+<14>[  264.495480] init: Command 'exec - system system -- /bin/rm -rf /data/per_boot' action=sys.boot_completed=1 (/system/etc/init/hw/init.rc:1189) took 274ms and succeeded
+<6>[  265.449477] mif: LNK-RX(29): f8 eb 1d 00 19 00 48 00 07 06 03 56 63 63 19 56 ...
+<14>[  265.972976] init: Service 'exec 23 (/bin/rm -rf /data/per_boot)' (pid 2314) exited with status 0 waiting took 1.478000 seconds
+<14>[  265.973035] init: Sending signal 9 to service 'exec 23 (/bin/rm -rf /data/per_boot)' (pid 2314) process group...
+<14>[  265.973154] libprocessgroup: Successfully killed process cgroup uid 1000 pid 2314 in 0ms
+<14>[  265.982954] init: processing action (sys.boot_completed=1) from (/system/etc/init/flags_health_check.rc:7)
+<14>[  265.992716] init: processing action (sys.boot_completed=1) from (/system/etc/init/init.waydroid.rc:6)
+<14>[  265.992836] init: service 'adbd' requested start, but it is already running (flags: 132)
+<14>[  265.992900] init: processing action (sys.boot_completed=1) from (/system/etc/init/logd.rc:34)
+<14>[  265.993040] init: starting service 'logd-auditctl'...
+<11>[  266.015866] libprocessgroup: Failed to make and chown /sys/fs/cgroup/uid_1036: Read-only file system
+<11>[  266.015948] init: createProcessGroup(1036, 2335) failed for service 'logd-auditctl': Read-only file system
+<14>[  266.061560] init: Command 'start logd-auditctl' action=sys.boot_completed=1 (/system/etc/init/logd.rc:35) took 68ms and succeeded
+<3>[  266.062772] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  266.062873] ieee80211 phy0: _brcmf_set_multicast_list: Setting allmulti failed, -5
+<14>[  266.087908] init: processing action (sys.user.0.ce_available=true) from (/system/etc/init/wifi.rc:21)
+<14>[  266.371122] init: Service 'logd-auditctl' (pid 2335) exited with status 0 oneshot service took 0.355000 seconds in background
+<14>[  266.371191] init: Sending signal 9 to service 'logd-auditctl' (pid 2335) process group...
+<14>[  266.371309] libprocessgroup: Successfully killed process cgroup uid 1036 pid 2335 in 0ms
+<6>[  266.729513] mif: LNK-RX(29): f8 eb 1d 00 19 00 49 00 07 06 03 54 63 63 1b 54 ...
+<6>[  268.009709] mif: LNK-RX(29): f8 eb 1d 00 19 00 4a 00 07 06 03 50 63 63 1f 50 ...
+<3>[  268.078773] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  270.094871] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  270.094915] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  271.849481] mif: LNK-RX(29): f8 eb 1d 00 19 00 4b 00 07 06 03 52 63 63 1d 52 ...
+<3>[  272.114837] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  272.114914] ieee80211 phy0: _brcmf_set_multicast_list: Setting BRCMF_C_SET_PROMISC failed, err=-5
+<6>[  273.129443] mif: LNK-RX(29): f8 eb 1d 00 19 00 4c 00 07 06 03 55 63 63 1a 55 ...
+<3>[  274.126803] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<6>[  274.409628] mif: LNK-RX(29): f8 eb 1d 00 19 00 4d 00 07 06 03 53 63 63 1c 53 ...
+<3>[  276.142873] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  276.142911] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<3>[  278.158791] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<14>[  280.135018] init: service 'idmap2d' requested start, but it is already running (flags: 4)
+<14>[  280.135070] init: Control message: Processed ctl.start for 'idmap2d' from pid: 1731 (system_server)
+<3>[  280.174816] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  280.174840] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  280.809580] mif: LNK-RX(29): f8 eb 1d 00 19 00 4e 00 07 06 03 51 63 63 1e 51 ...
+<6>[  285.929407] mif: LNK-RX(29): f8 eb 1d 00 19 00 4f 00 07 06 03 53 63 63 1c 53 ...
+<3>[  286.030866] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  286.030892] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  288.918831] binder: 5194:5194 cannot find target node
+<6>[  288.918857] binder: 5194:5194 transaction async to 0:0 failed 84986/29189/-22, code 2 size 92-0 line 3236
+<14>[  290.189718] init: Sending signal 9 to service 'idmap2d' (pid 142) process group...
+<14>[  290.190159] libprocessgroup: Successfully killed process cgroup uid 1000 pid 142 in 0ms
+<14>[  290.195761] init: Control message: Processed ctl.stop for 'idmap2d' from pid: 1731 (system_server)
+<3>[  292.046873] ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+<3>[  292.046897] ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+<6>[  292.329316] mif: LNK-RX(29): f8 eb 1d 00 19 00 50 00 07 06 03 56 63 63 19 56 ...
+<6>[  293.609361] mif: LNK-RX(29): f8 eb 1d 00 19 00 51 00 07 06 03 59 63 63 16 59 ...
+<6>[  294.790024] binder: 6835:6847 cannot find target node
+<6>[  294.790053] binder: 6835:6847 transaction async to 0:0 failed 87035/29189/-22, code 1 size 196-0 line 3236
+<6>[  294.801935] binder: 6835:6847 cannot find target node
+<6>[  294.801963] binder: 6835:6847 transaction async to 0:0 failed 87040/29189/-22, code 1 size 200-0 line 3236
+<3>[  295.139887] ieee80211 phy0: brcmf_fil_cmd_data: bus is down. we have nothing to do.
+<3>[  295.139933] ieee80211 phy0: send_key_to_dongle: wsec_key error (-5)
+<3>[  295.139959] ieee80211 phy0: brcmf_fil_cmd_data: bus is down. we have nothing to do.
+<3>[  295.139978] ieee80211 phy0: send_key_to_dongle: wsec_key error (-5)
+<3>[  295.818851] brcmfmac: brcmf_msgbuf_delete_flowring: timed out waiting for txstatus
+<3>[  295.906818] brcmfmac: brcmf_msgbuf_delete_flowring: timed out waiting for txstatus
+<1>[  295.944165] Unable to handle kernel paging request at virtual address ffffffffc203c248
+<1>[  295.944198] Mem abort info:
+<1>[  295.944207]   ESR = 0x0000000096000006
+<1>[  295.944218]   EC = 0x25: DABT (current EL), IL = 32 bits
+<1>[  295.944229]   SET = 0, FnV = 0
+<1>[  295.944238]   EA = 0, S1PTW = 0
+<1>[  295.944247]   FSC = 0x06: level 2 translation fault
+<1>[  295.944257] Data abort info:
+<1>[  295.944266]   ISV = 0, ISS = 0x00000006, ISS2 = 0x00000000
+<1>[  295.944275]   CM = 0, WnR = 0, TnD = 0, TagAccess = 0
+<1>[  295.944286]   GCS = 0, Overlay = 0, DirtyBit = 0, Xs = 0
+<1>[  295.944297] swapper pgtable: 4k pages, 48-bit VAs, pgdp=000000009335a000
+<1>[  295.944308] [ffffffffc203c248] pgd=0000000093766c03, p4d=0000000093766c03, pud=0000000093767c03, pmd=0000000000000000
+<0>[  295.944336] Internal error: Oops: 0000000096000006 [#1]  SMP
+<3>[  295.944350] Modules linked in: aes rfcomm zrn_modem(O) zrn_bbd(O) snd_zrn_abox(O) zrn_hotplug(O) snd_pcm snd_timer snd soundcore hci_uart btbcm bluetooth ecdh_generic kpp ecc zrn_exynos_rtc(O) zrn_bt(O) zrn_led(O) zrn_haptic(O) zrn_flash(O) i2c_gpio i2c_algo_bit
+<3>[  295.944455] CPU: 1 UID: 0 PID: 2232 Comm: sh Tainted: G S         O        7.1.0-zboot-wd-dp6 #65 PREEMPT 
+<3>[  295.944474] Tainted: [S]=CPU_OUT_OF_SPEC, [O]=OOT_MODULE
+<3>[  295.944485] Hardware name: Samsung Galaxy S9 (SM-G960) (DT)
+<3>[  295.944496] pstate: a0000005 (NzCv daif -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+<3>[  295.944510] pc : kfree+0x4c/0x304
+<3>[  295.944529] lr : brcmf_free_wiphy+0xb4/0xc8
+<3>[  295.944548] sp : ffff80008dfcbaa0
+<3>[  295.944557] x29: ffff80008dfcbab0 x28: ffff000007253c00 x27: 0000000000000000
+<3>[  295.944578] x26: 0000000000000000 x25: 0000000000000000 x24: ffff00000a00b1a0
+<3>[  295.944599] x23: ffff80008171e7e0 x22: ffff0008011ba0b8 x21: ffff000803b1c9c0
+<3>[  295.944619] x20: ffff800080f09158 x19: ffffffffc203c240 x18: 00000103ac4fac45
+<3>[  295.944639] x17: 0000000000000000 x16: 0000000000000000 x15: 0000000000000002
+<3>[  295.944659] x14: ffff0008028e0f80 x13: 000000000000023a x12: 00000003d43b3f9f
+<3>[  295.944679] x11: 0000000000000040 x10: ffff80008165e558 x9 : 00000000000000f5
+<3>[  295.944700] x8 : ffff80008dfcbab8 x7 : 0000000000000000 x6 : ffff800081745fc0
+<3>[  295.944720] x5 : 000000000000003c x4 : ffff80008dfcbaa0 x3 : ffff000014f20e00
+<3>[  295.944740] x2 : ffff000007253c00 x1 : ffff800080f08800 x0 : ffffffffc203c240
+<3>[  295.944761] Call trace:
+<3>[  295.944771]  kfree+0x4c/0x304 (P)
+<3>[  295.944789]  brcmf_free_wiphy+0xb4/0xc8
+<3>[  295.944807]  brcmf_cfg80211_detach+0xb8/0x114
+<3>[  295.944823]  brcmf_detach+0xc8/0x100
+<3>[  295.944841]  brcmf_pcie_remove+0x54/0x190
+<3>[  295.944858]  pci_device_remove+0x44/0xe0
+<3>[  295.944876]  device_remove+0x4c/0x80
+<3>[  295.944892]  device_release_driver_internal+0x1cc/0x224
+<3>[  295.944908]  device_driver_detach+0x18/0x24
+<3>[  295.944923]  unbind_store+0xb4/0xc0
+<3>[  295.944938]  drv_attr_store+0x24/0x40
+<3>[  295.944951]  sysfs_kf_write+0x7c/0x94
+<3>[  295.944966]  kernfs_fop_write_iter+0x130/0x200
+<3>[  295.944984]  vfs_write+0x244/0x36c
+<3>[  295.944999]  ksys_write+0x70/0x108
+<3>[  295.945013]  __arm64_sys_write+0x1c/0x30
+<3>[  295.945028]  invoke_syscall+0x54/0x10c
+<3>[  295.945045]  el0_svc_common.constprop.0+0x40/0xe0
+<3>[  295.945061]  do_el0_svc+0x1c/0x34
+<3>[  295.945076]  el0_svc+0x38/0x120
+<3>[  295.945094]  el0t_64_sync_handler+0xa0/0xf0
+<3>[  295.945112]  el0t_64_sync+0x198/0x19c
+<0>[  295.945132] Code: d34cfe73 f2dfbfe0 8b131813 aa1303e0 (f9400661) 
+<4>[  295.945147] ---[ end trace 00000000000000

@@ -1,0 +1,198 @@
+X(29): f8 eb 1d 00 19 00 da 00 07 06 03 52 63 63 1d 52 ...
+[  940.008580] mif: LNK-RX(29): f8 eb 1d 00 19 00 db 00 07 06 03 54 63 63 1b 54 ...
+[  943.849068] mif: LNK-RX(29): f8 eb 1d 00 19 00 dc 00 07 06 03 52 63 63 1d 52 ...
+[  946.408557] mif: LNK-RX(29): f8 eb 1d 00 19 00 dd 00 07 06 03 50 63 63 1f 50 ...
+[  947.688612] mif: LNK-RX(29): f8 eb 1d 00 19 00 de 00 07 06 03 54 63 63 1b 54 ...
+[  948.968740] mif: LNK-RX(29): f8 eb 1d 00 19 00 df 00 07 06 03 57 63 63 18 57 ...
+[  951.528591] mif: LNK-RX(29): f8 eb 1d 00 19 00 e0 00 07 06 03 59 63 63 16 59 ...
+[  952.808552] mif: LNK-RX(29): f8 eb 1d 00 19 00 e1 00 07 06 03 56 63 63 19 56 ...
+[  954.088591] mif: LNK-RX(29): f8 eb 1d 00 19 00 e2 00 07 06 03 52 63 63 1d 52 ...
+[  956.648658] mif: LNK-RX(29): f8 eb 1d 00 19 00 e3 00 07 06 03 55 63 63 1a 55 ...
+[  957.630659] mif: LNK-TX(12): f8 eb 0c 00 08 00 05 ff 0a 0f 05 01
+[  957.679254] Detected VIPT I-cache on CPU2
+[  957.679401] CPU2: Booted secondary processor 0x0000000200 [0x410fd051]
+[  957.747163] Detected VIPT I-cache on CPU3
+[  957.747310] CPU3: Booted secondary processor 0x0000000300 [0x410fd051]
+[  963.048694] mif: LNK-RX(29): f8 eb 1d 00 19 00 e4 00 07 06 03 53 63 63 1c 53 ...
+[  963.985812] mif: LNK-TX(12): f8 eb 0c 00 08 00 06 ff 0a 0f 05 00
+[  964.980027] mif: LNK-TX(12): f8 eb 0c 00 08 00 07 ff 0a 0f 05 01
+[  965.030749] Detected VIPT I-cache on CPU2
+[  965.030891] CPU2: Booted secondary processor 0x0000000200 [0x410fd051]
+[  965.107165] Detected VIPT I-cache on CPU3
+[  965.107302] CPU3: Booted secondary processor 0x0000000300 [0x410fd051]
+[  965.608717] mif: LNK-RX(29): f8 eb 1d 00 19 00 e5 00 07 06 03 4f 63 63 20 4f ...
+[  966.888627] mif: LNK-RX(29): f8 eb 1d 00 19 00 e6 00 07 06 03 4d 63 63 22 4d ...
+[  967.677468] bbd_control : ESW:CRASHED
+[  967.677498] zrn-bbd: hub not ready
+[  967.677507] zrn-bbd: control: ESW:CRASHED
+[  967.677524] bcm_spi_release++
+[  967.677536] [SSPBBD]: DBG SPI @ TX: <255B = 84, <1K = 422, <2K = 4, <4K = 7, <8K = 0, <16K = 0, <32K = 0, <64K = 0
+[  967.677547] [SSPBBD]: DBG SPI @ RX: <255B = 1873, <1K = 319, <2K = 0, <4K = 0, <8K = 0, <16K = 0, <32K = 0, <64K = 0
+[  967.677556] [SSPBBD]: DBG SPI @ FC: fail = 0, retries = 3, retry: errors = 0 delays = 1, pm = 0
+[  967.677569] wake disabled for irq 111 (gpa1-7)
+[  967.677579] bcm_spi_release--
+[  967.677603] bbd_control : ESW:NOTREADY
+[  967.677612] zrn-bbd: hub not ready
+[  967.677622] bbd_common_release[bbd_control]++
+[  967.677631] bbd_common_release[bbd_control]--
+[  967.677718] zrn-bbd: hub enable pin 0
+[  967.677767] zrn-bbd: hub supply: asked to switch off, left on
+[  967.681953] bbd_common_release[bbd_sensor]++
+[  967.681990] bbd_common_release[bbd_sensor]--
+[  967.721386] detected fb_set_par error, error code: -16
+[  967.904487] mif: misc_release: umts_rfs0 (opened 0) by ztoscorenetwork
+[  967.904568] mif: misc_release: umts_ipc0 (opened 0) by ztoscorenetwork
+[  967.904605] mif: misc_release: umts_router (opened 0) by ztoscorenetwork
+[  967.935763] mif: misc_release: umts_boot0 (opened 0) by cbd
+[  968.393788] psci: S9P vendor PMU 1088: 8d150000 -> 8d150000 mask=ff000000
+[  968.393861] psci: S9P vendor PMU 2114: 00000002 -> 00000002 mask=00000003
+[  968.393896] psci: S9P vendor PMU 2180: 00000002 -> 00000002 mask=00000003
+[  968.393931] psci: S9P vendor PMU 21ec: 00000002 -> 00000002 mask=00000003
+[  968.393964] psci: S9P vendor PMU 2258: 00000002 -> 00000002 mask=00000003
+[  968.393998] psci: S9P vendor PMU 2384: 00000002 -> 00000002 mask=00000003
+[  968.394196] Detected VIPT I-cache on CPU5
+[  968.394225] CPU features: SANITY CHECK: Unexpected variation in SYS_CTR_EL0. Boot CPU: 0x00000094448004, CPU5: 0x00000084448004
+[  968.394238] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64DFR0_EL1. Boot CPU: 0x00000010305408, CPU5: 0x00000010305116
+[  968.394248] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64ISAR0_EL1. Boot CPU: 0x00000010211120, CPU5: 0x00000000011120
+[  968.394258] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64ISAR1_EL1. Boot CPU: 0x00000000100001, CPU5: 0x00000000000000
+[  968.394267] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR1_EL1. Boot CPU: 0x00000010212122, CPU5: 0x00000000000000
+[  968.394274] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR2_EL1. Boot CPU: 0x00000000001011, CPU5: 0x00000000000000
+[  968.394283] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64PFR0_EL1. Boot CPU: 0x00000010112222, CPU5: 0x00000000002222
+[  968.394293] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_DFR0_EL1. Boot CPU: 0x00000004010088, CPU5: 0x00000003011066
+[  968.394302] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_ISAR5_EL1. Boot CPU: 0x00000001011121, CPU5: 0x00000000011121
+[  968.394310] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_MMFR3_EL1. Boot CPU: 0x00000002122211, CPU5: 0x00000002102211
+[  968.394317] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_MMFR4_EL1. Boot CPU: 0x00000000021110, CPU5: 0x00000000000000
+[  968.394324] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_PFR0_EL1. Boot CPU: 0x00000010000131, CPU5: 0x00000000000131
+[  968.394332] CPU features: SANITY CHECK: Unexpected variation in SYS_MVFR1_EL1. Boot CPU: 0x00000013211111, CPU5: 0x00000012111111
+[  968.394397] CPU5: Booted secondary processor 0x0000000101 [0x531f0020]
+[  968.511103] psci: S9P vendor PMU 1088: 8d150000 -> 8d150000 mask=ff000000
+[  968.511188] psci: S9P vendor PMU 2114: 00000002 -> 00000002 mask=00000003
+[  968.511223] psci: S9P vendor PMU 2180: 00000002 -> 00000002 mask=00000003
+[  968.511258] psci: S9P vendor PMU 21ec: 00000002 -> 00000002 mask=00000003
+[  968.511292] psci: S9P vendor PMU 2258: 00000002 -> 00000002 mask=00000003
+[  968.511456] psci: S9P vendor PMU 2384: 00000002 -> 00000002 mask=00000003
+[  968.511673] Detected VIPT I-cache on CPU6
+[  968.511700] CPU features: SANITY CHECK: Unexpected variation in SYS_CTR_EL0. Boot CPU: 0x00000094448004, CPU6: 0x00000084448004
+[  968.511714] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64DFR0_EL1. Boot CPU: 0x00000010305408, CPU6: 0x00000010305116
+[  968.511723] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64ISAR0_EL1. Boot CPU: 0x00000010211120, CPU6: 0x00000000011120
+[  968.511731] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64ISAR1_EL1. Boot CPU: 0x00000000100001, CPU6: 0x00000000000000
+[  968.511740] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR1_EL1. Boot CPU: 0x00000010212122, CPU6: 0x00000000000000
+[  968.511748] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR2_EL1. Boot CPU: 0x00000000001011, CPU6: 0x00000000000000
+[  968.511756] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64PFR0_EL1. Boot CPU: 0x00000010112222, CPU6: 0x00000000002222
+[  968.511767] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_DFR0_EL1. Boot CPU: 0x00000004010088, CPU6: 0x00000003011066
+[  968.511776] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_ISAR5_EL1. Boot CPU: 0x00000001011121, CPU6: 0x00000000011121
+[  968.511785] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_MMFR3_EL1. Boot CPU: 0x00000002122211, CPU6: 0x00000002102211
+[  968.511792] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_MMFR4_EL1. Boot CPU: 0x00000000021110, CPU6: 0x00000000000000
+[  968.511799] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_PFR0_EL1. Boot CPU: 0x00000010000131, CPU6: 0x00000000000131
+[  968.511806] CPU features: SANITY CHECK: Unexpected variation in SYS_MVFR1_EL1. Boot CPU: 0x00000013211111, CPU6: 0x00000012111111
+[  968.511880] CPU6: Booted secondary processor 0x0000000102 [0x531f0020]
+[  968.550991] psci: S9P vendor PMU 1088: 8d150000 -> 8d150000 mask=ff000000
+[  968.551096] psci: S9P vendor PMU 2114: 00000002 -> 00000002 mask=00000003
+[  968.551132] psci: S9P vendor PMU 2180: 00000002 -> 00000002 mask=00000003
+[  968.551166] psci: S9P vendor PMU 21ec: 00000002 -> 00000002 mask=00000003
+[  968.551200] psci: S9P vendor PMU 2258: 00000002 -> 00000002 mask=00000003
+[  968.551234] psci: S9P vendor PMU 2384: 00000002 -> 00000002 mask=00000003
+[  968.551446] Detected VIPT I-cache on CPU7
+[  968.551474] CPU features: SANITY CHECK: Unexpected variation in SYS_CTR_EL0. Boot CPU: 0x00000094448004, CPU7: 0x00000084448004
+[  968.551488] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64DFR0_EL1. Boot CPU: 0x00000010305408, CPU7: 0x00000010305116
+[  968.551498] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64ISAR0_EL1. Boot CPU: 0x00000010211120, CPU7: 0x00000000011120
+[  968.551507] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64ISAR1_EL1. Boot CPU: 0x00000000100001, CPU7: 0x00000000000000
+[  968.551517] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR1_EL1. Boot CPU: 0x00000010212122, CPU7: 0x00000000000000
+[  968.551525] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64MMFR2_EL1. Boot CPU: 0x00000000001011, CPU7: 0x00000000000000
+[  968.551534] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_AA64PFR0_EL1. Boot CPU: 0x00000010112222, CPU7: 0x00000000002222
+[  968.551545] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_DFR0_EL1. Boot CPU: 0x00000004010088, CPU7: 0x00000003011066
+[  968.551555] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_ISAR5_EL1. Boot CPU: 0x00000001011121, CPU7: 0x00000000011121
+[  968.551563] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_MMFR3_EL1. Boot CPU: 0x00000002122211, CPU7: 0x00000002102211
+[  968.551570] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_MMFR4_EL1. Boot CPU: 0x00000000021110, CPU7: 0x00000000000000
+[  968.551578] CPU features: SANITY CHECK: Unexpected variation in SYS_ID_PFR0_EL1. Boot CPU: 0x00000010000131, CPU7: 0x00000000000131
+[  968.551586] CPU features: SANITY CHECK: Unexpected variation in SYS_MVFR1_EL1. Boot CPU: 0x00000013211111, CPU7: 0x00000012111111
+[  968.551663] CPU7: Booted secondary processor 0x0000000103 [0x531f0020]
+[  968.656941] waydroid0: port 1(vethLE7GFj) entered disabled state
+[  968.657823] vethLE7GFj (unregistering): left allmulticast mode
+[  968.657880] vethLE7GFj (unregistering): left promiscuous mode
+[  968.657923] waydroid0: port 1(vethLE7GFj) entered disabled state
+[  969.187304] EXT4-fs (loop1): unmounting filesystem 8955afe7-70a4-4cf8-8048-a4503ce2d01d.
+[  969.298568] EXT4-fs (loop0): unmounting filesystem e9d74858-d524-41f7-be60-f850f9b93e08.
+[  970.728551] mif: LNK-RX(29): f8 eb 1d 00 19 00 e7 00 07 06 03 51 63 63 1e 51 ...
+[  970.728639] mif: rx_demux: shmem: ERR! umts_ipc0 is not opened
+[  970.728678] mif: io_dev_recv_skb_single_from_link_dev: umts_ipc0<-shmem: ERR! rx_demux fail (err -19)
+[  970.728727] mif: pass_skb_to_demux: shmem: umts_ipc0<-ss360ap: ERR! umts_ipc0->recv_skb fail (-19)
+[  970.835882] EXT4-fs (sda3): unmounting filesystem 57f8f4bc-abf4-655f-bf67-946fc0f9f25b.
+[  970.861216] EXT4-fs (sda18): unmounting filesystem fa7e4159-4411-51a1-910a-d0c01c498bc6.
+[  970.868197] EXT4-fs (sda19): unmounting filesystem cdccee81-4c36-5017-bf06-b4dd410c0d8f.
+[  971.248032] systemd-shutdown[1]: Syncing filesystems and block devices.
+[  971.317761] systemd-shutdown[1]: Sending SIGTERM to remaining processes...
+[  971.334220] systemd-journald[232]: Received SIGTERM from PID 1 (systemd-shutdow).
+[  971.385799] systemd-shutdown[1]: Sending SIGKILL to remaining processes...
+[  971.403875] systemd-shutdown[1]: Unmounting file systems.
+[  971.411194] (sd-umount)[12014]: Unmounting '/run/android/sys/fs/cgroup'.
+[  971.414134] (sd-umount)[12015]: Unmounting '/run/android/sys'.
+[  971.418179] (sd-umount)[12016]: Unmounting '/run/android'.
+[  971.422441] (sd-umount)[12017]: Unmounting '/run/credentials/systemd-journald.service'.
+[  971.426326] (sd-remount)[12018]: Remounting '/' read-only with options 'errors=remount-ro'.
+[  971.484901] EXT4-fs (sda25): re-mounted cb3fd559-aaea-43e5-9a4d-709ac4d0d134 ro.
+[  971.506628] systemd-shutdown[1]: All filesystems unmounted.
+[  971.506850] systemd-shutdown[1]: Deactivating swaps.
+[  971.507055] systemd-shutdown[1]: All swaps deactivated.
+[  971.507159] systemd-shutdown[1]: Detaching loop devices.
+[  971.519311] systemd-shutdown[1]: All loop devices detached.
+[  971.519437] systemd-shutdown[1]: Stopping MD devices.
+[  971.519943] systemd-shutdown[1]: All MD devices stopped.
+[  971.520044] systemd-shutdown[1]: Detaching DM devices.
+[  971.520467] systemd-shutdown[1]: All DM devices detached.
+[  971.520567] systemd-shutdown[1]: All filesystems, swaps, loop devices, MD devices and DM devices detached.
+[  971.559194] ztos-shutdown: syncing and remounting root read-only
+[  971.607329] EXT4-fs (sda25): re-mounted cb3fd559-aaea-43e5-9a4d-709ac4d0d134.
+[  971.639796] systemd-shutdown[1]: Successfully changed into root pivot.
+[  971.639926] systemd-shutdown[1]: Entering exitrd...
+[  971.686901] shutdown[1]: Syncing filesystems and block devices.
+[  971.692906] shutdown[1]: Sending SIGTERM to remaining processes...
+[  971.700533] shutdown[1]: Sending SIGKILL to remaining processes...
+[  971.707778] shutdown[1]: Unmounting file systems.
+[  971.713638] (sd-umoun[12026]: Unmounting '/run/credentials'.
+[  971.720944] (sd-remou[12027]: Remounting '/oldroot/dev/binderfs' read-only with options 'max=1048576'.
+[  971.725066] (sd-umoun[12028]: Unmounting '/oldroot/dev/binderfs'.
+[  971.728847] (sd-umoun[12029]: Unmounting '/oldroot/dev/hugepages'.
+[  971.732213] (sd-umoun[12030]: Unmounting '/oldroot/dev/mqueue'.
+[  971.739663] (sd-umoun[12031]: Unmounting '/oldroot/sys/fs/cgroup'.
+[  971.750408] (sd-umoun[12032]: Unmounting '/oldroot/dev/shm'.
+[  971.761261] (sd-umoun[12033]: Unmounting '/oldroot'.
+[  971.761483] (sd-umoun[12033]: Failed to unmount /oldroot: Device or resource busy
+[  971.774751] (sd-umoun[12034]: Unmounting '/oldroot/dev/pts'.
+[  971.777921] (sd-umoun[12035]: Unmounting '/oldroot/run'.
+[  971.786263] (sd-umoun[12036]: Unmounting '/oldroot/dev'.
+[  971.794021] (sd-umoun[12037]: Unmounting '/oldroot/sys'.
+[  971.796675] (sd-umoun[12038]: Unmounting '/oldroot/proc'.
+[  971.810745] (sd-umoun[12039]: Unmounting '/oldroot'.
+[  972.022464] EXT4-fs (sda25): unmounting filesystem cb3fd559-aaea-43e5-9a4d-709ac4d0d134.
+[  972.029525] shutdown[1]: All filesystems unmounted.
+[  972.029649] shutdown[1]: Deactivating swaps.
+[  972.029835] shutdown[1]: All swaps deactivated.
+[  972.029927] shutdown[1]: Detaching loop devices.
+[  972.042047] shutdown[1]: All loop devices detached.
+[  972.042170] shutdown[1]: Stopping MD devices.
+[  972.042772] shutdown[1]: All MD devices stopped.
+[  972.042864] shutdown[1]: Detaching DM devices.
+[  972.043362] shutdown[1]: All DM devices detached.
+[  972.043455] shutdown[1]: All filesystems, swaps, loop devices, MD devices and DM devices detached.
+[  972.045486] shutdown[1]: Syncing filesystems and block devices.
+[  972.056310] shutdown[1]: Powering off.
+[  972.115379] mif: ss310ap_shutdown: +++
+[  974.568881] mif: LNK-RX(29): f8 eb 1d 00 19 00 e8 00 07 06 03 53 63 63 1c 53 ...
+[  974.569184] mif: rx_demux: shmem: ERR! umts_ipc0 is not opened
+[  974.569309] mif: io_dev_recv_skb_single_from_link_dev: umts_ipc0<-shmem: ERR! rx_demux fail (err -19)
+[  974.569468] mif: pass_skb_to_demux: shmem: umts_ipc0<-ss360ap: ERR! umts_ipc0->recv_skb fail (-19)
+[  975.342807] mif: ss310ap_shutdown: T-I-M-E-O-U-T
+[  975.354803] zrn-modem: pmu CP_CTRL_NS = 0xc02216a2
+[  975.354888] zrn-modem: cp reset assert
+[  975.354984] zrn-modem: pmu CP_CTRL_NS = 0xc02216a6
+[  975.356082] mif: ss310ap_shutdown: ---
+[  975.356140] mif: modem_shutdown: ss360ap
+[  975.356219] [SSPBBD]: bcm_spi_shutdown ++
+[  975.356286] [SSPBBD]: DBG SPI @ TX: <255B = 84, <1K = 422, <2K = 4, <4K = 7, <8K = 0, <16K = 0, <32K = 0, <64K = 0
+[  975.356414] [SSPBBD]: DBG SPI @ RX: <255B = 1873, <1K = 319, <2K = 0, <4K = 0, <8K = 0, <16K = 0, <32K = 0, <64K = 0
+[  975.356543] [SSPBBD]: DBG SPI @ FC: fail = 0, retries = 3, retry: errors = 0 delays = 1, pm = 0
+[  975.356650] [SSPBBD]: bcm_spi_shutdown **
+[  975.356870] [SSPBBD]: bcm_spi_shutdown: hub left in standby for the next boot --
+[  975.357231] sd 0:0:0:0: [sda] Synchronizing SCSI cache
+[  975.371926] max77705-usbc 1-0025: shutdown: hv_mode 0, contract pdo 0, mailbox on

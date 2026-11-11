@@ -1,0 +1,13 @@
+/sys/fs/pstore:
+total 0
+dr-xr-x--- 2 samuel 1007     0 Nov 11 09:48 .
+drwxr-xr-x 8 root   root     0 Dec 31  1969 ..
+-r--r----- 1 samuel 1007 16372 Nov 11 09:48 console-ramoops-0
+-r--r--r-- 1 root   root 16348 Nov 11 09:37 dmesg-ramoops-0
+
+/var/lib/systemd/pstore:
+total 40
+drwxr-xr-x  2 root root  4096 Nov 11 09:48 .
+drwxr-xr-x 11 root root  4096 Nov  7 16:57 ..
+-rw-------  1 root root 16372 Nov 11 09:48 console-ramoops-0
+-rw-------  1 root root 16348 Nov 11 09:37 dmesg-ramoops-0

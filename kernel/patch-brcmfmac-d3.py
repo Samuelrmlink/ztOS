@@ -165,7 +165,10 @@ static s32 brcmf_cfg80211_suspend(struct wiphy *wiphy,
 		brcmf_wiphy_wowl_params(wiphy, ifp);
 #ifdef CONFIG_PM
 	else if (brcmf_keep_assoc && drvr->bus_if->wake_keep)
-		wiphy->wowlan = &brcmf_wowlan_keep;
+		/* a copy: brcmf_free_wiphy kfree()s any wowlan but its own
+		 * static one (swa4: an oops at unbind with the static) */
+		wiphy->wowlan = kmemdup(&brcmf_wowlan_keep,
+					sizeof(brcmf_wowlan_keep), GFP_KERNEL);
 #endif
 """),
 ])

@@ -1,0 +1,77 @@
+=== start 07:49:42 sleep 60
+before: d3_acks 0 hot 0 wakes 0
+2026-11-11 07:49:46 config: wake_interval_s=300 wifi_interval_s=0 wifi_window_s=30 wifi_grace_s=10 tick_s=300 doze_sleep_s=300 net_busy_pkts=40 sleep_mode=connected
+2026-11-11 07:49:49 backend up
+2026-11-11 07:49:49 inhibit watch armed
+2026-11-11 07:49:49 wowlan any: on
+2026-11-11 07:49:53 sleep refused: Device or resource busy
+2026-11-11 07:49:53 wakeup sources: brcmf_host_wake(active_count=1 last_change=254201) inotify(active_count=1 last_change=250722) zrn-bt(active_count=1 last_change=254238) eventpoll(active_count=1 last_change=250722) umts_ipc0(active_count=54 last_change=252828)
+2026-11-11 07:49:53 once: woke: aborted wake_stat=0x00000000 (asleep 0.2s, charge 1924.0->1924.0 mAh)
+2026-11-11 07:50:06 sleep refused: Input/output error
+2026-11-11 07:50:06 wakeup sources: zrn-bt(active_count=3 last_change=267099) umts_ipc0(active_count=55 last_change=257948)
+2026-11-11 07:50:06 wifi D3 refused the sleep (0000:01:00.0), 1 in a row
+2026-11-11 07:50:06 once: woke: aborted wake_stat=0x00000000 (asleep 4.4s, charge 1926.0->1927.0 mAh)
+2026-11-11 07:50:19 sleep refused: Input/output error
+2026-11-11 07:50:19 wakeup sources: zrn-bt(active_count=5 last_change=280505) umts_router(active_count=9 last_change=273116) (active_count=26 last_change=270908) eventpoll(active_count=26 last_change=270908) umts_ipc0(active_count=62 last_change=280487)
+2026-11-11 07:50:19 wifi D3 refused the sleep (0000:01:00.0), 2 in a row
+2026-11-11 07:50:19 wifi D3 keeps failing: unbinding Wi-Fi for sleep until the next boot
+2026-11-11 07:50:19 once: woke: aborted wake_stat=0x00000000 (asleep 4.6s, charge 1929.0->1930.0 mAh)
+after: d3_acks 1 hot 1 wakes 1 07:50:25
+2026-11-11 07:50:06 wakeup sources: zrn-bt(active_count=3 last_change=267099) umts_ipc0(active_count=55 last_change=257948)
+2026-11-11 07:50:06 wifi D3 refused the sleep (0000:01:00.0), 1 in a row
+2026-11-11 07:50:06 once: woke: aborted wake_stat=0x00000000 (asleep 4.4s, charge 1926.0->1927.0 mAh)
+2026-11-11 07:50:19 sleep refused: Input/output error
+2026-11-11 07:50:19 wakeup sources: zrn-bt(active_count=5 last_change=280505) umts_router(active_count=9 last_change=273116) (active_count=26 last_change=270908) eventpoll(active_count=26 last_change=270908) umts_ipc0(active_count=62 last_change=280487)
+2026-11-11 07:50:19 wifi D3 refused the sleep (0000:01:00.0), 2 in a row
+2026-11-11 07:50:19 wifi D3 keeps failing: unbinding Wi-Fi for sleep until the next boot
+2026-11-11 07:50:19 once: woke: aborted wake_stat=0x00000000 (asleep 4.6s, charge 1929.0->1930.0 mAh)
+Nov 11 07:50:06 ztos kernel: brcmfmac 0000:01:00.0: PM: dpm_run_callback(): pci_pm_suspend returns -5
+Nov 11 07:50:06 ztos kernel: brcmfmac 0000:01:00.0: PM: failed to suspend async: error -5
+Nov 11 07:50:06 ztos kernel: PM: Some devices failed to suspend, or early wake event detected
+Nov 11 07:50:06 ztos kernel: [SSPBBD]: bcm_spi_resume ++ 
+Nov 11 07:50:06 ztos kernel: [SSPBBD]: bcm_spi_resume -- 
+Nov 11 07:50:06 ztos kernel: mif: modem_resume: time = 3005.844453
+Nov 11 07:50:06 ztos kernel: mif: modem_resume: ss360ap: pda_active:1
+Nov 11 07:50:06 ztos kernel: mif: modem_resume: ss360ap
+Nov 11 07:50:06 ztos kernel: snd-zrn-abox: resume firmware 0; streams require prepare
+Nov 11 07:50:06 ztos kernel: PM: suspend exit
+Nov 11 07:50:08 ztos kernel: ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+Nov 11 07:50:08 ztos kernel: ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+Nov 11 07:50:13 ztos kernel: ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+Nov 11 07:50:13 ztos kernel: ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+Nov 11 07:50:14 ztos kernel: PM: suspend entry (deep)
+Nov 11 07:50:15 ztos kernel: [SSPBBD]: bbd_suspend ++
+Nov 11 07:50:19 ztos kernel: [SSPBBD]: bbd_suspend --
+Nov 11 07:50:19 ztos kernel: printk: Suspending console(s) (use no_console_suspend to debug)
+Nov 11 07:50:19 ztos kernel: mif: modem_suspend: time = 3015.169838
+Nov 11 07:50:19 ztos kernel: mif: modem_suspend: ss360ap: pda_active:0
+Nov 11 07:50:19 ztos kernel: mif: modem_suspend: ss360ap
+Nov 11 07:50:19 ztos kernel: [SSPBBD]: bcm_spi_suspend ++
+Nov 11 07:50:19 ztos kernel: [SSPBBD]: bcm_spi_suspend --
+Nov 11 07:50:19 ztos kernel: ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+Nov 11 07:50:19 ztos kernel: brcmfmac: brcmf_keepalive_start: keep-alive packet config failed, ret=-5
+Nov 11 07:50:19 ztos kernel: ieee80211 phy0: brcmf_netdev_start_xmit: xmit rejected state=0
+Nov 11 07:50:19 ztos kernel: brcmfmac 0000:01:00.0: brcmf_pcie_pm_enter_D3: Timeout on response for entering D3 substate
+Nov 11 07:50:19 ztos kernel: brcmfmac 0000:01:00.0: PM: pci_pm_suspend(): brcmf_pcie_pm_enter_D3 returns -5
+Nov 11 07:50:19 ztos kernel: brcmfmac 0000:01:00.0: PM: dpm_run_callback(): pci_pm_suspend returns -5
+Nov 11 07:50:19 ztos kernel: brcmfmac 0000:01:00.0: PM: failed to suspend async: error -5
+Nov 11 07:50:19 ztos kernel: PM: Some devices failed to suspend, or early wake event detected
+Nov 11 07:50:19 ztos kernel: [SSPBBD]: bcm_spi_resume ++ 
+Nov 11 07:50:19 ztos kernel: [SSPBBD]: bcm_spi_resume -- 
+Nov 11 07:50:19 ztos kernel: mif: modem_resume: time = 3019.219455
+Nov 11 07:50:19 ztos kernel: mif: modem_resume: ss360ap: pda_active:1
+Nov 11 07:50:19 ztos kernel: mif: modem_resume: ss360ap
+Nov 11 07:50:19 ztos kernel: snd-zrn-abox: resume firmware 0; streams require prepare
+Nov 11 07:50:19 ztos kernel: PM: suspend exit
+Nov 11 07:50:21 ztos kernel: ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+Nov 11 07:50:21 ztos kernel: ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+wlp1s0           UP             192.168.1.75/24 2605:59c8:495a:1620:6c1:fd4:6646:86a2/64 fddc:a166:d566:20:b405:4312:6b77:cca7/64 fe80::109f:3cae:941d:c80f/64 
+Connected to 02:dc:a1:56:d5:66 (on wlp1s0)
+	SSID: sdn
+	freq: 5180.0
+PING 192.168.1.1 (192.168.1.1) 56(84) bytes of data.
+
+--- 192.168.1.1 ping statistics ---
+3 packets transmitted, 0 received, 100% packet loss, time 2030ms
+
+=== end 07:50:36

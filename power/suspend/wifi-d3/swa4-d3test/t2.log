@@ -1,0 +1,30 @@
+=== start 09:33:20 #65 SMP PREEMPT Wed Nov 11 15:19:19 UTC 2026
+Running as unit: swa-deadman.service; invocation ID: 12310d2e9e5242999f74dc298f509ca3
+before: d3_acks 0 hot 0 wakes 0
+d3_test 15000 at 09:33:40
+rc 0
+after: d3_acks 1 hot 1 wakes 1 09:33:56
+PING 192.168.1.1 (192.168.1.1) 56(84) bytes of data.
+
+--- 192.168.1.1 ping statistics ---
+3 packets transmitted, 0 received, 100% packet loss, time 2030ms
+
+command failed: Input/output error (-5)
+Connected to 02:dc:a1:46:d5:66 (on wlp1s0)
+	SSID: sdn
+Nov 11 09:33:12 ztos kernel: brcmfmac: brcmfmac: fw event 37 (nodebug) status 0 reason 1 flags 0x0 addr 00:00:00:00:00:00
+Nov 11 09:33:12 ztos kernel: brcmfmac: brcmfmac: fw event 37 (nodebug) status 0 reason 1 flags 0x0 addr 3c:a6:c1:8c:83:8e
+Nov 11 09:33:40 ztos kernel: brcmfmac 0000:01:00.0: D3: acknowledged
+Nov 11 09:33:40 ztos kernel: ieee80211 phy0: brcmf_netdev_start_xmit: xmit rejected state=0
+Nov 11 09:33:44 ztos kernel: ieee80211 phy0: brcmf_fil_cmd_data: bus is down. we have nothing to do.
+Nov 11 09:33:44 ztos kernel: ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+Nov 11 09:33:50 ztos kernel: ieee80211 phy0: brcmf_fil_cmd_data: bus is down. we have nothing to do.
+Nov 11 09:33:50 ztos kernel: ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+Nov 11 09:33:56 ztos kernel: brcmfmac 0000:01:00.0: D3 exit: firmware kept, association kept
+Nov 11 09:33:56 ztos kernel: brcmfmac 0000:01:00.0: d3_test 15000 ms: 0
+Nov 11 09:33:58 ztos kernel: ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+Nov 11 09:33:58 ztos kernel: ieee80211 phy0: brcmf_cfg80211_dump_station: BRCMF_C_GET_ASSOCLIST failed, err=-5
+Nov 11 09:34:02 ztos kernel: ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+Nov 11 09:34:04 ztos kernel: ieee80211 phy0: brcmf_msgbuf_query_dcmd: Timeout on response for query command
+Nov 11 09:34:04 ztos kernel: ieee80211 phy0: brcmf_cfg80211_get_station: GET STA INFO failed, -5
+=== end 09:34:05
