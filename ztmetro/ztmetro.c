@@ -38,6 +38,7 @@
 #include "demoloop/stop-key.h"
 #include "power/power-key.h"
 #include "audio-sync.h"
+#include "volume-streams.h"
 #include "auth/btpair-proto.h"
 #include "audio-state.h"
 #include "pods/pods-bar.h"
@@ -1077,7 +1078,8 @@ struct zt_server {
 	bool key_sound;
 	char key_prefix[32];
 	int ring_volume;
-	bool volume_is_media;
+	int alarm_volume;		/* the alarm's level, as the others 0..VOLUME_MAX (kept in ztclock's settings) */
+	int audio_key_stream;		/* enum vs_stream: what the volume keys move, and the overlay shows first */
 	bool audio_active, audio_known;
 	uint32_t volume_key_ms;	/* when a key last moved the media volume */
 	/* the audio tile and its modal: what ztos-audiod last said (audio-state.h) */
@@ -1095,11 +1097,13 @@ struct zt_server {
 	bool audio_modal_open;
 	bool audio_modal_auto;		/* the volume keys opened it: it goes by itself */
 	bool media_on_volume;		/* and the player's controls come with it (Settings); always from the tile */
-	bool audio_modal_ring;		/* the ringer's level, for when nothing is playing */
-	bool audio_ring_drag;
+	bool audio_modal_expanded;	/* the keys' overlay: its caret opened, all three sliders */
+	int audio_level_drag;		/* VS_RING or VS_ALARM while a finger holds its slider, else 0 */
 	double audio_media_y;		/* what is playing, under the slider */
 	float audio_modal_y;		/* 0 shown, -audio_modal_h out of sight */
-	double audio_modal_h, audio_track_y;
+	double audio_modal_h;
+	double audio_tracks[VS_STREAMS];	/* each slider's line in the modal, -1 not shown */
+	double audio_caret_y;		/* the overlay's caret, -1 none */
 	struct zt_layer audio_modal_layer;
 	char audio_pending[sizeof(((struct audio_output *)0)->name)];	/* a swap on its way */
 	uint32_t audio_pending_ms;
@@ -6797,9 +6801,10 @@ static void ui_sound(struct zt_server *server, enum ui_sound sound) {
 	if (!runtime) return;
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/ztos-sounds.sock", runtime);
-	/* keyboard taps sit well under the ringer: at its level they were too loud */
-	int percent = server->ring_volume * 100 / VOLUME_MAX;
-	if (sound == UIS_KEY || sound == UIS_SPACE || sound == UIS_FUNCTION) percent = percent * 35 / 100;
+	/* a share of the ring's level, which ztos-sounds' stream has (volume-streams.h);
+	 * keyboard taps sit well under the ringer: at its level they were too loud */
+	int percent = 100;
+	if (sound == UIS_KEY || sound == UIS_SPACE || sound == UIS_FUNCTION) percent = 35;
 	unsigned char packet[2] = { (unsigned char)sound, (unsigned char)percent };
 	sendto(server->key_sound_fd, packet, sizeof(packet), MSG_DONTWAIT, (struct sockaddr *)&addr, sizeof(addr));
 }
@@ -9100,7 +9105,7 @@ static void shade_activate(struct zt_server *server, int index) {
 		damage(server);
 		break;
 	case 100 + Q_AUDIO:
-		server->audio_modal_auto = server->audio_modal_ring = false;
+		server->audio_modal_auto = server->audio_modal_expanded = false;
 		audio_modal_show(server);
 		break;
 	case 100 + Q_ROTATION:
@@ -11777,23 +11782,114 @@ static bool audio_ready(struct zt_server *server) {
 	return server->audio_state_ok && audio_daemon_alive();
 }
 
+/* The three volumes' sliders (volume-streams.h). From the tile: Media (the
+ * selected output's), then Calls + notifications, then Alarm, under the
+ * outputs. From the keys: only the one they move, with a caret that opens the
+ * other two under it. */
+#define AUDIO_SLIDER_GAP 64.0
+#define AUDIO_CARET_W	44.0
+
+static int *stream_level(struct zt_server *server, int stream) {
+	return stream == VS_RING ? &server->ring_volume : stream == VS_ALARM ? &server->alarm_volume : &server->volume;
+}
+
+static int stream_min_level(int stream) {
+	return stream == VS_ALARM ? (VS_ALARM_MIN * VOLUME_MAX + 99) / 100 : 0;
+}
+
+static int stream_percent_of_level(int level) {
+	return (level * 100 + VOLUME_MAX - 1) / VOLUME_MAX;
+}
+
+/* the ring's or the alarm's level kept where it lives, and ztos-audiod told:
+ * the sounds playing at it follow */
+static void stream_level_keep(struct zt_server *server, int stream) {
+	int percent = stream_percent_of_level(*stream_level(server, stream));
+	if (stream == VS_RING) {
+		config_keep("ring_volume", percent);
+	} else if (stream == VS_ALARM) {
+		vs_alarm_write(percent);
+	}
+	audio_tell("levels");
+}
+
+static void alarm_level_read(struct zt_server *server) {
+	int level = audio_level_of_percent(vs_level_read(VS_ALARM), VOLUME_MAX);
+	server->alarm_volume = level < stream_min_level(VS_ALARM) ? stream_min_level(VS_ALARM) : level;
+}
+
+/* the i-th slider shown */
+static int audio_stream_at(struct zt_server *server, int i) {
+	if (!server->audio_modal_auto) return i;
+	int first = server->audio_key_stream;
+	if (i == 0) return first;
+	for (int st = 0, k = 0; st < VS_STREAMS; st++)
+		if (st != first && ++k == i) return st;
+	return -1;
+}
+
+static void draw_volume_slider(struct zt_server *server, cairo_t *cr, double track_y, const char *label,
+		int percent, bool mute, double inset) {
+	double w = server->width, content_w = w - 2 * AUDIO_PAD;
+	char value[16] = "—";
+	if (percent >= 0) snprintf(value, sizeof(value), "%d%%", percent);
+	if (mute && percent >= 0) snprintf(value, sizeof(value), "muted");
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	draw_text(cr, label, FONT_REGULAR, 15.0, AUDIO_PAD, track_y - 34, content_w - inset - 60, 0, false);
+	double vw = text_width(value, FONT_REGULAR, 15.0);
+	draw_text(cr, value, FONT_REGULAR, 15.0, w - AUDIO_PAD - inset - vw, track_y - 34, 0, 0, false);
+	/* the banner's bar, with a thumb to take hold of */
+	double level = percent < 0 ? 0 : percent / 100.0;
+	cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
+	cairo_rectangle(cr, AUDIO_PAD, track_y - 1.5, content_w, 3);
+	cairo_fill(cr);
+	if (percent >= 0) {
+		if (mute) {
+			cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);
+		} else {
+			set_rgb(cr, server->accent);
+		}
+		cairo_rectangle(cr, AUDIO_PAD, track_y - 1.5, content_w * level, 3);
+		cairo_fill(cr);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		cairo_rectangle(cr, AUDIO_PAD + content_w * level - 4, track_y - 12, 8, 24);
+		cairo_fill(cr);
+	}
+}
+
+/* a chevron: down to open, up to close */
+static void draw_caret(cairo_t *cr, double cx, double cy, bool up) {
+	double d = up ? -1 : 1;
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	cairo_set_line_width(cr, 2.0);
+	cairo_move_to(cr, cx - 8, cy - 4 * d);
+	cairo_line_to(cr, cx, cy + 4 * d);
+	cairo_line_to(cr, cx + 8, cy - 4 * d);
+	cairo_stroke(cr);
+}
+
 static void draw_audio_modal(struct zt_server *server) {
 	if (server->width <= 0) return;
 	double w = server->width, content_w = w - 2 * AUDIO_PAD, y = AUDIO_ROW_TOP;
 	const struct audio_state *st = &server->audio_state;
-	bool ring = server->audio_modal_ring;
+	bool overlay = server->audio_modal_auto;
 	bool ready = audio_ready(server);
-	int selected = ready && !ring ? audio_selected(st, server->audio_pending) : -1;
-	int rows = ready && !ring ? st->n : 0;
-	bool has_slider = selected >= 0 || ring;
-	double track_y = y + rows * (AUDIO_ROW_H + AUDIO_ROW_GAP) + 44;
-	double total_h = has_slider ? track_y + 34 : y + (rows ? rows * (AUDIO_ROW_H + AUDIO_ROW_GAP) : 40) + 12;
+	int selected = ready ? audio_selected(st, server->audio_pending) : -1;
+	int rows = ready && !overlay ? st->n : 0;
+	int sliders = overlay && !server->audio_modal_expanded ? 1 : VS_STREAMS;
+	double first_track = overlay ? 40.0 + 34.0 : y + (rows ? rows * (AUDIO_ROW_H + AUDIO_ROW_GAP) : 40) + 44;
+	double total_h = first_track + (sliders - 1) * AUDIO_SLIDER_GAP + 34;
+	for (int i = 0; i < VS_STREAMS; i++) server->audio_tracks[i] = -1;
+	for (int i = 0; i < sliders; i++) {
+		int stream = audio_stream_at(server, i);
+		if (stream >= 0) server->audio_tracks[stream] = first_track + i * AUDIO_SLIDER_GAP;
+	}
+	server->audio_caret_y = overlay ? first_track - 34 + 10 : -1;
 	server->audio_media_y = total_h;
 	if (media_row_shown(server)) {
 		total_h += media_row_h(server);
 	}
 	server->audio_modal_h = total_h;
-	server->audio_track_y = track_y;
 
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, (int)w, (int)total_h, &cr);
@@ -11801,10 +11897,12 @@ static void draw_audio_modal(struct zt_server *server) {
 	cairo_rectangle(cr, 0, 0, w, total_h);
 	cairo_fill(cr);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	draw_text(cr, ring ? "Ringer + notifications" : "Audio output", FONT_SEMIBOLD, 20.0, AUDIO_PAD, 40.0, content_w, 0, false);
-	if (!rows && !ring) {
-		draw_text(cr, ready ? "No outputs right now." : "The audio service isn't running.",
-			FONT_REGULAR, 15.0, AUDIO_PAD, y, content_w, 0, false);
+	if (!overlay) {
+		draw_text(cr, "Audio output", FONT_SEMIBOLD, 20.0, AUDIO_PAD, 40.0, content_w, 0, false);
+		if (!rows) {
+			draw_text(cr, ready ? "No outputs right now." : "The audio service isn't running.",
+				FONT_REGULAR, 15.0, AUDIO_PAD, y, content_w, 0, false);
+		}
 	}
 	for (int i = 0; i < rows; i++, y += AUDIO_ROW_H + AUDIO_ROW_GAP) {
 		const struct audio_output *o = &st->out[i];
@@ -11829,33 +11927,22 @@ static void draw_audio_modal(struct zt_server *server) {
 		draw_text(cr, waiting ? "Switching…" : audio_type_of(o)->label, FONT_REGULAR, 12.0,
 			AUDIO_PAD + 46, y + 27, content_w - 56, 0, false);
 	}
-	if (has_slider) {
-		int percent = ring ? audio_percent_of_level(server->ring_volume, VOLUME_MAX) : st->out[selected].percent;
-		bool mute = !ring && st->out[selected].mute;
-		char value[16] = "—";
-		if (percent >= 0) snprintf(value, sizeof(value), "%d%%", percent);
-		cairo_set_source_rgb(cr, 1, 1, 1);
-		draw_text(cr, "Volume", FONT_REGULAR, 15.0, AUDIO_PAD, track_y - 34, content_w / 2, 0, false);
-		if (mute && percent >= 0) snprintf(value, sizeof(value), "muted");
-		double vw = text_width(value, FONT_REGULAR, 15.0);
-		draw_text(cr, value, FONT_REGULAR, 15.0, w - AUDIO_PAD - vw, track_y - 34, 0, 0, false);
-		/* the banner's bar, with a thumb to take hold of */
-		double level = percent < 0 ? 0 : percent / 100.0;
-		cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
-		cairo_rectangle(cr, AUDIO_PAD, track_y - 1.5, content_w, 3);
-		cairo_fill(cr);
-		if (percent >= 0) {
-			if (mute) {
-				cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);
-			} else {
-				set_rgb(cr, server->accent);
-			}
-			cairo_rectangle(cr, AUDIO_PAD, track_y - 1.5, content_w * level, 3);
-			cairo_fill(cr);
-			cairo_set_source_rgb(cr, 1, 1, 1);
-			cairo_rectangle(cr, AUDIO_PAD + content_w * level - 4, track_y - 12, 8, 24);
-			cairo_fill(cr);
+	for (int i = 0; i < sliders; i++) {
+		int stream = audio_stream_at(server, i);
+		if (stream < 0) continue;
+		int percent;
+		bool mute = false;
+		if (stream == VS_MEDIA) {
+			percent = selected >= 0 ? st->out[selected].percent : -1;
+			mute = selected >= 0 && st->out[selected].mute;
+		} else {
+			percent = stream_percent_of_level(*stream_level(server, stream));
 		}
+		draw_volume_slider(server, cr, server->audio_tracks[stream], vs_label(stream), percent, mute,
+			overlay && i == 0 ? AUDIO_CARET_W : 0);
+	}
+	if (overlay) {
+		draw_caret(cr, w - AUDIO_PAD - AUDIO_CARET_W / 2 + 6, server->audio_caret_y, server->audio_modal_expanded);
 	}
 	if (media_row_shown(server)) {
 		draw_media_row(server, cr, server->audio_media_y);
@@ -12214,6 +12301,7 @@ static int audio_watch_readable(int fd, uint32_t mask, void *data) {
 static void audio_watch_start(struct zt_server *server) {
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
 	server->audio_timer = wl_event_loop_add_timer(server->loop, audio_timer_fired, server);
+	alarm_level_read(server);
 	audio_state_read(server);
 	int fd = runtime ? inotify_init1(IN_NONBLOCK | IN_CLOEXEC) : -1;
 	if (fd < 0) {
@@ -12234,6 +12322,7 @@ static void audio_modal_show(struct zt_server *server) {
 	audio_state_read(server);
 	audio_state_hold(&server->audio_state, &server->audio_slider, now_ms());
 	audio_tell("refresh");	/* it answers through the file, if anything is different */
+	alarm_level_read(server);	/* the clock app may have moved it */
 	server->audio_row_down[0] = 0;
 	draw_audio_modal(server);
 	server->audio_modal_open = true;
@@ -12296,11 +12385,15 @@ static void audio_modal_pick(struct zt_server *server, const char *name) {
 	audio_modal_redraw(server);
 }
 
-/* The ringer's slider: the same level the keys move when nothing plays. */
-static void audio_ring_to(struct zt_server *server, double x) {
+/* The ring's or the alarm's slider. */
+static void audio_level_to(struct zt_server *server, int stream, double x) {
 	int percent = audio_slider_percent(x, AUDIO_PAD, server->width - 2 * AUDIO_PAD);
-	server->ring_volume = audio_level_of_percent(percent, VOLUME_MAX);
-	config_keep("ring_volume", (server->ring_volume * 100 + VOLUME_MAX - 1) / VOLUME_MAX);
+	int level = audio_level_of_percent(percent, VOLUME_MAX), low = stream_min_level(stream);
+	int *at = stream_level(server, stream);
+	if (level < low) level = low;
+	if (*at == level) return;
+	*at = level;
+	stream_level_keep(server, stream);
 	audio_modal_redraw(server);
 }
 
@@ -12333,26 +12426,37 @@ static void audio_modal_touch_begin(struct zt_server *server, struct touch_point
 		}
 		return;
 	}
-	if (server->audio_modal_ring) {
-		if (fabs(dy - server->audio_track_y) <= 24 && !server->audio_ring_drag) {
-			p->role = ROLE_AUDIO;
-			p->index = -2;
-			server->audio_ring_drag = true;
-			audio_ring_to(server, x);
-		}
+	if (server->audio_caret_y >= 0 && x >= server->width - AUDIO_PAD - AUDIO_CARET_W - 12 &&
+	    fabs(dy - server->audio_caret_y) <= 20) {
+		/* the overlay's caret: the other two volumes, or back to the one */
+		hap(server, HAP_TAP, HG_SYSTEM);
+		server->audio_modal_expanded = !server->audio_modal_expanded;
+		audio_modal_redraw(server);
 		return;
+	}
+	for (int stream = VS_RING; stream < VS_STREAMS; stream++) {
+		if (server->audio_tracks[stream] >= 0 && fabs(dy - server->audio_tracks[stream]) <= 24) {
+			if (server->audio_level_drag) return;	/* one finger on a slider is enough */
+			p->role = ROLE_AUDIO;
+			p->index = -1 - stream;
+			server->audio_level_drag = stream;
+			audio_level_to(server, stream, x);
+			return;
+		}
 	}
 	if (server->audio_slider.dragging || !audio_ready(server)) {
 		return;		/* one finger on the slider is enough */
 	}
 	int selected = audio_selected(st, server->audio_pending);
-	if (selected >= 0 && st->out[selected].percent >= 0 && fabs(dy - server->audio_track_y) <= 24) {
+	if (selected >= 0 && st->out[selected].percent >= 0 && server->audio_tracks[VS_MEDIA] >= 0 &&
+	    fabs(dy - server->audio_tracks[VS_MEDIA]) <= 24) {
 		p->role = ROLE_AUDIO;
 		p->index = -1;
 		audio_slider_begin(&server->audio_slider, st->out[selected].name, st->out[selected].percent);
 		audio_slider_to(server, x);
 		return;
 	}
+	if (server->audio_modal_auto) return;	/* the overlay has no outputs */
 	double at = dy - AUDIO_ROW_TOP;
 	int row = at < 0 ? -1 : (int)(at / (AUDIO_ROW_H + AUDIO_ROW_GAP));
 	if (row >= 0 && row < st->n && at - row * (AUDIO_ROW_H + AUDIO_ROW_GAP) <= AUDIO_ROW_H &&
@@ -12365,8 +12469,8 @@ static void audio_modal_touch_begin(struct zt_server *server, struct touch_point
 }
 
 static void audio_modal_touch_move(struct zt_server *server, struct touch_point *p, double x) {
-	if (p->index == -2) {
-		audio_ring_to(server, x);
+	if (p->index <= -2) {
+		audio_level_to(server, -1 - p->index, x);
 	} else if (p->index < 0) {
 		if (server->audio_slider.dragging) audio_slider_to(server, x);
 	} else if (p->moved && server->audio_row_down[0]) {
@@ -12379,9 +12483,11 @@ static void audio_modal_touch_end(struct zt_server *server, struct touch_point *
 	if (server->audio_modal_auto) {
 		wl_event_source_timer_update(server->volume_timer, AUDIO_AUTO_CLOSE_MS);
 	}
-	if (p->index == -2) {
-		server->audio_ring_drag = false;
-		wl_event_source_timer_update(server->volume_pip_timer, 250);	/* one pip at its new level */
+	if (p->index <= -2) {
+		server->audio_level_drag = 0;
+		if (p->index == -1 - VS_RING) {
+			wl_event_source_timer_update(server->volume_pip_timer, 250);	/* one pip at its new level */
+		}
 		return;
 	}
 	if (p->index < 0) {
@@ -12464,7 +12570,7 @@ static void uninstall_item(struct zt_server *server, int index) {
 static int volume_hide(void *data) {
 	struct zt_server *server = data;
 	if (server->audio_modal_open && server->audio_modal_auto) {
-		if (server->audio_slider.dragging || server->audio_ring_drag) {
+		if (server->audio_slider.dragging || server->audio_level_drag) {
 			wl_event_source_timer_update(server->volume_timer, 1000);	/* a finger is on it */
 		} else {
 			audio_modal_close(server);
@@ -12493,10 +12599,9 @@ static int volume_pip(void *data) {
 static void volume_modal_up(struct zt_server *server) {
     if (!server->audio_modal_open) {
         server->audio_modal_auto = true;
-        server->audio_modal_ring = !server->volume_is_media;
+        server->audio_modal_expanded = false;
         audio_modal_show(server);
     } else if (server->audio_modal_auto) {
-        server->audio_modal_ring = !server->volume_is_media;
         audio_modal_redraw(server);
     }
     if (server->audio_modal_auto) {
@@ -12515,23 +12620,33 @@ static void audio_volume_report(struct zt_server *server, int percent, bool exte
     if (server->width <= 0 || !server->screen_on)
         return;
     if (external && moved) {
-        server->volume_is_media = true;
+        if (!server->audio_modal_open) server->audio_key_stream = VS_MEDIA;
         volume_modal_up(server);
     }
 }
 
 static void volume_step(struct zt_server *server, int by) {
-    /* the stream is chosen on the first press; repeats keep it */
-    if (!server->volume_repeat_by)
-        server->volume_is_media = server->audio_modal_open ||	/* its slider is what's on the screen */
-            (server->audio_known ? server->audio_active : server->media_playing);
-    int *level = server->volume_is_media ? &server->volume : &server->ring_volume;
-    int previous = *level, to = previous + by;
-    *level = to < 0 ? 0 : to > VOLUME_MAX ? VOLUME_MAX : to;
-    config_keep(server->volume_is_media ? "media_volume" : "ring_volume",
-        (*level * 100 + VOLUME_MAX - 1) / VOLUME_MAX);
-    volume_modal_up(server);
-    if (server->volume_is_media) {
+    /* the stream is chosen on the first press (volume-streams.h: media if
+     * anything plays, else the ring); repeats keep it, and so does the overlay
+     * while it is up. The tile's modal is about its output: media. */
+    if (!server->volume_repeat_by) {
+        if (server->audio_modal_open && !server->audio_modal_auto)
+            server->audio_key_stream = VS_MEDIA;
+        else if (!server->audio_modal_open)
+            server->audio_key_stream = vs_key_stream(alarm_ringing(server), server->audio_known,
+                server->audio_active, server->media_playing);
+    }
+    int stream = server->audio_key_stream;
+    int *level = stream_level(server, stream);
+    int previous = *level, to = previous + by, low = stream_min_level(stream);
+    *level = to < low ? low : to > VOLUME_MAX ? VOLUME_MAX : to;
+    if (stream == VS_MEDIA)
+        config_keep("media_volume", stream_percent_of_level(*level));
+    else if (*level != previous)
+        stream_level_keep(server, stream);
+    if (server->screen_on)
+        volume_modal_up(server);	/* with the screen off it changes, unseen, as on any phone */
+    if (stream == VS_MEDIA) {
         char percent[16];
         snprintf(percent, sizeof(percent), "%d%%", audio_percent_of_level(*level, VOLUME_MAX));
         char line[32];
@@ -12540,9 +12655,11 @@ static void volume_step(struct zt_server *server, int by) {
         audio_modal_key(server, audio_percent_of_level(*level, VOLUME_MAX));
         if (!audio_tell(line))
             run_detached("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", percent);
+    } else {
+        audio_modal_redraw(server);
     }
-    hap(server, !server->volume_is_media && previous > 0 && *level == 0 ? HAP_TAP : HAP_TICK, HG_SYSTEM);
-    if (!server->volume_is_media && *level != previous) {
+    hap(server, stream == VS_RING && previous > 0 && *level == 0 ? HAP_TAP : HAP_TICK, HG_SYSTEM);
+    if (stream == VS_RING && *level != previous) {
         /* the ringer at its new level, as Windows Phone does: one pip after
          * the keys stop, not one per step */
         wl_event_source_timer_update(server->volume_pip_timer, 250);
@@ -12556,7 +12673,7 @@ static int volume_repeat(void *data) {
         server->volume_repeat_by = 0;	/* the key-up may never come with the screen off */
         return 0;
     }
-    int *level = server->volume_is_media ? &server->volume : &server->ring_volume;
+    int *level = stream_level(server, server->audio_key_stream);
     int before = *level;
     volume_step(server, server->volume_repeat_by);
     if (*level == before) {	/* at the end of the scale: no more ticks */
@@ -16293,6 +16410,16 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 		server->hwkey_held = -1;	/* its release is not a Start press */
 		return;
 	}
+	if (!server->screen_on && (event->keycode == KEY_VOLUMEUP || event->keycode == KEY_VOLUMEDOWN)) {
+		/* The screen off: a press is a step, as with it on (media if
+		 * something plays, else the ring), unseen and without waking the
+		 * screen, as phones do. No repeat: a key-up can be lost to sleep. */
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED && !demoloop_active()) {
+			server->volume_repeat_by = 0;
+			volume_step(server, event->keycode == KEY_VOLUMEUP ? 1 : -1);
+		}
+		return;
+	}
 	if (!server->screen_on) {
 		/* A keyboard on the desktop types into it with the phone's screen off,
 		 * as its mouse already points there (a monitor in use, the phone put
@@ -18129,7 +18256,10 @@ static int reload(int signal_number, void *data) {
 		return 0;
 	}
 	if (ring_before > 0 && server->ring_volume == 0) hap(server, HAP_TAP, HG_SYSTEM);
-	if (ring_before != server->ring_volume) waydroid_ringer();
+	if (ring_before != server->ring_volume) {
+		waydroid_ringer();
+		audio_tell("levels");
+	}
 	retro_setup(server);
 	retro_apps(server);
 	if (server->dm) {

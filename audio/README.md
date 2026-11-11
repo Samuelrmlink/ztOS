@@ -219,6 +219,51 @@ private to the test: null sinks, silence, no D-Bus and no device monitors.
 move-sink-input` to change the global output: that pins each stream, and
 WirePlumber saves the pin. The shell and `ztos-soundd` no longer do it.
 
+## Three volumes: Media, Calls + notifications, Alarm
+
+`ztmetro/volume-streams.h` has the whole of it; `ztos-audiod` does the same
+sums in Python. In short:
+
+- **Media** is the active output's volume, as above.
+- **Calls + notifications** (the ring) is `ring_volume` in
+  `~/.config/ztmetro/config`; **Alarm** is `volume` in
+  `~/.config/ztclock/settings`. Both are percent on wpctl's scale, as Media's,
+  and both were already there, so nothing was moved.
+- Every sound at one of them is its own PipeWire stream with `media.role`
+  (Notification or Alarm), `ztos.stream` (ring or alarm), and
+  `state.restore-props = false` so WirePlumber neither keeps nor restores its
+  volume: the call's ringtone and tones (ztphone), the system sounds and key
+  taps (`ztos-sounds`' one stream; a packet's volume is now a share of the
+  ring's level), Settings' ringtone preview, the alarm (ztclockd) and the clock
+  app's preview.
+- The output's volume applies after the stream's, so a ring stream's own gain
+  is its level over the output's. Through the speaker's chain that is all
+  floating point, so the gain may go above 1 (to +40 dB: 10 on `volume`, 10 on
+  the channels). The program sets the first value (`pw-play --volume`), and
+  `ztos-audiod` corrects it whenever a level or the output's volume changes
+  (the shell sends it `levels`). So the ring sounds the same at any Media level
+  from about 13 % up for a ring at 57 %.
+- Bluetooth's volume is the device's own, applied after the encoder, so there
+  the gain stops at 1. A sound with `ztos.volume.boost` (the alarm, a ringing
+  call) has the output turned up to the least that carries its level while it
+  plays, and put back 3 s after the last one ends (kept in
+  `$XDG_RUNTIME_DIR/ztos-volume-boost.json`, so a restart of the daemon still
+  puts it back). The same applies on the speaker when Media is very low or muted.
+- The alarm never plays under 20 %, whatever its slider or the clock app's
+  says. An alarm that should be silent has to be switched off.
+- `ztos-audiod`'s state has `"streams": {"ring": {"percent", "playing"},
+  "alarm": {...}, "boost"}`.
+
+The keys: media if anything plays, else the ring (`vs_key_stream`). "Anything
+plays" is `ztos-sounds`' count of uncorked playback streams that aren't the
+ring's or the alarm's (`ztos.stream`), system sounds or calls by role, or
+ztOS's own routing (`vs_counts_as_media`). While an alarm rings the keys snooze
+it instead (the alarm screen's own handling). With the screen off a press is
+one step, unseen, without waking the screen. The overlay shows the one slider
+with a caret that opens all three; it goes 3 s after the last touch or key.
+
+`make check-volume-streams` tests both sides on the host.
+
 ## Not done
 
 - **Speaker protection.** On the stock system the DSP runs Maxim's DSM
