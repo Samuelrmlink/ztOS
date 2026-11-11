@@ -336,6 +336,7 @@ struct x9dp {
 	u32 pma_saved;			/* COMBO_PMA_CTRL as the USB driver left it */
 	struct work_struct auto_work;
 	struct work_struct hpd_work;
+	struct work_struct detach_work;	/* the DP state ended: the link down */
 	bool id_done;
 	struct dentry *dbg;
 	char last[320];
@@ -2769,6 +2770,41 @@ static void x9dp_auto_work(struct work_struct *work)
 
 static void x9dp_hp_work(struct work_struct *work);
 
+/*
+ * The partner gone, or Alt Mode exited (a pin state with no DP lanes):
+ * everything the link had goes down, as stock's displayport_disable does
+ * on its HPD-low-for-good. The video and DECON2 stop, the controller, the
+ * PHY and the combo PMA go off, and the HPD state is forgotten so DRM sees
+ * the connector disconnected. A DP state again (with HPD) brings it all
+ * up through hpd_work, from "pma". HPD going low while the dock stays is
+ * not this: the link waits for HPD to come back.
+ */
+static void x9dp_detach_work(struct work_struct *work)
+{
+	struct x9dp *d = container_of(work, struct x9dp, detach_work);
+	bool any, hpd;
+
+	mutex_lock(&d->lock);
+	if (x9dp_lanes(d)) {
+		mutex_unlock(&d->lock);
+		return;		/* a DP state again before this ran */
+	}
+	any = d->pma_on || d->phy_on || d->ctrl_on || d->video_on || d->decon2_on;
+	hpd = d->dp_status & DP_STATUS_HPD_STATE;
+	if (any && !x9dp_link_ok(d)) {
+		/* the DPU's domain is off: its registers have nothing running */
+		d->decon2_on = d->video_on = d->ctrl_on = d->phy_on = false;
+	}
+	if (any)
+		x9dp_run(d, "off");
+	d->dp_status = 0;
+	d->link_fresh = true;
+	dev_info(d->dev, "detach: link %s\n", any ? "powered down" : "was off");
+	mutex_unlock(&d->lock);
+	if (d->drm && hpd)
+		schedule_work(&d->hp_work);
+}
+
 static void x9dp_hpd_work(struct work_struct *work)
 {
 	struct x9dp *d = container_of(work, struct x9dp, hpd_work);
@@ -2832,10 +2868,19 @@ static int x9dp_sw_set(struct typec_switch_dev *sw, enum typec_orientation orien
 {
 	struct x9dp *d = typec_switch_get_drvdata(sw);
 
+	bool gone;
+
 	mutex_lock(&d->lock);
 	if (orientation != TYPEC_ORIENTATION_NONE)
 		d->orient = orientation;
+	/* no partner at all: whatever the last pin state said, the link goes */
+	gone = orientation == TYPEC_ORIENTATION_NONE &&
+	       (d->pma_on || d->phy_on || d->ctrl_on || d->video_on || d->decon2_on);
+	if (gone)
+		d->mode = TYPEC_STATE_USB;
 	mutex_unlock(&d->lock);
+	if (gone)
+		schedule_work(&d->detach_work);
 	return 0;
 }
 
@@ -2875,6 +2920,8 @@ static int x9dp_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *state
 	mutex_unlock(&d->lock);
 	if ((auto_bringup || pma_early) && was != now)
 		schedule_work(&d->auto_work);
+	else if (was && !now)
+		schedule_work(&d->detach_work);
 	if ((hpd_read || d->drm_on) && hpd_up)
 		schedule_work(&d->hpd_work);
 	if (d->drm && hpd_changed)
@@ -2979,6 +3026,7 @@ static void x9dp_unregister(void *data)
 
 	cancel_work_sync(&d->auto_work);
 	cancel_work_sync(&d->hpd_work);
+	cancel_work_sync(&d->detach_work);
 	cancel_work_sync(&d->hp_work);
 	if (d->drm)
 		drm_dev_unplug(d->drm);
@@ -3015,6 +3063,7 @@ static int x9dp_probe(struct platform_device *pdev)
 	d->dev = dev;
 	mutex_init(&d->lock);
 	INIT_WORK(&d->auto_work, x9dp_auto_work);
+	INIT_WORK(&d->detach_work, x9dp_detach_work);
 	INIT_WORK(&d->hpd_work, x9dp_hpd_work);
 	INIT_WORK(&d->hp_work, x9dp_hp_work);
 	d->orient = TYPEC_ORIENTATION_NORMAL;
