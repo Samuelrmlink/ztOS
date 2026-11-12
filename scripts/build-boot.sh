@@ -181,6 +181,11 @@ python3 "$ROOT/kernel/patch-decon-wake.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-flip.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-panel-lock.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-panel-io.py" "$SRC"
+# the always-on display on the panel (ROADMAP 8.45, power/aod/PANEL-AOD.md):
+# aod_keep parks the output with the frame lit; aod_lpm / aod_clock / aod_sprite
+# send Samsung's own HLPM and live-clock sequences
+python3 "$ROOT/kernel/patch-decon-aod.py" "$SRC"
+python3 "$ROOT/kernel/patch-decon-lpm.py" "$SRC"
 python3 "$ROOT/kernel/patch-suspend-mpidr.py" "$SRC"
 python3 "$ROOT/kernel/patch-ufs-suspend.py" "$SRC"
 python3 "$ROOT/kernel/patch-touch-suspend.py" "$SRC"
