@@ -21,6 +21,7 @@
 
 #include "zrnmetrocore.h"
 #include "zt-clock.h"
+#include "battery-health.h"
 
 enum page {
 	PAGE_SLEEP = 0,
@@ -69,7 +70,6 @@ struct power_data {
 	long current_ma;
 	long current_avg_ma;
 	double temp_c;
-	long cycle_count;
 	char health[32];
 	char charge_type[32];
 	long input_limit_ma;
@@ -192,7 +192,6 @@ static void load_battery_data(void) {
 	pdata.current_ma = read_sysfs_long(BATTERY_PATH "/current_now") / 1000;
 	pdata.current_avg_ma = read_sysfs_long(BATTERY_PATH "/current_avg") / 1000;
 	pdata.temp_c = read_sysfs_long(BATTERY_PATH "/temp") / 10.0;
-	pdata.cycle_count = read_sysfs_long(BATTERY_PATH "/cycle_count");
 	read_sysfs_str(BATTERY_PATH "/health", pdata.health, sizeof(pdata.health), "Good");
 
 	pdata.time_to_empty_s = read_sysfs_long(BATTERY_PATH "/time_to_empty_now");
@@ -588,9 +587,16 @@ static double draw_page_sleep(cairo_t *cr) {
 	zmc_text(cr, "BATTERY & HARDWARE", FONT_SEMIBOLD, 11.5, ZMC_MARGIN, y, 0);
 	y += 18;
 
-	char health_buf[64];
-	snprintf(health_buf, sizeof(health_buf), "%s • %ld cycles recorded", pdata.health, pdata.cycle_count);
-	y = zmc_field(cr, y, "Battery health & cycles", health_buf);
+	/* cycles and capacity as what they are: power/battery-cycles.md */
+	struct battery_health bh;
+	char bh_buf[96];
+	battery_health_read(BATTERY_PATH, &bh);
+	battery_health_capacity_text(&bh, bh_buf, sizeof(bh_buf));
+	y = zmc_field(cr, y, "Capacity it holds", bh_buf);
+	battery_health_gauge_text(&bh, bh_buf, sizeof(bh_buf));
+	y = zmc_field(cr, y, "Cycles (fuel gauge)", bh_buf);
+	battery_health_samsung_text(&bh, bh_buf, sizeof(bh_buf));
+	y = zmc_field(cr, y, "Cycles (Samsung's count)", bh_buf);
 
 	char chg_buf[64];
 	if (charging)
