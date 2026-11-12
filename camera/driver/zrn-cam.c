@@ -60,8 +60,12 @@ int s9p_acpm_pmic_update(u8 reg, u8 val, u8 mask);
  * on the pattern of the other LDOs. Off unless asked for: on that run the iris
  * sensor did not answer, because gpg0-7 (gpio_iris_en) ignored the write.
  */
-static bool iris_allowed;
-module_param(iris_allowed, bool, 0644);
+/*
+ * The iris camera stays refused: its I2C pads gpp4-6/7 and gpio_iris_en
+ * (gpg0-7) are held by the secure world (camera/iris/README.md), and its
+ * main-PMIC LDOs are not in the approved list (REGISTERS.md).
+ */
+static const bool iris_allowed;
 
 enum { PB03, PB02, PMIC_N };
 
@@ -246,6 +250,21 @@ static void note(const char *fmt, ...)
 	pr_info("zrn-cam: %pV\n", &vaf);
 	result_len += scnprintf(result + result_len, sizeof(result) - result_len, "%pV\n", &vaf);
 	va_end(args);
+}
+
+/*
+ * S2MPB02 0x13: the second flash channel's control, which drives the iris's IR
+ * LED and may still be armed after a warm reboot from stock. Read and logged at
+ * each camera open; never written here (not approved).
+ */
+#define PB02_FLED2_CTRL	0x13
+
+static void ir_led_note(void)
+{
+	int v = pmic[PB02] ? i2c_smbus_read_byte_data(pmic[PB02], PB02_FLED2_CTRL) : -ENODEV;
+
+	pr_info("zrn-cam: S2MPB02 0x13 (IR LED channel) = %d (0x%02x)\n", v, v & 0xff);
+	note("S2MPB02 13 (IR LED channel) = 0x%02x (%d)", v & 0xff, v);
 }
 
 static int pmic_buses(void)
@@ -941,6 +960,7 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 		note("PMIC buses: %d", ret);
 		goto done;
 	}
+	ir_led_note();
 	if (!strcmp(cmd, "pmic")) {
 		pmic_dump();
 		goto done;

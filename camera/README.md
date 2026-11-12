@@ -10,8 +10,8 @@ Do it with someone at the phone.
 **Done on 2026-10-31:** `camera/driver/zrn-cam.c` powers each camera in stock's
 order from a module, reads its ID and powers it down, with `zrn-cam-probe`
 leaving a mark so a hang is not retried. Rear 0x20C3 rev 0xA5 (S5K2L3), front
-0x3081 rev 0xA3, three cycles each. Iris: no answer, `gpio_iris_en` (gpg0-7)
-ignores writes from here, so the secure world may own it (not proven).
+0x3081 rev 0xA3, three cycles each. Iris: no answer. The secure world holds both
+`gpio_iris_en` (gpg0-7) and the iris I2C pads gpp4-6/7 (`camera/iris/README.md`).
 
 ## RAW capture (2026-10-31)
 
@@ -32,7 +32,9 @@ sudo zrn-cam-probe pmic    # loads the module; the rails stay off
   0x4; the frames landing where asked, canaries untouched, imply it is bypassed.
 - The first frames were taken in a dark room: black level 64, noise growing with gain.
   **No picture of a scene has been checked yet**, nor the 1.4 stops between F1.5 and F2.4.
-- Iris: still no answer from the sensor, so no frames.
+- Iris: still no answer from the sensor, so no frames. Its I2C pads gpp4-6/7 are held by the secure
+  world as well as `gpio_iris_en` (gpg0-7), which explains it (`camera/iris/README.md`). zrn-cam
+  refuses the iris cycle outright.
 - A stall of all CPUs (test, 2026-10-31) reset the phone back into ztOS, not TWRP,
   within 48 s, with no one touching it.
 

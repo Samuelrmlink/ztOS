@@ -222,6 +222,8 @@ static int live_start(bool front, bool full)
 		top_cmu = ioremap(0x1a240000, 0x3000);
 	ret = pmic_buses();
 	if (!ret)
+		ir_led_note();
+	if (!ret)
 		ret = csis_map(p);
 	if (!ret)
 		ret = isppre_up();

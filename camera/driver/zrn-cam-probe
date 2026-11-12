@@ -18,7 +18,7 @@ mark() { printf '%s\n' "$*" > $D/doing; sync; }
 mark insmod
 if [ ! -d /sys/module/zrn_cam ]; then
 	modprobe i2c-gpio 2>/dev/null
-	insmod "$KO" ${IRIS:+iris_allowed=1} || { rm -f $D/doing; sync; echo "zrn-cam-probe: insmod failed"; exit 1; }
+	insmod "$KO" || { rm -f $D/doing; sync; echo "zrn-cam-probe: insmod failed"; exit 1; }
 fi
 rm -f $D/doing; sync
 rc=0
