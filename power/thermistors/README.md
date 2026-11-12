@@ -67,4 +67,30 @@ each one first (from `drivers/iio/adc/exynos_adc.c`, v3; none has been written):
 | INT_EN | 0x10 | 1, or leave it 0 and poll DAT bit 31 | Set-up |
 | INT_ST | 0x14 | 1 (clear) | After each conversion, if interrupts are on |
 | DAT | 0x08 | Read only: bit 31 done, bits 11:0 the value | Each conversion |
-| CMU gate for `gate_adcif` | in the clock block at 0x15a80000 | Enable | Before any of these, if the bootloader left it off |
+| CMU gate for `gate_adcif` | CMU_CMGP 0x14202018 and 0x1420201c, CG_VAL bit 21 (0x15a80000 is stock's clock provider node, not the register) | Enable | Before any of these, if the bootloader left it off |
+
+## zrn-therm: the battery temperature, measured (approved 2026-11-12)
+
+`zrn-therm/` is an out-of-tree module that reads the thermistors on the ADC
+as stock does: 5 conversions per channel, the highest and lowest dropped, then
+interpolated in stock's tables (`therm-tables.h`, generated from the JSON). It
+writes the battery's temperature into the fuel gauge's Temp register in
+stock's format, so the gauge, `max170xx_battery/temp` and the P9320 driver's
+10 V check see the real value. A value outside its table, an ADC error or a
+reading older than three periods is unknown: `/sys/kernel/zrn_therm/battery`
+then fails to read, and zrn-charge allows 5 V only, on a cable and on a pad.
+The gauge's own `temp` is never used as a fallback.
+
+It polls: INT_EN is set only so INT_ST latches "done", there is no interrupt
+handler, and INT_EN goes back to 0 after each round, as stock's exit_hw does.
+
+- Host tests: `cc -std=c11 -Wall -Wextra -Werror -o /tmp/td power/thermistors/zrn-therm/test-decode.c && /tmp/td`,
+  and zrn-charge's `devices/samsung-starlte/test-zrn-charge.sh`.
+- Build: `KTREE=<a prepared copy of the running kernel's tree> power/thermistors/zrn-therm/build.sh`.
+- First run on the phone: `sudo zrn-therm-probe zrn-therm.ko`, a step at a time behind a mark.
+- The ADC's bus clock gate is CMU_CMGP 0x14202018 and 0x1420201c
+  (`GOUT_BLK_CMGP_UID_ADC_CMGP_IPCLKPORT_PCLK_S0/S1`, Samsung's cmucal-sfr.c).
+  Closed means MANUAL (bit 20) set and CG_VAL (bit 21) clear. zrn-therm reads
+  it first and, if closed, sets CG_VAL only (approved 2026-11-12), clearing it again on unload. It read open (0x00200000, both) on the first run.
+- Sharing: stock's tree gives the ADC no CHUB `sysreg` handshake, so stock
+  reads it without one too.
