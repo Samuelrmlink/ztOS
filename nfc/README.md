@@ -666,6 +666,54 @@ It is built against `linux-7.1-dp/out-target-bt` with no warnings. It has not
 been loaded on the phone. `zrn-nfc` (stage 1) is still standalone; stage 1c
 can move it onto `zrn_i2c20_get()`.
 
+## Stage 1c (approved 2026-11-12): ready, blocked by the phone lock
+
+The HRM agent then showed that the bus itself works. With LDO38 on, SCL and
+SDA idled high, and the MAX86915 at 0x57 answered PART_ID 0x2B (08:07 CST).
+So the NACK at 0x27 is on the NFC chip's side.
+
+Changes for 1c, all in `driver/`:
+
+- **`zrn-nfc.c` timing:**
+  - waits 150 ms after VEN on;
+  - on a NACK, retries CORE_RESET once after 110 ms.
+- **`zrn-nfc.c` bus:**
+  - It now builds its own `i2c-algo-bit` adapter with **class 0** (no
+    `.detect` probing; i2c-gpio would set `I2C_CLASS_HWMON`) and no address
+    retries.
+  - It samples SCL and SDA with the lines released, before power-up.
+- **`zrn-i2c20.c`:** uses the same class-0 bit-banged adapter, and fails with
+  `-EBUSY` if gpp5 is taken.
+- **`stage1.sh`:** checks that `i2c_algo_bit` is loaded, and captures the
+  kernel log from a `/dev/kmsg` marker. The line-count method printed nothing
+  in 1b, because the ring buffer is full.
+
+**Not yet run.** At 08:39 and again until 09:10 CST, `ztlock run nfc` timed out
+after 30 min. `/run/ztbench/lock` is held by **`ztnotifyd` (pid 17519, started
+08:24:59)**, which inherited the locked fd 9 from a `ztlock run`. gnss and
+thermal are queued behind it too. This lock leak is not ours to fix.
+
+### If 1c still NACKs: the read-only clock-output check (proposal)
+
+From the vendor CAL (LineageOS universal9810,
+`cal-if/exynos9810/clkout_exynos9810.c`, `clk-exynos9810.c`, `cal-if/ra.c`)
+(from source):
+
+- `OSC_NFC` = **`VCLK_CLKOUT1`**. (`OSC_AUD`, the codec's `xclkout`, is
+  CLKOUT0.)
+- CLKOUT1 is the **PMU register at offset 0xA0C**, which is physical
+  **`0x14060A0C`** (PMU = `system-controller@14060000`). Its fields:
+  - SEL = bits 13:8, where 0x0 = TCXO;
+  - **bit 0 is a disable bit**: `ra_enable_clkout()` writes 0 to enable and 1
+    to disable.
+- **Proposed access:** **one 32-bit read** of `0x14060A0C` (devmem read, no
+  write).
+  - If bit 0 = 1, CLKOUT1 is gated, which explains why the chip never raised
+    CLK_REQ.
+  - The follow-up, needing separate approval, would be one read-modify-write:
+    bits 13:8 = 0, bit 0 = 0. Then repeat stage 1c, and set bit 0 back to 1
+    afterwards.
+
 ## Biggest unknowns
 
 1. **Clock.** Is CLKOUT (`oscclk_nfc`) running under ztOS, and does the chip

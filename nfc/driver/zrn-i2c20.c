@@ -4,9 +4,11 @@
  * See zrn-i2c20.h. Host-tested (built) only so far.
  *
  * Accesses, the same as the owner-approved NFC stage 1b and HRM ID read:
- *  - load: a bit-banged i2c-gpio bus, number ZRN_I2C20_BUS, on gpp5-0/1
- *    (pins become GPIOs, open-drain emulation; pull-ups are external, on
- *    VDD_NFC_1P8). No transfer is made by this module itself.
+ *  - load: a bit-banged bus (i2c-algo-bit), number ZRN_I2C20_BUS, on
+ *    gpp5-0/1 (pins become GPIOs, open-drain emulation; pull-ups are
+ *    external, on VDD_NFC_1P8). Adapter class 0, so no driver's .detect
+ *    probes addresses on it (i2c-gpio would set I2C_CLASS_HWMON), and no
+ *    address retries. No transfer is made by this module itself.
  *  - first get: ACPM read of S2MPS18 0x6F; if bits 7:6 are 0, ACPM update
  *    0x6F value 0x80 mask 0xC0 (mode 2), read back, wait 5 ms.
  *  - last put (and unload): if this module switched it on, ACPM write of the
@@ -14,10 +16,11 @@
  */
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/gpio/consumer.h>
 #include <linux/gpio/machine.h>
+#include <linux/i2c-algo-bit.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/platform_data/i2c-gpio.h>
 #include <linux/platform_device.h>
 
 #include "zrn-i2c20.h"
@@ -35,16 +38,39 @@ module_param(leave_on, bool, 0644);
 MODULE_PARM_DESC(leave_on, "keep LDO38 on after the last user (default: restore)");
 
 static struct gpiod_lookup_table bus_gpios = {
-	.dev_id = "i2c-gpio.103",
+	.dev_id = "zrn-i2c20",
 	.table = {
-		GPIO_LOOKUP_IDX("gpp5", 0, NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
-		GPIO_LOOKUP_IDX("gpp5", 1, NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+		GPIO_LOOKUP("gpp5", 0, "scl", GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+		GPIO_LOOKUP("gpp5", 1, "sda", GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
 		{ }
 	},
 };
 
-static struct i2c_gpio_platform_data bus_pdata = { .udelay = 5 };	/* ~100 kHz */
-static struct platform_device *bus_pdev;
+static struct platform_device *pdev;
+static struct gpio_desc *scl, *sda;
+
+static void set_sda(void *d, int v) { gpiod_set_value_cansleep(sda, v); }
+static void set_scl(void *d, int v) { gpiod_set_value_cansleep(scl, v); }
+static int get_sda(void *d) { return gpiod_get_value_cansleep(sda); }
+static int get_scl(void *d) { return gpiod_get_value_cansleep(scl); }
+
+static struct i2c_algo_bit_data bit = {
+	.setsda = set_sda,
+	.setscl = set_scl,
+	.getsda = get_sda,
+	.getscl = get_scl,
+	.udelay = 5,		/* about 100 kHz */
+	.timeout = HZ / 10,
+};
+
+static struct i2c_adapter bus = {
+	.owner = THIS_MODULE,
+	.name = "zrn-i2c20 gpp5",
+	.class = 0,		/* no detection probing */
+	.retries = 0,
+	.algo_data = &bit,
+	.nr = ZRN_I2C20_BUS,
+};
 
 static DEFINE_MUTEX(lock);
 static unsigned int users;
@@ -132,29 +158,42 @@ EXPORT_SYMBOL_GPL(zrn_i2c20_put);
 
 static int __init zrn_i2c20_init(void)
 {
-	struct i2c_adapter *adap;
 	int ret;
 
 	gpiod_add_lookup_table(&bus_gpios);
-	bus_pdev = platform_device_register_data(NULL, "i2c-gpio", ZRN_I2C20_BUS,
-						 &bus_pdata, sizeof(bus_pdata));
-	if (IS_ERR(bus_pdev)) {
-		ret = PTR_ERR(bus_pdev);
-		goto err;
+	pdev = platform_device_register_simple("zrn-i2c20", -1, NULL, 0);
+	if (IS_ERR(pdev)) {
+		ret = PTR_ERR(pdev);
+		goto err_table;
 	}
-	/* i2c-gpio probes synchronously; no adapter means gpp5 was taken */
-	adap = i2c_get_adapter(ZRN_I2C20_BUS);
-	if (!adap) {
-		pr_err("zrn-i2c20: no bus %d (gpp5-0/1 in use?)\n", ZRN_I2C20_BUS);
-		platform_device_unregister(bus_pdev);
-		ret = -EBUSY;
-		goto err;
+	/* a busy gpp5 (another bus on it) makes these fail: -EBUSY */
+	scl = gpiod_get(&pdev->dev, "scl", GPIOD_OUT_HIGH_OPEN_DRAIN);
+	if (IS_ERR(scl)) {
+		ret = PTR_ERR(scl);
+		scl = NULL;
+		goto err_pdev;
 	}
-	i2c_put_adapter(adap);
-	pr_info("zrn-i2c20: bus i2c-%d on gpp5-0/1\n", ZRN_I2C20_BUS);
+	sda = gpiod_get(&pdev->dev, "sda", GPIOD_OUT_HIGH_OPEN_DRAIN);
+	if (IS_ERR(sda)) {
+		ret = PTR_ERR(sda);
+		sda = NULL;
+		goto err_scl;
+	}
+	bus.dev.parent = &pdev->dev;
+	ret = i2c_bit_add_numbered_bus(&bus);
+	if (ret)
+		goto err_sda;
+	pr_info("zrn-i2c20: bus i2c-%d on gpp5-0/1 (class 0)\n", ZRN_I2C20_BUS);
 	return 0;
-err:
+err_sda:
+	gpiod_put(sda);
+err_scl:
+	gpiod_put(scl);
+err_pdev:
+	platform_device_unregister(pdev);
+err_table:
 	gpiod_remove_lookup_table(&bus_gpios);
+	pr_err("zrn-i2c20: no bus %d: %d (gpp5-0/1 in use?)\n", ZRN_I2C20_BUS, ret);
 	return ret;
 }
 
@@ -164,7 +203,10 @@ static void __exit zrn_i2c20_exit(void)
 	mutex_lock(&lock);
 	ldo_restore();
 	mutex_unlock(&lock);
-	platform_device_unregister(bus_pdev);
+	i2c_del_adapter(&bus);
+	gpiod_put(sda);
+	gpiod_put(scl);
+	platform_device_unregister(pdev);
 	gpiod_remove_lookup_table(&bus_gpios);
 	pr_info("zrn-i2c20: unloaded\n");
 }
@@ -173,4 +215,3 @@ module_init(zrn_i2c20_init);
 module_exit(zrn_i2c20_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Galaxy S9 hsi2c20 bus (gpp5) and LDO38 owner for NFC and HRM");
-MODULE_SOFTDEP("pre: i2c-gpio");

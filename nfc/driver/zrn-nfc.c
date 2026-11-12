@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * zrn-nfc stage 1: read the S3NRN82's NCI version, nothing else.
+ * zrn-nfc stage 1c: read the S3NRN82's NCI version, nothing else.
  *
  * Owner-approved access list (nfc/README.md section 7, 2026-11-12):
- *  - a bit-banged I2C bus on gpp5-0 (SCL) / gpp5-1 (SDA), bus ZRN_NFC_BUS;
+ *  - a bit-banged I2C bus on gpp5-0 (SCL) / gpp5-1 (SDA), bus ZRN_NFC_BUS,
+ *    i2c-algo-bit with adapter class 0 (no detection probes), no retries;
+ *    SDA/SCL levels are sampled (lines released = inputs) before power-up;
  *  - gpa1-2 as the chip's IRQ (rising edge); gpa2-6 (CLK_REQ) sampled only;
  *  - PCAL6524 (96-0022) line 11 = VEN (high = off) and line 9 = FIRM/WAKE,
  *    both outputs (the pca953x driver writes output reg 0x05, config 0x0D);
  *  - power up in NCI mode (never bootloader mode), CORE_RESET (keep config)
  *    and CORE_INIT to address 0x27 only, log the answers, power down.
+ *  - stage 1c (2026-11-12): 150 ms after VEN on; on a NACK, CORE_RESET is
+ *    sent once more after 110 ms (mainline s3fwrn5's standby retry).
  *
  * Never sent: RF_DISCOVER, CORE_SET_CONFIG, NFCEE commands, any proprietary
  * (GID 0xF) command, any bootloader command. No regulator and no clock is
@@ -20,9 +24,9 @@
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/machine.h>
 #include <linux/i2c.h>
+#include <linux/i2c-algo-bit.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/platform_data/i2c-gpio.h>
 #include <linux/platform_device.h>
 
 #define ZRN_NFC_BUS	103
@@ -31,17 +35,6 @@
 #define EXP_VEN		11
 #define EXP_FIRM	9
 
-static struct gpiod_lookup_table bus_gpios = {
-	.dev_id = "i2c-gpio.103",
-	.table = {
-		GPIO_LOOKUP_IDX("gpp5", 0, NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
-		GPIO_LOOKUP_IDX("gpp5", 1, NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
-		{ }
-	},
-};
-
-static struct i2c_gpio_platform_data bus_pdata = { .udelay = 5 };	/* ~100 kHz */
-static struct platform_device *bus_pdev;
 static struct platform_device *ctl_pdev;	/* consumer device for the GPIOs */
 
 static struct gpiod_lookup_table ctl_gpios = {
@@ -51,12 +44,38 @@ static struct gpiod_lookup_table ctl_gpios = {
 		GPIO_LOOKUP("gpa2", 6, "clkreq", GPIO_ACTIVE_HIGH),
 		GPIO_LOOKUP(EXP_CHIP, EXP_VEN, "ven", GPIO_ACTIVE_HIGH),
 		GPIO_LOOKUP(EXP_CHIP, EXP_FIRM, "firm", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpp5", 0, "scl", GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+		GPIO_LOOKUP("gpp5", 1, "sda", GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
 		{ }
 	},
 };
 
-static struct gpio_desc *g_irq, *g_clkreq, *g_ven, *g_firm;
+static struct gpio_desc *g_irq, *g_clkreq, *g_ven, *g_firm, *g_scl, *g_sda;
 static struct i2c_adapter *adap;
+static bool bus_added;
+
+static void set_sda(void *d, int v) { gpiod_set_value_cansleep(g_sda, v); }
+static void set_scl(void *d, int v) { gpiod_set_value_cansleep(g_scl, v); }
+static int get_sda(void *d) { return gpiod_get_value_cansleep(g_sda); }
+static int get_scl(void *d) { return gpiod_get_value_cansleep(g_scl); }
+
+static struct i2c_algo_bit_data bit = {
+	.setsda = set_sda,
+	.setscl = set_scl,
+	.getsda = get_sda,
+	.getscl = get_scl,
+	.udelay = 5,		/* about 100 kHz */
+	.timeout = HZ / 10,
+};
+
+static struct i2c_adapter nfc_adap = {
+	.owner = THIS_MODULE,
+	.name = "zrn-nfc gpp5",
+	.class = 0,		/* no detection probing */
+	.retries = 0,
+	.algo_data = &bit,
+	.nr = ZRN_NFC_BUS,
+};
 static DECLARE_COMPLETION(irq_done);
 static int irq_num = -1;
 static int irq_count;
@@ -152,7 +171,7 @@ static void run_version_read(void)
 	msleep(20);
 	sample("off");
 	gpiod_set_value_cansleep(g_ven, 0);
-	msleep(20);
+	msleep(150);		/* stage 1c: vendor SEC_NFC_MARGINTIME */
 	sample("ven-on");
 	gpiod_set_value_cansleep(g_firm, 1);
 	msleep(20);
@@ -162,7 +181,14 @@ static void run_version_read(void)
 	if (gpiod_get_value(g_irq) > 0)
 		nci_recv(pkt, sizeof(pkt), 1);
 
-	if (nci_send(core_reset, sizeof(core_reset)))
+	n = nci_send(core_reset, sizeof(core_reset));
+	if (n == -ENXIO || n == -EREMOTEIO) {
+		/* stage 1c: one retry, as mainline does for a chip in standby */
+		msleep(110);
+		sample("retry");
+		n = nci_send(core_reset, sizeof(core_reset));
+	}
+	if (n)
 		goto off;
 	n = nci_recv(pkt, sizeof(pkt), 500);
 	if (n < 0)
@@ -231,7 +257,11 @@ static void put_gpios(void)
 		gpiod_set_value_cansleep(g_ven, 1);	/* chip off; stays an output */
 		gpiod_put(g_ven);
 	}
-	g_irq = g_clkreq = g_firm = g_ven = NULL;
+	if (g_scl)
+		gpiod_put(g_scl);
+	if (g_sda)
+		gpiod_put(g_sda);
+	g_irq = g_clkreq = g_firm = g_ven = g_scl = g_sda = NULL;
 }
 
 static int __init zrn_nfc_init(void)
@@ -239,7 +269,6 @@ static int __init zrn_nfc_init(void)
 	struct device *dev;
 	int ret;
 
-	gpiod_add_lookup_table(&bus_gpios);
 	gpiod_add_lookup_table(&ctl_gpios);
 
 	ctl_pdev = platform_device_register_simple("zrn-nfc-ctl", -1, NULL, 0);
@@ -268,51 +297,45 @@ static int __init zrn_nfc_init(void)
 		goto err;
 	}
 
-	bus_pdev = platform_device_register_data(NULL, "i2c-gpio", ZRN_NFC_BUS,
-						 &bus_pdata, sizeof(bus_pdata));
-	if (IS_ERR(bus_pdev)) {
-		ret = PTR_ERR(bus_pdev);
-		bus_pdev = NULL;
+	/* the bus lines, released (open drain high = input); sample their levels
+	 * with the chip still off, before any transfer */
+	g_scl = gpiod_get(dev, "scl", GPIOD_OUT_HIGH_OPEN_DRAIN);
+	if (IS_ERR(g_scl)) { ret = PTR_ERR(g_scl); g_scl = NULL; goto err; }
+	g_sda = gpiod_get(dev, "sda", GPIOD_OUT_HIGH_OPEN_DRAIN);
+	if (IS_ERR(g_sda)) { ret = PTR_ERR(g_sda); g_sda = NULL; goto err; }
+	usleep_range(100, 200);
+	pr_info("zrn-nfc: bus idle SCL=%d SDA=%d\n", get_scl(NULL), get_sda(NULL));
+
+	ret = i2c_bit_add_numbered_bus(&nfc_adap);
+	if (ret)
 		goto err;
-	}
-	adap = i2c_get_adapter(ZRN_NFC_BUS);
-	if (!adap) {
-		ret = -ENODEV;
-		goto err_bus;
-	}
+	bus_added = true;
+	adap = &nfc_adap;
 
 	sample("start");
 	run_version_read();
 	return 0;
 
-err_bus:
-	platform_device_unregister(bus_pdev);
-	bus_pdev = NULL;
 err:
 	put_gpios();
 	platform_device_unregister(ctl_pdev);
 err_tables:
 	gpiod_remove_lookup_table(&ctl_gpios);
-	gpiod_remove_lookup_table(&bus_gpios);
 	pr_err("zrn-nfc: setup failed %d\n", ret);
 	return ret;
 }
 
 static void __exit zrn_nfc_exit(void)
 {
-	if (adap)
-		i2c_put_adapter(adap);
-	if (bus_pdev)
-		platform_device_unregister(bus_pdev);
+	if (bus_added)
+		i2c_del_adapter(&nfc_adap);
 	put_gpios();
 	platform_device_unregister(ctl_pdev);
 	gpiod_remove_lookup_table(&ctl_gpios);
-	gpiod_remove_lookup_table(&bus_gpios);
 	pr_info("zrn-nfc: unloaded\n");
 }
 
 module_init(zrn_nfc_init);
 module_exit(zrn_nfc_exit);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Galaxy S9 S3NRN82 NFC: stage-1 NCI version read");
-MODULE_SOFTDEP("pre: i2c-gpio");
+MODULE_DESCRIPTION("Galaxy S9 S3NRN82 NFC: stage-1c NCI version read");

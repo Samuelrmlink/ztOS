@@ -1,5 +1,6 @@
 #!/bin/sh
-# Stage 0 + stage 1 of nfc/README.md section 7 (owner-approved 2026-11-12).
+# Stage 0 + stage 1 (1b: LDO38 on/restore; 1c: 150 ms, one retry, class-0 bus)
+# of nfc/README.md, owner-approved 2026-11-12.
 # Run as root inside `ztlock run nfc`. Stops at the first unexpected state.
 #   stage1.sh <dir with zrn-nfc.ko>
 D=${1:-$(dirname "$0")}
@@ -17,6 +18,7 @@ pm=$(grep -E 'gpp5-[01]\)' /sys/kernel/debug/pinctrl/10830000.pinctrl*/pinmux-pi
 echo "$pm"
 echo "$pm" | grep -q -v UNCLAIMED && { say "STOP: gpp5-0/1 claimed"; exit 1; }
 [ -e /dev/i2c-103 ] && { say "STOP: i2c-103 exists"; exit 1; }
+lsmod | grep -q '^i2c_algo_bit' || { say "STOP: i2c_algo_bit not loaded"; exit 1; }
 
 say "stage 0: LDO38 (S2MPS18 0x6f) via ACPM"
 out=$(python3 "$ACPM" read 1 0x6f); echo "$out"
@@ -51,9 +53,10 @@ say "stage 0: PCAL6524 regs (in 00-02, out 04-06, cfg 0c-0e; VEN=P1.3 FIRM=P1.1)
 exp_regs
 
 say "stage 1: insmod zrn-nfc"
-n0=$(dmesg | wc -l)
+M="zrn-nfc-run $(date +%s)"; echo "$M" > /dev/kmsg
+klog() { dmesg | sed -n "/$M/,\$p" | grep -E "zrn-nfc|i2c|gpio"; }
 insmod "$D/zrn-nfc.ko"; rc=$?
-dmesg | tail -n +$((n0 + 1))
+klog
 say "insmod rc=$rc"
 grep -E 'gpp5-[01]\)|gpa1-2\)|gpa2-6\)' /sys/kernel/debug/pinctrl/*/pinmux-pins
 say "expander after run"
@@ -61,6 +64,6 @@ exp_regs
 if lsmod | grep -q '^zrn_nfc'; then
 	rmmod zrn_nfc; say "rmmod rc=$?"
 fi
-dmesg | tail -n +$((n0 + 1)) | grep -v 'zrn-nfc: [RT]X\|zrn-nfc: \['
+klog | tail -2
 grep -E 'gpp5-[01]\)' /sys/kernel/debug/pinctrl/10830000.pinctrl*/pinmux-pins
 [ -e /dev/i2c-103 ] && say "WARN: i2c-103 still present" || say "bus released"
