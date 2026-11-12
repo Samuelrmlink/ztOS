@@ -473,6 +473,115 @@ path above is safer.
 Routing must always be `DH` (0x00), and NFCEEs stay disabled, so the eSE never
 answers a reader on our behalf.
 
+## Run log: stage 0 on 2026-11-12 (stopped at LDO38)
+
+The owner approved stages 0 and 1 on 2026-11-12 ("Approve version read"). The
+tools are in [`driver/`](driver/):
+
+- `zrn-nfc.c`: the stage-1 module, built against `linux-7.1-dp/out-target-bt`,
+  vermagic `7.1.0-zboot-wd-dp6`;
+- `stage1.sh`: pre-checks, stage 0, insmod, readback, rmmod;
+- `build.sh`.
+
+Run at 07:02 CST inside `ztlock run nfc`. Kernel #62, battery 31%, no
+`zrn_hrm` loaded, gpp5-0/1 unclaimed, no `i2c-103`. Raw output:
+
+```
+== stage 0: LDO38 (S2MPS18 0x6f) via ACPM
+read type=1 reg=0x6f: ret=0 val=0x2c words=['0x2b0000', '0x2c00', '0x0', '0x0']
+== LDO38 = 0x2c (mode 0)
+== STOP: LDO38 off
+```
+
+**Result: LDO38 (`VDD_NFC_1P8`) is off** (observed): bits 7:6 = 0, voltage
+code 0x2C = 1.8 V. The older mainline dump in `sensors/stock-state/` showed
+`0xAC`, so whatever booted then had it on. Today's kernel #62 does not. The
+script stopped there, as the approval required.
+
+Not done: the expander reads, the module load, every GPIO or I2C access, and
+every NCI command. So there are **no NCI responses, no NCI version, no firmware
+version, and no VEN/FIRM reading**. With its 1.8 V rail off, the chip is
+unpowered whatever VEN says, and so are the pull-ups on gpp5-0/1 (inferred).
+
+### Proposal: stage 1b (LDO38 on), for owner approval
+
+Everything in stage 1 stays the same, plus one PMIC write and one restore:
+
+- **ACPM update** of S2MPS18 `0x6F`, mask `0xC0`, value `0x80`. That gives
+  `0xAC`: mode 2, "on while awake", the same value stock and the earlier
+  mainline both had. The command is `s9p-acpm update 1 0x6f 0x80 0xc0`. Read it
+  back once. Then wait 5 ms for the ramp (`regulator-ramp-delay` 12000 µV/µs).
+- At the end: **restore** `0x6F` to the value read before, `0x2C` (off), with
+  `s9p-acpm write 1 0x6f 0x2c`, and read it back. Do this unless the owner
+  prefers to leave the rail on.
+- Side effect: the same rail feeds the HRM sensor's I2C pull-ups. While it is
+  on, the `feature/hrm` agent must not run, which the gpp5 check already
+  enforces.
+
+### Proposal: how the NFC and HRM drivers share gpp5-0/1
+
+Both chips sit on the stock "hsi2c20" bus: NFC at `0x27`, HRM at `0x57`. Both
+depend on `VDD_NFC_1P8` for power or pull-ups. For the long term:
+
+1. **One bus-owner module, `zrn-i2c20`.** It owns the bus, which should become
+   a fixed number, for example `i2c-103`. Start with `i2c-gpio` on gpp5-0/1;
+   later, the real hsi2c20 controller once its USI setup is known. It also owns
+   **LDO38**, reference-counted: `zrn_i2c20_get()` / `zrn_i2c20_put()`, which
+   enable or disable the rail through ACPM.
+2. `zrn-nfc` and `zrn-hrm` become ordinary I2C client drivers on that bus
+   (`i2c_new_client_device` for 0x27 and 0x57). Neither registers its own bus
+   or touches the pins. The I2C core then serialises their transfers. This is
+   the same pattern as zrn-bt's expander bus.
+3. Neither client may switch LDO38 off while the other holds it.
+4. Later, the same goes into the device tree: one `i2c` node with both children
+   and a regulator, once S2MPS18 regulators exist in mainline.
+
+Until then, the rule stands: only one of `zrn_nfc` / `zrn_hrm*` is loaded at a
+time, and each checks for the other before loading.
+
+### Draft: stage 2, reading a card (for owner approval; not to be run before stage 1 succeeds)
+
+This assumes stage 1/1b worked and the chip answers NCI. New accesses in
+**bold**.
+
+- **Power and bus:** as in stage 1/1b (LDO38 on, i2c-gpio, gpa1-2 IRQ, VEN/FIRM
+  on the expander).
+- **Clock (CLKOUT for `oscclk_nfc`):**
+  - Stage 2a, read-only: **one 32-bit read of the PMU CLKOUT control register**
+    (address still to be found from the 9810 PMU map, probably near PMU base
+    `0x14060000` + `0x0A00`; we will propose the exact address before any read).
+  - Stage 2b, only if CLKOUT is off and RF discovery fails without it: **one
+    write** selecting OSC (26 MHz) on CLKOUT and enabling it. Exact register
+    and value to be proposed separately. The audio work also found `xclkout`
+    unused on mainline (`audio/MIC-REA.md`).
+- **NCI commands** (the CORE_RESET/CORE_INIT of stage 1, then):
+  - **`CORE_SET_CONFIG` (20 02)**, volatile RF parameters only:
+    - `TOTAL_DURATION` (0x00) = 500 ms;
+    - `PA_BAIL_OUT` (0x08) = 1;
+    - no `LA_*`/`LF_*` listen parameters;
+    - nothing persistent.
+  - **`RF_SET_LISTEN_MODE_ROUTING`: not sent.** No NFCEE is enabled and no
+    listen mode is configured.
+  - **`RF_DISCOVER_CMD` (21 03), poll only:** NFC-A, NFC-B, NFC-F and
+    ISO 15693 (`00 01 / 01 01 / 02 01 / 06 01`, or the proprietary 0x80 form if
+    NCI 1.0). **This turns the RF field on.** Each run lasts at most 30 s, then
+    `RF_DEACTIVATE_CMD` (21 06 00) for idle.
+  - `RF_DISCOVER_SELECT` (21 04), only if several cards are found:
+    - protocols T2T (0x02), ISO-DEP (0x04), T3T (0x03), 15693;
+    - **MIFARE Classic (0x81)** only in a separate, later sub-step.
+  - **Data exchange on the static RF connection (conn id 0)**:
+    - T2T `READ` (0x30) and `GET_VERSION` (0x60);
+    - ISO-DEP `SELECT` of the NDEF app, the EMV `2PAY.SYS.DDF01` and DESFire
+      `GetVersion` (0x60);
+    - T3T `Polling` / Read Without Encryption.
+    - **No write commands to cards.**
+  - `RF_DEACTIVATE` (21 06 00), then power down as in stage 1.
+- **Still excluded:** NFCEE commands, `0x2F` proprietary commands, firmware or
+  flash, and listen/emulation mode. MIFARE Classic gets its own approval later
+  (it needs the proprietary MFC wrapper, protocol 0x81).
+- **Cards:** only the owner's own test tags/cards, placed on the back of the
+  phone by the owner.
+
 ## Biggest unknowns
 
 1. **Clock.** Is CLKOUT (`oscclk_nfc`) running under ztOS, and does the chip
