@@ -53,6 +53,7 @@
 #include "../pods/pods-pages.h"
 #include "../devtest/devtest-pages.h"
 #include "../desktop/desktop-page.h"
+#include "../power/battery-health.h"
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -3237,7 +3238,14 @@ static double draw_battery(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Battery information", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "3000 mAh Li-Ion, Health Good", FONT_REGULAR, 15, MARGIN, y + 20, 0);
+	struct battery_health bh;	/* power/battery-health.h: a learned estimate */
+	char info[96];
+	battery_health_read(hw_battery(), &bh);
+	if (bh.health_pct >= 0)
+		snprintf(info, sizeof(info), "3000 mAh Li-Ion, holds about %ld mAh (%d %%)", bh.full_mah, bh.health_pct);
+	else
+		snprintf(info, sizeof(info), "3000 mAh Li-Ion");
+	zmc_text(cr, info, FONT_REGULAR, 15, MARGIN, y + 20, 0);
 
 	return y + 60;
 }
@@ -3832,7 +3840,7 @@ static double render_page_content(cairo_t *cr, int p) {
 		return pods_render(cr, p);
 	case PAGE_DEVTEST: case PAGE_DEVTEST_SYSTEM: case PAGE_DEVTEST_SENSORS: case PAGE_DEVTEST_JOURNAL:
 	case PAGE_DEVTEST_KERNEL: case PAGE_DEVTEST_SHELL: case PAGE_DEVTEST_HARDWARE: case PAGE_DEVTEST_LOGS:
-	case PAGE_DEVTEST_ANIM: case PAGE_DEVTEST_PREVIEW:
+	case PAGE_DEVTEST_ANIM: case PAGE_DEVTEST_PREVIEW: case PAGE_DEVTEST_TEMPS: case PAGE_DEVTEST_CHARGING:
 		return devtest_render(cr, p);
 	case PAGE_APP_SCALE: return draw_app_scale(cr);
 	case PAGE_THEME: return draw_theme(cr);

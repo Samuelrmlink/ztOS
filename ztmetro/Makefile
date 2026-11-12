@@ -163,13 +163,13 @@ gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 	$(APP_BUILD) $(JPEG_FLAGS) -o $@ gallery/ztgallery.c $(CORE) $(APP_LIBS) $(JPEG_LIBS) -lpthread
 
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
-EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c desktop/desktop-page.c
-EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
-settings/ztsettings: settings/ztsettings.c volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
+EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
+EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
+settings/ztsettings: settings/ztsettings.c power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
-devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h $(CORE_DEPS)
-	$(APP_BUILD) -o $@ devtest/zrndevtest.c devtest/devtest-pages.c $(CORE) $(APP_LIBS)
+devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h devtest/devtest-power.c devtest/devtest-power.h power/battery-health.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-power.c $(CORE) $(APP_LIBS)
 
 # Devices and Services: what is running, crashed or missing
 # ztSound: the equalizer and effects (the engine, ztos-soundd, ships in rootfs/overlay/usr/local/bin)
@@ -188,7 +188,7 @@ osial/ztosial: osial/ztosial.c $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ osial/ztosial.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 # Power Management: battery fuel gauge, sleep diagnostics, wake history
-power/ztpower: power/ztpower.c $(CORE_DEPS)
+power/ztpower: power/ztpower.c power/battery-health.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ power/ztpower.c $(CORE) $(APP_LIBS)
 
 perfd/zrnperfd: perfd/zrnperfd.c perfd/wlpm.c perfd/wlpm.h perfd/tickle.c perfd/tickle.h background-apps.h ztos-user.h perfd/iblog.c perfd/iblog.h perfd/ibnet.c perfd/ibnet.h perfd/perfial.c perfd/perfial.h
