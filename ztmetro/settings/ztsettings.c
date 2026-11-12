@@ -148,6 +148,7 @@ enum action {
 	ACT_CLOCK_24H,		/* "21:41" or "9:41 PM", for every clock */
 	ACT_LOCK_TIMEOUT,	/* a picker: how long the lock screen stays lit */
 	ACT_DOUBLE_TAP_WAKE,	/* a double tap on the always-on display wakes it */
+	ACT_LOCK_AWAKE,		/* the lock screen says what keeps the phone awake */
 	ACT_BURNIN_SHIFT,	/* the bars and the lock clock move a few pixels (burn-in) */
 	ACT_AOD_AUTO,		/* the always-on display's level from the room */
 	ACT_AOD_LOW_OFF,	/* and dark below 15 % on battery */
@@ -292,6 +293,7 @@ static struct {
 	bool aod_force_mark;	/* "aod_force_mark" */
 	int lock_timeout_idx;	/* "lock_timeout": an index into LOCK_TIMEOUT_SECONDS */
 	bool double_tap_wake;	/* "double_tap_wake" */
+	int lock_awake;		/* "lock_awake": 0 off, 1 on, 2 always (config only) */
 	bool burnin_shift;	/* "burn_in_shift": the shell's burn-in.h */
 	bool about_show_repo;
 	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
@@ -418,6 +420,7 @@ static void config_load(void) {
 	app.aod_image_faint = 0;
 	app.aod_force_mark = true;
 	app.double_tap_wake = true;
+	app.lock_awake = 1;
 	app.burnin_shift = true;
 	app.android_bt_remove_bond = true;
 	FILE *f = fopen(path, "r");
@@ -559,6 +562,8 @@ static void config_load(void) {
 			app.aod_auto = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "double_tap_wake") == 0) {
 			app.double_tap_wake = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "lock_awake") == 0) {
+			app.lock_awake = !strcmp(val, "off") || !strcmp(val, "0") ? 0 : !strcmp(val, "always") ? 2 : 1;
 		} else if (strcmp(key, "burn_in_shift") == 0) {
 			app.burnin_shift = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "lock_timeout") == 0) {
@@ -754,6 +759,7 @@ static void config_format(void) {
 	KEY("clock_24h", "%s", app.clock_24h ? "on" : "off");
 	KEY("lock_timeout", "%d", LOCK_TIMEOUT_SECONDS[app.lock_timeout_idx]);
 	KEY("double_tap_wake", "%s", app.double_tap_wake ? "on" : "off");
+	KEY("lock_awake", "%s", app.lock_awake == 0 ? "off" : app.lock_awake == 2 ? "always" : "on");
 	KEY("burn_in_shift", "%s", app.burnin_shift ? "on" : "off");
 	KEY("aod_auto_brightness", "%s", app.aod_auto ? "on" : "off");
 	KEY("aod_low_battery_off", "%s", app.aod_low_off ? "on" : "off");
@@ -2177,6 +2183,9 @@ static double draw_lock(cairo_t *cr) {
 		app.lock_timeout_idx, ACT_LOCK_TIMEOUT);
 	/* only the power key, the force press and this wake the always-on display */
 	y = zmc_switch(cr, y, "Double-tap to wake", app.double_tap_wake, ACT_DOUBLE_TAP_WAKE);
+	/* a line over the clock when something other than the lock screen keeps
+	 * the phone from sleeping; tapped, a read-only list (ROADMAP 8.30) */
+	y = zmc_switch(cr, y, "Show sleep blockers on lock screen", app.lock_awake != 0, ACT_LOCK_AWAKE);
 	return y + 20;
 }
 
@@ -4578,6 +4587,10 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_DOUBLE_TAP_WAKE:
 		app.double_tap_wake = !app.double_tap_wake;
+		config_save();
+		break;
+	case ACT_LOCK_AWAKE:
+		app.lock_awake = app.lock_awake ? 0 : 1;
 		config_save();
 		break;
 	case ACT_LOCK_TIMEOUT:

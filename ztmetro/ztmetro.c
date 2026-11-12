@@ -45,6 +45,7 @@
 #include "osk-numeric.h"
 #include "note-logic.h"
 #include "desktop/desktop.h"
+#include "lock-awake.h"
 #include "rotation.h"
 #include <dirent.h>
 #include <errno.h>
@@ -3421,6 +3422,7 @@ static void load_config(struct zt_server *server) {
 	server->double_tap_wake = true;
 	g_burnin.on = true;	/* burn_in_shift: the bars and the lock clock move a little */
 	server->aod_mode = AOD_OFF;
+	lock_awake_config(NULL);
 	server->clock_24h = ZT_CLOCK_24H_DEFAULT;
 	if (server->shade_brightness <= 0) {
 		server->shade_brightness = 50;
@@ -3558,6 +3560,8 @@ static void load_config(struct zt_server *server) {
 			server->aod_auto = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "double_tap_wake") == 0) {
 			server->double_tap_wake = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+		} else if (strcmp(key, "lock_awake") == 0) {
+			lock_awake_config(value);	/* on, always, off: lock-awake.h */
 		} else if (strcmp(key, "burn_in_shift") == 0) {
 			g_burnin.on = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "lock_timeout") == 0) {
@@ -6922,6 +6926,7 @@ static void lock(struct zt_server *server) {
 	animate(server, &server->lock_y, 0.0f, 1, 0, true);
 	server->lock_y = 0.0f;
 	draw_lock(server);
+	lock_awake_refresh(server);	/* what keeps it awake, if anything */
 	wlr_log(WLR_INFO, "locked");
 }
 
@@ -13834,6 +13839,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		/* locked as it goes dark (lock() itself runs as it comes back on,
 		 * and waking is silent) */
 		ui_sound(server, UIS_LOCK);
+		lock_awake_screen_off(server);
 		perf_tell("screen off\n");
 		if (server->wifi_suspend && wifi_up()) {
 			server->wifi_suspended_by_sleep = true;
@@ -14615,7 +14621,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 	}
 	if (server->locked) {
 		p->role = ROLE_LOCK;	/* nothing under it can be reached */
-		p->index = -1;
+		p->index = retro_on(server) ? -1 : lock_awake_hit(server, x, y);
 		if (retro_on(server)) {
 			/* the DotMatrix lock: only its box unlocks, swiped across */
 			float x0, y0, x1, y1;
@@ -15281,8 +15287,13 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 				break;
 			}
 		}
+		/* the awake line or its sheet tapped (a read-only look) */
+		if (!retro_on(server) && !cancelled && !p->moved && lock_awake_tap(server, p->index, p->x, p->y)) {
+			break;
+		}
 		if (dm_swiped || (!retro_on(server) && !cancelled && p->y - p->y0 < -server->height / 5.0)) {
 			server->locked = false;
+			lock_awake_unlocked(server);
 			desk_phone_lock(server, false);	/* the only way the desktop's lock lifts */
 			apps_suspend_sync(server);
 			bt_pair_sync(server);
@@ -18008,6 +18019,7 @@ static void render_frame(struct zt_server *server) {
 			layer_draw(server, &server->lock_note_layer, 0,
 				server->lock_y + (float)LOCK_NOTE_Y(server) + LOCK_LIFT * (1.0f - lift), lift);
 		}
+		lock_awake_draw(server, lift);
 		plug_over(server, server->lock_y);
 	}
 	if (server->call_over_lock && server->shown && server->shown->mapped &&
@@ -18574,6 +18586,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	draw_status(server);
 	draw_shade(server);
 	draw_lock(server);
+	lock_awake_refresh(server);
 
 	osk_layout(server);
 	activity(server);
@@ -18952,6 +18965,7 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	}
 	g_dump_name = "lock";
 	draw_lock(server);
+	lock_awake_render_sample(server);
 	load_apps(server);
 	hyper_open(server);	/* saved as hyperscan.png: empty, then a query */
 	snprintf(server->hyper_q, sizeof(server->hyper_q), "%s", getenv("ZTMETRO_HYPER") ? getenv("ZTMETRO_HYPER") : "th");
@@ -19157,6 +19171,7 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 
 /* desktop mode: the outputs after the panel (uses the helpers above) */
 #include "desktop/desktop.c"
+#include "lock-awake.c"
 
 int main(int argc, char *argv[]) {
 	wlr_log_init(getenv("ZTMETRO_DEBUG") ? WLR_DEBUG : WLR_INFO, NULL);

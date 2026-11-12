@@ -1,0 +1,810 @@
+#!/usr/bin/env python3
+"""zrn-sleep-why: everything that keeps the phone from sleeping now, not only
+the first reason zrn-sleepd found (its status' why=), and what woke it in
+the last hour. ROADMAP 8.30.
+
+Read only, and only when asked: by `zrn-sleepd status` and `zrn-sleepd why`,
+and by the shell's lock screen when it lights (ztmetro/lock-awake.c). Nothing
+here runs on a timer, so it costs no wakeups; zrn-sleepd's own loop is not
+changed by it.
+
+What it looks at (each a kind):
+  call      a call is up (ztoscorenetworkingd's call=)
+  audio     zrnperfd counts a stream playing (tickle_audio); which app from
+            PipeWire's sink inputs (pactl, as the phone's user)
+  gps       the GNSS engine runs, or ztos-gnss-gate holds timed-gnss; its
+            readers on 127.0.0.1:10110 and keep flags
+  camera    a process holds the camera open (/dev/zrn-cam*, /dev/video*)
+  inhibit   a file in /run/zrn-sleepd/inhibit, with who wrote it where that
+            is known (the table below, or pid= / app= / label= lines in it)
+  wakeup    a kernel wakeup source held now (/sys/class/wakeup, active)
+  charger   a cable (zrn-sleepd never sleeps on USB or mains power)
+  sleepd    zrn-sleepd's own state: switched off, paused, a doze or Wi-Fi
+            window, just woke, the screen only just off
+  aod       the always-on display: showing, or set to show once the screen
+            goes off (zrn-sleepd does not sleep while it shows)
+  dock      an external display is lit (DP Alt Mode)
+  display   the screen is on (with the lock screen up: the lock screen itself)
+
+  zrn-sleep-why               the blockers, one a line (as zrn-sleepd status)
+  zrn-sleep-why --json        everything, as JSON
+  zrn-sleep-why --shell [--always] [--wakers]
+                              tab-separated lines for the lock screen: its line,
+                              the items, the wakes; app names only (privacy)
+"""
+import json, os, re, subprocess, sys, time
+from pathlib import Path
+
+ROOT = Path('/')
+INHIBIT = 'run/zrn-sleepd/inhibit'
+STATUS = 'run/zrn-sleepd/status'
+PAUSED = 'run/zrn-sleepd/paused'
+ENABLED = 'var/lib/zrn-sleep/enabled'
+LOG = 'var/lib/zrn-sleep/log'
+PERF = 'run/zrnperfd.status'
+MODEM = 'run/ztoscorenetworking/status'
+GNSS_KEEP = 'run/ztos-gnss'
+GNSS_PORT = 10110
+HOUR = 3600
+# the lock screen's line leaves these out: the lit screen is the lock screen
+# itself, and 'waiting' is zrn-sleepd's own few seconds between two looks
+SELF_KINDS = ('display',)
+# the order of the line: what the owner most likely wants to know first
+ORDER = ('call', 'audio', 'gps', 'camera', 'inhibit', 'wakeup', 'charger', 'sleepd', 'aod', 'dock', 'display')
+
+# Inhibit files whose writer is known: name -> (kind, label, process name, unit)
+KNOWN_INHIBITS = {
+	'timed-gnss': ('gps', 'Location (GPS)', 'ztos-gnss-gate', 'ztos-gnss-gate.service'),
+	'timed-hub': ('inhibit', 'Sensor hub restarting', 'ztoscsf', 'ztoscsf-sensorhub.service'),
+	'timed-ztclock': ('inhibit', 'Alarm ringing', 'ztclockd', None),
+	'timed-push': ('inhibit', 'Android push delivery', None, None),
+	'always-on': ('inhibit', 'Always-on test (power/always-on)', None, None),
+}
+
+# Kernel wakeup sources by name (prefix) or by their device's driver
+SOURCE_LABELS = (
+	('umts_', 'Modem'), ('rmnet', 'Modem data'), ('multipdp', 'Modem data'),
+	('14170000.mcu_ipc', 'Modem mailbox'), ('max77705-charger', 'Charger'),
+	('max77705-usbc', 'USB-C port'), ('max77705-wireless', 'Wireless charger'),
+	('p9320', 'Wireless charger'), ('max170xx_battery', 'Battery gauge'),
+	('alarmtimer', 'Alarm timer'), ('gpio-keys', 'Buttons'), ('zrn-bt', 'Bluetooth'),
+	('zrn-exynos9810-rtc', 'Real-time clock'), ('0000:01:00.0', 'Wi-Fi'),
+	('[timerfd]', "A program's timer"), ('eventpoll', "A program's event wait"),
+	('inotify', 'A file watch'), ('wl_touch', 'Touchscreen'), ('wl_keyboard', 'Keyboard'),
+)
+
+# zrn-sleepd's why= that are its own state: why -> label
+SLEEPD_WHY = {
+	'switched off': 'Sleep switched off',
+	'paused': 'Sleep paused (the firmware refused it)',
+	'doze window': 'Letting background apps fetch messages',
+	'wifi window': 'Wi-Fi reconnecting after a wake',
+	'waiting': 'About to sleep',
+}
+
+# a wake's reason (zrn-sleepd's wake_reason) as words
+WAKE_LABELS = {
+	'rtc': 'its own timer', 'alarm': "an app's alarm", 'modem': 'the modem', 'key': 'the power key',
+	'bt': 'Bluetooth', 'hub': 'the sensor hub', 'other': 'something unknown',
+}
+NOT_WAKES = ('cancelled', 'aborted', 'fw-abort', 'alarm-due', 'hub-busy', 'stalled', 'failed',
+	     'audio unavailable')
+
+
+def path(rel):
+	return ROOT / rel.lstrip('/')
+
+
+def read(rel, default=''):
+	try:
+		return path(rel).read_text(errors='replace').strip()
+	except OSError:
+		return default
+
+
+def kv(rel):
+	out = {}
+	for line in read(rel).splitlines():
+		k, sep, v = line.partition('=')
+		if sep:
+			out[k.strip()] = v.strip()
+	return out
+
+
+def number(text, default=0):
+	try:
+		return int(str(text).strip() or default)
+	except ValueError:
+		return default
+
+
+def ago(seconds):
+	"""'40 s', '3 min', '2 h 5 min'."""
+	seconds = max(0, int(seconds))
+	if seconds < 60:
+		return f'{seconds} s'
+	if seconds < 90 * 60:
+		return f'{round(seconds / 60)} min'
+	h, m = divmod(round(seconds / 60), 60)
+	return f'{h} h {m} min' if m else f'{h} h'
+
+
+def blocker(kind, label, short=None, pid=None, proc=None, unit=None, detail=''):
+	return {'kind': kind, 'label': label, 'short': short or label, 'pid': pid, 'proc': proc,
+		'unit': unit, 'detail': detail}
+
+
+# ---- the phone's user (the shell's runtime directory and config) ----------
+
+def user_dirs():
+	"""(runtime dir, home, user name) of the phone's user."""
+	try:
+		sys.path.insert(0, '/usr/lib/ztos/python')
+		import ztos_user
+		return ztos_user.RUNTIME_DIR, ztos_user.HOME, ztos_user.USER
+	except Exception:
+		uid = os.getuid() or 1000
+		return (os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{uid}',
+			os.environ.get('HOME', '/home/samuel'), os.environ.get('USER', 'samuel'))
+
+
+# ---- processes -------------------------------------------------------------
+
+class Procs:
+	"""/proc, read once and only as far as asked."""
+	def __init__(self):
+		self._comm = None
+
+	def comm(self):
+		if self._comm is None:
+			self._comm = {}
+			try:
+				names = os.listdir(path('proc'))
+			except OSError:
+				names = []
+			for pid in names:
+				if pid.isdigit():
+					name = read(f'proc/{pid}/comm')
+					if name:
+						self._comm[int(pid)] = name
+		return self._comm
+
+	def find(self, name):
+		"""The oldest (lowest) pid whose comm is `name` (15 chars, as the kernel keeps it)."""
+		short = name[:15]
+		pids = sorted(pid for pid, comm in self.comm().items() if comm == short)
+		return pids[0] if pids else None
+
+	def name(self, pid):
+		return self.comm().get(pid) or read(f'proc/{pid}/comm') or None
+
+	@staticmethod
+	def unit(pid):
+		"""system.slice/foo.service -> foo.service; an app's scope likewise."""
+		for line in read(f'proc/{pid}/cgroup').splitlines():
+			group = line.split('::')[-1] if '::' in line else line.split(':')[-1]
+			for part in reversed(group.split('/')):
+				if part.endswith(('.service', '.scope')):
+					return part
+		return None
+
+	def fd_targets(self, match):
+		"""{pid: [target]} of the descriptors whose link satisfies `match`
+		(the processes this user may look into: all of them as root)."""
+		out = {}
+		for pid in self.comm():
+			try:
+				fds = os.listdir(path(f'proc/{pid}/fd'))
+			except OSError:
+				continue
+			for fd in fds:
+				try:
+					target = os.readlink(path(f'proc/{pid}/fd/{fd}'))
+				except OSError:
+					continue
+				if match(target):
+					out.setdefault(pid, []).append(target)
+		return out
+
+
+def who(procs, pid=None, name=None):
+	"""(pid, process name, unit) for a pid or a process name; Nones if gone."""
+	if pid is None and name:
+		pid = procs.find(name)
+	if pid is None:
+		return None, name, None
+	return pid, procs.name(pid) or name, procs.unit(pid)
+
+
+# ---- the kinds -------------------------------------------------------------
+
+def connectors():
+	"""{connector: enabled} of the DRM outputs: card0-DSI-1, card0-DP-1."""
+	out = {}
+	try:
+		names = os.listdir(path('sys/class/drm'))
+	except OSError:
+		return out
+	for name in names:
+		if '-' in name and name.startswith('card'):
+			state = read(f'sys/class/drm/{name}/enabled')
+			if state:
+				out[name] = state == 'enabled'
+	return out
+
+
+def shell_config(home):
+	out = {}
+	for line in read(f'{home}/.config/ztmetro/config').splitlines():
+		key, sep, value = line.split('#', 1)[0].partition('=')
+		if sep:
+			out[key.strip()] = value.strip()
+	return out
+
+
+def display_blockers(runtime, home):
+	out = []
+	conns = connectors()
+	shell = read(f'{runtime}/ztmetro.state').splitlines()
+	panel_on = any(on for name, on in conns.items() if 'DSI' in name or 'eDP' in name)
+	if any(on for name, on in conns.items() if '-DP-' in name or '-HDMI' in name):
+		out.append(blocker('dock', 'External display', detail='a dock or a cable to a screen'))
+	aod_showing = 'screen off' in shell and 'aod on' in shell
+	if aod_showing and panel_on:
+		out.append(blocker('aod', 'Always-on display showing', 'Always-on display',
+				   proc='ztmetro', detail='zrn-sleepd does not sleep while it shows'))
+	elif panel_on or not conns and 'screen on' in shell:
+		out.append(blocker('display', 'Screen on', proc='ztmetro'))
+		aod = shell_config(home).get('aod', 'off')
+		if aod in ('on', '1', 'charging'):
+			when = 'once the screen goes off' if aod != 'charging' else 'on a charger, once the screen goes off'
+			out.append(blocker('aod', 'Always-on display', detail=f'set to show {when}; '
+					   'the phone does not sleep while it shows'))
+	return out
+
+
+def charger_blockers():
+	out = []
+	try:
+		supplies = os.listdir(path('sys/class/power_supply'))
+	except OSError:
+		return out
+	for name in sorted(supplies):
+		kind = read(f'sys/class/power_supply/{name}/type')
+		if kind in ('USB', 'Mains') and read(f'sys/class/power_supply/{name}/online') == '1':
+			out.append(blocker('charger', 'Charger connected', 'Charging', proc=name,
+					   detail='zrn-sleepd does not sleep on a cable'))
+			break
+	return out
+
+
+def call_blockers():
+	call = kv(MODEM).get('call', 'idle')
+	if call not in ('', 'idle'):
+		return [blocker('call', 'Phone call', proc='ztoscorenetworkingd', detail=call)]
+	return []
+
+
+def parse_sink_inputs(text):
+	"""`pactl list sink-inputs`: [{'app', 'pid', 'binary', 'corked'}]."""
+	streams, cur = [], None
+	for raw in text.splitlines():
+		line = raw.strip()
+		if line.startswith('Sink Input #'):
+			cur = {'app': None, 'pid': None, 'binary': None, 'corked': False}
+			streams.append(cur)
+		elif cur is None:
+			continue
+		elif line.startswith('Corked:'):
+			cur['corked'] = line.split(':', 1)[1].strip() == 'yes'
+		else:
+			m = re.match(r'(application\.name|application\.process\.id|application\.process\.binary)'
+				     r'\s*=\s*"(.*)"$', line)
+			if m:
+				key = {'application.name': 'app', 'application.process.id': 'pid',
+				       'application.process.binary': 'binary'}[m.group(1)]
+				cur[key] = number(m.group(2), None) if key == 'pid' else m.group(2)
+	return streams
+
+
+def sink_inputs(runtime, user):
+	cmd = ['pactl', 'list', 'sink-inputs']
+	env = dict(os.environ, XDG_RUNTIME_DIR=runtime, LC_ALL='C')
+	if os.geteuid() == 0:
+		cmd = ['runuser', '-u', user, '--', 'env', f'XDG_RUNTIME_DIR={runtime}', 'LC_ALL=C'] + cmd
+	try:
+		r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+				   timeout=3, env=env)
+	except (OSError, subprocess.SubprocessError):
+		return None
+	return parse_sink_inputs(r.stdout) if r.returncode == 0 else None
+
+
+def audio_blockers(procs, runtime, user, streams=None):
+	if number(kv(PERF).get('tickle_audio', '0')) <= 0:
+		return []
+	if streams is None:
+		streams = sink_inputs(runtime, user)
+	out, seen = [], set()
+	for s in streams or []:
+		if s['corked']:
+			continue
+		app = s['app'] or s['binary'] or 'An app'
+		if app in seen:
+			continue
+		seen.add(app)
+		pid = s['pid']
+		out.append(blocker('audio', f'{app} playing', pid=pid, proc=(procs.name(pid) if pid else None) or s['binary'],
+				   unit=procs.unit(pid) if pid else None, detail='sound keeps the phone awake'))
+	if not out:
+		# zrnperfd keeps a stream a few seconds after it stops, and Android's
+		# goes through its own mixer: say what is known
+		out.append(blocker('audio', 'Sound playing', detail='an app played sound just now'))
+	return out
+
+
+def inhibit_meta(text):
+	"""pid= / app= / label= lines in an inhibit file (optional; most are empty)."""
+	meta = {}
+	for line in text.splitlines():
+		key, sep, value = line.partition('=')
+		if sep and key.strip() in ('pid', 'app', 'label'):
+			meta[key.strip()] = value.strip()
+	return meta
+
+
+def inhibit_blockers(procs, now=None):
+	"""Each inhibit file, as zrn-sleepd counts them (expired timed- ones are
+	its to remove: they no longer hold, and are left out here)."""
+	now = time.time() if now is None else now
+	out = []
+	try:
+		names = sorted(os.listdir(path(INHIBIT)))
+	except OSError:
+		return out
+	for name in names:
+		if name.startswith('.'):
+			continue	# a writer's file on its way in (renamed at once)
+		p = path(f'{INHIBIT}/{name}')
+		try:
+			st = p.stat()
+			text = p.read_text(errors='replace')[:400]
+		except OSError:
+			continue
+		timed = name.startswith('timed-')
+		if timed and st.st_mtime <= now:
+			continue
+		left = f'for another {ago(st.st_mtime - now)}' if timed else f'held for {ago(now - st.st_mtime)}'
+		meta = inhibit_meta(text)
+		kind, label, proc, unit = KNOWN_INHIBITS.get(name, ('inhibit', None, None, None))
+		pid = number(meta.get('pid'), None)
+		detail = f'{name}, {left}'
+		if name.startswith('timed-ial-'):
+			# ztOSIAL's Sleep1.Inhibit: "WHO: WHY (sender)"; WHY is the app's
+			# own words, so only WHO is shown
+			label = text.split(':', 1)[0].strip() or 'An app'
+			proc = proc or 'ztos-iald'
+		label = meta.get('label') or meta.get('app') or label or name.removeprefix('timed-')
+		if pid is None and proc:
+			pid = procs.find(proc)
+		elif pid is not None:
+			proc = procs.name(pid) or proc
+		unit = (procs.unit(pid) if pid else None) or unit
+		short = f'{label} using location' if kind == 'gps' else label
+		out.append(blocker(kind, label, short, pid=pid, proc=proc, unit=unit, detail=detail))
+	return out
+
+
+def tcp_clients(port):
+	"""Inodes of established sockets to 127.0.0.1:port (a GNSS reader)."""
+	inodes = set()
+	for table in ('proc/net/tcp', 'proc/net/tcp6'):
+		for line in read(table).splitlines()[1:]:
+			f = line.split()
+			if len(f) < 10 or f[3] != '01':
+				continue
+			try:
+				remote_port = int(f[2].rsplit(':', 1)[1], 16)
+			except (IndexError, ValueError):
+				continue
+			if remote_port == port:
+				inodes.add(f[9])
+	return inodes
+
+
+def gps_blockers(procs, held):
+	"""The engine running for readers; merged with timed-gnss when that holds."""
+	engine = procs.find('zrn-gnss-nmea')
+	gate = [b for b in held if b['kind'] == 'gps']
+	if engine is None and not gate:
+		return held
+	readers = []
+	inodes = tcp_clients(GNSS_PORT)
+	if inodes:
+		gate_pid = procs.find('ztos-gnss-gate')
+		owners = procs.fd_targets(lambda t: t.startswith('socket:[') and t[8:-1] in inodes)
+		readers = [procs.name(pid) for pid in sorted(owners) if pid != gate_pid]
+	try:
+		readers += [n.removeprefix('keep-') for n in os.listdir(path(GNSS_KEEP)) if n.startswith('keep-')]
+	except OSError:
+		pass
+	readers = [r for r in dict.fromkeys(readers) if r]
+	rest = [b for b in held if b['kind'] != 'gps']
+	if gate:
+		b = gate[0]
+	else:
+		pid, proc, unit = who(procs, engine)
+		b = blocker('gps', 'Location (GPS)', pid=pid, proc=proc, unit=unit, detail='the GNSS engine runs')
+	if readers:
+		b['detail'] = (b['detail'] + '; ' if b['detail'] else '') + 'read by ' + ', '.join(readers)
+		b['short'] = f'{readers[0]} using location'
+	else:
+		b['short'] = 'Location in use'
+	return [b] + rest
+
+
+def camera_blockers(procs):
+	try:
+		devs = [n for n in os.listdir(path('dev')) if n.startswith(('zrn-cam', 'video'))]
+	except OSError:
+		devs = []
+	if not devs:
+		return []
+	owners = procs.fd_targets(lambda t: t.startswith(('/dev/zrn-cam', '/dev/video')))
+	out = []
+	for pid in sorted(owners):
+		out.append(blocker('camera', 'Camera open', pid=pid, proc=procs.name(pid), unit=procs.unit(pid),
+				   detail=', '.join(sorted(set(owners[pid])))))
+	return out
+
+
+def source_label(name, driver=''):
+	for key in (name, driver):
+		for prefix, label in SOURCE_LABELS:
+			if key and key.startswith(prefix):
+				return label
+	return name or driver or 'An unnamed source'
+
+
+def wakeup_sources():
+	"""[{dir, name, driver, active_ms, active_count, wakeup_count, prevent_ms}]."""
+	out = []
+	try:
+		dirs = sorted(os.listdir(path('sys/class/wakeup')))
+	except OSError:
+		return out
+	for d in dirs:
+		base = f'sys/class/wakeup/{d}'
+		driver = ''
+		try:
+			driver = os.path.basename(os.readlink(path(f'{base}/device/driver')))
+		except OSError:
+			pass
+		out.append({'dir': d, 'name': read(f'{base}/name'), 'driver': driver,
+			    'active_ms': number(read(f'{base}/active_time_ms')),
+			    'active_count': number(read(f'{base}/active_count')),
+			    'wakeup_count': number(read(f'{base}/wakeup_count')),
+			    'prevent_ms': number(read(f'{base}/prevent_suspend_time_ms'))})
+	return out
+
+
+def wakeup_blockers(sources=None):
+	out = []
+	for s in wakeup_sources() if sources is None else sources:
+		if s['active_ms'] <= 0:
+			continue
+		label = source_label(s['name'], s['driver'])
+		name = s['name'] or s['dir']
+		out.append(blocker('wakeup', f'{label} (kernel)', f'Kernel: {label}', proc=name,
+				   detail=f'held for {ago(s["active_ms"] / 1000)}'))
+	return out
+
+
+def sleepd_blockers(status, why):
+	out = []
+	if not path(ENABLED).exists():
+		out.append(blocker('sleepd', SLEEPD_WHY['switched off'], proc='zrn-sleepd',
+				   detail='zrn-sleepd enable, or Settings'))
+	if path(PAUSED).exists():
+		out.append(blocker('sleepd', SLEEPD_WHY['paused'], proc='zrn-sleepd', detail=read(PAUSED)[:80]))
+	if why in ('doze window', 'wifi window', 'waiting'):
+		out.append(blocker('sleepd', SLEEPD_WHY[why], proc='zrn-sleepd', detail=f'zrn-sleepd: {why}'))
+	elif not why and status.get('state') == 'awake' and status.get('last'):
+		last = status['last']
+		out.append(blocker('sleepd', 'Just woke', proc='zrn-sleepd',
+				   detail=f'woken by {WAKE_LABELS.get(last, last)}; sleeping again shortly'))
+	return out
+
+
+# ---- what woke it ------------------------------------------------------------
+
+WOKE_RE = re.compile(r'^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (?:once: )?woke: (\S+)(?: \(([^)]*)\))?(.*)$')
+
+
+def log_tail(nbytes=96 * 1024):
+	try:
+		with open(path(LOG), 'rb') as f:
+			f.seek(0, 2)
+			size = f.tell()
+			f.seek(max(0, size - nbytes))
+			data = f.read()
+	except OSError:
+		return []
+	lines = data.replace(b'\0', b'').decode(errors='replace').splitlines()
+	return lines[1:] if size > nbytes else lines
+
+
+def wakes(lines, now=None, window=HOUR):
+	"""The SoC's returns in the last `window` s from zrn-sleepd's log:
+	{'count', 'reasons': {reason: n}, 'sources': {name: n}, 'modem': {channel: n}}."""
+	now = time.time() if now is None else now
+	out = {'count': 0, 'reasons': {}, 'sources': {}, 'modem': {}}
+	for line in lines:
+		m = WOKE_RE.match(line)
+		if not m:
+			continue
+		try:
+			t = time.mktime(time.strptime(m.group(1), '%Y-%m-%d %H:%M:%S'))
+		except ValueError:
+			continue
+		reason = m.group(2)
+		if now - t > window or t > now + 60 or reason in NOT_WAKES:
+			continue
+		out['count'] += 1
+		out['reasons'][reason] = out['reasons'].get(reason, 0) + 1
+		for part in (m.group(3) or '').removeprefix('modem rx: ').split(','):
+			ch = part.strip().split(' ')[0]
+			if ch.startswith(('umts_', 'rmnet', 'multipdp')):
+				out['modem'][ch] = out['modem'].get(ch, 0) + 1
+		by = re.search(r'\bby=(\S+)', m.group(4) or '')
+		for item in (by.group(1).split(',') if by else []):
+			name, _, n = item.rpartition('+')
+			if name:
+				out['sources'][name] = out['sources'].get(name, 0) + max(1, number(n, 1))
+	return out
+
+
+def top(counts):
+	return max(sorted(counts), key=lambda k: counts[k]) if counts else None
+
+
+def wakes_text(w):
+	"""'Woke 3 times in the last hour, mostly by the modem (umts_ipc0)'."""
+	n = w['count']
+	if not n:
+		return 'Did not sleep in the last hour' if w.get('slept') is False else 'No wakes from sleep in the last hour'
+	reason = top(w['reasons'])
+	label = WAKE_LABELS.get(reason, reason)
+	extra = top(w['modem']) if reason == 'modem' else None
+	source = top(w['sources'])
+	if source and not extra and reason not in ('rtc', 'key'):
+		extra = source
+	times = 'once' if n == 1 else 'twice' if n == 2 else f'{n} times'
+	most = 'by' if len(w['reasons']) == 1 else 'mostly by'
+	return f'Woke {times} in the last hour, {most} {label}' + (f' ({extra})' if extra else '')
+
+
+# ---- who wakes the CPU while it is awake (the sheet only) ---------------------
+
+def proc_switches(procs):
+	"""{pid: (name, context switches of all its threads, start s since boot)}."""
+	hz = os.sysconf('SC_CLK_TCK') if hasattr(os, 'sysconf') else 100
+	out = {}
+	for pid, name in procs.comm().items():
+		total = 0
+		try:
+			tasks = os.listdir(path(f'proc/{pid}/task'))
+		except OSError:
+			continue
+		for tid in tasks:
+			for line in read(f'proc/{pid}/task/{tid}/status').splitlines():
+				if line.startswith(('voluntary_ctxt_switches', 'nonvoluntary_ctxt_switches')):
+					total += number(line.split(':', 1)[1])
+		stat = read(f'proc/{pid}/stat')
+		fields = stat.rsplit(')', 1)[-1].split()
+		start = number(fields[19], 0) / hz if len(fields) > 19 else 0
+		out[pid] = (name, total, start)
+	return out
+
+
+def irq_counts():
+	"""{irq: (name, total over the CPUs)} from /proc/interrupts."""
+	out = {}
+	lines = read('proc/interrupts').splitlines()
+	if not lines:
+		return out
+	ncpu = len(lines[0].split())
+	for line in lines[1:]:
+		f = line.split()
+		if not f or not f[0].endswith(':'):
+			continue
+		counts = [number(x, None) for x in f[1:1 + ncpu]]
+		if None in counts or not counts:
+			continue
+		# '12: ... GIC-0  27 Level  arch_timer': the controller, its line and
+		# trigger go; the device's name stays
+		name = re.sub(r'^\S+\s+\d+\s+(Level|Edge)\s+', '', ' '.join(f[1 + ncpu:])) or f[0][:-1]
+		out[f[0][:-1]] = (name, sum(counts))
+	return out
+
+
+def uptime():
+	return number((read('proc/uptime') or '0').split('.')[0])
+
+
+def rank(before, after, seconds, limit=5, born_after=None):
+	"""[(name, per minute)]: the biggest risers between two snapshots
+	{key: (name, count[, start])}, summed by name. A key missing before
+	counts from 0 when it started after `born_after` (a new process); a
+	reused key with another name is left out."""
+	if seconds <= 0:
+		return []
+	by_name = {}
+	for key, value in after.items():
+		name, count = value[0], value[1]
+		if key in before and before[key][0] == name:
+			delta = count - before[key][1]
+		elif born_after is not None and len(value) > 2 and value[2] >= born_after:
+			delta = count
+		else:
+			continue
+		if delta > 0:
+			by_name[name] = by_name.get(name, 0) + delta
+	ranked = sorted(by_name.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+	return [(name, n * 60 / seconds) for name, n in ranked]
+
+
+def lifetime_rank(snap, now_up, limit=5):
+	"""[(name, per minute)] averaged since each process started (no earlier
+	snapshot to compare with)."""
+	rates = {}
+	for name, count, start in snap.values():
+		age = now_up - start
+		if age > 60:
+			rates[name] = rates.get(name, 0) + count * 60 / age
+	return sorted(rates.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+
+
+def snapshot_dir(runtime):
+	if os.geteuid() == 0:
+		return path('run/zrn-sleepd/why')
+	return path(f'{runtime}/zrn-sleep-why')
+
+
+def wakers(procs, runtime, keep=True):
+	"""Top processes by context switches and IRQs by count, a minute, over
+	the last hour where an earlier look left a snapshot (one kept every 5 min
+	at most, only when asked, pruned past the hour), else averaged since each
+	started."""
+	now_up = uptime()
+	snap = {'t': now_up, 'procs': {str(k): list(v) for k, v in proc_switches(procs).items()},
+		'irqs': {k: list(v) for k, v in irq_counts().items()}}
+	directory = snapshot_dir(runtime)
+	olds, newest = [], None
+	for f in sorted(directory.glob('*.json')) if directory.is_dir() else []:
+		try:
+			data = json.loads(f.read_text())
+			t = data['t']
+		except (OSError, ValueError, KeyError, TypeError):
+			f.unlink(missing_ok=True)
+			continue
+		if t > now_up or t < now_up - HOUR - 600:
+			f.unlink(missing_ok=True)	# another boot, or too old
+			continue
+		newest = t if newest is None else max(newest, t)
+		if t <= now_up - 120:
+			olds.append(data)
+	if keep and (newest is None or now_up - newest >= 300):
+		try:
+			directory.mkdir(parents=True, exist_ok=True)
+			(directory / f'{now_up}.json').write_text(json.dumps(snap))
+		except OSError:
+			pass
+	if olds:
+		base = min(olds, key=lambda d: abs(d['t'] - (now_up - HOUR)))
+		seconds = now_up - base['t']
+		window = 'last hour' if seconds >= HOUR - 300 else f'last {ago(seconds)}'
+		return {'window': window,
+			'procs': rank(base['procs'], snap['procs'], seconds, 5, born_after=base['t']),
+			'irqs': rank(base['irqs'], snap['irqs'], seconds, 3)}
+	irqs = sorted(((name, n * 60 / now_up) for name, n in snap['irqs'].values()) if now_up > 0 else [],
+		      key=lambda kv: (-kv[1], kv[0]))[:3]
+	return {'window': 'averaged since each started', 'procs': lifetime_rank(snap['procs'], now_up), 'irqs': irqs}
+
+
+# ---- all of it --------------------------------------------------------------
+
+def collect(want_wakers=False, now=None):
+	runtime, home, user = user_dirs()
+	procs = Procs()
+	status = kv(STATUS)
+	why = status.get('why', '')
+	items = []
+	items += call_blockers()
+	items += audio_blockers(procs, runtime, user)
+	items += gps_blockers(procs, inhibit_blockers(procs, now))
+	items += camera_blockers(procs)
+	sources = wakeup_sources()
+	items += wakeup_blockers(sources)
+	items += charger_blockers()
+	items += sleepd_blockers(status, why)
+	items += display_blockers(runtime, home)
+	items.sort(key=lambda b: ORDER.index(b['kind']) if b['kind'] in ORDER else len(ORDER))
+	w = wakes(log_tail(), now)
+	out = {'state': status.get('state', 'unknown'), 'why': why, 'blockers': items, 'wakes': w,
+	       'wakes_text': wakes_text(w)}
+	if want_wakers:
+		out['wakers'] = wakers(procs, runtime)
+	return out
+
+
+def headline(items, always=False):
+	"""The lock screen's line: 'Awake: Music playing · 2 more', or '' when
+	only the lock screen itself keeps it up (unless `always`)."""
+	others = [b for b in items if b['kind'] not in SELF_KINDS]
+	if not others:
+		if not always:
+			return ''
+		return 'Awake: the lock screen only' if items else 'Nothing keeps it awake'
+	more = len(others) - 1
+	return f'Awake: {others[0]["short"]}' + (f' \u00b7 {more} more' if more else '')
+
+
+def status_lines(result):
+	"""The blocker= lines `zrn-sleepd status` adds after its own."""
+	lines = []
+	for b in result['blockers']:
+		who_ = ''
+		if b['pid'] or b['proc'] or b['unit']:
+			parts = [f'pid {b["pid"]}' if b['pid'] else '', b['proc'] or '', b['unit'] or '']
+			who_ = ' (' + ', '.join(p for p in parts if p) + ')'
+		lines.append(f'blocker={b["kind"]}: {b["label"]}{who_}' + (f' - {b["detail"]}' if b['detail'] else ''))
+	if not result['blockers']:
+		lines.append('blocker=none')
+	lines.append(f'woke_last_hour={result["wakes"]["count"]}: {result["wakes_text"]}')
+	return lines
+
+
+def clean(text):
+	return ' '.join(str(text or '').replace('\t', ' ').split())
+
+
+def shell_lines(result, always=False):
+	"""For ztmetro (lock-awake.c), tab-separated. App and process names only:
+	no notification text, no window titles, no media titles, no IAL reasons."""
+	lines = [f'line\t{clean(headline(result["blockers"], always))}']
+	for b in result['blockers']:
+		parts = []
+		if b['proc']:
+			parts.append(b['proc'])
+		if b['pid']:
+			parts.append(f'pid {b["pid"]}')
+		# what it is doing before which unit: the line is cut at the end
+		if b['detail']:
+			parts.append(b['detail'])
+		if b['unit']:
+			parts.append(b['unit'])
+		lines.append(f'item\t{b["kind"]}\t{clean(b["label"])}\t{clean(" · ".join(parts))}')
+	lines.append(f'woke\t{clean(result["wakes_text"])}')
+	w = result.get('wakers')
+	if w:
+		lines.append(f'window\t{clean(w["window"])}')
+		for name, rate in w['procs']:
+			lines.append(f'waker\t{clean(name)}\t{rate:.0f} wakeups a minute')
+		for name, rate in w['irqs']:
+			lines.append(f'irq\t{clean(name)}\t{rate:.0f} interrupts a minute')
+	return lines
+
+
+def main(argv):
+	result = collect(want_wakers='--wakers' in argv or '--json' in argv)
+	if '--json' in argv:
+		print(json.dumps(result, indent=1))
+	elif '--shell' in argv:
+		print('\n'.join(shell_lines(result, '--always' in argv)))
+	else:
+		print('\n'.join(status_lines(result)))
+
+
+if __name__ == '__main__':
+	main(sys.argv[1:])
