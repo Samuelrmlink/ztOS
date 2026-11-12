@@ -91,4 +91,19 @@ The decision is the same: hide the AOD while the phone is in a pocket or face do
     - "pocket covered" hides the AOD and "pocket clear" shows it;
     - it is ignored with the screen on or the AOD switched off;
     - the screen coming on forgets it.
-- **Phone:** see the report of the 8.44 deploy.
+- **Phone, 12 Nov 2026,** on a charger. These ran inside `ztlock run aod-pocket`, with the integrated ztmetro `56e9250b…`, sensord `12b21eda…` and zrn-sleep-why `dfaa5a63…`.
+  - **At screen-off:** the AOD showed and a check ran at once (`pocket=on`).
+  - **Each check:** 50–61 ms from the ADD to the last REMOVE (`/run/ztoscsf-sensors/pocket`), and 10–19 interrupts from the hub (`ttyBCM`). No hub assert.
+  - **sensord with the AOD up:** 12 ticks of CPU and 224 context switches over 60 s. That includes the AOD's own light readings.
+  - **The shell's side**, with "pocket covered" and "pocket clear" sent by hand:
+    - covered: the panel's DRM connector went `disabled`;
+    - zrn-sleep-why printed `note=AOD hidden: phone covered`;
+    - clear: the AOD came back and the connector read `enabled`.
+  - **The screen coming on:** `pocket=off`, and `aod_covered no`.
+  - **Not done on the phone:** sleep through a real pocket, and the mA. On a charger the gauge measures the charger, not the phone. `power/aod/pocket-ab.sh` measures A (AOD shown) against B (hidden as covered) from the gauge's charge counter. It waits on the phone for the charger to go out.
+- **A finding: on this phone, proximity said `near` in every reading.**
+  - The ADC read about 8700 (5992 once), against a threshold of 2400. That held in a 400–500 lux room, uncovered, as much as in the dark.
+  - The 5 lux condition is what kept the AOD showing.
+  - Stock's sensor auto-calibrates in the hub (`PROX_AUTOCAL_AMS`), and its DPCM may weigh it with motion.
+  - A screen protector or case over the sensor, at the top left of the earpiece, is the usual cause of a stuck near. If so, cleaning or trimming it should bring the ADC down to a few hundred.
+  - Until the owner has checked: this matters more for the call blank (8.24), which uses proximity alone.
