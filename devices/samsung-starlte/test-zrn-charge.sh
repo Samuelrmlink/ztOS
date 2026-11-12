@@ -129,6 +129,63 @@ w "$B" voltage_now=4100000; t 420 "1800 1090 inhibit-charge"
 w "$B" voltage_now=3990000; t 420 "1800 1090 auto"
 w "$B" voltage_now=4100000; t 420 "1800 1090 auto"
 w "$B" voltage_now=4200000; t 380 "1800 2100 auto"
+# stock's swelling entry: stop, charge again (4.15 V) only under 4.00 V, and so
+# again once full there
+fresh; plug dcp
+w "$B" voltage_now=4100000; t 410 "1800 1090 inhibit-charge"
+check "41 C above 4.0 V: logged" "zrn-charge: wired dcp: in 1800 mA, charge 1090 mA, stopped (warm until under 4000 mV), battery 41.0 C" "$(cat "$T/out")"
+w "$B" voltage_now=4010000; t 410 "1800 1090 inhibit-charge"
+w "$B" voltage_now=3990000; t 410 "1800 1090 auto"
+w "$B" voltage_now=4120000; t 410 "1800 1090 auto"
+w "$B" voltage_now=4150000 status=Full; t 410 "1800 1090 inhibit-charge"
+w "$B" voltage_now=4050000 status=Discharging; t 405 "1800 1090 inhibit-charge"
+w "$B" voltage_now=3990000; t 405 "1800 1090 auto"
+w "$B" voltage_now=4100000 status=Charging; t 390 "1800 2100 auto"
+w "$B" voltage_now=4100000; t 50 "1800 700 inhibit-charge"
+w "$B" voltage_now=3950000; t 50 "1800 700 auto"
+t 100 "1800 700 auto"
+t 200 "1800 2100 auto"
+w "$B" voltage_now=4100000; t 400 "1800 2100 auto"
+check "under 41 C: no hold at 4.1 V" "1800 2100 auto" "$(lim)"
+rm "$B/voltage_now"; t 420 "1800 1090 auto"
+check "voltage unreadable: no hold" "1800 1090 auto" "$(lim)"
+
+# the USB connector's thermistor: 80 C cuts charging, 75 C lets it go
+c() { w "$TH" $1; tick 30; run; check "$1: $2" "$2" "$(lim)"; }
+fresh; plug afc-9v 1650000 9000000; run
+c usb=790 "1650 2150 auto"
+c usb=800 "100 2150 inhibit-charge"
+check "usb 80 C: logged" "zrn-charge: wired afc-9v 9 V: in 100 mA, charge 2150 mA, stopped (usb connector hot), battery 25.0 C" "$(cat "$T/out")"
+c usb=760 "100 2150 inhibit-charge"
+rm "$TH/usb"; tick 30; run; check "usb unknown: stays cut" "100 2150 inhibit-charge" "$(lim)"
+c usb=750 "1650 2150 auto"
+w "$TH" usb=820; unplug; tick 30; run; check "usb hot, nothing in: as unplugged" "500 500 auto" "$(lim)"
+w "$TH" usb=300
+
+# the charger's thermistor: 46 C limits the input, 44 C lets it go
+fresh; plug afc-9v 1650000 9000000; run
+c charger=450 "1650 2150 auto"
+c charger=460 "1000 1250 auto"
+c charger=450 "1000 1250 auto"
+rm "$TH/charger"; tick 30; run; check "charger unknown: stays limited" "1000 1250 auto" "$(lim)"
+c charger=440 "1650 2150 auto"
+w "$TH" charger=470; plug afc-9v 1650000 5000000; tick 30; run
+check "charger hot, afc at 5 V: as dcp (stock: 9 V only)" "1800 2100 auto" "$(lim)"
+plug dcp; c charger=480 "1800 2100 auto"
+plug pd 3000000 5000000; c charger=480 "1800 2150 auto"
+check "charger hot, pd: logged" "zrn-charge: wired pd: in 1800 mA, charge 2150 mA (charger hot), battery 25.0 C" "$(cat "$T/out")"
+c charger=430 "3000 2150 auto"
+
+# both hot: stock's mix_limit
+fresh; plug dcp; run
+w "$TH" charger=500; t 415 "1800 1090 auto"
+w "$TH" charger=490; t 420 "1800 1090 auto"
+w "$TH" charger=500; t 420 "338 1090 auto"
+check "mix: logged" "zrn-charge: wired dcp: in 338 mA, charge 1090 mA (warm battery and charger hot), battery 42.0 C" "$(cat "$T/out")"
+w "$TH" charger=300; t 400 "338 1090 auto"
+t 390 "1800 2100 auto"
+w "$TH" charger=500; rm "$TH/battery"; tick 30; run
+check "mix: battery unknown, not entered" "1800 2100 auto" "$(lim)"
 # the aged float: Samsung's count (EFS batt_discharge_level / 100) at 1000 or more
 AGE=$R/run/android/mnt/vendor/efs/FactoryApp/batt_discharge_level
 fv() { local f; read -r f < "$C/constant_charge_voltage"; echo "$f"; }

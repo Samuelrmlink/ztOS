@@ -25,6 +25,13 @@
 #	and 4.15 V, back at 10;  <= 15 C 700 mA, back at 20. Where the charger's float
 #	can't be set, "4.15 V" is kept by stopping at 4.15 V and resuming below 4.0 V.
 #	9 V only below 41 C; at 9 V with the screen on, 500 mA in / 1000 (stock SIOP).
+#	Entering the 41 C or the 5 C step, charging stops, and starts again (at
+#	4.15 V) only under 4.00 V, and so again each time it is full there (stock).
+# And from the other thermistors (power/THERMAL.md §3):
+#	USB connector >= 80 C: stopped, 5 V, 100 mA in; back at 75
+#	charger >= 46 C: AFC/QC at 9 V 1000 / 1250 mA, PD 5 V and 1800 mA in; back at 44
+#	battery >= 42 C with the charger >= 50 C: in ~338 mA at 5 V (stock's
+#	mix_limit), until the battery is at 39 C
 # The float otherwise: 4.24 V once Samsung's own cycle count (EFS
 # batt_discharge_level / 100, read only) is 1000 or more, stock's age step for
 # this battery; 4.35 V below it or if the count can't be read (owner,
@@ -340,12 +347,13 @@ trip() {	# fingerprint, limit mA, 1 if at 9 V, how it was seen: remember, and sa
 # what one pass remembers for the next (the daemon keeps it; a lone pass reads it)
 STATE="lowdone redrop src_was key_was cap win ceil wceil off_since plug_at settle hot_stop cold_stop warm cold cool vhold hv_at logged
 	sess_fp held_val held_since trips_seen hr_seen reduced_seen hr_sess hr_caps caps_was anom anom_cap
-	last_fp last_in last_hv"
+	last_fp last_in last_hv usb_hot chg_hot mix swell swell_hold"
 src_was=none key_was= cap=0 win=0 ceil=0 wceil=0 off_since=0 plug_at=0 settle=0
 lowdone=0 hot_stop=0 cold_stop=0 warm=0 cold=0 cool=0 vhold=0 hv_at=0 logged=
 redrop=0 sess_fp= held_val=0 held_since=0 trips_seen= hr_seen= reduced_seen= hr_sess=0 hr_caps= caps_was=
 anom=0 anom_cap=1500
 last_fp= last_in=0 last_hv=0
+usb_hot=0 chg_hot=0 mix=0 swell=0 swell_hold=0
 load() { [ -r "$RUN/state" ] && . "$RUN/state"; }
 save() {
 	local v
@@ -354,7 +362,7 @@ save() {
 
 pass() {	# look, decide, write; nap: when to look again without an event (s)
 	local T=250 tknown=0 mv in chg why= stop=0 hvbus=0 hvok=1 hvf= hv=0 want=0 rb a f t s key nominal fl bmax
-	local ramp=0 rs= n p ma
+	local ramp=0 rs= n p ma ct
 	# (all builtins: no process is started, but for i2cget on the old kernel)
 	now; detect
 
@@ -460,6 +468,19 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	[ $T -ge 410 ] && warm=1;	[ $T -le 390 ] && warm=0
 	[ $T -le 50 ] && cold=1;	[ $T -ge 100 ] && cold=0
 	[ $T -le 150 ] && cool=1;	[ $T -ge 200 ] && cool=0
+	# The USB connector and the charger thermistors, as stock reads them
+	# (power/THERMAL.md §3): temp_highlimit on the connector, 80 C cuts
+	# charging, 75 C lets it go; chg_high_temp on the charger, 46 C limits the
+	# input, 44 C lets it go. An unknown reading keeps the state it had.
+	num "$TH/usb" && { [ $REPLY -ge 800 ] && usb_hot=1; [ $REPLY -le 750 ] && usb_hot=0; }
+	ct=
+	num "$TH/charger" && { ct=$REPLY; [ $ct -ge 460 ] && chg_hot=1; [ $ct -le 440 ] && chg_hot=0; }
+	# stock's mix_limit: battery >= 42 C with the charger >= 50 C, held while
+	# the battery stays above 39 C
+	if [ $tknown = 1 ]; then
+		if [ $mix = 1 ]; then [ $T -le 390 ] && mix=0
+		elif [ -n "$ct" ] && [ $T -ge 420 ] && [ $ct -ge 500 ]; then mix=1; fi
+	fi
 
 	table $type; in=$lin chg=$lchg
 	case $type in
@@ -493,6 +514,18 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	else
 		vhold=0
 	fi
+	# Stock's swelling steps (>= 41 C, <= 5 C) stop charging first, and charge
+	# again at 4.15 V only once the battery is under 4.00 V; full there, the
+	# same again (swelling_*_rechg_voltage). Voltage unreadable: no hold.
+	if [ $((warm | cold)) = 1 ]; then
+		mv=0; num "$B/voltage_now" && mv=$((REPLY / 1000))
+		[ $swell = 0 ] && swell=1 swell_hold=1
+		get "$B/status"; [ "$REPLY" = Full ] && swell_hold=1
+		[ $mv -lt 4000 ] && swell_hold=0
+	else
+		swell=0 swell_hold=0
+	fi
+	[ $swell_hold = 1 ] && stop=1 why+=" until under 4000 mV"
 	[ $hot_stop = 1 ] && stop=1 why+=" too hot"
 	[ $cold_stop = 1 ] && stop=1 why+=" too cold"
 	[ $vhold = 1 ] && stop=1 why+=" at $f mV"
@@ -548,6 +581,26 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 		if [ $anom = 1 ]; then
 			hvok=0; min in $anom_cap; why+=" pd anomaly"
 		fi
+		# the charger hot: stock's sec_bat_check_afc_temp (AFC/QC at 9 V: in
+		# 1000, charge 1250) and sec_bat_check_pdic_temp (PD steps down to its
+		# 5 V PDO, at most nv_charge_power / 5 V = 1800 mA); 5 V cables: nothing
+		if [ $chg_hot = 1 ]; then
+			case $type in
+			afc-9v|qc2-9v) [ $hvbus = 1 ] && { min in 1000; min chg 1250; why+=" charger hot"; } ;;
+			pd)	hvok=0; min in 1800; why+=" charger hot" ;;
+			esac
+		fi
+		# both hot: stock's mix_limit, input = 4.35 V x (topoff 300 + 50 mA) /
+		# (0.9 x the bus voltage), at most 350 mA
+		if [ $mix = 1 ]; then
+			a=$((volt / 1000)); [ $a -lt 5 ] && a=5
+			min in $((4350 * 350 / (a * 90) / 10)); why+=" battery and charger hot"
+		fi
+	fi
+	# the connector at 80 C: no charging, 5 V and the least input there is
+	# (stock turns the buck off; here the input drops to 100 mA)
+	if [ $usb_hot = 1 ] && [ $src != none ]; then
+		stop=1 hvok=0; min in 100; why+=" usb connector hot"
 	fi
 
 	# 9 V: asked for through hv_enable; going back, the input limit drops first
