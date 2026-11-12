@@ -94,3 +94,35 @@ handler, and INT_EN goes back to 0 after each round, as stock's exit_hw does.
   it first and, if closed, sets CG_VAL only (approved 2026-11-12), clearing it again on unload. It read open (0x00200000, both) on the first run.
 - Sharing: stock's tree gives the ADC no CHUB `sysreg` handshake, so stock
   reads it without one too.
+
+### At boot, and the `load-failed` mark
+
+`zrn-therm.service` runs `zrn-therm-load` before zrn-charge. It writes
+`/var/lib/zrn-therm/loading`, loads `zrn-therm.ko` for the running kernel, and
+removes the mark. If the phone froze or reset during that load, the next boot
+finds `loading`, renames it **`/var/lib/zrn-therm/load-failed`** (its content is
+when the failed load started, in seconds since 1970) and does not load the
+module again.
+
+While `load-failed` is there:
+
+- the battery temperature is **unknown**: `/sys/kernel/zrn_therm/` does not
+  exist, and the gauge's `temp` is not a measurement;
+- zrn-charge treats unknown as hot for the voltage: **5 V only**, on a cable
+  (no AFC/PD 9 V) and on a pad (no 10 V), with the ordinary current limits;
+- the shell shows a standing notification, "Battery temperature sensor off"
+  (ztnotifyd watches the directory with inotify; `notifyd/therm-watch.h`).
+  Tapping it opens Settings > Battery.
+
+To clear it:
+
+- on the phone, Settings > Battery > **Try again**: it runs
+  `sudo -n /usr/local/sbin/zrn-therm-load --retry`, which removes the mark and
+  loads the module, behind the same `loading` mark. The sudoers rule is
+  `/etc/sudoers.d/zrn-therm`, that one command with `--retry` and nothing else
+  (template in `rootfs/overlay/usr/lib/ztos/user-templates/etc/sudoers.d/`);
+- or from a shell: `sudo zrn-therm-load --retry`, or
+  `sudo rm /var/lib/zrn-therm/load-failed`, and the next boot loads it.
+
+If the load fails again the same way, the mark comes back at the next boot:
+look at the previous boot's log (`journalctl -b -1 -k`) before trying again.
