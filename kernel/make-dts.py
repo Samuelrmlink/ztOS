@@ -29,6 +29,11 @@ block on this SoC is a silent bus hang rather than an error:
              switch on two of its pins, the connector's DP altmode and graph.
              docs/dp-altmode.md has the binding notes and where each value
              comes from
+  --hall     the flip cover's hall sensor as a lid switch (SW_LID) on
+             gpio-keys: gpa3-6, low while closed, both edges wake (stock
+             DT node "hall"; sensors/COVERS.md). Until a boot image with it
+             is flashed, sensors/hall/zrn-hall.ko adds the same node at run
+             time
 """
 import argparse
 import sys
@@ -45,6 +50,7 @@ ap.add_argument("--decon", action="store_true")
 ap.add_argument("--wlan", action="store_true")
 ap.add_argument("--dp-altmode", action="store_true")
 ap.add_argument("--dp-tx", action="store_true")
+ap.add_argument("--hall", action="store_true")
 ap.add_argument("--fallback", choices=("boot", "recovery"), default="boot")
 args = ap.parse_args()
 
@@ -471,6 +477,26 @@ if not args.gpu:
 		status = "disabled";""")
     sub("""		clock-output-names = "g3d";""", """		clock-output-names = "g3d";
 		status = "disabled";""")
+
+if args.hall:
+    # the flip cover: as zrn-hall.ko's node (sensors/hall/zrn-hall.conf). The
+    # pull stays as the bootloader left it; stock sets pull-down (pud 1)
+    sub("""			gpios = <&gpa0 6 GPIO_ACTIVE_LOW>;
+		};
+	};
+""", """			gpios = <&gpa0 6 GPIO_ACTIVE_LOW>;
+		};
+
+		lid-switch {
+			label = "Flip cover";
+			linux,input-type = <EV_SW>;
+			linux,code = <SW_LID>;
+			gpios = <&gpa3 6 GPIO_ACTIVE_LOW>;
+			debounce-interval = <15>;
+			wakeup-source;
+		};
+	};
+""")
 
 Path(args.out).write_text(s)
 print("make-dts: {} (ufs={} power={} touch={} gpu={} decon={} wlan={} dp_altmode={} fallback={})".format(

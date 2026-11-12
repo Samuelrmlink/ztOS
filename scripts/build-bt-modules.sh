@@ -38,7 +38,8 @@ cd "$SRC"
 # are built in (bluetooth or sound) and the modules from each that ship.
 EXT_BT="bluetooth/driver:zrn-bt sensors/driver:zrn-bbd leds:zrn-led leds:zrn-flash
 	modem/zrn-modem:zrn-modem haptics:zrn-haptic power/hotplug:zrn-hotplug
-	power/idle:zrn-cpuidle power/suspend:zrn-sleep-init power/rtc:zrn-exynos-rtc"
+	power/idle:zrn-cpuidle power/suspend:zrn-sleep-init power/rtc:zrn-exynos-rtc
+	sensors/hall:zrn-hall"
 EXT_SND="audio/driver:snd-zrn-abox"
 
 setup() {	# <dir>: the target's config, without paths from its own build
