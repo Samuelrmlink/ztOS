@@ -18,7 +18,7 @@ ifneq ($(FOREIGN),)
 $(info removed programs built for another machine, to build them here: $(FOREIGN))
 endif
 
-all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
+all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
 	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
 	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
@@ -246,8 +246,14 @@ sensord/ztoscsf-sensord: sensord/ztoscsf-sensord.c
 	$(CC) $(CFLAGS) $(WARN) -o $@ sensord/ztoscsf-sensord.c -lm
 
 # the modem's state for the shell (signal, operator, data), and airplane mode, SMS
-modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c
-	$(CC) $(CFLAGS) $(WARN) -o $@ modemd/ztoscorenetworkingd.c
+modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c mms/mmspdu.c mms/mmspdu.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ modemd/ztoscorenetworkingd.c mms/mmspdu.c
+
+# picture messages (MMS): the daemon, its PDU codec and the access point list
+MMS = mms/mmspdu.c mms/apnconf.c
+MMS_DEPS = $(MMS) mms/mmspdu.h mms/apnconf.h
+mms/ztmmsd: mms/ztmmsd.c $(MMS_DEPS)
+	$(CC) $(CFLAGS) $(WARN) -o $@ mms/ztmmsd.c $(MMS)
 
 # notifications from other programs, what is playing, and push
 ledd/zrn-ledd: ledd/zrn-ledd.c ledd/led-policy.h ztos-user.h
@@ -458,6 +464,9 @@ install: check-arch
 	install -Dm755 modemd/ztoscorenetworkingd /usr/local/sbin/ztoscorenetworkingd
 	install -Dm644 modemd/ztoscorenetworking-modem.service /etc/systemd/system/ztoscorenetworking-modem.service
 	install -Dm644 modemd/ztoscorenetworking.service /etc/systemd/system/ztoscorenetworking.service
+	install -Dm755 mms/ztmmsd /usr/local/sbin/ztmmsd
+	install -Dm644 mms/ztmmsd.service /etc/systemd/system/ztmmsd.service
+	install -Dm644 mms/apns-extra.xml /usr/local/share/ztoscorenetworking/apns-extra.xml
 	install -Dm755 csf/ztoscsf /usr/local/sbin/ztoscsf
 	install -Dm755 notifyd/ztnotifyd /usr/local/bin/ztnotifyd
 	install -Dm755 phone/ztphone /usr/local/bin/ztphone
@@ -474,7 +483,7 @@ install: check-arch
 	install -Dm644 csf/ztoscoresensorframework.service /etc/systemd/system/ztoscoresensorframework.service
 
 clean:
-	rm -f ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
+	rm -f ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h \
 		acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
@@ -518,8 +527,17 @@ check-bt-pair-sheet: xdg-shell-protocol.h
 # what the modem daemon reports of the SIM and the signal; no modem
 .PHONY: check-modem-sim
 check-modem-sim:
-	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c
+	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c mms/mmspdu.c
 	/tmp/ztmetro-modem-sim-test
+
+# MMS without a network: the PDU codec, the access point auto-fill, and the
+# modem daemon handing notifications over
+.PHONY: check-mms
+check-mms: mms/ztmmsd modemd/ztoscorenetworkingd
+	$(CC) -std=c11 -Wall -Wextra -Wno-unused-parameter -g -o /tmp/ztmetro-mms-test mms/tests/mms-test.c $(MMS)
+	cd mms && /tmp/ztmetro-mms-test tests/apns-stock-fixture.xml apns-extra.xml
+	sh mms/tests/ztmmsd-cli.sh mms/ztmmsd
+	python3 modemd/tests/sms-fixtures.py modemd/ztoscorenetworkingd
 
 .PHONY: check-sensord
 check-sensord:
