@@ -7,13 +7,16 @@
  *
  * The thermistors and their decoding tables: power/thermistors/README.md and
  * starlte-rev26.json. Stock reads them all on the SoC's ADC (adc@14230000);
- * this kernel has no driver for it, so none of them is measured here.
+ * here zrn-therm does (/sys/kernel/zrn_therm), and writes the battery's into
+ * the fuel gauge. Without it loaded, none of them is measured.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "ztos-hw.h"
 #include "zrnmetrocore.h"
@@ -76,36 +79,61 @@ static long hwmon_long(const char *dir, const char *leaf) {
 
 static const char *or_unavailable(const char *s) { return s[0] ? s : "unavailable"; }
 
-/* Stock's thermistors (stock DT rev26, BatteryStatusEng), in its order. */
+#define THERM "/sys/kernel/zrn_therm/"
+
+/* Stock's thermistors (stock DT rev26, BatteryStatusEng), in its order, and
+ * zrn-therm's name for each. */
 static const struct {
-	const char *name, *where;
+	const char *name, *file, *where;
 } thermistors[] = {
-	{ "Battery", "SoC ADC channel 4; stock's charging limits and swelling steps" },
-	{ "USB connector", "SoC ADC channel 1; stock cuts VBUS when it overheats" },
-	{ "Charger", "SoC ADC channel 3; stock's charger-temperature current limit" },
-	{ "Wireless coil", "SoC ADC channel 4 (the battery's: no coil thermistor of its own); stock's pad current limit" },
-	{ "AP (sec-ap-thermistor)", "SoC ADC channel 0; stock's thermal throttling" },
-	{ "Wi-Fi (sec-wf-thermistor)", "SoC ADC channel 2" },
-	{ "PA (sec-pa-thermistor)", "SoC ADC channel 10; the modem's power amplifier" },
+	{ "Battery", "battery", "ADC channel 4; charging limits and swelling steps" },
+	{ "USB connector", "usb", "ADC channel 1; stock cuts VBUS when it overheats" },
+	{ "Charger", "charger", "ADC channel 3; stock's charger-temperature current limit" },
+	{ "Wireless coil", "battery", "ADC channel 4, the battery's: no coil thermistor of its own" },
+	{ "AP (sec-ap-thermistor)", "ap", "ADC channel 0; stock's thermal throttling" },
+	{ "Wi-Fi (sec-wf-thermistor)", "wifi", "ADC channel 2" },
+	{ "PA (sec-pa-thermistor)", "pa", "ADC channel 10; the modem's power amplifier" },
 };
+
+/* zrn-therm's raw ADC value for a channel, from its raw file, or -1 */
+static int therm_raw(const char *file) {
+	char all[512], key[32];
+	read_all(THERM "raw", all, sizeof(all));
+	snprintf(key, sizeof(key), "%s ch", file);
+	const char *p = strstr(all, key), *raw = p ? strstr(p, " raw ") : NULL;
+	return raw ? atoi(raw + 5) : -1;
+}
 
 double devtest_draw_temps(cairo_t *cr) {
 	char value[256], a[64];
 	double y = zmc_header(cr, "temperatures");
 
+	bool loaded = access(THERM "status", R_OK) == 0;
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	y += zmc_text(cr, "Stock reads every thermistor on the SoC's ADC. This kernel has no "
-		"driver for it, so none of them is measured here: unavailable, not zero.",
+	y += zmc_text(cr, loaded ? "Every thermistor on the SoC's ADC, read by zrn-therm with stock's tables."
+		: "zrn-therm is not loaded, so no thermistor is measured: unknown, not zero.",
 		FONT_REGULAR, 13, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN) + 16;
 
 	for (size_t i = 0; i < sizeof(thermistors) / sizeof(thermistors[0]); i++) {
-		snprintf(value, sizeof(value), "unavailable (%s)", thermistors[i].where);
+		char path[96];
+		snprintf(path, sizeof(path), THERM "%s", thermistors[i].file);
+		zmc_read_file(path, a, sizeof(a));
+		int raw = therm_raw(thermistors[i].file);
+		if (a[0])
+			snprintf(value, sizeof(value), "%.1f C, ADC %d (%s)", atol(a) / 10.0, raw, thermistors[i].where);
+		else if (loaded)
+			snprintf(value, sizeof(value), "unknown, ADC %d (%s)", raw, thermistors[i].where);
+		else
+			snprintf(value, sizeof(value), "unknown (%s)", thermistors[i].where);
 		y = zmc_field(cr, y, thermistors[i].name, value);
 	}
 
-	/* what can be read today, each for what it is */
-	snprintf(value, sizeof(value), "%.1f C, not a measurement: the last value Android wrote "
-		"into the gauge; nothing on ztOS updates it", psy_long("max170xx_battery", "temp", 0) / 10.0);
+	if (loaded)
+		snprintf(value, sizeof(value), "%.1f C, written from the battery thermistor by zrn-therm",
+			 psy_long("max170xx_battery", "temp", 0) / 10.0);
+	else
+		snprintf(value, sizeof(value), "%.1f C, not a measurement: the last value written into the gauge",
+			 psy_long("max170xx_battery", "temp", 0) / 10.0);
 	y = zmc_field(cr, y, "Fuel gauge Temp register", value);
 
 	psy("p9320-wireless", "die_temp_raw", a, sizeof(a));
@@ -216,7 +244,12 @@ double devtest_draw_charging(cairo_t *cr) {
 	y = zmc_field(cr, y, "Cycles (fuel gauge)", value);
 	battery_health_samsung_text(&bh, value, sizeof(value));
 	y = zmc_field(cr, y, "Cycles (Samsung's count)", value);
-	y = zmc_field(cr, y, "Temperature limits", "not in force: zrn-charge and the wireless 10 V check "
-		"read the gauge's temperature, which is not measured (temperatures page)");
+	char t[32];
+	zmc_read_file(THERM "battery", t, sizeof(t));
+	if (t[0])
+		snprintf(value, sizeof(value), "in force: battery %.1f C from its thermistor", atol(t) / 10.0);
+	else
+		snprintf(value, sizeof(value), "battery temperature unknown: 5 V only, no 9 V or 10 V");
+	y = zmc_field(cr, y, "Temperature limits", value);
 	return y + 10;
 }

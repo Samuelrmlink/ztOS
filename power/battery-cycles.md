@@ -72,6 +72,10 @@ driver), **inferred**.
 - zrn-charge's temperature rules and the p9320 driver's 10 V check read this
   value, so **none of the charging temperature limits works** (source:
   `zrn-charge`, `kernel/p9320_wireless.c`).
+- **Fixed by zrn-therm (power/thermistors/), 2026-11-12:** on its first run
+  the battery thermistor read 43.1 C on the 10 V pad (observed), the gauge took
+  it (temp 333 -> 431), and the P9320 dropped to 5 V at once ("back to 5 V:
+  battery warm"). zrn-charge now reads the thermistor, never the gauge.
 
 ## The kernel proposal (not applied, not flashed)
 
