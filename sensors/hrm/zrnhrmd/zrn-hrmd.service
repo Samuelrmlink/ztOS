@@ -1,0 +1,13 @@
+[Unit]
+Description=ztOS heart rate / SpO2 on demand (MAX86915 through zrn-hrm.ko)
+# Not enabled until the owner approves LED use (sensors/hrm/README.md, step 2).
+After=systemd-modules-load.service
+
+[Service]
+ExecStartPre=/usr/bin/modprobe zrn-hrm
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/zrn-hrmd/zrn-hrmd.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

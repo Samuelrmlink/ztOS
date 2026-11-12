@@ -238,16 +238,63 @@ from the driver). The kernel only delivers raw ADC counts. Open options:
 
 ## Plan and size
 
-| Step | What | Size |
+| Step | What | Status |
 |---|---|---|
-| 0 | **Experiment: read the part ID** (below). Needs approval. | S, a 120-line probe module |
-| 1 | `zrn-hrm.ko`: bus, power, interrupt, FIFO, `/dev/zrn_hrm`; no LEDs until asked | M, about 500 lines |
-| 2 | First LED test: IR only, low current (for example `0x10` = 3.2 mA at range 0, which is 0.2 mA per step by the vendor's `CURRENT_PER_STEP`), finger on the sensor, 100 Hz for 10 s, raw dump. Needs its own approval: it drives the LEDs | S |
-| 3 | `zrnhrmd` or a zrnsensord extension: heart rate from green or IR, SpO2 from red and IR, quality gates, results in `/run/zrn-sensors/hrm` | M, about 400 lines |
-| 4 | ztMETRO heart rate app or shell tile: "place finger", live waveform, BPM, SpO2 marked experimental | S-M |
+| 0 | Read the part ID | **done**: `0x2B`, rev `0x42` |
+| 1 | `driver/zrn-hrm.ko`: a client of research/nfc's `zrn-i2c20` (bus 103 and LDO38), LDO8 through bus 97, boost gpg1-6, `/dev/zrn_hrm` | **built on the host** (`W=1`, no warnings), **not loaded** |
+| 2 | First LED test: IR and red at 9.6 mA, a finger on the sensor, 10 s raw capture (the list below) | **waiting for the owner's approval** |
+| 3 | `zrnhrmd/zrn-hrmd.py`: on-demand heart rate and SpO2, results in `/run/zrn-sensors/hrm` | **written, host-tested** (7 tests, synthetic PPG and a replay of the device's records) |
+| 4 | `apps/heart`: a ztOS SDK app (measure button, pulse trace, BPM, SpO2 marked experimental) that also sets its Start tile | **written**; runs on the host offscreen without errors |
 
-In all, the size is **M**, as the roadmap says. The risk is low once step 0
-passes.
+### The pieces
+
+- **`driver/zrn-hrm.ko`** (about 380 lines). Loading it touches no hardware.
+  - **Opening `/dev/zrn_hrm`:**
+    - reads S2MPB02 0x25 and stops unless it is `0x30`, then writes `0xB0`;
+    - takes the bus with `zrn_i2c20_get()`, which switches LDO38 on;
+    - checks PART_ID;
+    - raises the boost pin, gpg1-6;
+    - writes the step 2 list, then starts.
+  - **While open:** a delayed work drains the FIFO every 100 ms, so it uses no
+    interrupt. `read()` returns 24-byte `struct zrn_hrm_sample` records
+    (`driver/zrn-hrm.h`).
+  - **Closing:** shuts the chip down (`0x09 = 0x80`), sets the boost pin back
+    to an input, restores 0x25 and calls `zrn_i2c20_put()`.
+  - **LED currents** are module parameters, capped in the code at `0x30`
+    (9.6 mA).
+  - `zrn-i2c20.h` is a copy of research/nfc's header (a65b476). Link against
+    that branch's `Module.symvers` with `I2C20_SYMVERS=`.
+- **`zrnhrmd/`**:
+  - `ppg.py`, pure Python:
+    - band-pass filtering;
+    - Elgendi beat detection;
+    - heart rate as the median beat interval;
+    - quality as the share of consistent beat intervals;
+    - SpO2 as `110 − 25·R`, gated on perfusion and on R;
+    - a finger check from the IR DC level.
+  - `zrn-hrmd.py`: a root daemon. Control FIFO `/run/zrn-hrmd.ctl` (`start
+    [s]`, `stop`); it writes `/run/zrn-sensors/hrm` and `hrm-wave`. The device
+    is open only during a measurement, at most 60 s.
+  - `zrn-hrmd.service`: not enabled.
+  - `test_ppg.py`.
+  - Two settings are guesses to tune on the phone: `FINGER_DC` (50000 counts)
+    and the SpO2 line.
+- **`apps/heart`**: the measure and stop button, the live trace, BPM, SpO2
+  (uncalibrated) and the medical caveat. When a measurement finishes it puts
+  the reading on its Start tile with `ztos.tile_update`.
+
+### Step 2 procedure, once approved
+
+Inside `ztlock`:
+
+1. `insmod zrn-i2c20.ko` (the NFC branch), then `insmod zrn-hrm.ko`.
+2. With a fingertip on the sensor:
+   `timeout 10 cat /dev/zrn_hrm > rec.bin`. Closing the device powers
+   everything down.
+3. `rmmod zrn_hrm zrn_i2c20`.
+4. On the host: `zrn-hrmd.py --replay rec.bin --seconds 10`.
+
+Check afterwards that 0x25 reads `0x30` and 0x6F reads `0x2C`.
 
 ## Proposed experiment (step 0): read the part ID
 
@@ -321,34 +368,71 @@ never touches `0x25` (its S2MPB02 list is `0x03`, `0x04`, `0x0d`, `0x0e`,
 Phase 1 made no I2C transfers, GPIO, regulator or module changes, and no devmem
 access on the phone. `stock/EFS.img` was never read.
 
-## Draft: register list for the first LED test (step 2, not approved)
+## Step 2 register list (final, for the owner's approval)
 
-This is for the owner to approve or change, and only after step 0 has read
-`0x2B`. It is modelled on the stock `max86915_init_hrm_reg()`, cut down to the
-IR and red LEDs at about a quarter of stock current.
+This is everything `zrn-hrm.ko` does when `/dev/zrn_hrm` is opened, while it
+runs, and when it is closed (`driver/zrn-hrm.c`, `power_on()`, `drain_fifo()`
+and `power_off()`). It is the stock `max86915_init_hrm_reg()` sequence, with
+three changes:
 
-The test runs 10 s with a finger on the sensor. Every write goes to the
-MAX86915 at 0x57 on bus 99.
+- IR **and** red LEDs, at about a quarter of stock current;
+- every LED on the lowest range;
+- no chip interrupt: the FIFO is polled.
 
-| # | Reg | Value | Meaning | Stock |
-|---|---|---|---|---|
-| 0 | gpg1-6 | output 1 | LED boost on (GPIO) | same |
-| 1 | 0x09 MODE_CONFIG | 0x40 | soft reset | same |
-| 2 | read 0x00, 0x01 | | clear the interrupt status | same |
-| 3 | 0x0C LED1_PA (IR) | 0x30 | 9.6 mA at range 0 | 0x46 at range 2 = 42 mA |
-| 4 | 0x0D LED2_PA (red) | 0x30 | 9.6 mA at range 0 | 0x41 at range 2 = 39 mA (SpO2 mode) |
-| 5 | 0x0E, 0x0F (green, blue) | 0x00 | off | 0x00 |
-| 6 | 0x11 LED_RANGE | 0x00 | every LED at range 0: 0.2 mA per step, 51 mA max | 0xAA (range 2) |
-| 7 | 0x26, 0x27 crosstalk DACs | 0x00 | none | same |
-| 8 | 0x02 INT_ENABLE | 0x80 | FIFO almost full, not per-sample | 0x40 (PPG_RDY) |
-| 9 | 0x13 LED_SEQ_1 | 0x21 | slot 1 IR, slot 2 red | same |
-| 10 | 0x14 LED_SEQ_2 | 0x00 | slots 3 and 4 off | same |
-| 11 | 0x0A MODE_CONFIG_2 | 0x65 | ADC range 3, 100 Hz (SR = 1, to be checked against the datasheet), pulse width 1 | 0x6D (400 Hz) |
-| 12 | 0x08 FIFO_CONFIG | 0x4F | average 4, almost-full at 15 free | 0x40 |
-| 13 | 0x09 MODE_CONFIG | 0x03 | flex mode, run | same |
-| - | reads | 0x04-0x07 | FIFO pointers and data (3 bytes per slot) | |
-| 14 | 0x09 MODE_CONFIG | 0x80 | shutdown at the end | |
-| 15 | gpg1-6 | input | boost off (the pull-down holds it low) | same |
+The test runs for **10 s with a fingertip on the sensor**.
 
-Before this is asked for, check two things against the MAX86915 datasheet:
-the 0x0A sample-rate code, and the 0x08 averaging bits.
+### Sources
+
+- **V**: Samsung's GPL driver, `drivers/optics/max86915.c` and `.h`
+  (`exynos-linux-stable/starlte`, `tw10-android-4.9-q`), with the line where
+  the value or its comment is.
+- **O**: observed on this phone in step 0.
+- **I**: inferred.
+
+The MAX86915 datasheet is not public. The MAX86916 sheet (a close sibling)
+could not be fetched here: the download was refused on the host, and I did not
+retry by another route. The 0x0A and 0x08 codes below are therefore taken from
+the vendor driver, whose values agree with their comments (worked out in the
+table).
+
+| # | Bus / target | Access | Value | Meaning | Source |
+|---|---|---|---|---|---|
+| 1 | bus 97, S2MPB02 0x59, reg 0x25 | read | expect `0x30` | LDO8 off, 1.8 V; stop otherwise | O (step 0) |
+| 2 | bus 97, 0x59, 0x25 | write | `0xB0` | LDO8 (HRM_1.8V_AP) on | O (step 0) |
+| 3 | S2MPS18 0x6F through ACPM, by `zrn-i2c20` | read, then update `0x80`/mask `0xC0` if off, read back | `0x2C` → `0xAC` | VDD_NFC_1P8, the bus pull-ups, on | O (step 0, second run); research/nfc a65b476 |
+| 4 | gpp5-0/1 | i2c-gpio bus 103 (`zrn-i2c20`) | open-drain | bus | O |
+| 5 | 0x57, reg 0xFE | read 2 bytes | expect `xx 2B` | PART_ID check | O (step 0) |
+| 6 | **gpg1-6** | GPIO output | **1** | **LED boost on** | V: `max86915_power_ctrl()` raises `pin_hrm_en` (l.4199), DT `hrm_boost_en` |
+| 7 | wait 1 ms | | | | V: `usleep_range(1000, 1100)` after power-up |
+| 8 | 0x57 reg **0x09** MODE | write | `0x40` | soft reset | V: `max86915_init_status()` l.968 (`RESET_MASK 0x40`) |
+| 9 | 0x57 reg 0x00, 0x01 | read 1 byte each | | clear interrupt status | V: l.975, l.983 |
+| 10 | reg **0x0C** LED1_PA (IR) | write | **`0x30`** | 48 × 0.2 mA = **9.6 mA** | V: `CURRENT_PER_STEP(X) = (X+1)*200` µA (l.106), so range 0 is 0.2 mA per step. Stock is `0x46` at range 2 = 42 mA (l.57, l.96) |
+| 11 | reg **0x0D** LED2_PA (red) | write | **`0x30`** | 9.6 mA | V: the same; stock red is `0x41` (l.58), used in its SDK/SpO2 mode |
+| 12 | reg 0x0E, 0x0F (green, blue) | write | `0x00` | off | V: `HRM_DEFAULT_CURRENT3/4 = 0x00` |
+| 13 | reg **0x11** LED_RANGE | write | `0x00` | every LED at range 0 (max 51 mA at code `0xFF`) | V: `MAX_CURRENT(X) = (X+1)*51000` (l.102); field layout .h l.86-94. Stock `0xAA` |
+| 14 | reg 0x26, 0x27 crosstalk DACs | write | `0x00` | none | V: `HRM_DEFAULT_XTALK_CODE1/2 = 0x00` |
+| 15 | reg 0x02, 0x03 INT_ENABLE 1/2 | write | `0x00` | no interrupts (the driver polls) | V: register addresses; stock writes `0x02 = 0x40` (PPG_RDY). I: 0 is also the reset value |
+| 16 | reg **0x13** LED_SEQ1 | write | `0x21` | slot 1 = LED1 (IR), slot 2 = LED2 (red) | V: `flex_config[0] = (RED_LED_CH << 4) \| IR_LED_CH`, with IR = 1 and red = 2 (.h l.119-120) |
+| 17 | reg 0x14 LED_SEQ2 | write | `0x00` | slots 3 and 4 off | V: the same, without `CONFIG_HRM_GREEN_BLUE` |
+| 18 | reg **0x0A** MODE2 | write | **`0x6D`** | ADC range 3 (32 µA), SR 3 (**400 Hz**), pulse width 1 (**120 µs**) | V, exactly stock HRM: l.2547/2699 `0x0D \| (3 << 5)`, with the comment "32uA, 400Hz, 120us". Cross-checks: `0x0F` "400Hz, LED_PW=400us, 4096nA" (l.2369) gives SR 3 = 400 Hz, PW 3 = 400 µs, range 0 = 4 µA; `0x50` "16uA, 800Hz, 70us" (l.383) gives SR 4 = 800 Hz, PW 0 = 70 µs, range 2 = 16 µA. The fields are bits 6:5, 4:2, 1:0 (.h l.74-79) |
+| 19 | reg **0x08** FIFO_CONFIG | write | **`0x40`** | SMP_AVE 2 = **average 4**, so 400/4 = **100 sets/s**; no rollover; A_FULL 0 | V, exactly stock HRM: l.3662 `(0x02 << 5)`, comment "AVERAGE 4" (l.2707). Cross-checks: `0x1F` "1 Samples avg", `0x3F` "2 Samples avg", `0x5F` "4 Samples avg" (l.391-437) give SMP_AVE 0/1/2 = 1/2/4 |
+| 20 | reg **0x09** MODE | write | `0x03` | flex mode, running (**LEDs pulse from here**) | V: l.3670 |
+| 21 | every 100 ms: reg 0x04-0x06, then 0x07 | read 3 bytes, then n × 6 bytes | | FIFO write, overflow and read pointers (5 bits, 32 sets), then data: 3 bytes per slot, 19 bits | V: `get_num_samples_in_fifo()` l.2744-2765, `FIFO_SIZE 32`, `& 0x7ffff` (l.2878) |
+| 22 | reg **0x09** MODE | write | `0x80` | shutdown (LEDs off) | V: `max86915_disable()` l.4079 (`SHDN_MASK`) |
+| 23 | **gpg1-6** | GPIO input | | boost off (the pull-down holds it low) | V: `gpio_set_value(0)`, then `gpio_direction_input` in power off. O: pin pulled down at rest |
+| 24 | bus 97, 0x59, 0x25 | write, read back | `0x30` | LDO8 off | O (step 0) |
+| 25 | S2MPS18 0x6F | write the value read in 3, read back | `0x2C` | LDO38 back off (`zrn_i2c20_put`) | research/nfc |
+
+**Not used:**
+- the chip interrupt (gpp3-0 is untouched);
+- the green and blue LEDs;
+- the pilot PA (0x12);
+- any test-mode register (stock's 0xFF = 0x54/0x4D trim reads);
+- any address other than 0x57 on bus 103 (0x27, NFC, is never addressed).
+
+**LED energy (I):**
+- Each LED pulses 120 µs at 400 Hz, a 4.8 % duty cycle.
+- At 9.6 mA that averages about 0.46 mA per LED, roughly 1 mA in all, against
+  about 4 mA for stock.
+- The LEDs are on only while `/dev/zrn_hrm` is open: 10 s in this test, and
+  at most 60 s per measurement in the daemon.
