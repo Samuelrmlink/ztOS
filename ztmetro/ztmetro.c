@@ -9300,7 +9300,13 @@ static void shade_activate(struct zt_server *server, int index) {
 		shade_set_open(server, false);
 		break;
 	default:
-		if (index >= 20 && index - 20 < server->n_notes && !server->note_clearing) {
+		if (index >= 20 && index - 20 < server->n_notes && !server->note_clearing &&
+				!strcmp(server->notes[index - 20].key, "zrn-therm")) {
+			/* the battery temperature sensor is off (notifyd/therm-watch.h):
+			 * where it can be tried again */
+			shade_set_open(server, false);
+			launch_cmd(server, "ztsettings battery");
+		} else if (index >= 20 && index - 20 < server->n_notes && !server->note_clearing) {
 			/* a notification: opened to all of its text, or shut again */
 			server->notes[index - 20].expanded = !server->notes[index - 20].expanded;
 			server->notes_dirty = true;

@@ -33,6 +33,9 @@
  *  4. App downloads. Apps that download without saying so are watched through
  *     their own files (download-watch.h) and shown as a progress notification.
  *
+ *  5. The battery temperature sensor's failed-load mark, as a standing
+ *     notification while it is there (therm-watch.h).
+ *
  * Everything goes to the shell as lines down its control pipe
  * ($XDG_RUNTIME_DIR/ztmetro.ctl): "notekey KEY|FLAGS|PERCENT|WHO|APP|TITLE|TEXT"
  * and "noteclose KEY" (see note-logic.h: a program's notifications change in
@@ -55,6 +58,7 @@
 #include <unistd.h>
 #include <systemd/sd-bus.h>
 #include "download-watch.h"
+#include "therm-watch.h"
 
 static const char *runtime_dir;
 static sd_bus *bus;
@@ -697,10 +701,13 @@ int main(void)
 	const char *home = getenv("HOME");
 	for (size_t i = 0; i < DL_N_SOURCES && home; i++)
 		dl_start(&downloads[i], &dl_sources[i], home, shell_tell);
+	static struct therm_watch therm;
+	tw_init(&therm, shell_tell);
 
 	for (;;) {
 		if (resend) {
 			resend = 0;
+			tw_look(&therm, true);
 			for (size_t i = 0; i < DL_N_SOURCES && home; i++)
 				dl_resend(&downloads[i], now_ms());
 			media_told[0] = 0;
@@ -741,8 +748,14 @@ int main(void)
 		}
 		if (wait < 0)
 			wait = 0;
-		struct pollfd fds[2 + DL_N_SOURCES];
-		int n = 0, bus_at = -1, push_at = -1, dl_at = -1;
+		struct pollfd fds[3 + DL_N_SOURCES];
+		int n = 0, bus_at = -1, push_at = -1, dl_at = -1, tw_at = -1;
+		if (therm.fd >= 0) {
+			tw_at = n;
+			fds[n].fd = therm.fd;
+			fds[n].events = POLLIN;
+			fds[n++].revents = 0;
+		}
 		if (bus) {
 			uint64_t until = 0;
 			bus_at = n;
@@ -772,6 +785,8 @@ int main(void)
 		}
 		if (poll(fds, (nfds_t)n, (int)wait) < 0 && errno != EINTR)
 			break;
+		if (tw_at >= 0 && (fds[tw_at].revents & POLLIN))
+			tw_readable(&therm);
 		for (size_t i = 0; i < DL_N_SOURCES && home; i++)
 			if (fds[dl_at + (int)i].revents & POLLIN)
 				dl_readable(&downloads[i], now_ms());
