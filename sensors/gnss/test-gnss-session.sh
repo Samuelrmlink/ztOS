@@ -49,7 +49,7 @@ engine_off() {
 	return 0
 }
 
-samples() {	# N: one current/voltage sample a second, "mA uV" lines
+samples() {	# N: one current/voltage sample a second, "uA uV" lines (gauge units)
 	for _ in $(seq "$1"); do echo "$(cat $B/current_now) $(cat $B/voltage_now 2>/dev/null)"; sleep 1; done
 }
 
@@ -140,8 +140,8 @@ import json, statistics, sys
 n = sys.argv[1]
 def cur(p):
     v = [l.split() for l in open(p) if l.strip()]
-    ma = [int(x[0]) for x in v]
-    mw = [int(x[0]) * int(x[1]) / 1e6 for x in v if len(x) > 1]
+    ma = [int(x[0]) / 1000 for x in v]   # uA -> mA
+    mw = [int(x[0]) * int(x[1]) / 1e9 for x in v if len(x) > 1]   # uA * uV -> mW
     return ma, mw
 b, bw = cur(n + ".base")
 g, gw = cur(n + ".gnss")
