@@ -133,6 +133,7 @@ static void test_menu_keys(void)
 		"[ 5] COMMON", "[6] IMEI", "[7] FACTORY RESET", "[8] LTE BAND SELECTION", "[*] Back",
 	};
 	screen(lines, 9);
+	assert(file_has("allow=125\n"));	/* DEBUG SCREEN, VERSION INFORMATION, COMMON */
 	key_refused("svc key 3");		/* RF NV */
 	key_refused("svc key 4");		/* CONTROL */
 	key_refused("svc key 6");		/* IMEI */

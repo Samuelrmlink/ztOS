@@ -75,8 +75,19 @@ static struct {
 	char net_mode[8], ext_band[136], pci_lock[32];	/* "svc netinfo": GET answers, hex */
 } svc;
 
+static bool svc_key_ok(char k, char *why, size_t size);
+
 static void svc_write(void)
 {
+	/* the digits the daemon would let through on this screen, for the app
+	 * to show as live (whether the screen has come aside) */
+	char allow[11] = "", why[64];
+	bool waiting = svc.waiting;
+	svc.waiting = false;
+	for (char k = '0'; k <= '9'; k++)
+		if (svc_key_ok(k, why, sizeof(why)))
+			strncat(allow, &k, 1);
+	svc.waiting = waiting;
 	mkdir(STATUS_DIR, 0755);
 	FILE *f = fopen(SVC_FILE ".new", "w");
 	if (!f)
@@ -85,6 +96,7 @@ static void svc_write(void)
 		svc.code ? "on" : "off", svc.code ? svc.code->code : "", svc.code ? svc.code->what : "",
 		svc.code ? svc.mode : 0, svc.code ? svc.code->sub : 0, svc.code && svc.code->keys,
 		svc.waiting, svc.screens, svc.note);
+	fprintf(f, "allow=%s\n", allow);
 	fprintf(f, "net_mode=%s\next_band=%s\npci_lock=%s\n", svc.net_mode, svc.ext_band, svc.pci_lock);
 	for (int i = 0; i < svc.n; i++)
 		fprintf(f, "line=%s\n", svc.lines[i]);
