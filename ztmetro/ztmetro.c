@@ -45,6 +45,7 @@
 #include "osk-numeric.h"
 #include "note-logic.h"
 #include "desktop/desktop.h"
+#include "rotation.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -113,6 +114,7 @@
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_touch.h>
+#include <wlr/types/wlr_switch.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
@@ -482,6 +484,13 @@ struct zt_touch_device {
 	struct wl_listener down, up, motion, cancel, destroy;
 };
 
+/* A switch: the flip cover's hall sensor, SW_LID (sensors/hall) */
+struct zt_switch_device {
+	struct zt_server *server;
+	struct wlr_switch *sw;
+	struct wl_listener toggle, destroy;
+};
+
 /* A mouse (or an emulator's pointer) taken as a finger: the left button
  * touches, moving drags, letting go lifts. Where it is, in points. */
 #define POINTER_TOUCH_ID	900
@@ -847,6 +856,24 @@ struct zt_server {
 	struct pods_bar pods_bar;	/* that icon: ztos-podsd's $XDG_RUNTIME_DIR/ztos-pods */
 	bool shade_torch;
 	bool shade_rotation;
+	/* auto-rotation (ROADMAP 8.33, rotation.h): the panel turned with the
+	 * phone for Start and apps; the lock screen, calls and the AOD stay
+	 * portrait. width and height are the turned (logical) ones. */
+	struct {
+		bool enabled;		/* config auto_rotate: off by default */
+		bool locked;		/* config rotation_lock: the quick action */
+		int sensor;		/* ztoscsf-sensord's last "orientation N"; -1 none */
+		int test;		/* the ctl's "rotate N": in place of the sensor; -1 off */
+		int applied;		/* what is drawn now, 0..3 */
+		bool sensor_asked;	/* "orient on" sent */
+		int units;		/* Start's columns as configured (portrait) */
+	} rot;
+	/* the flip cover (ROADMAP 8.34): the hall sensor's SW_LID */
+	struct {
+		bool enabled;		/* config flip_cover: on by default */
+		bool closed;
+		bool seen;		/* a lid switch exists */
+	} cover;
 	bool shade_airplane;
 	bool shade_location;
 	bool shade_notifs_cleared;
@@ -1176,6 +1203,11 @@ static void auth_submit(struct zt_server *);
 static void auth_finish(struct zt_server *);
 static void draw_dialog(struct zt_server *);
 static void screen_set(struct zt_server *, bool);
+static void state_file_write(struct zt_server *server);
+static void rotation_sync(struct zt_server *server);
+static void rotation_apply(struct zt_server *server, int r);
+static struct rot_ctx rotation_ctx(struct zt_server *server);
+static void cover_set(struct zt_server *server, bool closed);
 static void activity(struct zt_server *);
 static void bt_pair_input(struct zt_server *, uint32_t, const char *);
 static void bt_pair_sync(struct zt_server *);
@@ -1673,6 +1705,13 @@ static void quad(struct zt_server *server, GLenum target, GLuint tex, const floa
 		mat_mul(mvp, q, mvp);
 	} else {
 		mat_mul(mvp, server->projection, model);
+	}
+	if (server->rot.applied) {
+		/* auto-rotation: the logical screen turned onto the panel, last,
+		 * in clip space (rotation.h) */
+		float turn[16];
+		rot_clip(server->rot.applied, turn);
+		mat_mul(mvp, turn, mvp);
 	}
 	glUseProgram(program);
 	glUniformMatrix4fv(glGetUniformLocation(program, "mvp"), 1, GL_FALSE, mvp);
@@ -3361,6 +3400,9 @@ static void load_config(struct zt_server *server) {
 	server->scale = 0.0f;	/* automatic: from the panel's width (server_new_output) */
 	server->size_step = 1.0f;
 	server->units = 6;		/* three medium tiles across */
+	server->rot.enabled = false;	/* auto-rotation: Settings turns it on */
+	server->cover.enabled = true;	/* a flip cover closed turns the screen off */
+	server->rot.locked = false;
 	server->menu_speed = 75;
 	server->key_height = DEFAULT_KEY_HEIGHT;
 	server->key_sound = true;
@@ -3486,6 +3528,12 @@ static void load_config(struct zt_server *server) {
 			/* medium tiles across: 2, 3 or 4 */
 			int columns = atoi(value);
 			server->units = columns < 2 ? 4 : columns > 4 ? 8 : columns * 2;
+		} else if (strcmp(key, "flip_cover") == 0) {
+			server->cover.enabled = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+		} else if (strcmp(key, "auto_rotate") == 0) {
+			server->rot.enabled = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
+		} else if (strcmp(key, "rotation_lock") == 0) {
+			server->rot.locked = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
 		} else if (strcmp(key, "brightness") == 0) {
 			server->shade_brightness = atoi(value);
 		} else if (strcmp(key, "timeout") == 0) {
@@ -3578,6 +3626,9 @@ static void load_config(struct zt_server *server) {
 	} else {
 		backlight_set(server->shade_brightness);
 	}
+	/* Start's columns as configured are the upright ones (auto-rotation) */
+	server->rot.units = server->units;
+	server->units = rot_units(server->rot.applied, server->units, MAX_UNITS);
 }
 
 static void add_tile(struct zt_server *server, enum tile_size size, const char *color,
@@ -5957,7 +6008,8 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 	/* Sized against the screen, off photos of the real thing: the battery is
 	 * about 6.8 % of the screen's width and 2.8 % of it high, and the clock's
 	 * digits are as tall as the battery. */
-	const double cell = round(server->width * 0.032 * 2) / 2;	/* battery cell height */
+	/* (the short side: turned to landscape, the row keeps its size) */
+	const double cell = round(fmin(server->width, server->height) * 0.032 * 2) / 2;	/* battery cell height */
 	const double right = server->width - 14;			/* Start's own side margin */
 	const double base = (STATUS_H + cell) / 2;	/* the baseline everything stands on */
 	double x = 14;
@@ -7022,15 +7074,17 @@ static int clock_tick(void *data) {
 
 static void shade_tile_rect(struct zt_server *server, int index, double *x, double *y,
 		double *w, double *h) {
-	*w = (server->width - 2 * SHADE_SIDE - 3 * SHADE_GAP) / 4.0;
+	/* turned to landscape (auto-rotation), all eight in one row */
+	int across = server->width > server->height ? 8 : 4;
+	*w = (server->width - 2 * SHADE_SIDE - (across - 1) * SHADE_GAP) / (double)across;
 	*h = round(*w * 0.66);		/* the quick actions are about 3:2 */
-	*x = SHADE_SIDE + (index % 4) * (*w + SHADE_GAP);
-	*y = SHADE_TOP + (index / 4) * (*h + SHADE_GAP);
+	*x = SHADE_SIDE + (index % across) * (*w + SHADE_GAP);
+	*y = SHADE_TOP + (index / across) * (*h + SHADE_GAP);
 }
 
 static double shade_links_y(struct zt_server *server) {
 	double x, y, w, h;
-	shade_tile_rect(server, 4, &x, &y, &w, &h);
+	shade_tile_rect(server, 7, &x, &y, &w, &h);	/* the last row's */
 	return y + h + 12;
 }
 
@@ -7097,13 +7151,13 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 	/* Bluetooth, rotation and location have nothing behind them on this
 	 * phone yet (no driver, no service), nor the flashlight while
 	 * zrn-flash is not loaded: shown, faint, and not pretending to switch */
-	bool missing = q == Q_ROTATION || q == Q_LOCATION ||
+	bool missing = (q == Q_ROTATION && !server->rot.enabled) || q == Q_LOCATION ||
 		(q == Q_FLASHLIGHT && access(TORCH_PATH, W_OK) != 0) ||
 		(q == Q_BLUETOOTH && access("/sys/class/bluetooth/hci0", F_OK) != 0);
 	bool on = q == Q_WIFI ? server->shade_wifi : q == Q_AIRPLANE ? server->shade_airplane :
 		q == Q_DATA ? server->cell_data_on : q == Q_VIBRATE ? server->haptics_enabled :
 		q == Q_FLASHLIGHT ? server->shade_torch : q == Q_BLUETOOTH ? server->shade_bt :
-		q == Q_BRIGHTNESS;
+		q == Q_ROTATION ? server->rot.locked : q == Q_BRIGHTNESS;
 	const struct audio_output *audio = q == Q_AUDIO ? audio_active_output(server) : NULL;
 	if (q == Q_AUDIO) {
 		on = audio != NULL;
@@ -9112,6 +9166,18 @@ static void shade_activate(struct zt_server *server, int index) {
 		audio_modal_show(server);
 		break;
 	case 100 + Q_ROTATION:
+		/* auto-rotation held upright, as on stock (8.33). With
+		 * auto-rotation off in Settings there is nothing to lock: faint */
+		if (!server->rot.enabled) {
+			break;
+		}
+		hap(server, HAP_TAP, HG_SYSTEM);
+		server->rot.locked = !server->rot.locked;
+		config_keep_text("rotation_lock", server->rot.locked ? "on" : "off");
+		state_file_write(server);
+		draw_shade(server);
+		damage(server);
+		break;
 	case 100 + Q_LOCATION:
 	case 100 + Q_NONE:
 		break;	/* nothing behind them yet: see shade_tile_draw */
@@ -12759,6 +12825,9 @@ static const char *aod_why(struct zt_server *server) {
 	if (demoloop_active()) {
 		return "the demo loop runs";
 	}
+	if (server->cover.closed && server->cover.enabled) {
+		return "the flip cover is closed";	/* nobody can see it */
+	}
 	if (server->call_over_lock) {
 		/* a dark, untouchable screen: a lit, double-tappable one
 		 * against a cheek is worse (the proximity sensor's blank is
@@ -13655,6 +13724,12 @@ static void screen_set(struct zt_server *server, bool on) {
 		aod_bl_release();
 	}
 	server->screen_on = on;
+	if (!on) {
+		/* upright again before the AOD draws, and the sensor off. (On, the
+		 * next frame decides, after lock() below: no turn and back.) */
+		server->aod = aod;	/* (so that it counts; set again further down) */
+		rotation_sync(server);
+	}
 	desk_phone_view(server);	/* the desktop is drawn only while seen */
 	state_file_write(server);
 	if (demoloop_active()) {
@@ -15402,16 +15477,18 @@ static void touch_down(struct wl_listener *listener, void *data) {
 	struct zt_touch_device *device = wl_container_of(listener, device, down);
 	struct zt_server *server = device->server;
 	struct wlr_touch_down_event *event = data;
-	touch_begin(server, event->touch_id, event->x * server->width,
-		event->y * server->height, event->time_msec);
+	double ux, uy;
+	rot_touch(server->rot.applied, event->x, event->y, &ux, &uy);	/* the glass is portrait */
+	touch_begin(server, event->touch_id, ux * server->width, uy * server->height, event->time_msec);
 }
 
 static void touch_motion(struct wl_listener *listener, void *data) {
 	struct zt_touch_device *device = wl_container_of(listener, device, motion);
 	struct zt_server *server = device->server;
 	struct wlr_touch_motion_event *event = data;
-	touch_update(server, event->touch_id, event->x * server->width,
-		event->y * server->height, event->time_msec);
+	double ux, uy;
+	rot_touch(server->rot.applied, event->x, event->y, &ux, &uy);
+	touch_update(server, event->touch_id, ux * server->width, uy * server->height, event->time_msec);
 }
 
 static void touch_up(struct wl_listener *listener, void *data) {
@@ -15463,8 +15540,10 @@ static void pointer_motion_absolute(struct wl_listener *listener, void *data) {
 	if (desk_owns_pointers(server)) {
 		return;
 	}
-	server->pointer_x = event->x * server->width;
-	server->pointer_y = event->y * server->height;
+	double ux, uy;
+	rot_touch(server->rot.applied, event->x, event->y, &ux, &uy);	/* (the panel turned) */
+	server->pointer_x = ux * server->width;
+	server->pointer_y = uy * server->height;
 	pointer_moved(server, event->time_msec);
 }
 
@@ -15518,6 +15597,10 @@ static void state_file_write(struct zt_server *server) {
 		server->height, server->scale, o->width, o->height, server->screen_on ? "on" : "off",
 		server->aod ? "on" : "off", server->aod_frames);
 	fprintf(f, "prox_blank %s\n", server->prox_blank ? "on" : "off");
+	fprintf(f, "cover %s%s\n", server->cover.closed ? "closed" : "open", server->cover.enabled ? "" : " ignored");
+	fprintf(f, "rotation %d\nauto_rotate %s\nrotation_lock %s\norientation %d\n", server->rot.applied,
+		server->rot.enabled ? "on" : "off", server->rot.locked ? "on" : "off",
+		server->rot.test >= 0 ? server->rot.test : server->rot.sensor);
 	fclose(f);
 	rename(tmp, path);
 }
@@ -16044,6 +16127,26 @@ static void ctl_command(struct zt_server *server, char *line) {
 			strncmp(line + 4, "on", 2) == 0 ? AOD_ON : AOD_OFF;
 		wlr_log(WLR_INFO, "aod: mode %d (ctl)", server->aod_mode);
 		aod_sync(server);
+	} else if (strncmp(line, "cover ", 6) == 0) {
+		/* cover closed | open: as the hall sensor would say (tests) */
+		cover_set(server, strncmp(line + 6, "closed", 6) == 0);
+	} else if (strncmp(line, "orientation ", 12) == 0) {
+		/* ztoscsf-sensord: the phone's quarter turn, 0..3 (auto-rotation) */
+		int r = atoi(line + 12);
+		if (r >= 0 && r <= 3 && r != server->rot.sensor) {
+			server->rot.sensor = r;
+			state_file_write(server);
+			damage(server);	/* rotation_sync, at the frame */
+		}
+	} else if (strncmp(line, "rotate ", 7) == 0) {
+		/* rotate 0..3 | auto: a test's orientation in place of the sensor's,
+		 * as if auto-rotation were on (still upright on the lock screen) */
+		server->rot.test = strncmp(line + 7, "auto", 4) == 0 ? -1 : atoi(line + 7) & 3;
+		struct rot_ctx c = rotation_ctx(server);
+		wlr_log(WLR_INFO, "rotation: test %d: wanted %d (screen %d, locked %d, call %d, special %d, app %d)",
+			server->rot.test, rot_wanted(&c), c.screen_on, c.locked, c.call_screen, c.special, c.app_opts_out);
+		state_file_write(server);
+		damage(server);
 	} else if (strncmp(line, "prox_blank ", 11) == 0) {
 		/* ztoscsf-sensord, in a call: near (on) or far (off) */
 		bool near = strncmp(line + 11, "on", 2) == 0;
@@ -16636,6 +16739,47 @@ static void set_default_keymap(struct wlr_keyboard *keyboard) {
 	xkb_context_unref(context);
 }
 
+/* The flip cover, as on stock: closed, the screen goes off (and locks, as
+ * the power key's does); opened, it comes on at the lock screen. Settings'
+ * switch (flip_cover) turns both off. A cover closed in a call darkens the
+ * screen as the power key would; the call goes on. */
+static void cover_set(struct zt_server *server, bool closed) {
+	if (closed == server->cover.closed) {
+		return;
+	}
+	server->cover.closed = closed;
+	wlr_log(WLR_INFO, "flip cover: %s%s", closed ? "closed" : "opened",
+		server->cover.enabled ? "" : " (ignored: switched off in Settings)");
+	state_file_write(server);
+	if (!server->cover.enabled) {
+		return;
+	}
+	if (closed && server->screen_on) {
+		touches_cancel_all(server);
+		screen_set(server, false);	/* dark, not the AOD: aod_why */
+	} else if (closed) {
+		aod_sync(server);	/* the AOD showing goes dark */
+	} else if (!server->screen_on) {
+		screen_set(server, true);	/* to the lock screen: screen_set locks */
+		activity(server);
+	}
+}
+
+static void switch_toggle(struct wl_listener *listener, void *data) {
+	struct zt_switch_device *sw = wl_container_of(listener, sw, toggle);
+	struct wlr_switch_toggle_event *event = data;
+	if (event->switch_type == WLR_SWITCH_TYPE_LID) {
+		cover_set(sw->server, event->switch_state == WLR_SWITCH_STATE_ON);
+	}
+}
+
+static void switch_destroy(struct wl_listener *listener, void *data) {
+	struct zt_switch_device *sw = wl_container_of(listener, sw, destroy);
+	wl_list_remove(&sw->toggle.link);
+	wl_list_remove(&sw->destroy.link);
+	free(sw);
+}
+
 static void server_new_input(struct wl_listener *listener, void *data) {
 	struct zt_server *server = wl_container_of(listener, server, new_input);
 	struct wlr_input_device *device = data;
@@ -16687,6 +16831,16 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 		wl_signal_add(&device->events.destroy, &keyboard->destroy);
 		wl_list_insert(&server->keyboards, &keyboard->link);
 		wlr_log(WLR_INFO, "keys: %s", device->name);
+	} else if (device->type == WLR_INPUT_DEVICE_SWITCH) {
+		struct zt_switch_device *sw = calloc(1, sizeof(*sw));
+		sw->server = server;
+		sw->sw = wlr_switch_from_input_device(device);
+		sw->toggle.notify = switch_toggle;
+		wl_signal_add(&sw->sw->events.toggle, &sw->toggle);
+		sw->destroy.notify = switch_destroy;
+		wl_signal_add(&device->events.destroy, &sw->destroy);
+		server->cover.seen = true;
+		wlr_log(WLR_INFO, "switch: %s", device->name);
 	}
 }
 
@@ -17179,6 +17333,15 @@ static double ftrace_clock(void) {
 	return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
+/* glScissor for a box in the logical screen's pixels, rows from the top as
+ * seen: the same box on the panel when it is turned (rotation.h) */
+static void zt_scissor(struct zt_server *server, int x, int y, int w, int h) {
+	struct wlr_output *o = server->output->wlr_output;
+	int b[4];
+	rot_box(server->rot.applied, o->width, o->height, x, y, w, h, b);
+	glScissor(b[0], b[1], b[2], b[3]);
+}
+
 static void render_frame(struct zt_server *server) {
 	if (server->aod) {
 		aod_render_frame(server);
@@ -17251,7 +17414,10 @@ static void render_frame(struct zt_server *server) {
 		return;
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-	glViewport(0, 0, output->width, output->height);
+	glViewport(0, 0, output->width, output->height);	/* the panel's own pixels */
+	/* turned (auto-rotation), the logical screen's pixels; zt_scissor maps them */
+	int lpw = server->rot.applied & 1 ? output->height : output->width;
+	int lph = server->rot.applied & 1 ? output->width : output->height;
 	glDisable(GL_SCISSOR_TEST);
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_CULL_FACE);
@@ -17293,21 +17459,21 @@ static void render_frame(struct zt_server *server) {
 		}
 	}
 	/* (a full-screen app, its bars away or on their way, shows under the strip) */
-	int under_bottom = server->sensorhub_fail_screen || fs_bars_t(server) < 0.999f ? output->height :
-		output->height - (int)floorf(NAV_H * server->scale);
+	int under_bottom = server->sensorhub_fail_screen || fs_bars_t(server) < 0.999f ? lph :
+		lph - (int)floorf(NAV_H * server->scale);
 	/* the lock screen nearly down: only the nav bar's strip, which covers
 	 * the rest, is left. An empty scissor (height below zero) was a GL
 	 * error, and every frame of the lock screen's last 0.5 s was dropped */
 	if (under_bottom <= under_top) {
 		lock_covers = true;
 	}
-	if (!lock_covers && (under_top > 0 || under_bottom < output->height)) {
+	if (!lock_covers && (under_top > 0 || under_bottom < lph)) {
 		glEnable(GL_SCISSOR_TEST);
-		glScissor(0, under_top, output->width, under_bottom - under_top);	/* row 0 is the top */
+		zt_scissor(server, 0, under_top, lpw, under_bottom - under_top);	/* row 0 is the top */
 	}
 	/* The opaque boot splash covers these layers; avoid drawing them underneath. */
 	if (server->splash || lock_covers) {
-		retro_draw(server, output->width, output->height, true, false);	/* only notes it is covered */
+		retro_draw(server, lpw, lph, true, false);	/* only notes it is covered */
 	}
 	if (!server->splash && !lock_covers) {
 	/* An app at rest in front covers them as the lock screen does: Superscan
@@ -17321,7 +17487,8 @@ static void render_frame(struct zt_server *server) {
 	if (app && app->mapped && !dm_lock) {
 		app_origin(app, &draw.ox, &draw.oy);
 		draw.fit = app_fit(server, app);
-		plane = plane_pick(server, app, &draw, app_covers, &plane_state);
+		/* (turned, the page is drawn by the GPU: a plane would need its own transform) */
+		plane = !server->rot.applied && plane_pick(server, app, &draw, app_covers, &plane_state);
 	}
 	if (plane) {
 		wlr_output_state_set_buffer(&state, buffer);
@@ -17351,7 +17518,7 @@ static void render_frame(struct zt_server *server) {
 	/* Start and the app list beside it, unless they have swung away completely;
 	 * or, in the DotMatrix style, its home in their place */
 	if (retro_on(server)) {
-		retro_draw(server, output->width, output->height, server->boot_logo_stage != 0, app_covers);
+		retro_draw(server, lpw, lph, server->boot_logo_stage != 0, app_covers);
 	} else if (server->start_t < 0.999f && !app_covers) {
 		float page_dx = -server->page * (float)server->width;
 		int n = server->page < 0.999f ? server->n_tiles : 0, draw_order[n > 0 ? n : 1];
@@ -17462,7 +17629,7 @@ static void render_frame(struct zt_server *server) {
 				/* nothing of what was found shows over the box or above it */
 				int top = (int)((SEARCH_BOX_Y + SEARCH_BOX_H + 4) * server->scale);
 				glEnable(GL_SCISSOR_TEST);
-				glScissor(0, top, output->width, output->height - top);
+				zt_scissor(server, 0, top, lpw, lph - top);
 			}
 			for (int i = 0; i < server->n_items; i++) {
 				struct app_item *it = &server->items[i];
@@ -17621,7 +17788,7 @@ static void render_frame(struct zt_server *server) {
 		 * down over it, as the action centre's does, only as far as its
 		 * second line */
 		glEnable(GL_SCISSOR_TEST);
-		glScissor(0, 0, output->width, (int)((STATUS_H + (PEEK_H - STATUS_H) * server->peek) * server->scale));
+		zt_scissor(server, 0, 0, lpw, (int)((STATUS_H + (PEEK_H - STATUS_H) * server->peek) * server->scale));
 		layer_draw(server, &server->peek_layer, 0, 0, 1.0f);
 		plug_over(server, 0.0f);
 		glDisable(GL_SCISSOR_TEST);
@@ -17639,7 +17806,7 @@ static void render_frame(struct zt_server *server) {
 		 */
 		float reveal = server->shade_h, bar = SHADE_HANDLE;
 		float cover = reveal > bar ? reveal - bar : 0;
-		int px_w = output->width;
+		int px_w = lpw;
 		int px_cover = (int)(cover * server->scale), px_bar = (int)(bar * server->scale);
 		float m[16];
 		mat_identity(m);
@@ -17652,7 +17819,7 @@ static void render_frame(struct zt_server *server) {
 
 		glEnable(GL_SCISSOR_TEST);
 		/* the frame buffer's first row is the top of the screen */
-		glScissor(0, 0, px_w, px_cover);
+		zt_scissor(server, 0, 0, px_w, px_cover);
 		layer_draw(server, &server->shade_layer, 0, 0, 1.0f);
 		if (server->shade_row && server->peek_layer.tex) {
 			layer_draw(server, &server->peek_layer, 0, 0, 1.0f);
@@ -17662,7 +17829,7 @@ static void render_frame(struct zt_server *server) {
 		 * further down than the panel has been uncovered */
 		double win_top = server->note_top, win_end = fmin(server->note_top + server->note_view, cover);
 		if (win_end > win_top) {
-			glScissor(0, (int)(win_top * server->scale), px_w, (int)ceil((win_end - win_top) * server->scale));
+			zt_scissor(server, 0, (int)(win_top * server->scale), px_w, (int)ceil((win_end - win_top) * server->scale));
 			int clear_row = 0;
 			for (int k = 0; k < server->n_notes; k++) {
 				struct zt_layer *layer = &server->note_layer[k];
@@ -17691,16 +17858,16 @@ static void render_frame(struct zt_server *server) {
 				if (swiped && server->note_head[k]) {
 					/* the app's name above it stays: others may be under it */
 					double split = fmax(win_top, fmin(win_end, y + NOTE_HEAD_H));
-					glScissor(0, (int)(win_top * server->scale), px_w, (int)ceil((split - win_top) * server->scale));
+					zt_scissor(server, 0, (int)(win_top * server->scale), px_w, (int)ceil((split - win_top) * server->scale));
 					layer_draw(server, layer, 0, (float)y, 1.0f);
-					glScissor(0, (int)(split * server->scale), px_w, (int)ceil((win_end - split) * server->scale));
+					zt_scissor(server, 0, (int)(split * server->scale), px_w, (int)ceil((win_end - split) * server->scale));
 					layer_draw(server, layer, (float)sx, (float)y, note_swipe_alpha(sx, server->width));
-					glScissor(0, (int)(win_top * server->scale), px_w, (int)ceil((win_end - win_top) * server->scale));
+					zt_scissor(server, 0, (int)(win_top * server->scale), px_w, (int)ceil((win_end - win_top) * server->scale));
 				} else {
 					layer_draw(server, layer, (float)sx, (float)y, swiped ? note_swipe_alpha(sx, server->width) : 1.0f);
 				}
 			}
-			glScissor(0, 0, px_w, px_cover);
+			zt_scissor(server, 0, 0, px_w, px_cover);
 		}
 		for (int i = 0; i < 8; i++) {
 			struct zt_layer *layer = &server->shade_tile_layer[i];
@@ -17721,7 +17888,7 @@ static void render_frame(struct zt_server *server) {
 				layer->th ? (float)layer->ph / layer->th : 1.0f);
 		}
 		/* the bar: the bottom strip of the panel, riding on the edge */
-		glScissor(0, px_cover, px_w, px_bar);
+		zt_scissor(server, 0, px_cover, px_w, px_bar);
 		layer_draw(server, &server->shade_layer, 0, reveal - (float)SHADE_MAX_H, 1.0f);
 		glDisable(GL_SCISSOR_TEST);
 	}
@@ -18055,6 +18222,112 @@ static void render_frame(struct zt_server *server) {
 	}
 }
 
+/* ---- auto-rotation (ROADMAP 8.33) ------------------------------------------
+ *
+ * The panel stays portrait; when the phone is turned, everything is drawn
+ * turned onto it (quad's last step), the glass's touches are turned back
+ * (rot_touch), and the shell lays itself out for the turned width and height
+ * as it does at start. The arithmetic and which screens turn are in
+ * rotation.h. ztoscsf-sensord measures the orientation only while it could be
+ * used (rot_sensor_wanted): "orient on|off" on its pipe, "orientation N"
+ * back on ours. Only the phone's own panel turns: the desktop on DP-1 is
+ * another output and is left as it is. */
+
+static struct rot_ctx rotation_ctx(struct zt_server *server) {
+	const char *id = server->shown && server->shown->xdg_toplevel ? server->shown->xdg_toplevel->app_id : NULL;
+	/* the lock screen up, or still on its way off */
+	bool lock_seen = server->locked || (server->lock_layer.tex && server->lock_y > 1.0f - server->height);
+	struct rot_ctx c = {
+		.enabled = server->rot.enabled || server->rot.test >= 0,
+		.lock_tile = server->rot.locked && server->rot.test < 0,
+		.sensor = server->rot.test >= 0 ? server->rot.test : server->rot.sensor,
+		.screen_on = server->screen_on && !server->prox_blank,
+		.aod = server->aod,
+		.locked = lock_seen && server->lock_enabled,
+		.call_screen = server->call_over_lock,
+		.special = server->splash || server->sensorhub_fail_screen || retro_on(server) ||
+			server->boot_logo_stage != 0,
+		.app_opts_out = rot_app_opts_out(id),
+	};
+	return c;
+}
+
+/* Lay the shell out again for the turned (or upright) screen: what
+ * server_new_output does at start, with the size swapped. */
+static void rotation_apply(struct zt_server *server, int r) {
+	struct wlr_output *o = server->output->wlr_output;
+	int pw, ph;	/* the panel, portrait, in points */
+	int was = server->rot.applied;
+	wlr_output_effective_resolution(o, &pw, &ph);
+	server->rot.applied = r;
+	server->width = r & 1 ? ph : pw;
+	server->height = r & 1 ? pw : ph;
+	server->units = rot_units(r, server->rot.units, MAX_UNITS);
+	wlr_log(WLR_INFO, "rotation: %d -> %d, %dx%d points, %d columns", was, r,
+		server->width, server->height, server->units);
+	projection_set(server);
+	/* the app list's rows and the letters' board are drawn for a width */
+	if (gl_begin(server)) {
+		for (int i = 0; i < server->n_items; i++) {
+			if (server->items[i].layer.tex) {
+				glDeleteTextures(1, &server->items[i].layer.tex);
+				server->items[i].layer.tex = 0;
+			}
+		}
+		if (server->board_layer.tex) {
+			glDeleteTextures(1, &server->board_layer.tex);
+			server->board_layer.tex = 0;
+		}
+		gl_end(server);
+	}
+	walls_load(server);
+	place_tiles(server);
+	draw_start(server);
+	set_scroll(server, server->scroll);
+	list_relayout(server);
+	draw_rounds(server);
+	draw_status(server);
+	draw_shade(server);
+	draw_nav(server);
+	if (server->osk_visible) {
+		osk_relayout(server);	/* the keys across the new width, the app clear of them */
+	} else {
+		osk_layout(server);
+	}
+	if (!server->locked) {
+		server->lock_y = (float)-server->height;	/* still out of sight, above */
+	}
+	draw_lock(server);
+	/* every app gets the room it now has (Wayland: a new configure) */
+	struct zt_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->xdg_toplevel && t->xdg_toplevel->base->initialized &&
+				!desk_surface(server, t->xdg_toplevel->base->surface)) {
+			app_configure(server, t);
+		}
+	}
+	state_file_write(server);
+	damage(server);
+}
+
+/* Whether to measure, and whether to turn: at every frame and at the
+ * screen's changes. Cheap when nothing changed. */
+static void rotation_sync(struct zt_server *server) {
+	if (!server->output || server->width <= 0) {
+		return;
+	}
+	struct rot_ctx c = rotation_ctx(server);
+	bool measure = rot_sensor_wanted(&c) && server->rot.test < 0;
+	if (measure != server->rot.sensor_asked) {
+		server->rot.sensor_asked = measure;
+		pipe_tell("/run/ztoscsf-sensord.ctl", measure ? "orient on\n" : "orient off\n");
+	}
+	int r = rot_wanted(&c);
+	if (r != server->rot.applied) {
+		rotation_apply(server, r);
+	}
+}
+
 static void output_frame(struct wl_listener *listener, void *data) {
 	struct zt_output *output = wl_container_of(listener, output, frame);
 	struct zt_server *server = output->server;
@@ -18070,6 +18343,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	 * its frame callback, on every vblank, not only when its commit came in
 	 * before this one: a commit just after it waited for the one after, and
 	 * Superscan's scroll fell into frames two vblanks apart */
+	rotation_sync(server);	/* (the panel turned with the phone, or back) */
 	bool app_live = (int32_t)(server->app_live_until - now_ms()) > 0;
 	/* nothing damaged and nothing moving: no frame, and no further wake-ups */
 	if (server->dirty || server->moving || app_live || loading_active(server) || animating(server, NULL)) {
@@ -18306,8 +18580,13 @@ static int reload(int signal_number, void *data) {
 	int release_ms = server->force_release_ms, release_strength = server->force_release_strength;
 	int force_level = server->force_press_level;
 	int ring_before = server->ring_volume;
+	int units_before = server->units;
 	reload_config(server);
 	desk_reload(server);
+	if (server->units != units_before && server->rot.applied) {
+		rotation_apply(server, server->rot.applied);	/* columns changed while turned */
+	}
+	damage(server);	/* auto-rotation on or off: the next frame turns (rotation_sync) */
 	if (force_level != server->force_press_level) {
 		force_level_apply(server);
 	}
@@ -18832,6 +19111,7 @@ int main(int argc, char *argv[]) {
 	for (int i = 0; i < 8; i++) {
 		server.shade_press[i] = 1.0f;
 	}
+	server.rot.sensor = server.rot.test = -1;	/* no orientation yet */
 	load_config(&server);
 	/* The style, once for the whole session: ztmetro-session exports it from
 	 * the config as ZTRF_SHELL_STYLE; every app started from here inherits it.
