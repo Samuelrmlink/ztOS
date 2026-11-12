@@ -558,6 +558,7 @@ check-sensord:
 	python3 sensord/test-sensord-queue.py
 	python3 sensord/test-sensord-prox.py
 	python3 sensord/test-sensord-orient.py
+	python3 sensord/test-sensord-pocket.py
 
 .PHONY: check-csf
 check-csf:

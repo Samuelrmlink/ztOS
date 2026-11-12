@@ -32,6 +32,11 @@
  *	orient_axes +x+y+z	which raw accelerometer axes are the screen's
  *				right, top and out of the glass (remembered)
  *	orient_180 on | off	whether upside down counts (remembered; off)
+ *	pocket on | off		from the shell: the always-on display would show
+ *				(screen off); check now and then whether the phone
+ *				is covered, and say "pocket covered|clear" to the
+ *				shell (see "the always-on display in a pocket")
+ *	pocket check		(tests) the next check now
  *
  * In a call held to the ear (dialing, ringing out or active, the sound not on
  * the speaker or a headset) and with the screen on, the proximity sensor is
@@ -318,6 +323,7 @@ static void sensor_set(struct sensor *s, bool on) {
  * assert may have been the overlap). Taking the sensors off is enough.
  */
 static bool call_prox;	/* a call held to the ear: see call_update */
+static bool pocket_burst;	/* a pocket check is reading: see pocket_start */
 static void prox_reset(void);
 static void status(void);
 
@@ -330,7 +336,10 @@ static void sensors_apply(void) {
 		/* the always-on display: only the light, slowly */
 		bool aod = !screen_on && aod_ms > 0 && s->id == 9;
 		bool orienting = s->id == ACCEL_ID && orient_on;
-		bool on = (screen_on && (s->wanted || (s->id == PROX_ID && call_prox) || orienting)) || aod;
+		/* a pocket check: proximity and light, a moment, screen off */
+		bool pocket = pocket_burst && (s->id == PROX_ID || s->id == 9);
+		bool on = (screen_on && (s->wanted || (s->id == PROX_ID && call_prox) || orienting)) || aod ||
+			pocket;
 		int ms = s->ms;
 		if (s->id == 9) {
 			ms = aod ? aod_ms : LIGHT_MS;
@@ -618,6 +627,111 @@ static void orient_reading(const int16_t v[3]) {
 	orient_tell();
 }
 
+/* --- the always-on display in a pocket --------------------------------- */
+
+/*
+ * While the shell would show the always-on display (screen off, the AOD
+ * wanted: "pocket on"), it is hidden while the phone is covered, in a pocket
+ * or face down, so the SoC may sleep (power/aod/POCKET.md). Nothing streams
+ * for it: a check turns proximity and light on, takes the first reading of
+ * each (both report at once when added), and turns them off again, about a
+ * quarter of a second. One check when the shell asks, then one every
+ * POCKET_EVERY_NS of the phone's time (CLOCK_BOOTTIME). A check that falls
+ * due while the SoC sleeps runs at the next wake (resume_seq, or anything
+ * else that wakes this daemon): no wake of its own. The shell is told
+ * "pocket covered" or "pocket clear" when that changes.
+ *
+ * Covered: proximity near and the room dark at the sensor (lux below
+ * POCKET_LUX). No proximity reading within POCKET_BURST_NS changes nothing:
+ * the display stays as it was, and an unknown phone shows it.
+ */
+#define POCKET_EVERY_NS		(120ULL * 1000000000ULL)
+static uint64_t pocket_every = POCKET_EVERY_NS;	/* ZTOSCSF_POCKET_EVERY_MS (tests) */
+#define POCKET_BURST_NS		1500000000ULL	/* at most, waiting for proximity */
+#define POCKET_LIGHT_NS		400000000ULL	/* and for light after it */
+#define POCKET_LUX		5
+
+static int light_last = -1;	/* the light sensor's last lux, from any reading */
+static bool pocket_on;		/* the shell would show the AOD: checks run */
+static int pocket_told = -1;	/* what the shell has: 1 covered, 0 clear, -1 nothing */
+static int pocket_prox = -1, pocket_lux = -1;	/* this check's readings */
+static uint64_t pocket_started, pocket_prox_at, pocket_next;
+static unsigned pocket_checks;	/* for the status file */
+
+static void pocket_start(void) {
+	pocket_burst = true;
+	pocket_prox = -1;
+	/* the light already on (for the AOD's own level): it reports changes
+	 * only, so its last reading is the room's */
+	pocket_lux = sensors[0].on ? light_last : -1;
+	pocket_started = now_ns();
+	pocket_checks++;
+	sensors_apply();
+}
+
+static void pocket_tell(int covered) {
+	if (covered == pocket_told) {
+		return;
+	}
+	if (shell(covered ? "pocket covered\n" : "pocket clear\n")) {
+		fprintf(stderr, "ztoscsf-sensord: pocket: %s\n", covered ? "covered, AOD hidden" : "clear");
+		pocket_told = covered;
+	}
+}
+
+/* The check is over: the sensors off, the result to the shell, the next. */
+static void pocket_end(void) {
+	pocket_burst = false;
+	sensors_apply();
+	pocket_next = now_ns() + pocket_every;
+	if (pocket_prox < 0) {
+		fprintf(stderr, "ztoscsf-sensord: pocket: no proximity reading, nothing changed\n");
+	} else if (pocket_on) {
+		/* light unknown (it never came): proximity alone */
+		pocket_tell(pocket_prox == 1 && (pocket_lux < 0 || pocket_lux < POCKET_LUX));
+	}
+	status();
+}
+
+/* After each reading, each wake and each command. */
+static void pocket_tick(void) {
+	uint64_t now = now_ns();
+	if (pocket_burst) {
+		bool timeout = now - pocket_started >= POCKET_BURST_NS;
+		bool done = pocket_prox >= 0 && (pocket_lux >= 0 || now - pocket_prox_at >= POCKET_LIGHT_NS);
+		if (done || timeout || !pocket_on) {
+			pocket_end();
+		}
+	} else if (pocket_on && now >= pocket_next) {
+		pocket_start();
+	}
+}
+
+/* ms until pocket_tick has something to do, -1 for nothing */
+static int pocket_wait_ms(void) {
+	if (!pocket_on && !pocket_burst) {
+		return -1;
+	}
+	uint64_t now = now_ns(), at = pocket_burst ? pocket_started + POCKET_BURST_NS : pocket_next;
+	if (pocket_burst && pocket_prox >= 0 && pocket_prox_at + POCKET_LIGHT_NS < at) {
+		at = pocket_prox_at + POCKET_LIGHT_NS;
+	}
+	return at <= now ? 0 : (int)((at - now + 999999) / 1000000);
+}
+
+static void pocket_set(bool on) {
+	if (on == pocket_on) {
+		return;
+	}
+	pocket_on = on;
+	if (on) {
+		pocket_next = 0;	/* a check now */
+	} else {
+		pocket_told = -1;	/* the shell forgets it too: a fresh start next time */
+	}
+	pocket_tick();
+}
+
 /* --- frames from the hub ----------------------------------------------- */
 
 static void record(struct sensor *s, const uint8_t *d) {
@@ -631,6 +745,10 @@ static void record(struct sensor *s, const uint8_t *d) {
 		memcpy(&lux, d, 4);
 		memcpy(&cct, d + 4, 4);
 		memcpy(rgbw, d + 8, 8);
+		light_last = lux > 1000000 ? 1000000 : (int)lux;
+		if (pocket_burst && pocket_lux < 0) {
+			pocket_lux = light_last;
+		}
 		light(lux);
 		tone(cct);
 		/* files only when the value really changes: 5 % lux (at least 2), or 100 K */
@@ -665,6 +783,10 @@ static void record(struct sensor *s, const uint8_t *d) {
 		memcpy(&adc, d + 1, 2);
 		snprintf(text, sizeof(text), "%s %u\n", d[0] ? "near" : "far", adc);
 		publish("prox", text);
+		if (pocket_burst && pocket_prox < 0) {
+			pocket_prox = d[0] ? 1 : 0;
+			pocket_prox_at = now_ns();
+		}
 		prox_reading(d[0] ? 1 : 0);
 		return;
 	}
@@ -842,12 +964,13 @@ static void save(void) {
 }
 
 static void status(void) {
-	char text[256];
+	char text[320];
 	snprintf(text, sizeof(text), "auto=%s\nscreen=%s\nopentone=%s\naod=%d\ncall=%s %s\nprox=%s\n"
-		"orient=%s %d\n",
+		"orient=%s %d\npocket=%s %s %u\n",
 		auto_on ? "on" : "off", screen_on ? "on" : "off", tone_on ? "on" : "off", aod_ms,
 		call_state, call_route, !call_prox ? "off" : prox_told ? "near" : "on",
-		orient_on ? "on" : "off", orient.cur);
+		orient_on ? "on" : "off", orient.cur, pocket_on ? "on" : "off",
+		pocket_told < 0 ? "unknown" : pocket_told ? "covered" : "clear", pocket_checks);
 	publish("status", text);
 }
 
@@ -878,6 +1001,12 @@ static void command(char *line, bool persist) {
 		orient.allow_180 = strcmp(value, "on") == 0;
 		if (persist) {
 			save();
+		}
+	} else if (strcmp(what, "pocket") == 0) {
+		if (strcmp(value, "check") == 0) {
+			pocket_next = 0;	/* (tests) the next check now */
+		} else {
+			pocket_set(strcmp(value, "on") == 0);
 		}
 	} else if (strcmp(what, "aod") == 0) {
 		int ms = atoi(value);
@@ -928,6 +1057,10 @@ int main(void) {
 	signal(SIGINT, stop);
 	setvbuf(stderr, NULL, _IOLBF, 0);
 	orient_init(&orient);
+	const char *every = getenv("ZTOSCSF_POCKET_EVERY_MS");
+	if (every && atoi(every) > 0) {
+		pocket_every = (uint64_t)atoi(every) * 1000000ULL;
+	}
 	const char *env = getenv("ZTOSCSF_ROOT");
 	snprintf(root, sizeof(root), "%s", env ? env : "");
 	at(ctl_path, sizeof(ctl_path), CTL);
@@ -1033,6 +1166,10 @@ int main(void) {
 		if (wait >= 0 && (timeout < 0 || wait < timeout)) {
 			timeout = wait;
 		}
+		wait = pocket_wait_ms();	/* a check due, or one reading */
+		if (wait >= 0 && (timeout < 0 || wait < timeout)) {
+			timeout = wait;
+		}
 		if (poll(fds, 3, timeout) < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -1057,9 +1194,14 @@ int main(void) {
 			light_decide();
 		}
 		prox_decide();
+		pocket_tick();
+	}
+	if (pocket_told == 1) {
+		shell("pocket clear\n");	/* nobody checks any more: the AOD as without */
 	}
 	if (stopping) {	/* leave the hub quiet: the REMOVEs one by one, 1 s at most */
 		screen_on = false;	/* (and the shell's panel back on: sensors_apply) */
+		pocket_burst = false;
 		sensors_apply();
 		uint64_t end = now_ns() + 1000000000ULL;
 		while ((nq || inflight) && now_ns() < end) {
