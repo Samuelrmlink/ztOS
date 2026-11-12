@@ -205,6 +205,12 @@ class Parsing(Base):
 		items = why.display_blockers(RUNTIME, HOME)
 		self.assertEqual([(b['kind'], b['label']) for b in items], [('aod', 'Always-on display showing')])
 
+	def test_aod_held_by_panel(self):
+		# ROADMAP 8.45: the output parked, the frame on the panel: no blocker
+		self.root.connector('card0-DSI-1', False)
+		self.root.file('run/user/1000/ztmetro.state', 'screen off\naod on\naod_parked yes\n')
+		self.assertEqual(why.display_blockers(RUNTIME, HOME), [])
+
 	def test_dock(self):
 		self.root.connector('card0-DSI-1', True)
 		self.root.connector('card0-DP-1', True)

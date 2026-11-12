@@ -11,7 +11,7 @@ HB=/var/tmp/aodp/hb
 LIMIT=${1:-480}
 LOG=/var/tmp/aodp/deadman.log
 mkdir -p /var/tmp/aodp
-touch "$HB"
+touch "$HB"; chmod 1777 /var/tmp/aodp; chmod 666 "$HB"
 echo "$(date '+%F %T') armed, limit ${LIMIT}s" >> "$LOG"
 while sleep 15; do
 	age=$(( $(date +%s) - $(stat -c %Y "$HB" 2>/dev/null || echo 0) ))
