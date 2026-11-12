@@ -43,6 +43,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../mms/mmspdu.h"
+
 #define AT_DEV		"/dev/umts_router"
 #define CTL		"/run/ztoscorenetworking.ctl"
 #define STATUS_DIR	"/run/ztoscorenetworking"
@@ -630,9 +632,15 @@ static void sms_who(const char *number, char *who, size_t size)
 	}
 }
 
+static bool mms_push(const char *pdu);
+static void sim_id_write(void);
+static void sim_id_answer(const char *l);
+
 static void sms_arrived(const char *pdu)
 {
 	char number[40], text[8192], escaped[16384], note[400];
+	if (mms_push(pdu))
+		return;		/* an MMS notification: ztmmsd's */
 	if (!sms_decode(pdu, number, sizeof(number), text, sizeof(text))) {
 		fprintf(stderr, "ztoscorenetworkingd: a message that could not be read\n");
 		return;
@@ -957,6 +965,11 @@ static void on_line(char *l)
 		snprintf(sim_mccmnc, sizeof(sim_mccmnc), "%.6s", l);	/* MCC, and an MNC of 2 or 3 */
 		if (!net_set)
 			net_configure();
+		sim_id_write();
+		queue_at("AT+CRSM=176,28478,0,0,0");	/* EF_GID1 */
+		queue_at("AT+CRSM=176,28486,0,0,17");	/* EF_SPN */
+	} else if (!strncmp(l, "+CRSM:", 6) && !strncmp(sent, "AT+CRSM=176,", 12)) {
+		sim_id_answer(l);
 	} else if (!strncmp(l, "+CSQ:", 5)) {
 		int rssi = atoi(l + 5);
 		if (rssi >= 0 && rssi != 99) {
@@ -1216,6 +1229,154 @@ static void data_route(void)
 			"ip link set rmnet0 down");
 		routed[0] = 0;
 	}
+}
+
+/* ---- MMS: what ztmmsd needs of the modem ---------------------------------
+ *
+ * The notifications: an SMS to the WAP push port (2948) is not a text. Its
+ * PDU (hex) goes to MMS_PUSH_DIR/<FNV>.pdu, whole or one part of several,
+ * for ztmmsd, which joins and reads them (mms/mmspdu.c); nothing of it is
+ * logged here but its part number.
+ *
+ * The connection: "mms on" / "mms off" on the control pipe. MMS goes through
+ * context 1 (rmnet0): for T-Mobile and its MVNOs (Mint) the data access point
+ * carries MMS (apns-conf.xml: type "default,supl,mms"). That context stays
+ * up when mobile data is switched off (see ctx_up); then rmnet0 is given its
+ * address with no default route, so only ztmmsd's sockets (bound to rmnet0)
+ * use it. If it was never up, it is brought up as for data. MMS_STATE says
+ * where to reach the MMSC from ("iface=", "dns=") while that holds; empty
+ * otherwise. An MMS access point of its own (a second context, rmnet1) is
+ * not done: see modem/TELEPHONY.md.
+ *
+ * The SIM's network, GID1 and SPN, for the access point auto-fill: SIM_ID,
+ * read by AT+CRSM (READ BINARY of EF_GID1 6F3E and EF_SPN 6F46) after
+ * AT+CIMI. The IMSI itself is never written down.
+ */
+#define MMS_PUSH_DIR	"/var/lib/ztoscorenetworking/mms/push"
+#define MMS_STATE	STATUS_DIR "/mms"
+#define SIM_ID		STATUS_DIR "/sim"
+#define MMS_HOLD_MS	300000L	/* an "mms on" not taken back is let go after this */
+static bool mms_wanted;
+static long mms_wanted_at;
+static char sim_gid1[33], sim_spn[33];
+static void data_activate(void);
+
+static bool mms_push(const char *pdu)
+{
+	struct sms_wap w;
+	if (!sms_wap_push(pdu, &w))
+		return false;
+	char dir[512], path[600], tmp[620];
+	snprintf(dir, sizeof(dir), "%s", sms_test_dir ? sms_test_dir : MMS_PUSH_DIR);
+	if (!sms_test_dir) {
+		mkdir("/var/lib/ztoscorenetworking", 0755);
+		mkdir("/var/lib/ztoscorenetworking/mms", 0755);
+	}
+	mkdir(dir, 0700);
+	unsigned hash = 2166136261u;
+	for (const char *c = pdu; *c; c++)
+		hash = (hash ^ (unsigned char)*c) * 16777619u;
+	snprintf(path, sizeof(path), "%s/%08x.pdu", dir, hash);
+	snprintf(tmp, sizeof(tmp), "%s.new", path);
+	FILE *f = fopen(tmp, "w");
+	bool ok = f && fprintf(f, "%s\n", pdu) > 0;
+	if (f && fclose(f))
+		ok = false;
+	if (ok)
+		ok = !rename(tmp, path);
+	fprintf(stderr, "ztoscorenetworkingd: an MMS notification (part %u of %u)%s\n",
+		w.total ? w.part : 1, w.total ? w.total : 1, ok ? "" : ": could not be kept");
+	return true;
+}
+
+static void mms_ask(bool on)
+{
+	mms_wanted = on;
+	mms_wanted_at = on ? ms() : 0;
+	if (on && !ctx_up)
+		data_tried_at = 0;
+}
+
+static void mms_keep(void)
+{
+	static char routed[48], said[200];
+	if (mms_wanted && ms() - mms_wanted_at > MMS_HOLD_MS) {
+		fprintf(stderr, "ztoscorenetworkingd: mms: held %ld s without \"mms off\": let go\n", MMS_HOLD_MS / 1000);
+		mms_wanted = false;
+	}
+	bool registered = now.eps_reg == 1 || now.eps_reg == 5 || now.ps_reg == 1 || now.ps_reg == 5;
+	if (mms_wanted && !now.data_on && !ctx_up && registered &&
+			(!data_tried_at || ms() - data_tried_at > 30000))
+		data_activate();
+	if (now.data) {
+		routed[0] = 0;		/* data_route has rmnet0 */
+	} else if (mms_wanted && ctx_up && ctx_ip[0] && strcmp(routed, ctx_ip)) {
+		run("sysctl -qw net.ipv6.conf.rmnet0.disable_ipv6=1; ip addr flush dev rmnet0; "
+			"ip addr add %s/32 dev rmnet0 && ip link set rmnet0 up", ctx_ip);
+		snprintf(routed, sizeof(routed), "%s", ctx_ip);
+		fprintf(stderr, "ztoscorenetworkingd: mms: rmnet0 up for MMS only (no default route)\n");
+	} else if (!mms_wanted && routed[0]) {
+		run("ip addr flush dev rmnet0; ip link set rmnet0 down");
+		routed[0] = 0;
+	} else if (!ctx_up) {
+		routed[0] = 0;
+	}
+	char state[200] = "";
+	if (ctx_up && (now.data || routed[0]))
+		snprintf(state, sizeof(state), "iface=rmnet0\ndns=%s,%s\n", data_dns[0], data_dns[1]);
+	if (strcmp(state, said)) {
+		mkdir(STATUS_DIR, 0755);
+		FILE *f = fopen(MMS_STATE ".new", "w");
+		if (f) {
+			fputs(state, f);
+			fclose(f);
+			chmod(MMS_STATE ".new", 0644);
+			rename(MMS_STATE ".new", MMS_STATE);
+			snprintf(said, sizeof(said), "%s", state);
+		}
+	}
+}
+
+static void sim_id_write(void)
+{
+	mkdir(STATUS_DIR, 0755);
+	FILE *f = fopen(SIM_ID ".new", "w");
+	if (!f)
+		return;
+	fprintf(f, "mccmnc=%s\ngid1=%s\nspn=%s\n", sim_mccmnc, sim_gid1, sim_spn);
+	fclose(f);
+	chmod(SIM_ID ".new", 0644);
+	rename(SIM_ID ".new", SIM_ID);
+}
+
+/* +CRSM: 144,0,"<hex>", the answer to a READ BINARY of GID1 or SPN */
+static void sim_id_answer(const char *l)
+{
+	int sw1 = 0;
+	const char *q = strchr(l, '"');
+	if (sscanf(l + 6, " %d", &sw1) != 1 || sw1 != 144 || !q)
+		return;
+	char hex[80];
+	snprintf(hex, sizeof(hex), "%.79s", q + 1);
+	hex[strcspn(hex, "\"")] = 0;
+	if (strstr(sent, ",28478,")) {
+		/* GID1: hex as it is, without the padding */
+		size_t n = strlen(hex);
+		while (n >= 2 && (hex[n - 1] == 'F' || hex[n - 1] == 'f') && (hex[n - 2] == 'F' || hex[n - 2] == 'f'))
+			n -= 2;
+		snprintf(sim_gid1, sizeof(sim_gid1), "%.*s", (int)(n < 32 ? n : 32), hex);
+	} else if (strstr(sent, ",28486,")) {
+		/* SPN: a display byte, then the name, FF padded */
+		size_t o = 0;
+		for (size_t i = 2; hex[i] && hex[i + 1] && o + 1 < sizeof(sim_spn); i += 2) {
+			int c = hex_byte(hex + i);
+			if (c < 0 || c == 0xff)
+				break;
+			sim_spn[o++] = c >= 0x20 && c < 0x7f ? (char)c : '?';
+		}
+		sim_spn[o] = 0;
+	}
+	sim_id_write();
 }
 
 /* ---- SMS-SUBMIT in PDU mode --------------------------------------------- */
@@ -2025,7 +2186,7 @@ static void ipc_message(int main_cmd, int sub, int type, int mseq, const unsigne
 		int result = data[3] | data[4] << 8;
 		if (result != 0x8000) {
 			fprintf(stderr, "ztoscorenetworkingd: data: 0d%02x refused (0x%04x)\n", data[1], result);
-		} else if (data[1] == 0x01 && now.data_on && !ctx_up) {
+		} else if (data[1] == 0x01 && (now.data_on || mms_wanted) && !ctx_up) {
 			data_bring_up();
 		}
 		data_asked_at = 0;
@@ -2150,6 +2311,8 @@ static void command(char *l)
 		data_wish(true, true);
 	} else if (!strcmp(l, "data off")) {
 		data_wish(false, false);
+	} else if (!strcmp(l, "mms on") || !strcmp(l, "mms off")) {
+		mms_ask(l[5] == 'n');
 	} else if (!strncmp(l, "sms ", 4) || !strncmp(l, "smse ", 5)) {
 		bool escaped = l[3] == 'e';
 		char *body = l + (escaped ? 5 : 4), number[32], text[1801];
@@ -2609,6 +2772,7 @@ int main(int argc, char **argv)
 		if (!busy && !q_len) {
 			data_keep();
 			data_route();
+			mms_keep();
 			publish();
 		}
 	}
