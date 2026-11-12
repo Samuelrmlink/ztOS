@@ -2,7 +2,7 @@
 # Stage 0 + stage 1 (1b: LDO38 on/restore; 1c: 150 ms, one retry, class-0 bus)
 # of nfc/README.md, owner-approved 2026-11-12.
 # Run as root inside `ztlock run nfc`. Stops at the first unexpected state.
-#   stage1.sh <dir with zrn-nfc.ko>
+#   stage1.sh <dir with zrn-nfc-stage1.ko>
 D=${1:-$(dirname "$0")}
 ACPM=/usr/local/libexec/ztos-power/s9p-acpm
 say() { echo "== $*"; }
@@ -13,7 +13,7 @@ cap=$(cat /sys/class/power_supply/max170xx_battery/capacity)
 
 # the HRM agent's bus must not be loaded; gpp5-0/1 must be free
 if lsmod | grep -q '^zrn_hrm'; then say "STOP: zrn_hrm loaded"; exit 1; fi
-if lsmod | grep -q '^zrn_nfc'; then say "STOP: zrn_nfc already loaded"; exit 1; fi
+if lsmod | grep -q '^zrn_nfc_stage1'; then say "STOP: zrn_nfc_stage1 already loaded"; exit 1; fi
 pm=$(grep -E 'gpp5-[01]\)' /sys/kernel/debug/pinctrl/10830000.pinctrl*/pinmux-pins)
 echo "$pm"
 echo "$pm" | grep -q -v UNCLAIMED && { say "STOP: gpp5-0/1 claimed"; exit 1; }
@@ -55,14 +55,14 @@ exp_regs
 say "stage 1: insmod zrn-nfc"
 M="zrn-nfc-run $(date +%s)"; echo "$M" > /dev/kmsg
 klog() { dmesg | sed -n "/$M/,\$p" | grep -E "zrn-nfc|i2c|gpio"; }
-insmod "$D/zrn-nfc.ko"; rc=$?
+insmod "$D/zrn-nfc-stage1.ko"; rc=$?
 klog
 say "insmod rc=$rc"
 grep -E 'gpp5-[01]\)|gpa1-2\)|gpa2-6\)' /sys/kernel/debug/pinctrl/*/pinmux-pins
 say "expander after run"
 exp_regs
-if lsmod | grep -q '^zrn_nfc'; then
-	rmmod zrn_nfc; say "rmmod rc=$?"
+if lsmod | grep -q '^zrn_nfc_stage1'; then
+	rmmod zrn_nfc_stage1; say "rmmod rc=$?"
 fi
 klog | tail -2
 grep -E 'gpp5-[01]\)' /sys/kernel/debug/pinctrl/10830000.pinctrl*/pinmux-pins
