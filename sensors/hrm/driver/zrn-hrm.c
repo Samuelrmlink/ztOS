@@ -26,6 +26,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/machine.h>
 #include <linux/i2c.h>
+#include <linux/i2c-algo-bit.h>
 #include <linux/kfifo.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -34,7 +35,9 @@
 #include <linux/workqueue.h>
 
 #include "zrn-hrm.h"
+#ifndef ZRN_HRM_OWN_BUS
 #include "zrn-i2c20.h"
+#endif
 
 #define NAME		"zrn-hrm"
 
@@ -96,11 +99,81 @@ static struct gpiod_lookup_table boost_gpio = {
 	.dev_id = NAME,
 	.table = {
 		GPIO_LOOKUP("gpg1", 6, "boost", GPIO_ACTIVE_HIGH),
+#ifdef ZRN_HRM_OWN_BUS
+		GPIO_LOOKUP("gpp5", 1, "sda", GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+		GPIO_LOOKUP("gpp5", 0, "scl", GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+#endif
 		{ }
 	},
 };
 
 static struct platform_device *pdev;
+
+#ifdef ZRN_HRM_OWN_BUS
+/*
+ * Built with OWN_BUS=1: no zrn-i2c20. The module makes its own bus 104 on
+ * gpp5-0/1 while the device is open, as zrn-hrm-probe did: class 0 (no
+ * detection probes) and no address retries. LDO38, the bus pull-ups, is then
+ * the caller's job (probe/run-step2.sh switches it through ACPM).
+ */
+#define OWN_BUS_NR	104
+static struct gpio_desc *sda, *scl;
+static void set_sda(void *d, int v) { gpiod_set_value_cansleep(sda, v); }
+static void set_scl(void *d, int v) { gpiod_set_value_cansleep(scl, v); }
+static int get_sda(void *d) { return gpiod_get_value_cansleep(sda); }
+static int get_scl(void *d) { return gpiod_get_value_cansleep(scl); }
+static struct i2c_algo_bit_data own_bit = {
+	.setsda = set_sda, .setscl = set_scl, .getsda = get_sda, .getscl = get_scl,
+	.udelay = 5, .timeout = HZ / 10,
+};
+static struct i2c_adapter own_adap;
+
+static void bus_put(struct i2c_adapter *a)
+{
+	i2c_del_adapter(a);
+	gpiod_put(scl);
+	gpiod_put(sda);
+}
+
+static struct i2c_adapter *bus_get(void)
+{
+	int ret;
+
+	sda = gpiod_get(&pdev->dev, "sda", GPIOD_OUT_HIGH_OPEN_DRAIN);
+	if (IS_ERR(sda))
+		return ERR_CAST(sda);
+	scl = gpiod_get(&pdev->dev, "scl", GPIOD_OUT_HIGH_OPEN_DRAIN);
+	if (IS_ERR(scl)) {
+		gpiod_put(sda);
+		return ERR_CAST(scl);
+	}
+	if (get_sda(NULL) != 1 || get_scl(NULL) != 1) {
+		pr_err(NAME ": bus lines low (SCL %d SDA %d): is LDO38 on?\n",
+		       get_scl(NULL), get_sda(NULL));
+		ret = -EIO;
+		goto err;
+	}
+	memset(&own_adap, 0, sizeof(own_adap));
+	own_adap.owner = THIS_MODULE;
+	strscpy(own_adap.name, NAME, sizeof(own_adap.name));
+	own_adap.class = 0;		/* no detection probes */
+	own_adap.algo_data = &own_bit;
+	own_adap.nr = OWN_BUS_NR;
+	own_adap.dev.parent = &pdev->dev;
+	ret = i2c_bit_add_numbered_bus(&own_adap);
+	if (ret)
+		goto err;
+	own_adap.retries = 0;		/* no resent addresses */
+	return &own_adap;
+err:
+	gpiod_put(scl);
+	gpiod_put(sda);
+	return ERR_PTR(ret);
+}
+#else
+static struct i2c_adapter *bus_get(void) { return zrn_i2c20_get(); }
+static void bus_put(struct i2c_adapter *a) { zrn_i2c20_put(a); }
+#endif
 static struct i2c_adapter *pmic, *bus;
 static struct gpio_desc *boost;
 static int l8_was = -1;
@@ -171,7 +244,7 @@ static void power_off(void)
 		pmic = NULL;
 	}
 	if (bus) {
-		zrn_i2c20_put(bus);
+		bus_put(bus);
 		bus = NULL;
 	}
 }
@@ -213,7 +286,7 @@ static int power_on(void)
 		return ret;
 
 	/* bus and its pull-ups (LDO38) */
-	bus = zrn_i2c20_get();
+	bus = bus_get();
 	if (IS_ERR(bus)) {
 		ret = PTR_ERR(bus);
 		bus = NULL;
@@ -417,4 +490,6 @@ module_init(zrn_hrm_init);
 module_exit(zrn_hrm_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Galaxy S9 MAX86915 raw PPG (IR + red) on zrn-i2c20");
+#ifndef ZRN_HRM_OWN_BUS
 MODULE_SOFTDEP("pre: zrn-i2c20");
+#endif

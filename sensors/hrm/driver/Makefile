@@ -1,4 +1,8 @@
 obj-m += zrn-hrm.o
+# OWN_BUS=1: its own class-0 bus 104 on gpp5 instead of zrn-i2c20 (LDO38 by the caller)
+ifeq ($(OWN_BUS),1)
+ccflags-y += -DZRN_HRM_OWN_BUS
+endif
 
 # zrn-i2c20.h is a copy of research/nfc's nfc/driver/zrn-i2c20.h (a65b476);
 # zrn-i2c20.ko itself is built from that branch. Point I2C20_SYMVERS at its
