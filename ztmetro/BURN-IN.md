@@ -160,3 +160,17 @@ copes with a panel that moves the picture itself.
 - **The AOD** (the owner's design): nothing to change found. Stock moves its
   AOD further (a big jump every 10 min across its range) and also lets the
   panel self-move it; ours already moves 9 places every 10 min.
+
+## Tested
+
+- Host: `make check-burn-in` (the schedule; the heartbeat file; ShellWatch,
+  16 cases); `power/suspend/test-sleepd-recovery.py` still passes; the shell
+  and Settings build clean (desktop/dev container).
+- Phone, 2026-11-12: the integrated shell (with this branch) writes the
+  heartbeat (pid = the running shell, monotonic age under a minute at two
+  readings 6 minutes apart); zrn-sleepd with ShellWatch installed and running,
+  no action taken against the live shell; the lock screen drawn at place 8,
+  looking right. Not yet done (battery reached 15 %): the screenshot pair
+  across a place change, the 7-minute frame/upload count, and
+  `power/suspend/shell-watch-device-test.py` (ShellWatch against a dummy
+  process named ztmetro, never the session's shell).
