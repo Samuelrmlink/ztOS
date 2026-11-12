@@ -7,7 +7,10 @@
  * thermistor module never finished (the phone froze or reset during it), and
  * then does not load it again: the battery temperature is unknown and
  * zrn-charge keeps charging at 5 V. While that file is there the shell shows
- * "Battery temperature sensor off"; tapping it opens Settings > Battery, where
+ * "Battery temperature sensor off", a plain notification so that the lock
+ * screen lists it too (ongoing ones are left off it); swiped away, it comes
+ * back when the shell or ztnotifyd starts again while the mark is there.
+ * Tapping it opens Settings > Battery, where
  * "Try again" clears the mark and loads the module. When the file goes, the
  * notification goes.
  *
@@ -55,7 +58,7 @@ static inline void tw_look(struct therm_watch *w, bool again)
 	if (now == w->shown && !again)
 		return;
 	if (now)
-		w->tell("notekey " TW_KEY "|%s|-2||System|Battery temperature sensor off|"
+		w->tell("notekey " TW_KEY "|%s|-1||System|Battery temperature sensor off|"
 			"Charging is limited to 5 V: the sensor's driver did not load at the last start. "
 			"Tap for Settings > Battery > Try again.", w->shown == 1 || again ? "q" : "-");
 	else if (w->shown == 1 || again)

@@ -65,7 +65,7 @@ int main(void)
 	fputs("1794460000\n", f);
 	fclose(f);
 	settle(&w);
-	assert(lines == 1 && starts(last, "notekey zrn-therm|-|-2||System|Battery temperature sensor off|"));
+	assert(lines == 1 && starts(last, "notekey zrn-therm|-|-1||System|Battery temperature sensor off|"));
 	tw_look(&w, true);				/* the shell restarted */
 	assert(lines == 2 && starts(last, "notekey zrn-therm|q|"));
 	unlink(failed);
