@@ -8,14 +8,14 @@
  *   1. S2MPB02 (bus 97, 0x59) register 0x25 (LDO8 = HRM_1.8V_AP): read it, and
  *      abort unless it is 0x30 (off, 1.8 V).
  *   2. Write 0x25 = 0xB0 (on, 1.8 V), read back, wait 2 ms.
- *   3. A bit-banged bus 99 on gpp5-0 (SCL) / gpp5-1 (SDA), the stock
+ *   3. A bit-banged bus 104 on gpp5-0 (SCL) / gpp5-1 (SDA), the stock
  *      hsi2c@108E0000 pins. Lines are open-drain: "high" is the pin as an
  *      input, so no pull or other pinctrl setting is changed. The adapter has
  *      no class (no detection probes) and no address retries.
  *   4. If both lines read high: one 2-byte read of the MAX86915 at 0x57 from
  *      register 0xFE (REV_ID, PART_ID; 0x2B expected), at most 3 tries,
  *      10 ms apart.
- *   5. Remove bus 99, then write 0x25 back to the value read in step 1 and
+ *   5. Remove bus 104, then write 0x25 back to the value read in step 1 and
  *      read it back.
  *
  * Nothing is written to the MAX86915, the LED boost enable (gpg1-6) and the
@@ -37,7 +37,7 @@
 #define L8_OFF_1V8	0x30	/* bit 7 off, 600 mV + 0x30 * 25 mV */
 #define L8_ON_1V8	0xb0
 
-#define HRM_BUS		99
+#define HRM_BUS		104	/* 99-102 are zrn-cam's, 103 zrn-nfc's */
 #define HRM_ADDR	0x57
 #define HRM_REV_ID	0xfe	/* then PART_ID at 0xff */
 #define HRM_TRIES	3
