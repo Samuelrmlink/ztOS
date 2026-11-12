@@ -143,6 +143,7 @@ enum action {
 	ACT_CLOCK_24H,		/* "21:41" or "9:41 PM", for every clock */
 	ACT_LOCK_TIMEOUT,	/* a picker: how long the lock screen stays lit */
 	ACT_DOUBLE_TAP_WAKE,	/* a double tap on the always-on display wakes it */
+	ACT_BURNIN_SHIFT,	/* the bars and the lock clock move a few pixels (burn-in) */
 	ACT_AOD_AUTO,		/* the always-on display's level from the room */
 	ACT_AOD_LOW_OFF,	/* and dark below 15 % on battery */
 	ACT_AOD_THEME,		/* a theme's preview tapped: its index in CLOCK_THEME_IDS */
@@ -282,6 +283,7 @@ static struct {
 	bool aod_force_mark;	/* "aod_force_mark" */
 	int lock_timeout_idx;	/* "lock_timeout": an index into LOCK_TIMEOUT_SECONDS */
 	bool double_tap_wake;	/* "double_tap_wake" */
+	bool burnin_shift;	/* "burn_in_shift": the shell's burn-in.h */
 	bool about_show_repo;
 	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
 	int haptic_strength;	/* percent */
@@ -406,6 +408,7 @@ static void config_load(void) {
 	app.aod_image_faint = 0;
 	app.aod_force_mark = true;
 	app.double_tap_wake = true;
+	app.burnin_shift = true;
 	app.android_bt_remove_bond = true;
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
@@ -542,6 +545,8 @@ static void config_load(void) {
 			app.aod_auto = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "double_tap_wake") == 0) {
 			app.double_tap_wake = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "burn_in_shift") == 0) {
+			app.burnin_shift = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "lock_timeout") == 0) {
 			int t = atoi(val), best = 0;	/* the nearest choice */
 			for (int i = 0; i < N_LOCK_TIMEOUTS; i++) {
@@ -733,6 +738,7 @@ static void config_format(void) {
 	KEY("clock_24h", "%s", app.clock_24h ? "on" : "off");
 	KEY("lock_timeout", "%d", LOCK_TIMEOUT_SECONDS[app.lock_timeout_idx]);
 	KEY("double_tap_wake", "%s", app.double_tap_wake ? "on" : "off");
+	KEY("burn_in_shift", "%s", app.burnin_shift ? "on" : "off");
 	KEY("aod_auto_brightness", "%s", app.aod_auto ? "on" : "off");
 	KEY("aod_low_battery_off", "%s", app.aod_low_off ? "on" : "off");
 	KEY("aod_theme", "%s", app.aod_theme);
@@ -2233,6 +2239,9 @@ static double draw_display(cairo_t *cr) {
 	}
 	static const char *const fs_bars[] = { "2 seconds", "3 seconds", "5 seconds", "10 seconds" };
 	y = picker(cr, y, "Bars stay after a swipe in full screen", fs_bars, 4, app.fs_bars_idx, ACT_FS_BARS_CYCLE);
+	/* the status bar, the nav bar and the lock clock a few pixels off their
+	 * place, a new one every 3 minutes (the shell's burn-in.h) */
+	y = zmc_switch(cr, y, "Shift the bars against burn-in", app.burnin_shift, ACT_BURNIN_SHIFT);
 
 	return y + 20;
 }
@@ -4429,6 +4438,10 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_AOD_AUTO:
 		app.aod_auto = !app.aod_auto;
+		config_save();
+		break;
+	case ACT_BURNIN_SHIFT:
+		app.burnin_shift = !app.burnin_shift;
 		config_save();
 		break;
 	case ACT_DOUBLE_TAP_WAKE:
