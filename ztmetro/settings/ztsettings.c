@@ -54,6 +54,7 @@
 #include "../devtest/devtest-pages.h"
 #include "../desktop/desktop-page.h"
 #include "../power/battery-health.h"
+#include "therm-retry.h"
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -3234,6 +3235,7 @@ static double draw_battery(cairo_t *cr) {
 	snprintf(est, sizeof(est), "%s, %.2f V, Maxim MAX17055", stat[0] ? stat : "Discharging", v);
 	zmc_text(cr, est, FONT_REGULAR, 14, MARGIN, y, 0);
 	y += 36;
+	y = therm_section(cr, y);	/* therm-retry.h */
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Battery information", FONT_REGULAR, 13, MARGIN, y, 0);
@@ -3944,6 +3946,7 @@ static void activate(int action, int arg) {
 	if (action >= PODS_ACTIONS && action < PODS_ACTIONS_END) { pods_activate(action, arg); return; }
 	if (action >= DEVTEST_ACTIONS && action < DEVTEST_ACTIONS_END) { devtest_activate(action, arg); return; }
 	if (action >= DESKTOP_ACTIONS && action < DESKTOP_ACTIONS_END) { desktop_page_activate(action, arg); return; }
+	if (action == ACT_THERM_RETRY) { therm_retry(); return; }
 	/* a picker's box opens or closes it; one of its options is the choice */
 	if (is_picker(action) && arg < 0) {
 		open_picker = open_picker == action ? 0 : action;
