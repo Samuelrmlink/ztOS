@@ -39,6 +39,7 @@ ztmetro/perfd/zrnperfd
 ztmetro/ledd/zrn-ledd
 ztmetro/sensord/ztoscsf-sensord
 ztmetro/modemd/ztoscorenetworkingd
+ztmetro/mms/ztmmsd
 ztmetro/csf/ztoscsf
 ztmetro/notifyd/ztnotifyd
 ztmetro/phone/ztphone
