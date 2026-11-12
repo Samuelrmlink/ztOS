@@ -26,6 +26,9 @@ What it looks at (each a kind):
   dock      an external display is lit (DP Alt Mode)
   display   the screen is on (with the lock screen up: the lock screen itself)
 
+And a note (note=, not a blocker) when the always-on display is hidden because
+the phone is covered: "AOD hidden: phone covered".
+
   zrn-sleep-why               the blockers, one a line (as zrn-sleepd status)
   zrn-sleep-why --json        everything, as JSON
   zrn-sleep-why --shell [--always] [--wakers]
@@ -261,6 +264,16 @@ def display_blockers(runtime, home):
 			out.append(blocker('aod', 'Always-on display', detail=f'set to show {when}; '
 					   'the phone does not sleep while it shows'))
 	return out
+
+
+def display_notes(runtime):
+	"""What the display is doing that keeps nothing awake but explains a dark
+	screen: the AOD hidden because the phone is covered (a pocket, face down;
+	ztmetro's aod_covered, power/aod/POCKET.md)."""
+	shell = read(f'{runtime}/ztmetro.state').splitlines()
+	if 'screen off' in shell and 'aod_covered yes' in shell:
+		return ['AOD hidden: phone covered']
+	return []
 
 
 def charger_blockers():
@@ -732,7 +745,7 @@ def collect(want_wakers=False, now=None):
 	items.sort(key=lambda b: ORDER.index(b['kind']) if b['kind'] in ORDER else len(ORDER))
 	w = wakes(log_tail(), now)
 	out = {'state': status.get('state', 'unknown'), 'why': why, 'blockers': items, 'wakes': w,
-	       'wakes_text': wakes_text(w)}
+	       'wakes_text': wakes_text(w), 'notes': display_notes(runtime)}
 	if want_wakers:
 		out['wakers'] = wakers(procs, runtime)
 	return out
@@ -761,6 +774,8 @@ def status_lines(result):
 		lines.append(f'blocker={b["kind"]}: {b["label"]}{who_}' + (f' - {b["detail"]}' if b['detail'] else ''))
 	if not result['blockers']:
 		lines.append('blocker=none')
+	for note in result.get('notes', []):
+		lines.append(f'note={note}')
 	lines.append(f'woke_last_hour={result["wakes"]["count"]}: {result["wakes_text"]}')
 	return lines
 
@@ -785,6 +800,8 @@ def shell_lines(result, always=False):
 		if b['unit']:
 			parts.append(b['unit'])
 		lines.append(f'item\t{b["kind"]}\t{clean(b["label"])}\t{clean(" · ".join(parts))}')
+	for note in result.get('notes', []):
+		lines.append(f'note\t{clean(note)}')
 	lines.append(f'woke\t{clean(result["wakes_text"])}')
 	w = result.get('wakers')
 	if w:
