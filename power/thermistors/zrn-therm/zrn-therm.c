@@ -12,8 +12,9 @@
  *   ADC 0x14230000: CON1 0x00 (0x4, then 0x2; bit 0 to start), CON2 0x04
  *   (0x60, the channel in bits 3:0), INT_EN 0x10 (1 while converting, 0 after:
  *   only as the done flag, polled; no interrupt handler), INT_ST 0x14 (1 to
- *   clear). The ADC's bus clock gate in CMU_CMGP (0x14200000 + 0x2018 and
- *   0x201c, CG_VAL bit 21) only if it reads closed and open_gate=1.
+ *   clear). The ADC's bus clock gate in CMU_CMGP (0x14202018 and 0x1420201c,
+ *   ADC_CMGP PCLK_S0/S1): CG_VAL (bit 21) set only if it reads closed, and
+ *   cleared again on unload; it read open (0x00200000) on the first run.
  *   Fuel gauge (I2C 1-0036, through the max17042 driver's regmap): Temp 0x08.
  *
  * It reads the gate before it touches the ADC: a read of a gated block hangs
@@ -63,9 +64,9 @@
 
 #define FG_TEMP			0x08
 
-static bool open_gate;
+static bool open_gate = true;
 module_param(open_gate, bool, 0644);
-MODULE_PARM_DESC(open_gate, "open the ADC's clock gate if it reads closed (default: refuse)");
+MODULE_PARM_DESC(open_gate, "open the ADC's clock gate if it reads closed (CG_VAL only; closed again on unload)");
 static bool write_gauge = true;
 module_param(write_gauge, bool, 0644);
 MODULE_PARM_DESC(write_gauge, "write the battery temperature into the fuel gauge's Temp register");
@@ -102,7 +103,7 @@ static struct {
 	unsigned int gauge_reg;	/* what was written */
 	u32 gate[2];		/* the gate registers as last read */
 	unsigned int period;	/* ms, the current period */
-	bool gate_opened;
+	bool gate_opened[2];	/* closed when found: closed again on unload */
 } st;
 
 static long long now_ms(void)
@@ -126,7 +127,7 @@ static int gate_check(void)
 				return -EACCES;
 			}
 			writel(v | GATE_CG_VAL, gates + 4 * i);
-			st.gate_opened = true;
+			st.gate_opened[i] = true;
 			pr_info("zrn-therm: ADC clock gate %d was closed (0x%08x): opened, now 0x%08x\n",
 				i, v, readl(gates + 4 * i));
 		}
@@ -290,7 +291,7 @@ static ssize_t status_show(struct kobject *k, struct kobj_attribute *a, char *bu
 		       "gate 0x%08x 0x%08x%s\ngauge_write %d reg 0x%04x\n",
 		       st.samples, st.errors, st.last_err, st.period, st.ns_last / 1000,
 		       st.samples ? st.ns_total / st.samples / 1000 : 0, st.gate[0], st.gate[1],
-		       st.gate_opened ? " (opened by zrn-therm)" : "", st.gauge_err, st.gauge_reg);
+		       (st.gate_opened[0] || st.gate_opened[1]) ? " (opened by zrn-therm)" : "", st.gauge_err, st.gauge_reg);
 	mutex_unlock(&lock);
 	return n;
 }
@@ -356,11 +357,22 @@ unmap:
 
 static void __exit zrn_therm_exit(void)
 {
+	int i;
+
 	sampling = false;
 	unregister_pm_notifier(&pm_nb);
 	cancel_delayed_work_sync(&work);
 	sysfs_remove_group(kobj, &group);
 	kobject_put(kobj);
+	for (i = 0; i < 2; i++) {
+		if (st.gate_opened[i]) {
+			u32 v = readl(gates + 4 * i);
+
+			writel(v & ~GATE_CG_VAL, gates + 4 * i);
+			pr_info("zrn-therm: ADC clock gate %d closed again: 0x%08x -> 0x%08x\n",
+				i, v, readl(gates + 4 * i));
+		}
+	}
 	iounmap(adc);
 	iounmap(gates);
 }

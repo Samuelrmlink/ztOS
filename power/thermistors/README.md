@@ -91,6 +91,6 @@ handler, and INT_EN goes back to 0 after each round, as stock's exit_hw does.
 - The ADC's bus clock gate is CMU_CMGP 0x14202018 and 0x1420201c
   (`GOUT_BLK_CMGP_UID_ADC_CMGP_IPCLKPORT_PCLK_S0/S1`, Samsung's cmucal-sfr.c).
   Closed means MANUAL (bit 20) set and CG_VAL (bit 21) clear. zrn-therm reads
-  it first and opens it only with `open_gate=1`.
+  it first and, if closed, sets CG_VAL only (approved 2026-11-12), clearing it again on unload. It read open (0x00200000, both) on the first run.
 - Sharing: stock's tree gives the ADC no CHUB `sysreg` handshake, so stock
   reads it without one too.
