@@ -223,6 +223,8 @@ static int live_start(bool front, bool full)
 	ret = pmic_buses();
 	if (!ret)
 		ret = csis_map(p);
+	if (!ret)
+		ret = isppre_up();
 	if (ret)
 		goto out;
 	if (readl(csis + CSIS_VERSION) != 0x05010000) {
@@ -476,6 +478,12 @@ static const struct file_operations live_fops = {
 	.owner = THIS_MODULE, .write = live_write, .read = live_read,
 	.mmap = live_mmap, .release = live_release, .unlocked_ioctl = live_ioctl,
 };
+/*
+ * A fixed minor, so that kmod-static-nodes makes /dev/zrn-cam at boot and the
+ * first open loads this module (misc_open: request_module char-major-10-250).
+ * 250 is free in include/linux/miscdevice.h and on the phone.
+ */
+#define ZRN_CAM_MINOR	250
 static struct miscdevice live_misc = {
-	.minor = MISC_DYNAMIC_MINOR, .name = "zrn-cam", .fops = &live_fops, .mode = 0660,
+	.minor = ZRN_CAM_MINOR, .name = "zrn-cam", .fops = &live_fops, .mode = 0660,
 };

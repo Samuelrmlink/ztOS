@@ -64,6 +64,9 @@ static const struct csi_path path_front_full = {
 };
 static const struct csi_path *pth;
 
+#define PMU_SIZE	0x5000
+#define PMU_ISPPRE_STATUS 0x404c
+
 #define CSIS_VERSION	0x000
 #define CSIS_CMN	0x004
 #define CSIS_MSK0	0x010
@@ -304,8 +307,25 @@ static int csis_map(const struct csi_path *p)
 	if (!sys_phy)
 		sys_phy = ioremap(0x16210500, 4);
 	if (!pmu)
-		pmu = ioremap(0x14060000, 0x1000);
+		pmu = ioremap(0x14060000, PMU_SIZE);
 	return csis && csis_phy && csis_vc && csis_dma && sys_phy && pmu ? 0 : -ENOMEM;
+}
+
+/*
+ * The receiver, its PHY and its DMA are in the ISPPRE power domain. Touching
+ * them while it is off hangs the bus, so nothing is read or written there
+ * unless the PMU says it is up: ISPPRE_STATUS, the condition the pmucal tables
+ * test before saving ISPPRE's registers (power/suspend/sleep-tables.h). Read only.
+ */
+static int isppre_up(void)
+{
+	u32 st = readl(pmu + PMU_ISPPRE_STATUS);
+
+	if ((st & 0xf) != 0xf) {
+		note("ISPPRE power domain is off (status 0x%x); nothing touched", st);
+		return -ENODEV;
+	}
+	return 0;
 }
 
 static void csis_on(void)
@@ -508,6 +528,8 @@ static int stream_run(bool front, bool want_frame, bool pattern)
 	int ret;
 
 	ret = csis_map(front ? &path_front : &path_rear);
+	if (!ret)
+		ret = isppre_up();
 	if (ret)
 		return ret;
 	ver = readl(csis + CSIS_VERSION);

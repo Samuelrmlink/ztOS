@@ -1066,6 +1066,8 @@ static int __init zrn_cam_init(void)
 }
 module_init(zrn_cam_init);
 MODULE_SOFTDEP("pre: i2c-gpio");
+MODULE_ALIAS_MISCDEV(ZRN_CAM_MINOR);
+MODULE_ALIAS("devname:zrn-cam");
 MODULE_IMPORT_NS("DMA_BUF");
 MODULE_DESCRIPTION("Galaxy S9 cameras: power, chip ID, power down");
 MODULE_LICENSE("GPL");

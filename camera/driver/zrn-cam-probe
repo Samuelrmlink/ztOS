@@ -6,7 +6,7 @@
 # clear it; remove /var/lib/zrn-cam/doing by hand after reading what happened.
 # Never autoloaded: nothing starts this at boot.
 D=/var/lib/zrn-cam
-KO=$D/zrn-cam.ko
+KO=${KO:-/usr/lib/modules/$(uname -r)/extra/zrn-cam.ko}
 RUN=/sys/kernel/debug/zrn-cam/run
 RES=/sys/kernel/debug/zrn-cam/result
 mkdir -p $D
