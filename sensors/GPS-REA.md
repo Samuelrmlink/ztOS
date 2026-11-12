@@ -552,6 +552,15 @@ unit's start (`--pre`, 3 s, the HAL), about 5 s to "engine on".
   The store did not exist this morning (`gldata.sto` absent, as was the
   gate's last fix: both directories had been reset since), so s2/s3 ran on
   a store written by a 4-minute session. Not chased further.
+- **No signal at the end of the morning.** s6 (09:16, the first run with
+  the new unit installed) and s7 (09:19) got NMEA and LTO-predicted
+  satellites in view (11 GPS, 12 Galileo, 8 GLONASS, 5-6 BeiDou), but
+  tracked 0-1 (one GPS at 23 dB-Hz) and had no fix in 90 and 150 s. By then
+  the phone was in use (screen on and off on tty1, a pacman update from a
+  terminal), so it had most likely left the window. The missing framework
+  restart did not cause it: s3, after such a stop, tracked 36 satellites,
+  and lhd delivered here (`GPSD:CORE_ON`, NMEA flowing). **To recheck by
+  the window** (owner).
 - **Re-attach** while the gate holds the engine (120 s after the last reader)
   is still under a second (not re-measured).
 
