@@ -99,7 +99,12 @@ screen timeout default (60 s) is stock's 30 s doubled.
 
 ## Proposals, not done
 
-### The panel's own self-move (needs the owner's approval: panel commands)
+### The panel's own self-move: proposal only (tried 2026-11-12, blanked the panel)
+
+**Do not send these again.** Stock's sequence, sent once on 2026-11-12 with the
+owner's approval, blanked the panel within two minutes (post-mortem below). A
+new proposal needs a design that keeps the AOD timing registers (76, and FE
+behind the level-3 key) out of normal mode.
 
 Stock runs it all the time the screen is on. The whole picture moves inside
 the DDI, so it also covers what the shell cannot shift (Start, the
@@ -130,16 +135,49 @@ at every screen-off):
 
     F0 5A 5A ; 7D 01 ; 76 09 0F 00 ; F0 A5 A5
 
-Proposed trial, one step at a time, watching the phone's own panel
-(photographed; the HDMI rig does not see it): (1) disable alone (F0 only,
-harmless if self-move is already off); (2) enable with pattern row 0,
-watch for 20 min that the picture moves and nothing else changes
-(colours, brightness, the self-mask bands); (3) disable, and a screen
-off/on, to see the panel come back normal. Then, if good: zrn-sleepd or the
-shell sends enable 3 s after each screen-on and every 19 min with the next
-pattern, disable at screen-off, as stock does. Unknowns: how far it moves
-(the position bits are undocumented) and whether our DECON's frame trigger
-copes with a panel that moves the picture itself.
+What it would take to propose it again: a sequence without `76` (the AOD
+porch) and without the FC key, shown to keep DECON's TE and frame done
+running in normal mode (the self timer and pattern registers 77/7C/7D alone,
+if the DDI moves the picture at all without the AOD porch); and a trial
+script that watches dmesg from its own thread, never blocks on grim, and
+disables at the first `flip did not latch`.
+
+#### Post-mortem: the trial of 2026-11-12
+
+Sent through `panel_cmd`, inside `ztlock run burn-in`, with
+`power/aod/selfmove-trial.py` (the screen on, a charger in, 24 %):
+
+| Time (CST) | What |
+|---|---|
+| 11:58:27 | step 1, disable alone (`F0 5A 5A; 7D 01; 76 09 0F 00; F0 A5 A5`), keys closed: no change, no error |
+| 11:58:35 | step 2, the enable above, pattern row 0, then `F0 A5 A5; FC A5 A5` again |
+| 12:00:02 | 1 min: panel enabled per DRM, grim normal, dmesg clean |
+| 12:00:23 | `s9p-decon: flip did not latch within 50 ms`, then `[CRTC:38] vblank wait timed out` (WARNING, drm_atomic_helper_wait_for_vblanks): DECON's frames stopped completing. The owner saw a blank screen; haptics still worked |
+| 12:00-12:03 | the script blocked in its minute grim (a screenshot waits for a frame that never completes), so its own dmesg check and stop-and-disable never ran |
+| 12:03:28-37 | the owner pressed the power key several times: the shell turned the screen off and on (its loop was alive) without the picture coming back |
+| 12:03:43 | a long press: logind "Powering off". The shutdown stopped tailscaled (12:03:43) and NetworkManager: **that is when the network dropped**, not the trial itself (sshd answered every 10 s until 12:03:36) |
+| 12:03:53-12:05:50 | every commit on the way down timed out (`flip_done timed out`, `previous shadow update stuck`, `commit wait timed out`), and the fbdev restore when the shell's display file closed waited on a vblank too: the power-off took two minutes |
+| 12:05:51 | the phone came back up (on its charger); this boot: no display errors, the panel normal, the shell (pid 628) and its heartbeat fine |
+
+18 display errors in that boot, all after the enable; none before it (11:00 to
+11:58:35). No panic: pstore is empty for this boot (the only ramoops record is
+from 08:09, an earlier boot). Nothing was written to the panel's flash: no F1,
+C0 or C1, and every register set here is volatile (the power-off's
+sleep-in and the boot's panel init put it back).
+
+Likely cause: the enable is stock's, but stock runs it on its own driver,
+where `76 09 0F 85 A0 0B 90` (the AOD porch setting) in normal mode is
+matched by the DECON side. Ours keeps normal-mode timing: with the panel's
+porch and self timer changed under it, TE or the panel's acceptance of
+DECON's frames stopped about 1.8 minutes in (perhaps at the self timer's
+first move), DECON's shadow update never completed, and every flip after it
+hung. The `FE 00` behind the level-3 key is the other unknown.
+
+ShellWatch did nothing, rightly: the shell was not hung (its loop answered
+the power key and wrote its heartbeat; the 3.3 minutes of failed frames were
+under the 5-minute limit). A panel that shows nothing while DRM says it is on is not
+something the heartbeat can see; it is the kernel's (a DECON watchdog on
+"flip did not latch" that resets the panel) and outside this item.
 
 ### Others
 
