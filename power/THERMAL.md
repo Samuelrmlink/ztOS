@@ -240,10 +240,19 @@ fall-back. Unknown inputs neither raise a level nor hold it.
 | 4 | 650 MHz | 400 MHz | 2 |
 
 - **zrnperfd** writes `scaling_max_freq` too, for its boost ladder.
-  zrn-thermald keeps zrnperfd's last value as its wish and gives it back when
-  the ceiling lifts. While a ceiling is on, it watches `/run` (inotify) for
-  `zrnperfd.status`, which zrnperfd rewrites after each change of limits, and
-  clamps again at once. The GPU goes through its devfreq cooling device
+  zrn-thermald sends it the ceiling as `thermal-cap LITTLE BIG` (kHz, or
+  `off`) on `/run/zrnperfd.ctl`, and zrnperfd applies it to every limit it
+  writes. zrnperfd's status shows it as `thermal_cap=LITTLE,BIG`; it isn't
+  kept across a zrnperfd restart, so zrn-thermald sends it again whenever the
+  status differs.
+  - **Fallback:** if zrnperfd isn't running (its pipe has no reader), or is an
+    older build without the command, zrn-thermald clamps the limits itself.
+  - It keeps zrnperfd's last value as its wish and gives it back when the
+    ceiling lifts.
+  - While a ceiling is on, it watches `/run` (inotify) for `zrnperfd.status`,
+    which zrnperfd rewrites after each change of limits, and clamps again at
+    once.
+- **The GPU** goes through its devfreq cooling device
   (`cooling_device0`), a separate request in the kernel that doesn't fight
   zrnperfd's `max_freq`. While writing it, the GPU is held awake through
   `power/control`, as zrnperfd does.

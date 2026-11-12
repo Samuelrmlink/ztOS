@@ -15,7 +15,9 @@ temp_little and temp_gpu, in C; any thermal zone but the gauge's, in mC).
 	    zrnperfd also writes scaling_max_freq (its boost ladder): what it
 	    asks for is kept and given back when the ceiling lifts, and while a
 	    ceiling is on, /run is watched (inotify) so a new rung of zrnperfd's
-	    is clamped at once.
+	    is clamped at once. Where zrnperfd takes "thermal-cap LITTLE BIG"
+	    (its status then says thermal_cap=), the ceiling goes to it instead
+	    and it applies the ceiling itself, before it writes anything.
   Warn	    a notification while the battery or the AP passes its warning mark,
 	    and while the battery's temperature is unknown (then nothing below
 	    can protect it). Through the shell's control pipe, as ztnotifyd's own
@@ -95,6 +97,7 @@ STATE = '/var/lib/zrn-thermald'
 STATUS = '/run/zrn-thermald.status'
 RUN = '/run'
 PERFD_STATUS = 'zrnperfd.status'
+PERFD_CTL = '/run/zrnperfd.ctl'
 USER_RUN = '/run/user'
 INPUTS = ('battery', 'ap', 'charger', 'usb', 'wifi', 'pa')
 TZ_SKIP = ('max170xx_battery',)	# the gauge's: a copy of zrn-therm's battery
@@ -114,6 +117,14 @@ def read(path):
 	try:
 		with open(p(path)) as f:
 			return f.readline().strip()
+	except OSError:
+		return None
+
+
+def read_all(path):
+	try:
+		with open(p(path)) as f:
+			return f.read()
 	except OSError:
 		return None
 
@@ -355,6 +366,43 @@ def gpu_apply(dev, state):
 		write(ctl, was)
 
 
+class Perfd:
+	"""zrnperfd's thermal-cap command: it applies the ceiling to every limit it
+	writes, so nothing is written over. Used when zrnperfd is up (its control
+	pipe has a reader) and knows the command (its status has thermal_cap=);
+	otherwise False, and the ceilings are clamped here. 'sent' until its
+	status shows the ceiling, then 'held'."""
+
+	def held(self):
+		for line in (read_all(RUN + '/' + PERFD_STATUS) or '').splitlines():
+			if line.startswith('thermal_cap='):
+				try:
+					l, b = line[12:].split(',')
+					return int(l), int(b)
+				except ValueError:
+					return None
+		return None
+
+	def set(self, want):
+		have = self.held()
+		if have is None:
+			return False
+		try:
+			fd = os.open(p(PERFD_CTL), os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+		except OSError:
+			return False	# no reader: zrnperfd is not running (its status is old)
+		try:
+			if have == tuple(want):
+				return 'held'
+			os.write(fd, (('thermal-cap %d %d\n' % want) if any(want) else 'thermal-cap off\n').encode())
+			log('ceiling to zrnperfd: little %d, big %d kHz' % want)
+			return 'sent'
+		except OSError:
+			return False
+		finally:
+			os.close(fd)
+
+
 # ---- the shell's notifications -------------------------------------------------------
 
 class Shell:
@@ -442,6 +490,8 @@ class Thermald:
 		self.shell = Shell()
 		self.cpus = [Cpu(n, c) for n, c in policies()]
 		self.gpu = gpu_cooling()
+		self.perfd = Perfd()
+		self.via_perfd = False
 		self.poweroff = poweroff or self._poweroff
 		self.powering_off = False
 		self.r = {}
@@ -488,8 +538,14 @@ class Thermald:
 
 	def caps(self):
 		c = CAPS.get(self.level, {})
+		got = self.perfd.set((c.get('little', 0), c.get('big', 0)))
+		self.via_perfd = bool(got)
 		for cpu in self.cpus:
-			cpu.apply(c.get(cpu.cluster))
+			if got == 'held':
+				cpu.ours = None	# zrnperfd has written its own, capped, since
+			elif not got:
+				cpu.apply(c.get(cpu.cluster))
+			# 'sent': what we clamped stays until zrnperfd has taken it
 		gpu_apply(self.gpu, c.get('gpu', 0))
 
 	def tick(self, now):
@@ -556,6 +612,7 @@ class Thermald:
 			 'dry_run=%s' % ('yes' if DRY_RUN or self.fake is not None else 'no')]
 		lines += ['%s=%s' % (k, '-' if v is None else v) for k, v in self.r.items()]
 		lines += ['cap_%s=%s' % (c.cluster, c.ours if c.ours is not None else '-') for c in self.cpus]
+		lines += ['cpu_caps=%s' % ('zrnperfd' if self.via_perfd else 'direct')]
 		lines += ['gpu_state=%s' % (read(self.gpu + '/cur_state') if self.gpu else '-')]
 		try:
 			with open(p(STATUS) + '.new', 'w') as f:
@@ -647,7 +704,7 @@ def run(once=False):
 	due = time.clock_gettime(CLOCK_BOOTTIME) + d.period_ms / 1000
 	timer_set(tfd, d.period_ms / 1000)
 	while not stop:
-		watch.want(d.level > 0)
+		watch.want(d.level > 0 and not d.via_perfd)
 		fds = [tfd] + ([watch.fd] if watch.wd >= 0 else [])
 		try:
 			ready, _, _ = select.select(fds, [], [])
