@@ -133,6 +133,8 @@ class Policy(unittest.TestCase):
 		self.assertFalse(c.see(hot, 4))
 		self.assertFalse(c.see(hot, 5))
 		self.assertTrue(c.see(hot, 6))
+		self.assertFalse(c.see(hot, 7))		# once per hot spell (the dry run's repeats)
+		self.assertFalse(c.see(hot, 8))
 		c = T.Confirm()
 		for s in range(10):
 			self.assertFalse(c.see(hot, None))	# no sample count: never confirmed

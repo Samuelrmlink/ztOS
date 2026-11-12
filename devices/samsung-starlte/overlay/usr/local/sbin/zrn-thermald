@@ -253,10 +253,10 @@ class Confirm:
 			self.last_sample = None
 			return False
 		if sample is None or sample == self.last_sample:
-			return self.n >= CONFIRM	# not a new reading: no new evidence
+			return False		# not a new reading: no new evidence
 		self.last_sample = sample
 		self.n += 1
-		return self.n >= CONFIRM
+		return self.n == CONFIRM	# once per hot spell
 
 
 class Unknown:
@@ -465,7 +465,10 @@ class Thermald:
 		if DRY_RUN or self.fake is not None:
 			log('DRY RUN: would power off now: ' + why, 2)
 			return
-		subprocess.run(['systemctl', 'poweroff'], check=False)
+		if subprocess.run(['systemctl', 'poweroff'], check=False).returncode != 0:
+			log('systemctl poweroff failed: trying again after %d more readings' % CONFIRM, 0)
+			self.powering_off = False
+			self.confirm.n = 0
 
 	def record(self, why):
 		os.makedirs(p(STATE), exist_ok=True)
