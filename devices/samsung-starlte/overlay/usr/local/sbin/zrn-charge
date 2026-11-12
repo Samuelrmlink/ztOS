@@ -25,6 +25,11 @@
 #	and 4.15 V, back at 10;  <= 15 C 700 mA, back at 20. Where the charger's float
 #	can't be set, "4.15 V" is kept by stopping at 4.15 V and resuming below 4.0 V.
 #	9 V only below 41 C; at 9 V with the screen on, 500 mA in / 1000 (stock SIOP).
+# The float otherwise: 4.24 V once Samsung's own cycle count (EFS
+# batt_discharge_level / 100, read only) is 1000 or more, stock's age step for
+# this battery; 4.35 V below it or if the count can't be read (owner,
+# 2026-11-12; power/battery-cycles.md). The kernel takes it through the
+# charger's constant_charge_voltage (patch-max77705-charger.py).
 #
 # The charger type comes from the max77705-usbc power supply where the kernel
 # has one (charger_type, else usb_type and current_max); on a kernel without it,
@@ -67,6 +72,8 @@ U=$PS/max77705-usbc		# what the source is
 B=$PS/max170xx_battery
 RX=$PS/p9320-wireless		# the receiver: its output voltage, if it says
 TH=$R/sys/kernel/zrn_therm	# the thermistors, from zrn-therm: fresh or unreadable
+AGE=$R/run/android/mnt/vendor/efs/FactoryApp/batt_discharge_level	# Samsung's count x 100 (read only)
+AGE_CYCLES=1000 AGE_FLOAT=4240	# stock's battery,age_data step for this battery
 DRM=$R/sys/class/drm
 LED=$R/run/zrn-led/charge
 RUN=$R/run/zrn-charge
@@ -346,7 +353,7 @@ save() {
 }
 
 pass() {	# look, decide, write; nap: when to look again without an event (s)
-	local T=250 tknown=0 mv in chg why= stop=0 hvbus=0 hvok=1 hvf= hv=0 want=0 rb a f t s key nominal fl
+	local T=250 tknown=0 mv in chg why= stop=0 hvbus=0 hvok=1 hvf= hv=0 want=0 rb a f t s key nominal fl bmax
 	local ramp=0 rs= n p ma
 	# (all builtins: no process is started, but for i2cget on the old kernel)
 	now; detect
@@ -468,23 +475,27 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	elif [ $cold = 1 ]; then min chg 700; why+=" cold"
 	elif [ $cool = 1 ]; then min chg 700; why+=" cool"
 	fi
-	# the float: 4.15 V while swelling is a risk, else the battery's own
-	nominal=4350; num "$B/constant_charge_voltage_max" && nominal=$((REPLY / 1000))
+	# the float: 4.15 V while swelling is a risk, else the battery's own, or
+	# stock's aged step once Samsung's count says so
+	bmax=4350; num "$B/constant_charge_voltage_max" && bmax=$((REPLY / 1000))
+	nominal=$bmax
+	num "$AGE" && [ $((REPLY / 100)) -ge $AGE_CYCLES ] && [ $AGE_FLOAT -lt $nominal ] && nominal=$AGE_FLOAT
 	f=$nominal; [ $((warm | cold)) = 1 ] && f=4150
-	fl=$nominal; num "$C/constant_charge_voltage" && fl=$((REPLY / 1000))
+	fl=$bmax; num "$C/constant_charge_voltage" && fl=$((REPLY / 1000))
 	[ $fl != $f ] && put "$C/constant_charge_voltage" $((f * 1000)) &&
 		num "$C/constant_charge_voltage" && fl=$((REPLY / 1000))
-	if [ $f -lt $nominal ] && [ $fl -gt $f ]; then
-		# can't be set: stop at 4.15 V, go on below 4.0 V, as stock recharges
+	if [ $f -lt $bmax ] && [ $fl -gt $f ]; then
+		# can't be set (an older kernel): stop at the float, go on 150 mV
+		# below it, as stock recharges
 		mv=0; num "$B/voltage_now" && mv=$((REPLY / 1000))
-		[ $mv -ge 4150 ] && vhold=1
-		[ $mv -lt 4000 ] && vhold=0
+		[ $mv -ge $f ] && vhold=1
+		[ $mv -lt $((f - 150)) ] && vhold=0
 	else
 		vhold=0
 	fi
 	[ $hot_stop = 1 ] && stop=1 why+=" too hot"
 	[ $cold_stop = 1 ] && stop=1 why+=" too cold"
-	[ $vhold = 1 ] && stop=1 why+=" at 4.15 V"
+	[ $vhold = 1 ] && stop=1 why+=" at $f mV"
 	[ $((warm | hot_stop | cold_stop)) = 1 ] && hvok=0
 	[ $tknown = 1 ] || hvok=0
 	# held at 5 V by hand (a new driver on trial): touch /etc/zrn-charge/no-hv
