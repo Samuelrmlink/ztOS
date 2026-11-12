@@ -91,6 +91,11 @@ MODEM_SOURCES = ('umts_', 'rmnet', 'multipdp')
 
 SCREEN_OFF_S = 15	# off this long before the first sleep
 MAX_SLEEP_S = 1800	# an RTC alarm at the latest after this
+# the AOD on the panel (aod_parked): an RTC wake at the shell's next place
+# (ztmetro AOD_SHIFT_S), this late past it, and this long up after it
+AOD_SHIFT_S = 600
+AOD_LATE_S = 2
+AOD_AWAKE_S = 4
 # Doze: an app picked to run in the background no longer keeps the phone up.
 # It sleeps at most DOZE_SLEEP_S, then stays up DOZE_AWAKE_S with Wi-Fi back,
 # so the app (WhatsApp through microG) can fetch what came in. Calls and SMS
@@ -409,10 +414,19 @@ def wifi_state():
 	return state if state in ('up', 'down') else (state or 'absent')
 
 
+def aod_parked():
+	"""The AOD held by the panel (ROADMAP 8.45, power/aod/PANEL-AOD.md): the
+	shell parked the output with its frame lit and the panel's own clock
+	turning, so the SoC may sleep under it."""
+	shell = read(SHELL_STATE).splitlines()
+	return 'screen off' in shell and 'aod on' in shell and 'aod_parked yes' in shell
+
+
 def display_state():
-	"""'on', 'aod' (the output lit, the shell's AOD showing), or 'off'."""
+	"""'on', 'aod' (the output lit, the shell's AOD showing), 'aod-panel'
+	(the AOD held by the panel, the output off), or 'off'."""
 	if screen_off():
-		return 'off'
+		return 'aod-panel' if aod_parked() else 'off'
 	shell = read(SHELL_STATE).splitlines()
 	if 'screen off' in shell and 'aod on' in shell:
 		return 'aod'
@@ -1319,6 +1333,13 @@ def cycle(ignore=(), ignore_inhibits=()):
 	if cap is not None and cap < alarm_s:
 		log(f'battery low: sleeping at most {cap}s')
 		alarm_s = cap
+	# the AOD on the panel: back by its next place (the shell moves it every
+	# AOD_SHIFT_S, and resyncs the panel's clock at every wake)
+	aod_alarm = False
+	if aod_parked():
+		due = int(AOD_SHIFT_S - time.time() % AOD_SHIFT_S) + AOD_LATE_S
+		if due < alarm_s:
+			alarm_s, aod_alarm = due, True
 	last_sleep.clear()
 	t_start = boottime()
 	t_in = None
@@ -1522,8 +1543,11 @@ def cycle(ignore=(), ignore_inhibits=()):
 		last_wake_boot = boottime()
 		purpose = reason
 		if reason == 'rtc':
-			purpose = 'tick' if wifi_parked else 'wifi'
+			purpose = 'aod' if aod_alarm and (wifi_parked or not WIFI_INTERVAL_S) else \
+				'tick' if wifi_parked else 'wifi'
 		last_sleep['purpose'] = purpose
+		if aod_parked():
+			tell_shell('aod tick')	# the panel's clock resynced, the place, the battery
 		# the cycle's own cost: before the suspend, and from the return to here
 		cost = ''
 		if t_in is not None and t_woke is not None:
@@ -1786,6 +1810,8 @@ def main():
 					if info.get('purpose') == 'tick':
 						backoff = mono	# nothing to do: straight back
 						quick = True
+					elif info.get('purpose') == 'aod':
+						backoff = mono + AOD_AWAKE_S	# the shell redraws and parks again
 					# Wi-Fi was up at the sleep and is bound again: give it its window
 					if (WIFI_WINDOW_S and info.get('purpose') in ('wifi', 'alarm', 'other') and
 							last_wifi.get('before') == 'up' and (WIFI / WIFI_DEV).exists()):

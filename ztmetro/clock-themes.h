@@ -31,6 +31,8 @@ struct clock_ctx {
 	bool h24;
 	int place;		/* the burn-in place (the image's shift within its frame) */
 	double left;		/* ALIGN_LEFT: the left edge the theme used */
+	bool panel_hands;	/* the AOD on the panel: it draws the hands (PANEL-AOD.md) */
+	double hands_x, hands_y;	/* analogue: the dial's centre, for it */
 };
 
 struct clock_theme {
@@ -156,6 +158,18 @@ static double theme_analogue(struct clock_ctx *c, double y) {
 		cairo_line_to(cr, cx + sin(a) * (r - 3 - l), cy - cos(a) * (r - 3 - l));
 	}
 	cairo_stroke(cr);
+	c->hands_x = cx;
+	c->hands_y = cy;
+	if (c->panel_hands) {
+		/* the panel turns its own hands over this dial; no time in words
+		 * (it would stand still): the date alone */
+		cairo_restore(cr);
+		y = cy + r + 16;
+		ct_grey(c);
+		ct_date(c, "%A, %B %-d", line, sizeof(line));
+		draw_text(cr, line, FONT_SEMILIGHT, 18, c->dx + 24, y, c->w - 48, 26, true);
+		return y + 40;
+	}
 	double mins = c->tm.tm_min, hours = c->tm.tm_hour % 12 + mins / 60.0;
 	double ha = hours * M_PI / 6, ma = mins * M_PI / 30;
 	ct_white(c);

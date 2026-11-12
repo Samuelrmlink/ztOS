@@ -250,7 +250,9 @@ def display_blockers(runtime, home):
 	if any(on for name, on in conns.items() if '-DP-' in name or '-HDMI' in name):
 		out.append(blocker('dock', 'External display', detail='a dock or a cable to a screen'))
 	aod_showing = 'screen off' in shell and 'aod on' in shell
-	if aod_showing and panel_on:
+	if aod_showing and not panel_on and 'aod_parked yes' in shell:
+		pass	# held by the panel (ROADMAP 8.45): no blocker, the SoC may sleep
+	elif aod_showing and panel_on:
 		out.append(blocker('aod', 'Always-on display showing', 'Always-on display',
 				   proc='ztmetro', detail='zrn-sleepd does not sleep while it shows'))
 	elif panel_on or not conns and 'screen on' in shell:

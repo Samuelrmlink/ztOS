@@ -948,6 +948,17 @@ struct zt_server {
 	uint32_t aod_fast_until;	/* read the room often until then */
 	struct wl_event_source *aod_light_timer;
 	int aod_place_shown;		/* the place last drawn, to log each move */
+	/* the AOD on the panel (ROADMAP 8.45, power/aod/PANEL-AOD.md): HLPM, the
+	 * output parked with the frame lit (aod_keep), the panel's own clock */
+	bool aod_panel_on;		/* config aod_panel (on unless "off") */
+	bool aod_panel_mode;		/* this AOD is the panel's (decided as it shows) */
+	bool aod_parked;		/* the output off, the frame on the panel */
+	bool aod_clock_on;		/* the panel's hands are turning */
+	bool aod_sprite_sent;
+	int aod_lpm;			/* the HLPM row asked for: 0 none, 1 2 nit, 2 10 nit */
+	long aod_panel_key;		/* what the frame on the panel shows, but the time */
+	double aod_hands_x, aod_hands_y;	/* the dial's centre, points; < 0 none */
+	struct wl_event_source *aod_park_timer;
 	int screen_timeout;		/* seconds of no input before the screen sleeps; 0: never */
 	int lock_timeout;		/* the same on the lock screen; 0: screen_timeout */
 	bool double_tap_wake;		/* config double_tap_wake: a double tap wakes the AOD */
@@ -3415,6 +3426,7 @@ static void load_config(struct zt_server *server) {
 	server->screen_timeout = SCREEN_TIMEOUT_S;
 	server->lock_timeout = LOCK_TIMEOUT_S;
 	server->aod_auto = true;
+	server->aod_panel_on = true;
 	server->aod_low_off = false;	/* shown down to the last per cent unless asked */
 	snprintf(server->aod_theme, sizeof(server->aod_theme), "metro");
 	snprintf(server->lock_theme, sizeof(server->lock_theme), "metro");
@@ -3558,6 +3570,8 @@ static void load_config(struct zt_server *server) {
 			server->aod_force_mark_on = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "aod_low_battery_off") == 0) {
 			server->aod_low_off = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
+		} else if (strcmp(key, "aod_panel") == 0) {
+			server->aod_panel_on = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "aod_auto_brightness") == 0) {
 			server->aod_auto = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "double_tap_wake") == 0) {
@@ -7113,6 +7127,9 @@ static int net_tick(void *data) {
 
 static void aod_sync(struct zt_server *server);
 static void aod_refresh(struct zt_server *server);
+static long aod_panel_key_now(struct zt_server *server);
+static int aod_panel_row(struct zt_server *server);
+static bool aod_lpm_put(struct zt_server *server, int row);
 
 static void draw_nav(struct zt_server *server);
 
@@ -7175,9 +7192,12 @@ static int clock_tick(void *data) {
 			draw_shade(server);
 		}
 	}
-	/* the always-on display: shown or not (the battery), and the minute */
+	/* the always-on display: shown or not (the battery), and the minute
+	 * (parked with the panel's clock turning, only what else changed) */
 	aod_sync(server);
-	aod_refresh(server);
+	if (!(server->aod_parked && server->aod_clock_on && aod_panel_key_now(server) == server->aod_panel_key)) {
+		aod_refresh(server);
+	}
 	time_t now = time(NULL);
 	wl_event_source_timer_update(server->clock_timer, (60 - now % 60) * 1000 + 50);
 	return 0;
@@ -13042,7 +13062,8 @@ static void aod_tint(struct zt_server *server) {
 	if (server->tone_k > 0 && server->tone_k < 6450) {
 		tone_rgb(server->tone_k, rgb);
 	}
-	float k = (bl.mode == BL_TABLE ? (float)server->aod_scale : 0.35f) * (float)server->aod_budget_k;
+	float k = (server->aod_panel_mode ? 1.0f : bl.mode == BL_TABLE ? (float)server->aod_scale : 0.35f) *
+		(float)server->aod_budget_k;
 	for (int i = 0; i < 3; i++) {
 		server->tint[i] = k * rgb[i];
 	}
@@ -13350,17 +13371,22 @@ static double aod_rows(struct zt_server *server, cairo_t *cr, double w, double d
 /* The whole AOD picture into `cr` (points, w x h), theme `theme`, at place
  * `place`, for the time `now`. */
 static void aod_compose(struct zt_server *server, cairo_t *cr, double w, double h, time_t now, int place,
-		const struct clock_theme *theme) {
+		const struct clock_theme *theme, bool shown) {
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_paint(cr);
 	double dx = AOD_SPOTS[place][0], dy = AOD_SPOTS[place][1];
 	struct clock_ctx c = { .cr = cr, .server = server, .flip = 1, .w = w, .h = h, .dx = dx, .aod = true,
-		.h24 = server->clock_24h, .place = place, .left = -1 };
+		.h24 = server->clock_24h, .place = place, .left = -1,
+		.panel_hands = shown && server->aod_panel_mode, .hands_x = -1, .hands_y = -1 };
 	localtime_r(&now, &c.tm);
 	c.prev = c.tm;
 	/* under a sixth of the way down: clear of the status bar's rows and the
 	 * top self-mask band at any place, and of the nav bar's far below */
 	double y = theme->draw(&c, round(h * 0.18) + dy);
+	if (shown) {
+		server->aod_hands_x = c.hands_x;
+		server->aod_hands_y = c.hands_y;
+	}
 	aod_rows(server, cr, w, dx, theme->align == ALIGN_LEFT ? c.left : -1, y);
 	aod_force_mark(server, cr, now);
 }
@@ -13400,8 +13426,10 @@ static void aod_draw_place(struct zt_server *server, time_t now, int place) {
 	double w = server->width, h = server->height;
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, w, h, &cr);
-	const struct clock_theme *theme = clock_theme(server->aod_theme, THEME_AOD);
-	aod_compose(server, cr, w, h, now, place, theme);
+	/* the panel's clock is analogue: its dial, the hands its own */
+	const struct clock_theme *theme = clock_theme(server->aod_panel_mode ? "analogue" : server->aod_theme,
+						      THEME_AOD);
+	aod_compose(server, cr, w, h, now, place, theme, true);
 	aod_measure(buffer->surface, buffer->pw, buffer->ph, &server->aod_mean, &server->aod_lit);
 	double k = server->aod_mean > theme->light_budget ? theme->light_budget / server->aod_mean : 1;
 	if (fabs(k - server->aod_budget_k) > 0.01 && !g_dump_dir) {
@@ -13449,7 +13477,7 @@ static void previews_write(struct zt_server *server, const char *into) {
 			cairo_surface_t *sf = cairo_image_surface_create(CAIRO_FORMAT_RGB24, pw, ph);
 			cairo_t *cr = cairo_create(sf);
 			cairo_scale(cr, PREVIEW_SCALE, PREVIEW_SCALE);
-			aod_compose(server, cr, w, h, at, 0, t);
+			aod_compose(server, cr, w, h, at, 0, t, false);
 			cairo_destroy(cr);
 			double mean, lit;
 			aod_measure(sf, pw, ph, &mean, &lit);
@@ -13609,8 +13637,14 @@ static int aod_light_tick(void *data) {
 			wlr_log(WLR_INFO, "aod: %d lux, level %d (L* %.0f, pixels x%.2f)%s", lux, level,
 				AOD_LEVELS[level].lstar, AOD_LEVELS[level].scale, jump ? "" : ", gliding");
 			server->aod_level = level;
-			aod_bl_set(AOD_LEVELS[level].lstar, !jump);
-			if (AOD_LEVELS[level].scale != server->aod_scale) {
+			if (server->aod_panel_mode) {
+				if (server->aod_lpm && aod_panel_row(server) != server->aod_lpm) {
+					aod_lpm_put(server, aod_panel_row(server));	/* the panel's own level */
+				}
+			} else {
+				aod_bl_set(AOD_LEVELS[level].lstar, !jump);
+			}
+			if (!server->aod_panel_mode && AOD_LEVELS[level].scale != server->aod_scale) {
 				server->aod_scale = AOD_LEVELS[level].scale;
 				server->aod_dirty = true;	/* the pixels' part: a frame now */
 				wlr_output_schedule_frame(server->output->wlr_output);
@@ -13657,6 +13691,210 @@ static void aod_light_stop(struct zt_server *server) {
 	server->aod_level = -1;
 }
 
+/*
+ * The AOD on the panel (ROADMAP 8.45, power/aod/PANEL-AOD.md). With the
+ * kernel's aod_lpm (kernel/patch-decon-lpm.py), a shown AOD frame is followed
+ * by Samsung's HLPM entry (frames still flowing, stock's order), then the
+ * output is parked with aod_keep (the frame stays lit, the output reads
+ * disabled: zrn-sleepd may sleep), then the panel's analogue clock is set up
+ * at the dial's centre. A new frame unparks with it (the kernel takes the
+ * clock's timing out first) and parks again; the minute needs no frame. Woken,
+ * the output comes on and aod_lpm 0 is Samsung's exit and the whole
+ * brightness set. ZTMETRO_AOD_PANEL=0 or config aod_panel=off: as before.
+ */
+#define DECON_DEV	"/sys/devices/platform/soc@0/16030000.decon"
+#define AOD_KEEP_PARAM	"/sys/module/s9p_decon/parameters/aod_keep"
+#define AOD_PARK_MS	250	/* after a frame's commit, before parking */
+#define AOD_SPRITE_W	480
+#define AOD_SPRITE_H	120
+
+static void aod_render_frame(struct zt_server *server);
+
+static bool sysfs_put(const char *path, const char *text) {
+	int fd = open(path, O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return false;
+	}
+	size_t n = strlen(text);
+	bool ok = write(fd, text, n) == (ssize_t)n;
+	close(fd);
+	return ok;
+}
+
+static bool aod_panel_available(struct zt_server *server) {
+	const char *env = getenv("ZTMETRO_AOD_PANEL");
+	if (!server->aod_panel_on || g_nested || g_dump_dir || (env && strcmp(env, "0") == 0)) {
+		return false;
+	}
+	return access(DECON_DEV "/aod_lpm", W_OK) == 0 && access(AOD_KEEP_PARAM, W_OK) == 0;
+}
+
+/* HLPM 2 nit in the dark (the room's first level, < 5 lux), else 10 nit */
+static int aod_panel_row(struct zt_server *server) {
+	return server->aod_level > 0 || (!server->aod_auto && AOD_FIXED_LEVEL > 0) ? 2 : 1;
+}
+
+static bool aod_lpm_put(struct zt_server *server, int row) {
+	char v[4];
+	snprintf(v, sizeof(v), "%d", row);
+	if (!sysfs_put(DECON_DEV "/aod_lpm", v)) {
+		wlr_log(WLR_ERROR, "aod: panel lpm %d refused (%s)", row, strerror(errno));
+		return false;
+	}
+	server->aod_lpm = row;
+	wlr_log(WLR_INFO, "aod: panel lpm %d", row);
+	return true;
+}
+
+/* The hands, as power/aod/panel/make-sprite.py draws them: 480 x 120 RGBA,
+ * hour and minute bands, 3 px grey lines from just before x 120 (where
+ * stock's turn), no second hand. Lengths: the dial's 0.5 and 0.82. */
+static bool aod_sprite_send(struct zt_server *server) {
+	static unsigned char img[AOD_SPRITE_W * AOD_SPRITE_H * 4];
+	double r = 74 * server->scale;	/* theme_analogue's dial, pixels */
+	int ends[2] = { 120 + (int)(r * 0.5), 120 + (int)(r * 0.82) };
+	for (int i = 0; i < AOD_SPRITE_W * AOD_SPRITE_H; i++) {
+		img[i * 4] = img[i * 4 + 1] = img[i * 4 + 2] = 0xFF;
+		img[i * 4 + 3] = 0;
+	}
+	for (int band = 0; band < 2; band++) {
+		double cy = band * 40 + 19.5;
+		int x0 = 110, x1 = ends[band] < AOD_SPRITE_W - 4 ? ends[band] : AOD_SPRITE_W - 4;
+		for (int y = band * 40; y < band * 40 + 40; y++) {
+			for (int x = x0 - 2; x <= x1 + 2; x++) {
+				double dx = x < x0 ? x0 - x : x > x1 ? x - x1 : 0;
+				double d = sqrt(dx * dx + (y - cy) * (y - cy)), cov = 2.0 - d;
+				if (cov <= 0) continue;
+				unsigned char *p = img + ((size_t)y * AOD_SPRITE_W + x) * 4;
+				p[0] = p[1] = p[2] = 0xA0;
+				p[3] = (unsigned char)(255 * (cov > 1 ? 1 : cov));
+			}
+		}
+	}
+	int fd = open(DECON_DEV "/aod_sprite", O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		wlr_log(WLR_ERROR, "aod: no aod_sprite (%s)", strerror(errno));
+		return false;
+	}
+	size_t done = 0;
+	while (done < sizeof(img)) {
+		ssize_t n = write(fd, img + done, sizeof(img) - done);
+		if (n <= 0) break;
+		done += (size_t)n;
+	}
+	close(fd);
+	return done == sizeof(img);
+}
+
+/* "analog X Y HH MM SS 24" or "time HH MM SS 24": the time read at the call */
+static bool aod_clock_put(struct zt_server *server, bool place) {
+	char line[80];
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	if (ts.tv_nsec > 900000000L) {
+		/* the second is about to turn: the panel counts from the next */
+		usleep((useconds_t)((1000000000L - ts.tv_nsec) / 1000));
+		clock_gettime(CLOCK_REALTIME, &ts);
+	}
+	struct tm tm;
+	localtime_r(&ts.tv_sec, &tm);
+	if (place) {
+		snprintf(line, sizeof(line), "analog %d %d %d %d %d %d",
+			 (int)lround(server->aod_hands_x * server->scale),
+			 (int)lround(server->aod_hands_y * server->scale),
+			 tm.tm_hour, tm.tm_min, tm.tm_sec, server->clock_24h ? 1 : 0);
+	} else {
+		snprintf(line, sizeof(line), "time %d %d %d %d", tm.tm_hour, tm.tm_min, tm.tm_sec,
+			 server->clock_24h ? 1 : 0);
+	}
+	if (!sysfs_put(DECON_DEV "/aod_clock", line)) {
+		wlr_log(WLR_ERROR, "aod: panel clock \"%s\" refused (%s)", line, strerror(errno));
+		return false;
+	}
+	wlr_log(WLR_INFO, "aod: panel clock %s", line);
+	return true;
+}
+
+/* What the parked frame shows but the time: its place, the day, the battery,
+ * the charger. The waiting apps redraw by their own events. */
+static long aod_panel_key_now(struct zt_server *server) {
+	time_t now = time(NULL);
+	struct tm tm;
+	localtime_r(&now, &tm);
+	return (long)aod_place(now) * 10000000L + tm.tm_yday * 10000L + aod_battery(server) * 10L +
+		(aod_charger(server) ? 1 : 0);
+}
+
+static void aod_park_later(struct zt_server *server) {
+	if (server->aod_panel_mode && server->aod_park_timer) {
+		wl_event_source_timer_update(server->aod_park_timer, AOD_PARK_MS);
+	}
+}
+
+static int aod_park_tick(void *data) {
+	struct zt_server *server = data;
+	if (!server->output || !server->aod || server->screen_on || server->aod_parked ||
+			server->aod_dirty || !server->aod_panel_mode) {
+		return 0;
+	}
+	int row = aod_panel_row(server);
+	if (server->aod_lpm != row && !aod_lpm_put(server, row)) {
+		return 0;	/* the shell's AOD as before */
+	}
+	if (!sysfs_put(AOD_KEEP_PARAM, "Y")) {
+		wlr_log(WLR_ERROR, "aod: cannot set aod_keep: not parked");
+		return 0;
+	}
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_enabled(&state, false);
+	bool ok = wlr_output_commit_state(server->output->wlr_output, &state);
+	wlr_output_state_finish(&state);
+	sysfs_put(AOD_KEEP_PARAM, "N");	/* only this blank keeps the panel lit */
+	if (!ok) {
+		wlr_log(WLR_ERROR, "aod: could not park (output commit failed)");
+		return 0;
+	}
+	server->aod_parked = true;
+	if (!server->aod_sprite_sent) {
+		server->aod_sprite_sent = aod_sprite_send(server);
+	}
+	server->aod_clock_on = server->aod_sprite_sent && server->aod_hands_x >= 0 &&
+		aod_clock_put(server, true);
+	wlr_log(WLR_INFO, "aod: parked on the panel%s", server->aod_clock_on ? ", its clock turning" : "");
+	state_file_write(server);
+	return 0;
+}
+
+/* The output on again with the frame there was (a wake, or the dark next) */
+static void aod_unpark(struct zt_server *server) {
+	if (!server->aod_parked) {
+		return;
+	}
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_enabled(&state, true);
+	if (!wlr_output_commit_state(server->output->wlr_output, &state)) {
+		wlr_log(WLR_ERROR, "aod: could not leave the park");
+	}
+	wlr_output_state_finish(&state);
+	server->aod_parked = false;
+	server->aod_clock_on = false;
+}
+
+/* Out of the panel's AOD altogether: unparked, HLPM left (the exit and the
+ * brightness set), before the screen lights or goes dark */
+static void aod_panel_leave(struct zt_server *server) {
+	if (server->aod_park_timer) {
+		wl_event_source_timer_update(server->aod_park_timer, 0);
+	}
+	aod_unpark(server);
+	if (server->aod_lpm) {
+		aod_lpm_put(server, 0);
+	}
+	server->aod_panel_mode = false;
+}
+
 /* Draw it again and send it: the next frame carries it. */
 static void aod_refresh(struct zt_server *server) {
 	if (!server->aod) {
@@ -13669,8 +13907,11 @@ static void aod_refresh(struct zt_server *server) {
 		server->aod_place_shown = place;
 	}
 	aod_draw_at(server, now);
+	server->aod_panel_key = aod_panel_key_now(server);
 	server->aod_dirty = true;
-	if (server->output) {
+	if (server->output && server->aod_parked) {
+		aod_render_frame(server);	/* no frame events while the output is off */
+	} else if (server->output) {
 		wlr_output_schedule_frame(server->output->wlr_output);
 	}
 }
@@ -13733,12 +13974,18 @@ static void aod_render_frame(struct zt_server *server) {
 	}
 	wlr_output_state_set_buffer(&state, buffer);
 	wlr_buffer_unlock(buffer);
+	if (server->aod_parked) {
+		wlr_output_state_set_enabled(&state, true);	/* out of the park, with it */
+	}
 	if (wlr_output_commit_state(output, &state)) {
 		server->output->last_submitted = buffer;
 		server->plane_shown = false;
 		server->plane_surface = NULL;
 		server->aod_dirty = false;
 		server->aod_frames++;
+		server->aod_parked = false;
+		server->aod_clock_on = false;	/* the kernel took it out for the frame */
+		aod_park_later(server);
 		burnin_frame_shown();
 		state_file_write(server);	/* (its aod_frames: one write a minute) */
 	} else {
@@ -13764,6 +14011,11 @@ static void aod_sync(struct zt_server *server) {
 	bool want = aod_wanted(server);
 	if (want == server->aod) {
 		return;
+	}
+	if (!want) {
+		aod_panel_leave(server);	/* then the ordinary blank: black, sleep in */
+	} else {
+		server->aod_panel_mode = aod_panel_available(server);
 	}
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
@@ -13853,6 +14105,10 @@ static void screen_set(struct zt_server *server, bool on) {
 	bool aod = !on && !dark_why;
 	if (aod) {
 		aod_bl_hold();
+		server->aod_panel_mode = aod_panel_available(server);
+	}
+	if (on) {
+		aod_panel_leave(server);	/* the output on, HLPM's exit, before the brightness */
 	}
 	if (!aod && !(on && server->aod)) {
 		struct wlr_output_state state;
@@ -15752,6 +16008,8 @@ static void state_file_write(struct zt_server *server) {
 		server->height, server->scale, o->width, o->height, server->screen_on ? "on" : "off",
 		server->aod ? "on" : "off", server->aod_frames);
 	fprintf(f, "prox_blank %s\n", server->prox_blank ? "on" : "off");
+	fprintf(f, "aod_parked %s\naod_panel %s lpm %d clock %s\n", server->aod_parked ? "yes" : "no",
+		server->aod_panel_mode ? "on" : "off", server->aod_lpm, server->aod_clock_on ? "on" : "off");
 	fprintf(f, "cover %s%s\n", server->cover.closed ? "closed" : "open", server->cover.enabled ? "" : " ignored");
 	fprintf(f, "rotation %d\nauto_rotate %s\nrotation_lock %s\norientation %d\n", server->rot.applied,
 		server->rot.enabled ? "on" : "off", server->rot.locked ? "on" : "off",
@@ -16056,6 +16314,13 @@ static void ctl_command(struct zt_server *server, char *line) {
 				app_ready(server, t);
 			}
 		}
+	} else if (strcmp(line, "aod tick") == 0) {
+		/* zrn-sleepd, after a wake: the panel's clock gets the time again
+		 * (it drifts), and the minute's other news is drawn */
+		if (server->aod_parked && server->aod_clock_on) {
+			aod_clock_put(server, false);
+		}
+		clock_tick(server);
 	} else if (strcmp(line, "clock") == 0) {
         clock_tick(server);
         damage(server);
@@ -19440,6 +19705,7 @@ int main(int argc, char *argv[]) {
 	server.key_repeat_timer = wl_event_loop_add_timer(server.loop, key_repeat_fired, &server);
 	server.repeat_index = -1;
 	server.aod_light_timer = wl_event_loop_add_timer(server.loop, aod_light_tick, &server);
+	server.aod_park_timer = wl_event_loop_add_timer(server.loop, aod_park_tick, &server);
 	server.flip_timer = wl_event_loop_add_timer(server.loop, flip_frame, &server);
 	server.previews_timer = wl_event_loop_add_timer(server.loop, previews_idle, &server);
 	server.voldown_timer = wl_event_loop_add_timer(server.loop, voldown_later, &server);
