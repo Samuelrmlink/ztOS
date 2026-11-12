@@ -72,6 +72,8 @@ struct state {
 static struct state now = { "?", "", -1, 0, 0, 0, -1, -1, -1, false, false, false, "", -1 };
 static struct state written;
 static bool written_once;
+static int call_audio_route;	/* 0 off, 1 earpiece, 2 speaker: call_audio() */
+static const char *const call_audio_names[] = { "off", "earpiece", "speaker" };
 static char call_result[16];
 
 static const char *reg_name(int reg)
@@ -158,7 +160,9 @@ static void publish(void)
 {
 	static double written_ipc_rx;
 	static long written_at;
-	bool same = written_once && memcmp(&now, &written, sizeof(now)) == 0;
+	static int written_route;
+	bool same = written_once && memcmp(&now, &written, sizeof(now)) == 0 &&
+		written_route == call_audio_route;
 	if (same && (ipc_last_rx == written_ipc_rx || ms() - written_at < 60000))
 		return;
 	mkdir(STATUS_DIR, 0755);
@@ -170,6 +174,7 @@ static void publish(void)
 	int bars = status_bars(now.bars, reg);
 	fprintf(f, "call_result=%s\n", call_result);
 	fprintf(f, "call=%s\ncall_number=%s\n", now.call[0] ? now.call : "idle", now.call_number);
+	fprintf(f, "call_audio=%s\n", call_audio_names[call_audio_route]);
 	fprintf(f, "sim=%s\noperator=%s\nbars=%d\nregistered=%s\ntech=%s\nairplane=%d\ndata=%d\ndata_on=%d\n"
 		"ip=%s\nwifi_bars=%d\n",
 		now.sim, now.operator, bars, reg_name(reg), tech(),
@@ -183,6 +188,7 @@ static void publish(void)
 	rename(STATUS ".new", STATUS);
 	written = now;
 	written_once = true;
+	written_route = call_audio_route;
 	written_ipc_rx = ipc_last_rx;
 	written_at = ms();
 	if (!same)
@@ -766,8 +772,29 @@ static bool release_saw_call;
  * modem starts on it. Sound is on from dialling: the network's own ringback
  * and announcements are part of the call.
  */
-static int call_audio_route;	/* 0 off, 1 earpiece, 2 speaker */
 static void ipc_send(int main_cmd, int sub, int type, const unsigned char *data, size_t len);
+
+/* The sensor daemon keeps the proximity sensor on for a call held to the ear
+ * and blanks the screen against a cheek (sensors/README.md, "Proximity in
+ * calls"): it is told the call's state and where its sound goes, each time
+ * either changes. */
+#define SENSORD_CTL	"/run/ztoscsf-sensord.ctl"
+static void tell_sensord(void)
+{
+	static char told[48];
+	char line[48];
+	snprintf(line, sizeof(line), "call %s %s\n", now.call[0] ? now.call : "idle",
+		call_audio_names[call_audio_route]);
+	if (!strcmp(line, told))
+		return;
+	/* not running: it reads the status file when it starts */
+	int fd = open(SENSORD_CTL, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0)
+		return;
+	if (write(fd, line, strlen(line)) == (ssize_t)strlen(line))
+		snprintf(told, sizeof(told), "%s", line);
+	close(fd);
+}
 
 static void call_audio(int route)
 {
@@ -800,6 +827,8 @@ static void call_audio(int route)
 	}
 	fprintf(stderr, "ztoscorenetworkingd: call audio: %s\n", names[route]);
 	call_audio_route = route;
+	tell_sensord();
+	publish();
 }
 
 static void call_set(const char *state, const char *number)
@@ -834,6 +863,7 @@ static void call_set(const char *state, const char *number)
 		now.call_number[0] = 0;
 	}
 	snprintf(now.call, sizeof(now.call), "%s", state);
+	tell_sensord();
 	if (number && number[0])
 		snprintf(now.call_number, sizeof(now.call_number), "%s", number);
 	/* Calls must reach the UI even while an unrelated AT command is pending. */
