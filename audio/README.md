@@ -274,5 +274,9 @@ with a caret that opens all three; it goes 3 s after the last touch or key.
 - **Earpiece, headphones, microphones**: all on the CS47L93 codec (SPI), whose
   bus is not in the device tree either. Mainline has the codec driver
   (madera), so this is the next piece.
+- **The 3.5 mm jack** (headphones, headsets, their buttons and microphone):
+  built, off by default until its codec writes are approved. See
+  `audio/HEADSET.md`. FM radio: `audio/FM-RADIO.md` (no FM chip on the
+  G960F as far as every source shows).
 - **Idle power**: the DSP core stays running after the first load.
 - Other rates and formats than 48 kHz / 16 bit / stereo (PipeWire converts).

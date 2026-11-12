@@ -63,7 +63,7 @@ Every sensor in this section sits behind the hub: `zrn-bbd`, then lhd, then `zto
 | NFC (`sec-nfc` 0x27, eSE `ese_p3`) | other agent | `hsi2c_20`, `spi_7` | **ROADMAP 8.28** (`research/nfc`) | - |
 | MST (Samsung Pay) | other agent | `sec-mst`: gpg3-4, gph0-7, gph0-6 | **ROADMAP 8.28** | - |
 | GNSS (BCM4773) | other agent | `ztos-gnss-gate` running | **ROADMAP 8.29** (`feature/gnss`) | - |
-| FM radio (Richwave RTC6213N) | missing (present on this G960F) | `rtcfmradio@64` on `hsi2c_11`, irq gpa2-1, LNA gph1-3, `VDD_FM_2P8` (LDO45, always-on); `CONFIG_RADIO_RTC6213N=y` in stock. The headphone cable is the antenna | `hsi2c_11` in the DT, a port of Samsung's GPL V4L2 driver (no mainline driver), FM audio into the CS47L93 (an analogue input route), and the headphone jack first | L |
+| FM radio | not fitted (likely) | No `rtcfmradio` node in any of the 12 stock SM-G960F device trees; hsi2c_11 carries only the SX9320 grip sensor; no LDO45. The RTC6213N is in the Snapdragon S9's tree, not this one (audio/FM-RADIO.md) | Nothing, unless a board photo shows the chip | - |
 
 ### Audio
 
