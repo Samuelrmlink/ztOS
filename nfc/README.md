@@ -773,6 +773,46 @@ From the vendor CAL (LineageOS universal9810,
     bits 13:8 = 0, bit 0 = 0. Then repeat stage 1c, and set bit 0 back to 1
     afterwards.
 
+### Stage 2a result, 11:58 CST: CLKOUT1 is gated
+
+The owner approved stage 2 (2026-11-12), clock write excluded. Its first step
+was run inside `ztlock run nfc` (battery 22%, charging), with
+[`driver/clkout1-read.py`](driver/clkout1-read.py): one aligned 32-bit read
+through `/dev/mem`, no write. Observed:
+
+```
+CLKOUT1 @0x14060a0c = 0x00000001: SEL=0x0 DISABLE=1 -> GATED
+```
+
+**The NFC reference clock is off.** SEL is already TCXO (0). Only the disable
+bit is set. That fits CLK_REQ never rising, and a chip configured for an AP
+clock (`FW_CFG_CLK_SPEED=0x12`, `sec-nfc,nfc_ap_clk`). As instructed, **stage 2
+stopped here**: no LDO, no expander access, no NCI command and no RF field.
+
+**Proposal: stage 2b, for owner approval.** One write before the stage-2
+session, and one write after it:
+
+- **Before:** write `0x14060A0C` = `0x00000000` (clear bit 0; SEL stays 0 =
+  TCXO), then read it back. This is what the vendor's `ra_enable_clkout()`
+  does for `OSC_NFC`.
+- **After:** write `0x14060A0C` = `0x00000001` (the value read today), then
+  read it back.
+- Same `/dev/mem` method, inside the same `ztlock run nfc`. Stock gates the
+  clock dynamically from CLK_REQ. Leaving it running only for the session is
+  the simple equivalent.
+- Side effects: a 26 MHz output on the clock pad for the session. CLKOUT0
+  (audio) is a different register and is not touched.
+
+**Second request (also needs approval):** `RF_DISCOVER_MAP_CMD` (21 00),
+poll-mode mapping of protocol ISO-DEP (0x04) to the ISO-DEP RF interface
+(0x02).
+
+- This is volatile NCI configuration.
+- Without it, NCI 1.0 controllers activate ISO-DEP cards on the Frame
+  interface. The host would then have to send RATS and do the ISO-DEP block
+  framing itself, and neither is in the approved list.
+- Type 2 (NTAG/Ultralight) and FeliCa reads work without it.
+
 ## Biggest unknowns
 
 1. **Clock.** Is CLKOUT (`oscclk_nfc`) running under ztOS, and does the chip
