@@ -219,5 +219,10 @@ assert a.takeover_target({"sp", "u"}, {"sp": SP, "u": {"name": "u", "kind": "hea
 assert a.takeover_target({"sp", "h"}, {"sp": SP, "h": {"name": "h", "kind": "headphones"}, "b1": BTS("b1")}) == "b1"  # a plain jack doesn't count
 assert a.takeover_target({"old"}, {"sp": SP, "b1": BTS("b1")}) is None       # all new: a restart
 assert a.takeover_target({"sp"}, {"sp": SP, "b1": BTS("b1"), "b2": BTS("b2")}) is None  # two at once: ask
+# headphones plugged into the jack (ztos-headsetd's sink) take the audio as Bluetooth does
+JK = {"name": a.JACK_SINK, "kind": "headphones"}
+assert a.takeover_target({"sp"}, {"sp": SP, a.JACK_SINK: JK}) == a.JACK_SINK
+assert a.takeover_target({"sp", "b1"}, {"sp": SP, "b1": BTS("b1"), a.JACK_SINK: JK}) is None  # AirPods on: the user's choice
+assert a.takeover_target({"sp", a.JACK_SINK}, {"sp": SP, a.JACK_SINK: JK}) is None        # already there
 
 print("audiod: ok")
