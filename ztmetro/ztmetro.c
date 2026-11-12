@@ -119,6 +119,7 @@
 #include <wlr/util/edges.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
+#include "burn-in.h"	/* after cairo: the shift and the heartbeat (8.37) */
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -3375,6 +3376,7 @@ static void load_config(struct zt_server *server) {
 	server->aod_image_faint = 0;
 	server->aod_force_mark_on = true;
 	server->double_tap_wake = true;
+	g_burnin.on = true;	/* burn_in_shift: the bars and the lock clock move a little */
 	server->aod_mode = AOD_OFF;
 	server->clock_24h = ZT_CLOCK_24H_DEFAULT;
 	if (server->shade_brightness <= 0) {
@@ -3507,6 +3509,8 @@ static void load_config(struct zt_server *server) {
 			server->aod_auto = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "double_tap_wake") == 0) {
 			server->double_tap_wake = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+		} else if (strcmp(key, "burn_in_shift") == 0) {
+			g_burnin.on = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "lock_timeout") == 0) {
 			/* the same while the lock screen shows; 0: the screen's */
 			int t = atoi(value);
@@ -5952,7 +5956,7 @@ static void ink_box(const char *text, const char *font, double size, double *hei
 
 #define STATUS_ICON_K	1.15	/* the status icons' height, in the clock digits' */
 
-static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool live) {
+static void status_row_drawn(struct zt_server *server, cairo_t *cr, bool details, bool live) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	/* Sized against the screen, off photos of the real thing: the battery is
 	 * about 6.8 % of the screen's width and 2.8 % of it high, and the clock's
@@ -6222,6 +6226,16 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 			strcmp(server->cell_reg, "searching") == 0 ? "Searching..." : "No service";
 		draw_text(cr, sim, FONT_REGULAR, size, 14, y, 0, 0, false);
 	}
+}
+
+/* The status row, a few pixels off its place against burn-in (burn-in.h):
+ * the same place in the bar, the lock screen, the held bar and the action
+ * centre, all drawn from here. */
+static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool live) {
+	cairo_save(cr);
+	burnin_translate(cr, &BURNIN_STATUS, server->scale);
+	status_row_drawn(server, cr, details, live);
+	cairo_restore(cr);
 }
 
 /* What the status row should be showing, set against what it shows: an icon
@@ -6630,6 +6644,7 @@ static void draw_lock_clock_at(struct zt_server *server, time_t now) {
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, LOCK_CLOCK_H, &cr);
 	cairo_translate(cr, 0, -y0);	/* drawn in screen coordinates, at rest (low) */
+	burnin_translate(cr, &BURNIN_LOCK, server->scale);	/* (burn-in.h) */
 	lock_clock_paint(server, cr, theme, server->flip_t < 1 ? server->flip_last : now, server->flip_from,
 		server->flip_t);
 	zt_buffer_show(server, &server->lock_clock_layer, buffer, cr, server->width, LOCK_CLOCK_H);
@@ -6981,10 +6996,57 @@ static int net_tick(void *data) {
 static void aod_sync(struct zt_server *server);
 static void aod_refresh(struct zt_server *server);
 
+static void draw_nav(struct zt_server *server);
+
+/* The minute's part in burn-in.h: the heartbeat, and the place the bars and
+ * the lock clock are drawn at from now. Before anything is drawn, so that a
+ * frame still waiting from the last minute is seen as waiting. */
+static void burnin_minute(struct zt_server *server) {
+	if (g_dump_dir) {
+		return;	/* --render: place 0, and no heartbeat over the session's */
+	}
+	double mono = burnin_mono();
+	bool lit = server->output && (server->screen_on || server->aod);
+	bool wants = server->screen_on ? server->dirty : server->aod ? server->aod_dirty : false;
+	/* counted from the first minute that found it waiting, with no frame
+	 * shown since: a frame asked for a moment ago (the screen just lit) is
+	 * not a frame that has waited since the last one shown */
+	static double seen;
+	if (!lit || !wants || g_burnin.commit_s >= seen) {
+		seen = lit && wants ? mono : 0;
+	}
+	double waiting = seen > 0 ? mono - seen : 0;
+	if (!g_nested) {
+		char path[256];
+		int err = burnin_heartbeat_write(runtime_file(path, sizeof(path), "ztmetro.alive"),
+			(long)getpid(), mono, lit, waiting);
+		static int told;
+		if (err && err != told) {
+			wlr_log(WLR_ERROR, "burn-in: heartbeat %s: %s", path, strerror(-err));
+		}
+		told = err;
+		if (waiting > 120) {
+			wlr_log(WLR_ERROR, "burn-in: a frame has waited %.0f s for the panel", waiting);
+		}
+	}
+	int place = burnin_place_now((long long)time(NULL));
+	if (place != g_burnin.place) {
+		g_burnin.place = place;
+		if (perflog()) wlr_log(WLR_INFO, "burn-in: place %d", place);
+	}
+	/* the nav bar is not drawn on the minute: only when its place changed,
+	 * in the minute's frame, and only where it can be seen */
+	if (server->width > 0 && server->screen_on && NAV_H > 0 && !retro_on(server) &&
+			g_burnin.place_nav != g_burnin.place) {
+		draw_nav(server);
+	}
+}
+
 /* Once a minute, on the minute: the only thing that wakes an idle shell. */
 static int clock_tick(void *data) {
 	struct zt_server *server = data;
     tzset(); /* localtime_r does not refresh a changed /etc/localtime itself */
+	burnin_minute(server);
 	if (server->width > 0) {
 		modem_read(server);
 		draw_status(server);
@@ -7452,6 +7514,7 @@ static void draw_nav(struct zt_server *server) {
 		cairo_rectangle(cr, third * i, 0, third, NAV_H);
 		cairo_clip(cr);
 		cairo_translate(cr, 0, server->nav_icon_y[i]);
+		burnin_translate(cr, &BURNIN_NAV, server->scale);	/* (burn-in.h) */
 
 		if (server->nav_pressed == i) {
 			set_rgb(cr, server->accent);
@@ -7493,6 +7556,7 @@ static void draw_nav(struct zt_server *server) {
 		cairo_restore(cr);
 	}
 	zt_buffer_show(server, &server->nav_layer, buffer, cr, server->width, NAV_H);
+	g_burnin.place_nav = g_burnin.place;
 }
 
 /* points per SVG unit: the logo (73.65 x 68.49) at about a third of the screen's width */
@@ -13522,6 +13586,7 @@ static void aod_render_frame(struct zt_server *server) {
 		server->plane_surface = NULL;
 		server->aod_dirty = false;
 		server->aod_frames++;
+		burnin_frame_shown();
 		state_file_write(server);	/* (its aod_frames: one write a minute) */
 	} else {
 		wlr_log(WLR_ERROR, "aod: output commit failed");
@@ -16422,6 +16487,15 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 	if (alarm_key(server, event)) {
 		return;
 	}
+	if (event->keycode == KEY_PLAYPAUSE || event->keycode == KEY_MEDIA) {
+		/* a wired headset's button (the 3.5 mm jack) or a keyboard's media
+		 * key: the player, screen on or off, not the window in front. Its
+		 * volume buttons are KEY_VOLUMEUP/DOWN, the phone's own, below. */
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+			run_detached("playerctl", "play-pause", NULL, NULL);
+		}
+		return;
+	}
 	if (event->keycode == KEY_POWER) {
 		/* the power key is the shell's alone: see power/power-key.h */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
@@ -17965,6 +18039,7 @@ static void render_frame(struct zt_server *server) {
 			wlr_log(WLR_INFO, "plane: the page %s", plane ? "on a display plane" : "drawn by the GPU");
 		}
 		server->output->last_submitted = buffer;
+		burnin_frame_shown();
 	}
 	wlr_output_state_finish(&state);
 	server->dirty = false;
@@ -18679,6 +18754,20 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	server->clock_24h = true;
 	g_dump_name = "lock-clock-24h";
 	draw_lock_clock_at(server, longest);
+	/* burn-in.h: the status bar, the nav bar and the lock clock at each of
+	 * the shift's places (burnin-status-N, -nav-N, -lock-N), then back to 0 */
+	for (int i = 0; i < BURNIN_PLACES; i++) {
+		char name[32];
+		g_burnin.place = i;
+		snprintf(name, sizeof(name), "burnin-status-%d", i);
+		g_dump_name = name;
+		draw_status(server);
+		snprintf(name, sizeof(name), "burnin-nav-%d", i);
+		draw_nav(server);
+		snprintf(name, sizeof(name), "burnin-lock-%d", i);
+		draw_lock_clock_at(server, longest);
+	}
+	g_burnin.place = 0;
 	/* every AOD theme with the longest 12-hour time and in 24-hour time, and
 	 * its light against its budget (aod-themes.txt) */
 	char themes_txt[512];

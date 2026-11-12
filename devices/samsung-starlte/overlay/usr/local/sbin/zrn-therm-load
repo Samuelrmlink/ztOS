@@ -1,0 +1,38 @@
+#!/bin/sh
+# Load zrn-therm at boot (zrn-therm.service), before zrn-charge: the battery
+# temperature, measured (power/thermistors/README.md). Without it zrn-charge
+# sees the temperature as unknown and allows 5 V only.
+#
+# Unattended phone: a mark is on the disk while it loads. Found at the next
+# boot, the load never finished (the phone froze or reset): it is not loaded
+# again until someone looks and removes the failed mark,
+#   sudo rm /var/lib/zrn-therm/load-failed
+D=/var/lib/zrn-therm
+M=$D/loading
+F=$D/load-failed
+# the running kernel's own build (another release's is refused: vermagic)
+KO=/usr/lib/modules/$(uname -r)/extra/zrn-therm.ko
+[ -d /sys/module/zrn_therm ] && exit 0
+mkdir -p "$D"
+if [ -e "$M" ]; then
+	mv -f "$M" "$F"
+	sync
+fi
+if [ -e "$F" ]; then
+	echo "zrn-therm: a load never finished ($F): not loading it; the battery temperature stays unknown (5 V only)"
+	exit 0
+fi
+if [ ! -f "$KO" ]; then
+	echo "zrn-therm: no module for $(uname -r) ($KO); the battery temperature stays unknown (5 V only)"
+	exit 0
+fi
+date +%s > "$M"
+sync
+if insmod "$KO"; then
+	echo "zrn-therm: loaded"
+else
+	echo "zrn-therm: insmod failed; the battery temperature stays unknown (5 V only)"
+fi
+rm -f "$M"
+sync
+exit 0

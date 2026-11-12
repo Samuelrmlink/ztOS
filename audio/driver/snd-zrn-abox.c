@@ -248,6 +248,14 @@ static DEFINE_SPINLOCK(ipc_lock);
 static int abox_irq;
 static struct task_struct *rx_task;	/* only when the interrupt could not be had */
 static struct snd_card *card;
+/* the 3.5 mm jack: zrn-headset.c, included below */
+static bool hs_micvdd_held(void);
+static bool hs_hp_active(void);
+static bool hs_speakers_held_off(void);
+static void hs_capture_started(void);
+static void hs_capture_stopping(void);
+static void hs_stream_prepare(void);
+static void hs_streams_idle(void);
 /*
  * Two playback devices, two of the DSP's eight playback DMAs (RDMA0 and
  * RDMA1): its mixer sums every stream into SIFS0 and on to the speakers, so
@@ -1200,6 +1208,8 @@ static void amp_set(bool on)
 	};
 	int i;
 
+	if (on && hs_speakers_held_off())
+		on = false;	/* the jack has the sound */
 	mutex_lock(&amp_lock);
 	if (on && !amp_on) {
 		amp_both(0x0401, 0x01);		/* software reset */
@@ -1497,8 +1507,10 @@ static int abox_pcm_close(struct snd_pcm_substream *s)
 	mutex_lock(&stream_lock);
 	WRITE_ONCE(st->active, NULL);
 	synchronize_rcu();
-	if (!call_route && !any_active())
+	if (!call_route && !any_active()) {
 		amp_set(false);
+		hs_streams_idle();
+	}
 	st_msg(st, PCM_PLTDAI_CLOSE, 0, 0, 0);
 	/* the speaker side off until the next start, as Samsung's
 	 * abox_uaif_shutdown: its FIFO starts empty with the next stream */
@@ -1584,6 +1596,8 @@ static int abox_pcm_prepare(struct snd_pcm_substream *s)
 	}
 	if (!call_route)
 		amp_set(true);
+	if (!call_route)
+		hs_stream_prepare();
 	if (!asrc_off)
 		sifs_pace();
 	ret = st_msg(st, PCM_PLTDAI_PREPARE, 0, 0, 0);
@@ -2226,7 +2240,8 @@ static void codec_stop(void)
 	codec_write(CODEC_AIF1TX2MIX_SRC1, 0);
 	codec_update(CODEC_MIC_BIAS_CTRL_5, 0x0101, 0);
 	codec_update(CODEC_MIC_BIAS_CTRL_1, 0x0001, 0);
-	codec_update(CODEC_MIC_CP_1, 0x0003, 0x0002);		/* off, bypass: reset default */
+	if (!hs_micvdd_held())	/* the jack's MICBIAS2 runs from it too */
+		codec_update(CODEC_MIC_CP_1, 0x0003, 0x0002);	/* off, bypass: reset default */
 	codec_update(CODEC_SYSTEM_CLOCK_1, 0x0040, 0);
 	codec_fll_off();
 	mutex_unlock(&codec_lock);
@@ -2261,13 +2276,16 @@ static int cap_path_on(void)
 		return ret;
 	}
 	cap.path_on = true;
+	hs_capture_started();
 	return 0;
 }
 
 static void cap_path_off(void)
 {
-	if (!cap.path_on || call_mic_on)	/* a call still needs it */
+	/* a call, or the headphones (UAIF0's clocks), still need it */
+	if (!cap.path_on || call_mic_on || hs_hp_active())
 		return;
+	hs_capture_stopping();
 	if (cap.codec_up)
 		codec_stop();
 	writel(readl(sfr + ABOX_UAIF0_CTRL0) & ~BIT(1), sfr + ABOX_UAIF0_CTRL0);
@@ -2909,10 +2927,13 @@ static int map_irq(void)
 	return irq > 0 ? irq : -EINVAL;
 }
 
+#include "zrn-headset.c"
+
 static void teardown(void)
 {
 	int i;
 
+	hs_exit();
 	cancel_delayed_work_sync(&watchdog_work);
 	if (card)
 		snd_card_free(card);
@@ -3743,6 +3764,8 @@ static int __init abox_init(void)
 		ret = snd_ctl_add(card, snd_ctl_new1(&fx, NULL));
 	}
 	}
+	if (!ret)
+		ret = hs_init();
 	if (!ret)
 		ret = snd_card_register(card);
 	if (ret)
