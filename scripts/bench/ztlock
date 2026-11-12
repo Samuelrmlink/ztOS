@@ -18,6 +18,8 @@ run) owner=$2; shift 2
 	flock -w 1800 9 || { echo "ztlock: still busy after 30 min: $(cat "$O" 2>/dev/null)" >&2; exit 1; }
 	echo "$owner since $(date +%T): $*" > "$O" 2>/dev/null || true
 	trap 'rm -f "$O"' EXIT
-	sh -c "$*" ;;
+	# the command runs without fd 9: a daemon it starts (ztnotifyd, 2026-11-12)
+	# would otherwise keep the lock open for good after this script exits
+	sh -c "$*" 9<&- ;;
 *) echo "usage: ztlock run OWNER 'cmd' | ztlock who" >&2; exit 2 ;;
 esac

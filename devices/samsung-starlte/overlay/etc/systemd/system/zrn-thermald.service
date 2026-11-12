@@ -1,0 +1,18 @@
+[Unit]
+Description=Thermal policy: CPU and GPU ceilings, heat warnings, the battery overheat power-off (zrn-thermald)
+# reads zrn-therm's thermistors; without them the battery is unknown: a
+# warning, and never a power-off
+After=zrn-therm.service
+Wants=zrn-therm.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/zrn-thermald
+Restart=always
+RestartSec=5
+# shutdown (the reason for the next start), shutdown.last, events.log
+StateDirectory=zrn-thermald
+
+[Install]
+WantedBy=multi-user.target

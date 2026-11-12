@@ -20,7 +20,7 @@ endif
 
 all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd \
 	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
-	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
+	store/ztstore power/ztpower servicemode/ztservicemode camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
 	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
 
 sounds/ztos-sounds: sounds/ztos-sounds.c volume-streams.h
@@ -191,6 +191,10 @@ osial/ztosial: osial/ztosial.c $(CORE_DEPS)
 power/ztpower: power/ztpower.c power/battery-health.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ power/ztpower.c $(CORE) $(APP_LIBS)
 
+# ServiceMode: the modem's field test and menus, to look at (modemd/servicemode.h)
+servicemode/ztservicemode: servicemode/ztservicemode.c $(CORE_DEPS)
+	$(APP_BUILD) -o $@ servicemode/ztservicemode.c $(CORE) $(APP_LIBS)
+
 perfd/zrnperfd: perfd/zrnperfd.c perfd/wlpm.c perfd/wlpm.h perfd/tickle.c perfd/tickle.h background-apps.h ztos-user.h perfd/iblog.c perfd/iblog.h perfd/ibnet.c perfd/ibnet.h perfd/perfial.c perfd/perfial.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ perfd/zrnperfd.c perfd/wlpm.c perfd/tickle.c perfd/iblog.c perfd/ibnet.c perfd/perfial.c -lm
 
@@ -246,7 +250,7 @@ sensord/ztoscsf-sensord: sensord/ztoscsf-sensord.c sensord/orient.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ sensord/ztoscsf-sensord.c -lm
 
 # the modem's state for the shell (signal, operator, data), and airplane mode, SMS
-modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c mms/mmspdu.c mms/mmspdu.h
+modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c modemd/servicemode.h mms/mmspdu.c mms/mmspdu.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ modemd/ztoscorenetworkingd.c mms/mmspdu.c
 
 # picture messages (MMS): the daemon, its PDU codec and the access point list
@@ -423,6 +427,9 @@ install: check-arch
 	install -Dm644 ntfy/ztntfy.desktop /usr/local/share/applications/ztntfy.desktop
 	install -Dm644 ntfy/ztntfy.svg /usr/local/share/icons/hicolor/scalable/apps/ztntfy.svg
 	install -Dm755 power/ztpower /usr/local/bin/ztpower
+	install -Dm755 servicemode/ztservicemode /usr/local/bin/ztservicemode
+	install -Dm644 servicemode/ztservicemode.desktop /usr/local/share/applications/ztservicemode.desktop
+	install -Dm644 servicemode/ztservicemode.svg /usr/local/share/icons/hicolor/scalable/apps/ztservicemode.svg
 	install -Dm755 osial/ztosial /usr/local/bin/ztosial
 	install -Dm644 osial/ztosial.desktop /usr/local/share/applications/ztosial.desktop
 	install -Dm644 osial/ztosial.svg /usr/local/share/icons/hicolor/scalable/apps/ztosial.svg
@@ -484,7 +491,7 @@ install: check-arch
 	install -Dm644 csf/ztoscoresensorframework.service /etc/systemd/system/ztoscoresensorframework.service
 
 clean:
-	rm -f ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
+	rm -f servicemode/ztservicemode ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h \
 		acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
@@ -530,6 +537,12 @@ check-bt-pair-sheet: xdg-shell-protocol.h
 check-modem-sim:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c mms/mmspdu.c
 	/tmp/ztmetro-modem-sim-test
+
+# ServiceMode (modemd/servicemode.h): what reaches the CP, which keys pass; no modem
+.PHONY: check-servicemode
+check-servicemode:
+	$(CC) -std=c11 -Wall -Wno-unused-parameter -o /tmp/ztmetro-servicemode-test modemd/tests/servicemode.c mms/mmspdu.c
+	/tmp/ztmetro-servicemode-test
 
 # MMS without a network: the PDU codec, the access point auto-fill, and the
 # modem daemon handing notifications over
