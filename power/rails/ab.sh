@@ -22,7 +22,7 @@ CHG=$(cat /sys/class/power_supply/max77705-charger/online)
 undo() {
 	case $FIX in
 	mif) echo "mif-scale on" > $PERF ;;	# zrnperfd sets the level for the screen
-	abox) [ -n "$IDLE_WAS" ] && echo "$IDLE_WAS" > $IDLE ;;
+	abox) echo 500 > $IDLE ;;	# the fix stays on (the module default)
 	esac
 	echo "aod $AOD_WAS" > $CTL
 	rm -f /run/zrn-sleepd/inhibit/rail-map
@@ -33,7 +33,12 @@ trap 'exit 1' INT TERM HUP
 set_a() {	# the fix off
 	case $FIX in
 	mif) echo "mif-scale off" > $PERF; sleep 1; echo 1794000 > $MIF ;;
-	abox) echo 0 > $IDLE ;;
+	abox)	# the module as before the fix: a fresh load leaves the DSP
+		# ticking (~1000 interrupts/s), a wake from idle does not
+		su samuel -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop wireplumber'
+		sleep 1
+		rmmod snd_zrn_abox && modprobe snd_zrn_abox idle_off_ms=0
+		su samuel -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start wireplumber' ;;
 	esac
 }
 set_b() {	# the fix on
