@@ -22,9 +22,10 @@
 #include "ztos-hw.h"
 #include "zrnmetrocore.h"
 #include "devtest-pages.h"
+#include "devtest-power.h"
 
 enum page { PAGE_HUB, PAGE_SYSTEM, PAGE_SENSORS, PAGE_JOURNAL, PAGE_KERNEL, PAGE_SHELL, PAGE_HARDWARE,
-	PAGE_LOGS /* the hub's second tab */, PAGE_ANIM, PAGE_PREVIEW };
+	PAGE_LOGS /* the hub's second tab */, PAGE_ANIM, PAGE_PREVIEW, PAGE_TEMPS, PAGE_CHARGING };
 enum action { ACT_OPEN = DEVTEST_ACTIONS + 1, ACT_PLAY };
 
 static int first_page;
@@ -137,6 +138,8 @@ static double draw_hub(cairo_t *cr) {
 	double y = tab_header(cr, PAGE_HUB);
 	y = zmc_entry(cr, y, "system", "kernel, memory, storage, load", ACT_OPEN, PAGE_SYSTEM);
 	y = zmc_entry(cr, y, "sensors", "battery, charger, heat, clocks: live", ACT_OPEN, PAGE_SENSORS);
+	y = zmc_entry(cr, y, "temperatures", "stock's thermistors, and what this kernel can read", ACT_OPEN, PAGE_TEMPS);
+	y = zmc_entry(cr, y, "charging", "cable, PD, wireless pad, battery cycles: live", ACT_OPEN, PAGE_CHARGING);
 	y = zmc_entry(cr, y, "hardware", "what this kernel drives, and what it does not", ACT_OPEN, PAGE_HARDWARE);
 	y = zmc_entry(cr, y, "animations", "Windows Phone 8.1's transitions, from the Lumia 530's firmware", ACT_OPEN, PAGE_ANIM);
 	return y + 20;
@@ -541,6 +544,8 @@ double devtest_render(cairo_t *cr, int page) {
 	case PAGE_HARDWARE: return draw_hardware(cr);
 	case PAGE_ANIM: return draw_anims(cr);
 	case PAGE_PREVIEW: return draw_preview(cr);
+	case PAGE_TEMPS: return devtest_draw_temps(cr);
+	case PAGE_CHARGING: return devtest_draw_charging(cr);
 	}
 	return 0;
 }
@@ -570,6 +575,8 @@ void devtest_arrived(int page) {
 	}
 	switch (tab) {
 	case PAGE_SENSORS:
+	case PAGE_TEMPS:
+	case PAGE_CHARGING:
 		zmc_every(1000, tick);	/* only while this page is open */
 		break;
 	case PAGE_JOURNAL:

@@ -24,6 +24,16 @@
  *	watch NAME [MS]		also stream accel | gyro | pressure | prox, for the
  *				next five seconds (say it again to go on)
  *	unwatch NAME
+ *	call STATE [ROUTE]	from the modem daemon: the call's state (idle,
+ *				incoming, dialing, ringing, active) and where its
+ *				sound goes (earpiece, speaker, bluetooth, off)
+ *
+ * In a call held to the ear (dialing, ringing out or active, the sound not on
+ * the speaker or a headset) and with the screen on, the proximity sensor is
+ * on; near and far, each steady for a moment, go to the shell as
+ * "prox_blank on|off" (the panel off and the glass ignored). The sensor is
+ * off at every other time. A sensor that says nothing leaves the screen on
+ * (sensors/README.md, "Proximity in calls").
  *
  * The protocol is Samsung's SSP, as their kernel driver speaks it: the phone
  * opens a transaction with a 9-byte header (command, length, options, data),
@@ -72,7 +82,8 @@ static void at(char *buf, size_t size, const char *path) {
 }
 
 enum { AP2HUB_READ, AP2HUB_WRITE, HUB2AP_WRITE };
-enum { CMD_ADD = 0xa1, CMD_REMOVE = 0xa2, CMD_TIMESTAMP = 0xa7, CMD_AP_RESUME = 0xd3 };
+enum { CMD_ADD = 0xa1, CMD_REMOVE = 0xa2, CMD_TIMESTAMP = 0xa7, CMD_AP_RESUME = 0xd3,
+	CMD_PROX_THRESHOLD = 0xf2 };
 enum { REC_DEBUG = 0x03, REC_META = 0x05, REC_TIME_SYNC = 0x06, REC_INIT_DONE = 0x0a,
 	REC_DATA = 0x37 };
 
@@ -86,9 +97,11 @@ static struct sensor {
 	{ "light", 9, 18, 1000 },	/* 1 reading every second: fast enough for smooth auto-brightness */
 	{ "accel", 0, 6, 200 },
 	{ "gyro", 1, 12, 200 },
-	{ "pressure", 5, 6, 1000 },
-	{ "prox", 7, 2, 200 },
+	{ "pressure", 5, 6, 1000 },	/* pressure (s32), temperature (s16) */
+	{ "prox", 7, 3, 200 },		/* near (u8), reflected light (u16): ssp.h */
 };
+#define PROX_ID		7
+#define PRESSURE_ID	5
 #define N_SENSORS (int)(sizeof(sensors) / sizeof(sensors[0]))
 
 static int dev = -1;
@@ -257,6 +270,19 @@ static void sensor_set(struct sensor *s, bool on) {
 	s->on = on;
 	if (on) {
 		int32_t ms = s->ms;
+		if (s->id == PROX_ID) {
+			/* as Samsung's driver before each ADD of the proximity sensor
+			 * (enable_sensor, set_proximity_threshold): the TMD4906's
+			 * thresholds, big-endian, its defaults for this phone
+			 * (SSP_PROX_AUTOCAL_AMS; the DT overrides none) */
+			static const uint8_t thresholds[8] = {
+				2400 >> 8, 2400 & 0xff,		/* high */
+				1600 >> 8, 1600 & 0xff,		/* low */
+				16368 >> 8, 16368 & 0xff,	/* detect high */
+				1000 >> 8, 1000 & 0xff,		/* detect low */
+			};
+			hub_write(CMD_PROX_THRESHOLD, thresholds, sizeof(thresholds));
+		}
 		memcpy(msg + 1, &ms, 4);	/* then batch time 0, options 0 */
 		hub_write(CMD_ADD, msg, 10);
 	} else {
@@ -272,12 +298,19 @@ static void sensor_set(struct sensor *s, bool on) {
  * start and every screen-off (sent then without waiting for echoes, so the
  * assert may have been the overlap). Taking the sensors off is enough.
  */
+static bool call_prox;	/* a call held to the ear: see call_update */
+static void prox_reset(void);
+static void status(void);
+
 static void sensors_apply(void) {
+	if (!screen_on || !call_prox) {
+		prox_reset();	/* the sensor goes off: the screen as it was */
+	}
 	for (int i = 0; i < N_SENSORS; i++) {
 		struct sensor *s = &sensors[i];
 		/* the always-on display: only the light, slowly */
 		bool aod = !screen_on && aod_ms > 0 && s->id == 9;
-		bool on = (screen_on && s->wanted) || aod;
+		bool on = (screen_on && (s->wanted || (s->id == PROX_ID && call_prox))) || aod;
 		if (s->id == 9) {
 			int ms = aod ? aod_ms : LIGHT_MS;
 			if (s->on && on && s->ms != ms) {
@@ -445,6 +478,96 @@ static void light(uint32_t lux) {
 	light_decide();
 }
 
+/* --- proximity, in a call ---------------------------------------------- */
+
+/*
+ * The TMD4906 behind the hub decides near and far itself (its thresholds:
+ * sensor_set) and reports only changes. Here each must hold a moment before
+ * the shell hears it: near briefly, so a finger passing over the top of the
+ * phone does not blink the screen; far longer, as Android's 250 ms, so a
+ * phone moving along the cheek does not light it. No reading at all leaves
+ * the screen on.
+ */
+#define PROX_NEAR_NS	150000000ULL
+#define PROX_FAR_NS	300000000ULL
+
+static char call_state[16] = "idle", call_route[16] = "off";
+static int prox_seen = -1;	/* the hub's last word: 1 near, 0 far, -1 none yet */
+static int prox_told;		/* what the shell has: 1 the panel off for a cheek */
+static uint64_t prox_since;	/* when prox_seen last changed */
+
+static void prox_tell(int near) {
+	if (near == prox_told) {
+		return;
+	}
+	if (shell(near ? "prox_blank on\n" : "prox_blank off\n")) {
+		prox_told = near;	/* (not taken: tried again, prox_wait_ms) */
+		fprintf(stderr, "ztoscsf-sensord: proximity: %s\n", near ? "near, panel off" : "far, panel on");
+		status();
+	}
+}
+
+/* The sensor goes off, or the hub started again: the screen as it was. */
+static void prox_reset(void) {
+	prox_seen = -1;
+	prox_tell(0);
+}
+
+static int prox_want(void) {
+	return call_prox && screen_on && prox_seen == 1;
+}
+
+static void prox_decide(void) {
+	int want = prox_want();
+	if (want == prox_told) {
+		return;
+	}
+	/* back on at once when the call, the screen or the reading went;
+	 * after the hold when the sensor itself says far (or near) */
+	bool at_once = !want && prox_seen != 0;
+	if (at_once || now_ns() - prox_since >= (want ? PROX_NEAR_NS : PROX_FAR_NS)) {
+		prox_tell(want);
+	}
+}
+
+/* ms until prox_decide has something to do, -1 for nothing */
+static int prox_wait_ms(void) {
+	int want = prox_want();
+	if (want == prox_told) {
+		return -1;
+	}
+	uint64_t hold = want ? PROX_NEAR_NS : PROX_FAR_NS, gone = now_ns() - prox_since;
+	if (!want && prox_seen != 0) {
+		return 500;	/* the shell did not take "off": again soon */
+	}
+	return gone >= hold ? 500 : (int)((hold - gone + 999999) / 1000000);
+}
+
+static void prox_reading(int near) {
+	if (near != prox_seen) {
+		prox_seen = near;
+		prox_since = now_ns();
+	}
+	prox_decide();
+}
+
+/* From the modem daemon: the state of the call and where its sound goes.
+ * Ringing here is ours ringing out (dialled); an incoming call that rings is
+ * "incoming" and in no one's ear yet. A headset or the speaker: the screen is
+ * wanted, as on stock. */
+static void call_update(const char *state, const char *route) {
+	snprintf(call_state, sizeof(call_state), "%s", state);
+	snprintf(call_route, sizeof(call_route), "%s", route[0] ? route : "earpiece");
+	bool talking = !strcmp(call_state, "dialing") || !strcmp(call_state, "ringing") ||
+		!strcmp(call_state, "active");
+	bool ear = strcmp(call_route, "speaker") != 0 && strcmp(call_route, "bluetooth") != 0;
+	if (call_prox != (talking && ear)) {
+		fprintf(stderr, "ztoscsf-sensord: call %s, %s: proximity %s\n", call_state, call_route,
+			talking && ear ? "on" : "off");
+	}
+	call_prox = talking && ear;
+}
+
 /* --- frames from the hub ----------------------------------------------- */
 
 static void record(struct sensor *s, const uint8_t *d) {
@@ -484,6 +607,28 @@ static void record(struct sensor *s, const uint8_t *d) {
 			snprintf(text, sizeof(text), "%u\n", rgbw[i]);
 			publish(name, text);
 		}
+		return;
+	}
+	if (s->id == PROX_ID) {
+		/* ssp.h: prox_detect (1 near), prox_adc; report_prox_data */
+		uint16_t adc;
+		memcpy(&adc, d + 1, 2);
+		snprintf(text, sizeof(text), "%s %u\n", d[0] ? "near" : "far", adc);
+		publish("prox", text);
+		prox_reading(d[0] ? 1 : 0);
+		return;
+	}
+	if (s->id == PRESSURE_ID) {
+		/* ssp.h: pressure (s32, the LPS22H's 24-bit count, 4096 per
+		 * hPa), temperature (s16, hundredths of a degree:
+		 * pressure_temperature_show). Uncalibrated: Samsung subtracts
+		 * a factory offset kept in EFS, which is not read here. */
+		int32_t raw;
+		int16_t centi;
+		memcpy(&raw, d, 4);
+		memcpy(&centi, d + 4, 2);
+		snprintf(text, sizeof(text), "%.2f %d %.2f\n", raw / 4096.0, raw, centi / 100.0);
+		publish("pressure", text);
 		return;
 	}
 	if (s->size == 6) {
@@ -548,6 +693,7 @@ static void frame(const uint8_t *f, int len) {
 			for (int k = 0; k < N_SENSORS; k++) {
 				sensors[k].on = false;
 			}
+			prox_reset();	/* its last near is gone with it */
 			sensors_apply();
 			break;
 		case REC_TIME_SYNC:
@@ -631,9 +777,10 @@ static void save(void) {
 }
 
 static void status(void) {
-	char text[64];
-	snprintf(text, sizeof(text), "auto=%s\nscreen=%s\nopentone=%s\naod=%d\n", auto_on ? "on" : "off",
-		screen_on ? "on" : "off", tone_on ? "on" : "off", aod_ms);
+	char text[192];
+	snprintf(text, sizeof(text), "auto=%s\nscreen=%s\nopentone=%s\naod=%d\ncall=%s %s\nprox=%s\n",
+		auto_on ? "on" : "off", screen_on ? "on" : "off", tone_on ? "on" : "off", aod_ms,
+		call_state, call_route, !call_prox ? "off" : prox_told ? "near" : "on");
 	publish("status", text);
 }
 
@@ -666,6 +813,10 @@ static void command(char *line, bool persist) {
 		if (persist) {
 			save();
 		}
+	} else if (strcmp(what, "call") == 0) {
+		char route[16] = "";
+		sscanf(line, "%*15s %*15s %15s", route);
+		call_update(value, route);
 	} else if (strcmp(what, "watch") == 0 || strcmp(what, "unwatch") == 0) {
 		for (int i = 1; i < N_SENSORS; i++) {
 			if (strcmp(value, sensors[i].name) == 0) {
@@ -678,6 +829,7 @@ static void command(char *line, bool persist) {
 		}
 	}
 	sensors_apply();
+	prox_decide();	/* a call that ended, or the screen gone: the blank goes */
 	status();
 }
 
@@ -719,8 +871,20 @@ int main(void) {
 	if (f) {
 		fclose(f);
 	}
+	/* started in a call (a restart): the modem daemon only reports changes */
+	char state[16] = "idle", route[16] = "";
+	at(path, sizeof(path), "/run/ztoscorenetworking/status");
+	f = fopen(path, "r");
+	while (f && fgets(line, sizeof(line), f)) {
+		sscanf(line, "call=%15[a-z]", state);
+		sscanf(line, "call_audio=%15[a-z]", route);
+	}
+	if (f) {
+		fclose(f);
+	}
+	call_update(state, route);
 
-	const char *device = getenv("ZTOSCSF_SSP") ? getenv("ZTOSCSF_SSP") : DEV;
+	const char *device =getenv("ZTOSCSF_SSP") ? getenv("ZTOSCSF_SSP") : DEV;
 	dev = open(device, O_RDWR | O_NONBLOCK | O_NOCTTY);
 	if (dev < 0) {
 		fprintf(stderr, "ztoscsf-sensord: %s: %s\n", device, strerror(errno));
@@ -779,6 +943,10 @@ int main(void) {
 		if (wait >= 0 && (timeout < 0 || wait < timeout)) {
 			timeout = wait;
 		}
+		wait = prox_wait_ms();	/* a near or far being held */
+		if (wait >= 0 && (timeout < 0 || wait < timeout)) {
+			timeout = wait;
+		}
 		if (poll(fds, 3, timeout) < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -802,9 +970,10 @@ int main(void) {
 		if (light_way != 0) {
 			light_decide();
 		}
+		prox_decide();
 	}
 	if (stopping) {	/* leave the hub quiet: the REMOVEs one by one, 1 s at most */
-		screen_on = false;
+		screen_on = false;	/* (and the shell's panel back on: sensors_apply) */
 		sensors_apply();
 		uint64_t end = now_ns() + 1000000000ULL;
 		while ((nq || inflight) && now_ns() < end) {
@@ -817,6 +986,7 @@ int main(void) {
 		}
 		return 0;
 	}
+	prox_reset();	/* no sensor, no blank */
 	fprintf(stderr, "ztoscsf-sensord: the hub went away\n");
 	return 1;
 }

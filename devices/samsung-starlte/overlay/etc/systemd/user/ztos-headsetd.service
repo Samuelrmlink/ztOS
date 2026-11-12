@@ -1,0 +1,14 @@
+[Unit]
+Description=ztOS headset jack: the headphone output, and pausing on unplug
+After=pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
+
+[Service]
+ExecStart=/usr/local/bin/ztos-headsetd
+Restart=always
+RestartSec=2
+# watching, not playing: the efficiency cores are enough
+CPUAffinity=0-3
+
+[Install]
+WantedBy=default.target

@@ -119,6 +119,7 @@
 #include <wlr/util/edges.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
+#include "burn-in.h"	/* after cairo: the shift and the heartbeat (8.37) */
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -652,6 +653,9 @@ struct zt_server {
 	bool locked;
 	bool call_over_lock;	/* only the phone call, or a ringing alarm, may cover the lock */
 	char over_lock_app[24];	/* which of them: its app_id, "ztphone" or "ztclock-ring" */
+	/* a call held to the ear (prox_blank_set); the power key woke it, so
+	 * the next "near" waits for a "far" first */
+	bool prox_blank, prox_override;
 	/* app switcher: the apps as a row of cards, newest on the right */
 	bool switcher;
 	float switch_t;			/* 0 the app at full size, 1 cards */
@@ -3374,6 +3378,7 @@ static void load_config(struct zt_server *server) {
 	server->aod_image_faint = 0;
 	server->aod_force_mark_on = true;
 	server->double_tap_wake = true;
+	g_burnin.on = true;	/* burn_in_shift: the bars and the lock clock move a little */
 	server->aod_mode = AOD_OFF;
 	server->clock_24h = ZT_CLOCK_24H_DEFAULT;
 	if (server->shade_brightness <= 0) {
@@ -3506,6 +3511,8 @@ static void load_config(struct zt_server *server) {
 			server->aod_auto = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "double_tap_wake") == 0) {
 			server->double_tap_wake = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
+		} else if (strcmp(key, "burn_in_shift") == 0) {
+			g_burnin.on = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "lock_timeout") == 0) {
 			/* the same while the lock screen shows; 0: the screen's */
 			int t = atoi(value);
@@ -5951,7 +5958,7 @@ static void ink_box(const char *text, const char *font, double size, double *hei
 
 #define STATUS_ICON_K	1.15	/* the status icons' height, in the clock digits' */
 
-static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool live) {
+static void status_row_drawn(struct zt_server *server, cairo_t *cr, bool details, bool live) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	/* Sized against the screen, off photos of the real thing: the battery is
 	 * about 6.8 % of the screen's width and 2.8 % of it high, and the clock's
@@ -6236,6 +6243,16 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 			strcmp(server->cell_reg, "searching") == 0 ? "Searching..." : "No service";
 		draw_text(cr, sim, FONT_REGULAR, size, 14, y, 0, 0, false);
 	}
+}
+
+/* The status row, a few pixels off its place against burn-in (burn-in.h):
+ * the same place in the bar, the lock screen, the held bar and the action
+ * centre, all drawn from here. */
+static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool live) {
+	cairo_save(cr);
+	burnin_translate(cr, &BURNIN_STATUS, server->scale);
+	status_row_drawn(server, cr, details, live);
+	cairo_restore(cr);
 }
 
 /* What the status row should be showing, set against what it shows: an icon
@@ -6644,6 +6661,7 @@ static void draw_lock_clock_at(struct zt_server *server, time_t now) {
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, LOCK_CLOCK_H, &cr);
 	cairo_translate(cr, 0, -y0);	/* drawn in screen coordinates, at rest (low) */
+	burnin_translate(cr, &BURNIN_LOCK, server->scale);	/* (burn-in.h) */
 	lock_clock_paint(server, cr, theme, server->flip_t < 1 ? server->flip_last : now, server->flip_from,
 		server->flip_t);
 	zt_buffer_show(server, &server->lock_clock_layer, buffer, cr, server->width, LOCK_CLOCK_H);
@@ -7038,10 +7056,57 @@ static int net_tick(void *data) {
 static void aod_sync(struct zt_server *server);
 static void aod_refresh(struct zt_server *server);
 
+static void draw_nav(struct zt_server *server);
+
+/* The minute's part in burn-in.h: the heartbeat, and the place the bars and
+ * the lock clock are drawn at from now. Before anything is drawn, so that a
+ * frame still waiting from the last minute is seen as waiting. */
+static void burnin_minute(struct zt_server *server) {
+	if (g_dump_dir) {
+		return;	/* --render: place 0, and no heartbeat over the session's */
+	}
+	double mono = burnin_mono();
+	bool lit = server->output && (server->screen_on || server->aod);
+	bool wants = server->screen_on ? server->dirty : server->aod ? server->aod_dirty : false;
+	/* counted from the first minute that found it waiting, with no frame
+	 * shown since: a frame asked for a moment ago (the screen just lit) is
+	 * not a frame that has waited since the last one shown */
+	static double seen;
+	if (!lit || !wants || g_burnin.commit_s >= seen) {
+		seen = lit && wants ? mono : 0;
+	}
+	double waiting = seen > 0 ? mono - seen : 0;
+	if (!g_nested) {
+		char path[256];
+		int err = burnin_heartbeat_write(runtime_file(path, sizeof(path), "ztmetro.alive"),
+			(long)getpid(), mono, lit, waiting);
+		static int told;
+		if (err && err != told) {
+			wlr_log(WLR_ERROR, "burn-in: heartbeat %s: %s", path, strerror(-err));
+		}
+		told = err;
+		if (waiting > 120) {
+			wlr_log(WLR_ERROR, "burn-in: a frame has waited %.0f s for the panel", waiting);
+		}
+	}
+	int place = burnin_place_now((long long)time(NULL));
+	if (place != g_burnin.place) {
+		g_burnin.place = place;
+		if (perflog()) wlr_log(WLR_INFO, "burn-in: place %d", place);
+	}
+	/* the nav bar is not drawn on the minute: only when its place changed,
+	 * in the minute's frame, and only where it can be seen */
+	if (server->width > 0 && server->screen_on && NAV_H > 0 && !retro_on(server) &&
+			g_burnin.place_nav != g_burnin.place) {
+		draw_nav(server);
+	}
+}
+
 /* Once a minute, on the minute: the only thing that wakes an idle shell. */
 static int clock_tick(void *data) {
 	struct zt_server *server = data;
     tzset(); /* localtime_r does not refresh a changed /etc/localtime itself */
+	burnin_minute(server);
 	if (server->width > 0) {
 		modem_read(server);
 		draw_status(server);
@@ -7510,6 +7575,7 @@ static void draw_nav(struct zt_server *server) {
 		cairo_rectangle(cr, third * i, 0, third, NAV_H);
 		cairo_clip(cr);
 		cairo_translate(cr, 0, server->nav_icon_y[i]);
+		burnin_translate(cr, &BURNIN_NAV, server->scale);	/* (burn-in.h) */
 
 		if (server->nav_pressed == i) {
 			set_rgb(cr, server->accent);
@@ -7551,6 +7617,7 @@ static void draw_nav(struct zt_server *server) {
 		cairo_restore(cr);
 	}
 	zt_buffer_show(server, &server->nav_layer, buffer, cr, server->width, NAV_H);
+	g_burnin.place_nav = g_burnin.place;
 }
 
 /* points per SVG unit: the logo (73.65 x 68.49) at about a third of the screen's width */
@@ -12830,8 +12897,9 @@ static const char *aod_why(struct zt_server *server) {
 		return "the demo loop runs";
 	}
 	if (server->call_over_lock) {
-		/* no proximity sensor in use: a lit, double-tappable screen
-		 * against a cheek is worse than the dark */
+		/* a dark, untouchable screen: a lit, double-tappable one
+		 * against a cheek is worse (the proximity sensor's blank is
+		 * prox_blank_set, with the screen on) */
 		return "a call is under way";
 	}
 	if (aod_charger(server)) {
@@ -13591,6 +13659,7 @@ static void aod_render_frame(struct zt_server *server) {
 		server->plane_surface = NULL;
 		server->aod_dirty = false;
 		server->aod_frames++;
+		burnin_frame_shown();
 		state_file_write(server);	/* (its aod_frames: one write a minute) */
 	} else {
 		wlr_log(WLR_ERROR, "aod: output commit failed");
@@ -13660,6 +13729,7 @@ static void screen_set(struct zt_server *server, bool on) {
 	if (!server->output || server->screen_on == on) {
 		return;
 	}
+	server->prox_blank = server->prox_override = false;	/* a real sleep from a blank */
 	/* nested, a disabled output is the window gone, with nothing left to
 	 * wake it; and the Waydroid freeze below is not this machine's */
 	if (!on && g_nested) {
@@ -13803,6 +13873,48 @@ static void activity(struct zt_server *server) {
 	}
 }
 
+static void touches_cancel_all(struct zt_server *server);
+
+/* A call held to the ear: ztoscsf-sensord's proximity sensor ("prox_blank
+ * on|off" on the control pipe; sensors/README.md, "Proximity in calls").
+ * The panel goes off and the glass is ignored, but it is not the screen's
+ * sleep: no lock, no sound, nothing frozen, and the phone taken away (or the
+ * power key) brings it straight back. Only during a call's screen; anything
+ * else refuses it. */
+static void prox_blank_set(struct zt_server *server, bool on) {
+	if (on == server->prox_blank) {
+		return;
+	}
+	if (on && (!server->output || !server->screen_on || server->aod || g_nested ||
+			!server->call_over_lock || strcmp(over_lock_id(server), "ztphone") ||
+			server->prox_override)) {
+		return;
+	}
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_enabled(&state, !on);
+	bool ok = wlr_output_commit_state(server->output->wlr_output, &state);
+	wlr_output_state_finish(&state);
+	if (!ok) {
+		wlr_log(WLR_ERROR, "proximity: could not switch the display %s", on ? "off" : "on");
+		return;
+	}
+	server->prox_blank = on;
+	if (on) {
+		touches_cancel_all(server);	/* a cheek's touch ends here, unseen */
+	} else {
+		if (bl.mode == BL_TABLE && ramp.goal > 0.0) {
+			ramp_snap(ramp.goal);
+		} else {
+			backlight_set(server->shade_brightness);
+		}
+		activity(server);
+		damage(server);
+	}
+	wlr_log(WLR_INFO, "proximity: %s", on ? "near, the panel off" : "far, the panel back");
+	state_file_write(server);
+}
+
 /* An Android app in front keeps its screen on (FLAG_KEEP_SCREEN_ON, as a map
  * does while it navigates). Waydroid does not pass that on; the location
  * bridge (android/waydroid/location) looks at Android's wake locks while it
@@ -13857,6 +13969,12 @@ static int idle_fired(void *data) {
 		 * it (a dark screen takes no touch). It ends by itself, at the
 		 * latest after ztclockd's autostop. */
 		if (server->screen_on && alarm_ringing(server)) {
+			wl_event_source_timer_update(server->idle_timer, 15000);
+			return 0;
+		}
+		/* held to the ear: the screen is wanted back the moment it
+		 * leaves, not asleep behind the power key */
+		if (server->screen_on && server->prox_blank) {
 			wl_event_source_timer_update(server->idle_timer, 15000);
 			return 0;
 		}
@@ -14330,6 +14448,9 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 	if (!server->screen_on) {
 		aod_tap_down(server, id, x, y);	/* only a double tap on the always-on display */
 		return;	/* asleep: the glass does nothing until the power key */
+	}
+	if (server->prox_blank) {
+		return;	/* a cheek, in a call */
 	}
     if (!server->locked && server->android_compiling && server->pending_pid > 0 && !server->shown) {
         float mid = STATUS_H + (server->height - STATUS_H - NAV_H) / 2.0f;
@@ -15534,6 +15655,7 @@ static void state_file_write(struct zt_server *server) {
 	fprintf(f, "points %d %d\nscale %.2f\npixels %d %d\nscreen %s\naod %s\naod_frames %u\n", server->width,
 		server->height, server->scale, o->width, o->height, server->screen_on ? "on" : "off",
 		server->aod ? "on" : "off", server->aod_frames);
+	fprintf(f, "prox_blank %s\n", server->prox_blank ? "on" : "off");
 	fclose(f);
 	rename(tmp, path);
 }
@@ -15726,6 +15848,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (!strcmp(line, "call_screen end")) {
 		char mark_path[256];
 		unlink(runtime_file(mark_path, sizeof(mark_path), "ztmetro-call-locked"));
+		server->prox_override = false;
+		prox_blank_set(server, false);
 		server->call_over_lock = false;
 		apps_suspend_sync(server);
 		draw_status(server);
@@ -16058,6 +16182,11 @@ static void ctl_command(struct zt_server *server, char *line) {
 			strncmp(line + 4, "on", 2) == 0 ? AOD_ON : AOD_OFF;
 		wlr_log(WLR_INFO, "aod: mode %d (ctl)", server->aod_mode);
 		aod_sync(server);
+	} else if (strncmp(line, "prox_blank ", 11) == 0) {
+		/* ztoscsf-sensord, in a call: near (on) or far (off) */
+		bool near = strncmp(line + 11, "on", 2) == 0;
+		if (!near) server->prox_override = false;
+		prox_blank_set(server, near);
 	} else if (strncmp(line, "screen off", 10) == 0) {
 		screen_set(server, false);
 	} else if (strncmp(line, "screen on", 9) == 0) {
@@ -16244,6 +16373,12 @@ static bool hardware_nav_keys(void) {
 static void power_key_apply(struct zt_server *server, enum power_key_action action) {
 	switch (action) {
 	case POWER_KEY_WAKE:
+		if (server->prox_blank) {
+			/* held to the ear: back on, and it stays on until the
+			 * sensor has seen far and near again */
+			prox_blank_set(server, false);
+			server->prox_override = true;
+		}
 		screen_set(server, true);
 		activity(server);
 		break;
@@ -16425,11 +16560,21 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 	if (alarm_key(server, event)) {
 		return;
 	}
+	if (event->keycode == KEY_PLAYPAUSE || event->keycode == KEY_MEDIA) {
+		/* a wired headset's button (the 3.5 mm jack) or a keyboard's media
+		 * key: the player, screen on or off, not the window in front. Its
+		 * volume buttons are KEY_VOLUMEUP/DOWN, the phone's own, below. */
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+			run_detached("playerctl", "play-pause", NULL, NULL);
+		}
+		return;
+	}
 	if (event->keycode == KEY_POWER) {
 		/* the power key is the shell's alone: see power/power-key.h */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 			bool on = server->screen_on;
-			power_key_apply(server, power_key_pressed(&server->power_key, server->screen_on));
+			power_key_apply(server, power_key_pressed(&server->power_key,
+				server->screen_on && !server->prox_blank));
 			if (on && server->voldown_held) {
 				/* the chord: volume down is down already */
 				server->voldown_pending = false;
@@ -16459,8 +16604,8 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 	}
 	if (keyboard && keyboard->force) {
 		/* the touchscreen's force press: a home key, felt, that the finger
-		 * pressing it doesn't also tap with */
-		if (!server->force_press) {
+		 * pressing it doesn't also tap with (not a cheek's, in a call) */
+		if (!server->force_press || server->prox_blank) {
 			return;
 		}
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
@@ -17967,6 +18112,7 @@ static void render_frame(struct zt_server *server) {
 			wlr_log(WLR_INFO, "plane: the page %s", plane ? "on a display plane" : "drawn by the GPU");
 		}
 		server->output->last_submitted = buffer;
+		burnin_frame_shown();
 	}
 	wlr_output_state_finish(&state);
 	server->dirty = false;
@@ -18681,6 +18827,20 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	server->clock_24h = true;
 	g_dump_name = "lock-clock-24h";
 	draw_lock_clock_at(server, longest);
+	/* burn-in.h: the status bar, the nav bar and the lock clock at each of
+	 * the shift's places (burnin-status-N, -nav-N, -lock-N), then back to 0 */
+	for (int i = 0; i < BURNIN_PLACES; i++) {
+		char name[32];
+		g_burnin.place = i;
+		snprintf(name, sizeof(name), "burnin-status-%d", i);
+		g_dump_name = name;
+		draw_status(server);
+		snprintf(name, sizeof(name), "burnin-nav-%d", i);
+		draw_nav(server);
+		snprintf(name, sizeof(name), "burnin-lock-%d", i);
+		draw_lock_clock_at(server, longest);
+	}
+	g_burnin.place = 0;
 	/* every AOD theme with the longest 12-hour time and in 24-hour time, and
 	 * its light against its budget (aod-themes.txt) */
 	char themes_txt[512];

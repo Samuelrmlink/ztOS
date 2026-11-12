@@ -25,6 +25,7 @@ int main(void) {
 		{ PAGE_DEVTEST, PAGE_DEV }, { PAGE_DEVTEST_LOGS, PAGE_DEV },
 		{ PAGE_DEVTEST_SYSTEM, PAGE_DEVTEST }, { PAGE_DEVTEST_SENSORS, PAGE_DEVTEST }, { PAGE_DEVTEST_HARDWARE, PAGE_DEVTEST },
 		{ PAGE_DEVTEST_ANIM, PAGE_DEVTEST }, { PAGE_DEVTEST_PREVIEW, PAGE_DEVTEST_ANIM },
+		{ PAGE_DEVTEST_TEMPS, PAGE_DEVTEST }, { PAGE_DEVTEST_CHARGING, PAGE_DEVTEST },
 		{ PAGE_DEVTEST_JOURNAL, PAGE_DEVTEST_LOGS }, { PAGE_DEVTEST_KERNEL, PAGE_DEVTEST_LOGS }, { PAGE_DEVTEST_SHELL, PAGE_DEVTEST_LOGS },
 	};
 	for (size_t i = 0; i < sizeof(tree) / sizeof(tree[0]); i++) {
@@ -40,7 +41,7 @@ int main(void) {
 	/* the modules' pages are in their order, for page_is_*() and their first-page sums */
 	assert(PAGE_SOUND_FX == PAGE_SOUND_EQ + 1 && PAGE_SOUND_APPS == PAGE_SOUND_EQ + 3);
 	assert(PAGE_PODS_ABOUT == PAGE_PODS_STATUS + 3);
-	assert(PAGE_DEVTEST_LOGS == PAGE_DEVTEST + 7 && PAGE_DEVTEST_PREVIEW == PAGE_DEVTEST + 9);
+	assert(PAGE_DEVTEST_LOGS == PAGE_DEVTEST + 7 && PAGE_DEVTEST_PREVIEW == PAGE_DEVTEST + 9 && PAGE_DEVTEST_CHARGING == PAGE_DEVTEST + 11);
 	assert(page_is_sound(PAGE_SOUND_APPS) && !page_is_sound(PAGE_AUDIO) && !page_is_sound(PAGE_LED));
 	assert(page_is_pods(PAGE_PODS_ABOUT) && !page_is_pods(PAGE_BLUETOOTH));
 	assert(page_is_devtest(PAGE_DEVTEST_PREVIEW) && !page_is_devtest(PAGE_DEV));

@@ -1,0 +1,14 @@
+[Unit]
+Description=Battery and board thermistors (zrn-therm), and the fuel gauge's temperature from them
+# zrn-charge reads the battery's temperature from it; until it is loaded the
+# temperature is unknown and charging stays at 5 V.
+After=local-fs.target
+Before=zrn-charge.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/zrn-therm-load
+
+[Install]
+WantedBy=multi-user.target

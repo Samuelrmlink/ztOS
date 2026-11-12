@@ -115,6 +115,10 @@ ALARM_MIN = 20                 # an alarm is never silent by accident
 GAIN_MAX = 100.0               # a stream's own gain, through a software volume (+40 dB)
 VOLUME_MAX = 10.0              # what PipeWire takes for "volume" and for each channelVolume
 GAIN_MAX_HW = 1.0              # through an output whose volume is the device's (Bluetooth)
+# Wired headphones: a stream is never above unity there, and a ring or an alarm
+# never turns the output above this (hearing; the driver caps the jack too)
+HEADPHONE_BOOST_MAX = 60
+JACK_SINK = "ztos-headphones"  # ztos-headsetd's sink for the 3.5 mm jack
 GAIN_TOLERANCE = 0.03          # closer than this is right already
 BOOST_HOLD = 3.0               # the alarm's loop starts a new pw-play each time round
 ROLE_STREAMS = ("ring", "alarm")
@@ -255,13 +259,15 @@ def classify(props, route=""):
 
 
 def takeover_target(known, sinks):
-    """A Bluetooth output that has just connected takes the audio, unless another
-    Bluetooth or USB output is there already: choosing then is the user's.
+    """A Bluetooth output that has just connected, or headphones just plugged into
+    the jack, take the audio, unless another Bluetooth or USB output is there
+    already: choosing then is the user's.
     known: the output names last seen, None before the first look. Everything
     being new (a PipeWire restart, say) is not a device connecting."""
     if known is None:
         return None
-    new = [s for name, s in sinks.items() if name not in known and s["kind"] == "bluetooth"]
+    new = [s for name, s in sinks.items() if name not in known
+           and (s["kind"] == "bluetooth" or s.get("name") == JACK_SINK)]
     if len(new) != 1 or not known & set(sinks):
         return None
     for name, s in sinks.items():
@@ -415,7 +421,7 @@ def parse_levels(ring_text, alarm_text):
 
 
 def gain_cap(dev):
-    return GAIN_MAX_HW if dev and dev.get("kind") == "bluetooth" else GAIN_MAX
+    return GAIN_MAX_HW if dev and dev.get("kind") in ("bluetooth", "headphones") else GAIN_MAX
 
 
 def stream_gain(level, dev):
@@ -434,6 +440,8 @@ def stream_gain(level, dev):
 def needs_boost(level, dev):
     if level <= 0 or not dev or dev.get("percent") is None:
         return False
+    if dev.get("kind") == "headphones" and not dev.get("mute") and dev["percent"] >= HEADPHONE_BOOST_MAX:
+        return False             # as far as it goes in someone's ears
     out = 0.0 if dev.get("mute") else cube(dev["percent"])
     return out * gain_cap(dev) < cube(level) * 0.97
 
@@ -441,6 +449,8 @@ def needs_boost(level, dev):
 def boost_percent(level, dev):
     """The least the output can be at to carry level at the stream's most."""
     p = int(((cube(level) / gain_cap(dev)) ** (1.0 / 3.0)) * 100.0 + 0.999)
+    if dev and dev.get("kind") == "headphones":
+        p = min(p, HEADPHONE_BOOST_MAX)
     return max(1, min(100, p))
 
 
