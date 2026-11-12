@@ -655,6 +655,14 @@ check-power-key:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-power-key-test tests/power-key.c
 	/tmp/ztmetro-power-key-test
 
+.PHONY: check-burn-in
+# burn-in.h: the shift's schedule (equal shares, one step at a time, 2-4 px)
+# and the heartbeat file zrn-sleepd's watch reads; then that watch itself
+check-burn-in:
+	$(CC) -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -o /tmp/ztmetro-burn-in-test tests/burn-in.c
+	/tmp/ztmetro-burn-in-test
+	python3 ../power/suspend/test-shell-watch.py
+
 .PHONY: check-osk-numeric
 check-osk-numeric:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-osk-numeric-test tests/osk-numeric.c -lm
