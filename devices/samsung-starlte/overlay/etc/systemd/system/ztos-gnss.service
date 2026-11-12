@@ -21,10 +21,12 @@ TimeoutStopSec=20
 # The gate's sleep inhibit goes with the engine, however it ended (the gate
 # holds it only while the engine runs; see ztos-gnss-gate).
 ExecStopPost=-/bin/rm -f /run/zrn-sleepd/inhibit/timed-gnss
-# lhd passes GNSS data to gpsd through a pipe: once gpsd is gone, lhd blocks
-# writing to it and the whole sensor hub stops (2026-10-27). Restart the
-# whole framework after gpsd: a bare lhd restart without the hub's reset
-# sequence made the firmware assert (transport_layer.c line 165) a minute on.
-# Also today's recovery after a hub that died in a sleep: keep it until the
-# pin fix (zrn-sleep-init pdn table) has held across real doze cycles.
-ExecStopPost=/usr/bin/systemctl --no-block restart ztoscoresensorframework.service
+# No sensor framework restart after a session any more (2026-11-12). It was
+# added when gpsd was killed with the engine still streaming and lhd then
+# blocked writing to its pipe (2026-10-27). Now the HAL client stops the
+# engine first and gpsd exits cleanly: after 4 stops without the restart,
+# lhd kept its PID, only its two pipe-opener threads waited for the next
+# gpsd (fifo_open), the hub kept talking on ttyBCM (~1 IRQ/s), ready stayed
+# 1, no crash lines, and the next session got a fix. The restart never
+# touched lhd or sensord anyway (only ztoscsf, which looks at the hub every
+# PERIOD_S by itself). sensors/GPS-REA.md section 9.

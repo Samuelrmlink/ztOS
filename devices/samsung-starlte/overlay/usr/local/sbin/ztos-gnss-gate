@@ -32,8 +32,19 @@ Accuracy: zrn-gnss-nmea sends $PZTFX,accuracy_m,, with the engine's own
 estimate; without one the gate falls back to HDOP x 4 m.
 
 It also stands in for Samsung's RIL (@VND_Multiclient, see ril_stand_in).
+
+The location switch. Every reader comes through here (geoclue, Linux gpsd,
+Waydroid's bridge), so this is where location is turned off: with OFF_FLAG
+present (kept across boots) the engine stays off, a running one is stopped,
+and readers stay connected but get nothing, not even the last fix, until
+location is on again. The phone's user switches it by writing "on" or
+"off" to CONTROL (a FIFO, 0620, root and the user's group), as the shell's
+Location tile and ztos-location do. STATE (0644) says, for the status bar
+and the tile, whether location is on, what the engine does (off, starting,
+tracking, capped, disabled) and how many read: rewritten only when one of
+these changes, never with a position.
 """
-import glob, os, socket, subprocess, sys, threading, time
+import glob, os, pwd, socket, subprocess, sys, threading, time
 
 PUBLIC_TCP = ("127.0.0.1", 10110)
 PUBLIC_UNIX = "/run/ztos-gnss/nmea.sock"
@@ -63,6 +74,11 @@ KEEP_SCREEN_FRESH = 40  # the bridge touches it every 15 s (ztmetro.c)
 HUB_READY = "/sys/class/sec/sensorhub/ready"
 HUB_READY_HELD = 10  # the hub ready this long before the start limit is reset
 DRM_GLOB = "/sys/class/drm/card*-*/enabled"
+# the location switch
+OFF_FLAG = "/var/lib/ztos-gnss/off"   # present: location off (kept across boots)
+CONTROL = "/run/ztos-gnss/control"    # "on" / "off" from the phone's user
+STATE = "/run/ztos-gnss/state"        # enabled=, engine=, readers=
+USER_CONF = "/etc/ztos/user.conf"     # ZTOS_USER / ZTOS_GID (os/overlay/usr/lib/ztos/user.sh)
 
 
 def now():
@@ -82,6 +98,8 @@ held_at = None     # now() of the last inhibit write, None when not held
 served_off_since = None  # now() since when readers are served, screen off
 capped = False     # screen-off cap reached: no engine until the screen is on
 refused_logged = False
+enabled = True     # the location switch (OFF_FLAG absent)
+state_written = None  # what STATE says now
 stop_gen = 0
 ready_since = None
 start_issued_at = -1e9  # now() of the last start that could work
@@ -334,6 +352,8 @@ def feed(c, data):
 def start_engine(why):
     """Called with lock held."""
     global running, last_start, refused_logged
+    if not enabled:
+        return  # the switch is off: readers wait, nothing is said for each
     if capped:
         if not refused_logged:
             refused_logged = True
@@ -380,7 +400,7 @@ def accept_loop(server):
         conn.setblocking(False)
         with lock:
             clients.add(conn)
-            hello = last_sentence()
+            hello = last_sentence() if enabled else None
             if hello:
                 feed(conn, hello)
             arrived.set()
@@ -424,7 +444,9 @@ def policy():
             served_off_since = t
     else:
         served_off_since = None
-    if served_off_since is not None and t - served_off_since >= CAP and not kept():
+    if running and not enabled:
+        stop_engine("location off; GPS off")
+    elif served_off_since is not None and t - served_off_since >= CAP and not kept():
         capped = True
         stop_engine(f"screen-off location cap: {CAP} s with the screen off; "
                     "GPS off until the screen is on")
@@ -441,7 +463,147 @@ def policy():
         # (With the screen off and no reader the engine stops in IDLE_OFF s,
         # and stop_engine holds sleep until it has.)
         release()
+    publish_state()
     return running
+
+
+# ---- the location switch ----
+def load_enabled():
+    global enabled
+    enabled = not os.path.exists(OFF_FLAG)
+
+
+def set_enabled(on):
+    """The user's switch. Called with lock held."""
+    global enabled
+    if on == enabled:
+        return
+    enabled = on
+    try:
+        if on:
+            os.unlink(OFF_FLAG)
+        else:
+            os.makedirs(os.path.dirname(OFF_FLAG), exist_ok=True)
+            open(OFF_FLAG, "w").close()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log(f"cannot keep the location switch: {e}")
+    if on:
+        log("location on")
+        if clients and not running:
+            start_engine("location on; GPS on for the waiting readers")
+    else:
+        if running:
+            stop_engine("location off; GPS off")
+        else:
+            log("location off")
+    publish_state()
+    arrived.set()  # the pump applies it
+
+
+def engine_state():
+    """Called with lock held."""
+    if not enabled:
+        return "disabled"
+    if capped:
+        return "capped"
+    if not running:
+        return "off"
+    return "tracking" if now() - engine_seen < ENGINE_SEEN else "starting"
+
+
+def publish_state():
+    """STATE, rewritten only when it changes. Called with lock held."""
+    global state_written
+    text = "enabled=%d\nengine=%s\nreaders=%d\n" % (enabled, engine_state(), len(clients))
+    if text == state_written:
+        return
+    try:
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        tmp = STATE + ".new"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, STATE)
+        state_written = text
+    except OSError as e:
+        log(f"cannot write {STATE}: {e}")
+
+
+def user_gid():
+    """The phone's user's group, from /etc/ztos/user.conf, else UID 1000's."""
+    conf = {}
+    try:
+        with open(USER_CONF) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                conf[k] = v.strip().strip("'\"")
+    except OSError:
+        pass
+    try:
+        if conf.get("ZTOS_GID", "").isdigit():
+            return int(conf["ZTOS_GID"])
+        if conf.get("ZTOS_USER"):
+            return pwd.getpwnam(conf["ZTOS_USER"]).pw_gid
+        return pwd.getpwuid(int(conf.get("ZTOS_UID") or 1000)).pw_gid
+    except (KeyError, ValueError):
+        return None
+
+
+def control_open():
+    """CONTROL: written only by root and the phone's user's group."""
+    os.makedirs(os.path.dirname(CONTROL), exist_ok=True)
+    try:
+        os.unlink(CONTROL)
+    except FileNotFoundError:
+        pass
+    os.mkfifo(CONTROL, 0o600)
+    gid = user_gid()
+    try:
+        if gid is None:
+            raise OSError("no phone user")
+        os.chown(CONTROL, -1, gid)
+        os.chmod(CONTROL, 0o620)
+    except OSError as e:
+        log(f"{CONTROL}: root's alone ({e})")
+    # read and write: no EOF each time a writer closes it
+    return os.open(CONTROL, os.O_RDWR)
+
+
+def control_line(line):
+    """One command from CONTROL."""
+    cmd = line.strip().lower()
+    if cmd.startswith("location "):
+        cmd = cmd[len("location "):].strip()
+    with lock:
+        if cmd == "on":
+            set_enabled(True)
+        elif cmd == "off":
+            set_enabled(False)
+        elif cmd:
+            log("control: unknown command (on or off)")
+
+
+def control_loop():
+    try:
+        fd = control_open()
+    except OSError as e:
+        log(f"no location switch: {e}")
+        return
+    buf = b""
+    while True:
+        try:
+            data = os.read(fd, 256)
+        except OSError:
+            time.sleep(1)
+            continue
+        buf += data
+        *lines, buf = buf.split(b"\n")
+        buf = buf[-64:]
+        for raw in lines:
+            control_line(raw.decode("ascii", "replace"))
 
 
 def pump():
@@ -539,12 +701,15 @@ def main():
     os.chmod(PUBLIC_UNIX, 0o666)
     ux.listen(8)
     load_last()
+    load_enabled()
     with lock:
         release()  # a hold left by an earlier gate: nothing runs yet
+        publish_state()
     threading.Thread(target=ril_stand_in, daemon=True).start()
+    threading.Thread(target=control_loop, daemon=True).start()
     for s in (tcp, ux):
         threading.Thread(target=accept_loop, args=(s,), daemon=True).start()
-    log("waiting for readers; GPS off")
+    log("waiting for readers; GPS off" + ("" if enabled else "; location is off"))
     pump()
 
 

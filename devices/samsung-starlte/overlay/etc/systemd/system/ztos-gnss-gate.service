@@ -7,6 +7,8 @@ ExecStart=/usr/local/sbin/ztos-gnss-gate
 StateDirectory=ztos-gnss
 StateDirectoryMode=0700
 ExecStopPost=/usr/bin/systemctl --no-block stop ztos-gnss.service
+# no gate, no switch: the shell's Location tile shows it as unavailable
+ExecStopPost=-/bin/rm -f /run/ztos-gnss/state /run/ztos-gnss/control
 Restart=always
 RestartSec=5
 
