@@ -419,8 +419,8 @@ static void csis_off(void)
 	writel(0, csis + CSIS_MSK1);
 	writel(0, csis_vc + CMN_MASK);
 	rmw(sys_phy, BIT(pth->rst_bit), 0);
-	if (pth->csis == path_front.csis)	/* the rear PHY's isolation was off bypass at no time; leave it */
-		rmw(pmu + pth->iso, BIT(0), 0);
+	/* both PHYs back into isolation, as phy_power_off; the rear's since 2026-11-12 */
+	rmw(pmu + pth->iso, BIT(0), 0);
 }
 
 static void dma_prepare(void)

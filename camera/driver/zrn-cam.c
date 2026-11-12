@@ -951,9 +951,8 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 		if (!top_cmu)
 			top_cmu = ioremap(0x1a240000, 0x3000);
 		bus_note("before");
-		/* only the two camera domains of the stock DT */
-		if (sscanf(cmd, "dvfs-%u-%u", &dom, &khz) == 2 && (dom == 5 || dom == 7) &&
-		    khz >= 100000 && khz <= INTCAM_KHZ) {
+		/* only the approved request (REGISTERS.md, J): dvfs_cam at 690000 */
+		if (sscanf(cmd, "dvfs-%u-%u", &dom, &khz) == 2 && dom == 7 && khz == INTCAM_KHZ) {
 			ret = apm_set(dom, khz);
 			note("APM domain %u at %u kHz: %d", dom, khz, ret);
 			usleep_range(1000, 2000);
