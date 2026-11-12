@@ -27,6 +27,11 @@
  *	call STATE [ROUTE]	from the modem daemon: the call's state (idle,
  *				incoming, dialing, ringing, active) and where its
  *				sound goes (earpiece, speaker, bluetooth, off)
+ *	orient on | off		from the shell: follow the phone's orientation
+ *				(auto-rotation on, not locked, screen on)
+ *	orient_axes +x+y+z	which raw accelerometer axes are the screen's
+ *				right, top and out of the glass (remembered)
+ *	orient_180 on | off	whether upside down counts (remembered; off)
  *
  * In a call held to the ear (dialing, ringing out or active, the sound not on
  * the speaker or a headset) and with the screen on, the proximity sensor is
@@ -34,6 +39,12 @@
  * "prox_blank on|off" (the panel off and the glass ignored). The sensor is
  * off at every other time. A sensor that says nothing leaves the screen on
  * (sensors/README.md, "Proximity in calls").
+ *
+ * While the shell asks for it (orient on) and the screen is on, the
+ * accelerometer runs at ORIENT_MS and orient.h turns its readings into a
+ * quarter turn, 0..3; each change goes to the shell as "orientation N" and
+ * to /run/ztoscsf-sensors/orientation. Off, nothing runs for it
+ * (sensors/README.md, "Orientation").
  *
  * The protocol is Samsung's SSP, as their kernel driver speaks it: the phone
  * opens a transaction with a 9-byte header (command, length, options, data),
@@ -68,6 +79,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "orient.h"
+
 #define DEV	"/dev/zrn_ssp"
 #define CTL	"/run/ztoscsf-sensord.ctl"
 #define OUT	"/run/ztoscsf-sensors"
@@ -92,6 +105,7 @@ static struct sensor {
 	const char *name;
 	int id, size, ms;
 	bool on, wanted;
+	int watch_ms;	/* the rate a watch asked for; 0: the table's */
 	time_t until;	/* a watch runs out; 0 is never */
 } sensors[] = {
 	{ "light", 9, 18, 1000 },	/* 1 reading every second: fast enough for smooth auto-brightness */
@@ -102,6 +116,8 @@ static struct sensor {
 };
 #define PROX_ID		7
 #define PRESSURE_ID	5
+#define ACCEL_ID	0
+#define ORIENT_MS	100	/* the accelerometer's rate for orientation */
 #define N_SENSORS (int)(sizeof(sensors) / sizeof(sensors[0]))
 
 static int dev = -1;
@@ -109,6 +125,9 @@ static volatile sig_atomic_t stopping;
 static bool screen_on = true, auto_on = true;
 #define LIGHT_MS	1000	/* the light sensor's rate with the screen on (sensors[0]) */
 static int aod_ms;		/* the always-on display's rate with it off; 0: off */
+static bool orient_on;		/* the shell wants the orientation (orient on) */
+static struct orient orient;
+static int orient_told = -1;	/* what the shell has; -1 nothing yet */
 
 /* --- transactions ------------------------------------------------------ */
 
@@ -310,14 +329,21 @@ static void sensors_apply(void) {
 		struct sensor *s = &sensors[i];
 		/* the always-on display: only the light, slowly */
 		bool aod = !screen_on && aod_ms > 0 && s->id == 9;
-		bool on = (screen_on && (s->wanted || (s->id == PROX_ID && call_prox))) || aod;
+		bool orienting = s->id == ACCEL_ID && orient_on;
+		bool on = (screen_on && (s->wanted || (s->id == PROX_ID && call_prox) || orienting)) || aod;
+		int ms = s->ms;
 		if (s->id == 9) {
-			int ms = aod ? aod_ms : LIGHT_MS;
-			if (s->on && on && s->ms != ms) {
-				sensor_set(s, false);	/* a new rate: off and on again */
-			}
-			s->ms = ms;
+			ms = aod ? aod_ms : LIGHT_MS;
+		} else if (s->watch_ms) {
+			ms = s->watch_ms;
 		}
+		if (orienting && (!s->wanted || ms > ORIENT_MS)) {
+			ms = ORIENT_MS;	/* a watch asking for faster keeps its own */
+		}
+		if (s->on && on && s->ms != ms) {
+			sensor_set(s, false);	/* a new rate: off and on again */
+		}
+		s->ms = ms;
 		sensor_set(s, on);
 	}
 }
@@ -568,6 +594,30 @@ static void call_update(const char *state, const char *route) {
 	call_prox = talking && ear;
 }
 
+/* --- orientation, for auto-rotation ------------------------------------ */
+
+/* The shell is told each change; one it did not take (not up, busy) is
+ * offered again with the next reading. */
+static void orient_tell(void) {
+	char line[24];
+	if (orient.cur < 0 || orient.cur == orient_told) {
+		return;
+	}
+	snprintf(line, sizeof(line), "%d\n", orient.cur);
+	publish("orientation", line);
+	snprintf(line, sizeof(line), "orientation %d\n", orient.cur);
+	if (shell(line)) {
+		fprintf(stderr, "ztoscsf-sensord: orientation %d\n", orient.cur);
+		orient_told = orient.cur;
+		status();
+	}
+}
+
+static void orient_reading(const int16_t v[3]) {
+	orient_feed(&orient, v, now_ns());
+	orient_tell();
+}
+
 /* --- frames from the hub ----------------------------------------------- */
 
 static void record(struct sensor *s, const uint8_t *d) {
@@ -631,7 +681,17 @@ static void record(struct sensor *s, const uint8_t *d) {
 		publish("pressure", text);
 		return;
 	}
-	if (s->size == 6) {
+	if (s->id == ACCEL_ID) {
+		int16_t v[3];
+		memcpy(v, d, 6);
+		if (orient_on && screen_on) {
+			orient_reading(v);
+		}
+		if (!s->wanted) {
+			return;	/* on for the orientation alone: no file 10 times a second */
+		}
+		snprintf(text, sizeof(text), "%d %d %d\n", v[0], v[1], v[2]);
+	} else if (s->size == 6) {
 		int16_t v[3];
 		memcpy(v, d, 6);
 		snprintf(text, sizeof(text), "%d %d %d\n", v[0], v[1], v[2]);
@@ -694,6 +754,7 @@ static void frame(const uint8_t *f, int len) {
 				sensors[k].on = false;
 			}
 			prox_reset();	/* its last near is gone with it */
+			orient_reset(&orient);
 			sensors_apply();
 			break;
 		case REC_TIME_SYNC:
@@ -772,15 +833,21 @@ static void save(void) {
 	if (f) {
 		fprintf(f, "auto %s\n", auto_on ? "on" : "off");
 		fprintf(f, "opentone %s\n", tone_on ? "on" : "off");
+		char axes[8];
+		orient_axes_text(&orient, axes);
+		fprintf(f, "orient_axes %s\n", axes);
+		fprintf(f, "orient_180 %s\n", orient.allow_180 ? "on" : "off");
 		fclose(f);
 	}
 }
 
 static void status(void) {
-	char text[192];
-	snprintf(text, sizeof(text), "auto=%s\nscreen=%s\nopentone=%s\naod=%d\ncall=%s %s\nprox=%s\n",
+	char text[256];
+	snprintf(text, sizeof(text), "auto=%s\nscreen=%s\nopentone=%s\naod=%d\ncall=%s %s\nprox=%s\n"
+		"orient=%s %d\n",
 		auto_on ? "on" : "off", screen_on ? "on" : "off", tone_on ? "on" : "off", aod_ms,
-		call_state, call_route, !call_prox ? "off" : prox_told ? "near" : "on");
+		call_state, call_route, !call_prox ? "off" : prox_told ? "near" : "on",
+		orient_on ? "on" : "off", orient.cur);
 	publish("status", text);
 }
 
@@ -794,6 +861,24 @@ static void command(char *line, bool persist) {
 		screen_on = strcmp(value, "off") != 0;
 		goal = -1;	/* coming back on: the room's level, from the next reading */
 		lux_smooth = -1;
+		orient_reset(&orient);	/* the phone moved while it was off: at once again */
+		orient_told = -1;
+	} else if (strcmp(what, "orient") == 0) {
+		bool on = strcmp(value, "on") == 0;
+		if (on != orient_on) {
+			orient_reset(&orient);	/* a fresh start: the first reading is taken */
+			orient_told = -1;
+		}
+		orient_on = on;
+	} else if (strcmp(what, "orient_axes") == 0) {
+		if (orient_axes(&orient, value) && persist) {
+			save();
+		}
+	} else if (strcmp(what, "orient_180") == 0) {
+		orient.allow_180 = strcmp(value, "on") == 0;
+		if (persist) {
+			save();
+		}
 	} else if (strcmp(what, "aod") == 0) {
 		int ms = atoi(value);
 		aod_ms = ms <= 0 ? 0 : ms < 1000 ? 1000 : ms;
@@ -823,7 +908,7 @@ static void command(char *line, bool persist) {
 				sensors[i].wanted = what[0] == 'w';
 				sensors[i].until = time(NULL) + 5;
 				if (ms >= 10) {
-					sensors[i].ms = ms;
+					sensors[i].watch_ms = ms;
 				}
 			}
 		}
@@ -842,6 +927,7 @@ int main(void) {
 	signal(SIGTERM, stop);
 	signal(SIGINT, stop);
 	setvbuf(stderr, NULL, _IOLBF, 0);
+	orient_init(&orient);
 	const char *env = getenv("ZTOSCSF_ROOT");
 	snprintf(root, sizeof(root), "%s", env ? env : "");
 	at(ctl_path, sizeof(ctl_path), CTL);

@@ -242,7 +242,7 @@ install-acct: acct/ztacctd acct/ztacct acct/ztusage
 touchkeyd/ztos-touchkeyd: touchkeyd/ztos-touchkeyd.c
 	$(CC) $(CFLAGS) $(WARN) -o $@ touchkeyd/ztos-touchkeyd.c
 
-sensord/ztoscsf-sensord: sensord/ztoscsf-sensord.c
+sensord/ztoscsf-sensord: sensord/ztoscsf-sensord.c sensord/orient.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ sensord/ztoscsf-sensord.c -lm
 
 # the modem's state for the shell (signal, operator, data), and airplane mode, SMS
@@ -525,6 +525,7 @@ check-modem-sim:
 check-sensord:
 	python3 sensord/test-sensord-queue.py
 	python3 sensord/test-sensord-prox.py
+	python3 sensord/test-sensord-orient.py
 
 .PHONY: check-csf
 check-csf:
