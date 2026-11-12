@@ -11,6 +11,12 @@
  *   new	a number (or a name from People, offered as it is typed),
  *		the message, send.
  *
+ * Pictures: "..." > attach a picture takes the newest in ~/Pictures (again:
+ * the next older; past the oldest: none). It is scaled to a JPEG in ztmmsd's
+ * outbox and sent as an MMS ("send NUMBER FILE TEXT" on /run/ztmmsd.ctl).
+ * A picture message that came in is a log line with "mms:<id>" after the
+ * text; its parts are in MMS_STORE/<id> (mms/ztmmsd.c).
+ *
  * Sending goes to the modem daemon ("sms NUMBER TEXT" on its control pipe),
  * which does it and writes what came of it into its log; messages coming in
  * are in the same log (comm.h has both formats). What was sent is kept in
@@ -29,6 +35,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <cairo.h>
+#include <dirent.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
 
@@ -37,6 +45,10 @@
 
 #define MARGIN ZMC_MARGIN
 #define MAX_TEXT 1800	/* UTF-8 bytes; the daemon splits long messages */
+#define MMS_CTL "/run/ztmmsd.ctl"
+#define MMS_STORE "/var/lib/ztoscorenetworking/mms/store"
+#define MMS_OUTBOX "/var/lib/ztoscorenetworking/mms/outbox"
+#define MMS_MAX_BYTES (600 * 1024)	/* what is sent: well under the carriers' 1 MB */
 
 enum page { P_THREADS, P_THREAD, P_NEW };
 
@@ -51,6 +63,7 @@ enum action {
 	ACT_CALL,
 	ACT_SELECT, ACT_DELETE, ACT_MORE, ACT_DISCARD,
 	ACT_RETRY,	/* arg: a message that was not sent */
+	ACT_ATTACH,	/* the next picture, or none */
 };
 
 enum state { M_IN, M_SENT, M_PENDING, M_FAILED };
@@ -60,6 +73,7 @@ struct message {
 	time_t at;
 	char number[32];
 	char text[8192];
+	char pic[300];		/* a picture shown with it (MMS), or "" */
 };
 
 static struct message messages[MAX_MSGS];
@@ -85,6 +99,8 @@ static const char *test_log;
 static unsigned footer_revision;
 static bool sample;		/* drawing a page into a file: made-up messages */
 static double box_h = 44;	/* how tall the message box is, for what is in it */
+static char attach[300];	/* the picture to go with the next message, or "" */
+static int attach_index = -1;	/* which of the pictures, newest first */
 
 /* the newest bubble rising into place: drawn apart from the page, on the GPU */
 #define RISE_MS 260
@@ -209,6 +225,154 @@ static int count_dir(const char *path, const char *dir) {
 /* The newest MAX_MSGS / 2 sent and the same of what came in: the files only
  * grow, and shifting four megabytes per line once they are long is no way to
  * spend the efficiency cores. */
+/* "mms:<id>": the first picture among that message's parts, from its meta */
+static void mms_picture(const char *extra, char *out, size_t size) {
+	out[0] = 0;
+	if (strncmp(extra, "mms:", 4) || strchr(extra + 4, '/') || strstr(extra, "..")) return;
+	char path[400], line[400];
+	snprintf(path, sizeof(path), "%s/%s/meta", MMS_STORE, extra + 4);
+	FILE *f = fopen(path, "r");
+	while (f && fgets(line, sizeof(line), f)) {
+		char *cursor = line;
+		if (strcmp(next_field(&cursor), "part")) continue;
+		const char *type = next_field(&cursor), *name = next_field(&cursor);
+		if (!strncmp(type, "image/", 6) && name[0] && !strchr(name, '/')) {
+			snprintf(out, size, "%s/%s/%s", MMS_STORE, extra + 4, name);
+			break;
+		}
+	}
+	if (f) fclose(f);
+}
+
+/* ---- pictures: thumbnails in bubbles, and the one to attach ---------------- */
+
+#define THUMB 200	/* the longer side of a picture in a bubble */
+static struct { char path[300]; cairo_surface_t *surface; double w, h; } thumbs[24];
+static int thumb_next;
+
+static cairo_surface_t *surface_of(GdkPixbuf *pb) {
+	int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
+	int channels = gdk_pixbuf_get_n_channels(pb), stride = gdk_pixbuf_get_rowstride(pb);
+	const guchar *px = gdk_pixbuf_read_pixels(pb);
+	cairo_surface_t *cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	if (cairo_surface_status(cs)) return cs;
+	cairo_surface_flush(cs);
+	unsigned char *dst = cairo_image_surface_get_data(cs);
+	int dstride = cairo_image_surface_get_stride(cs);
+	for (int y = 0; y < h; y++) {
+		uint32_t *row = (uint32_t *)(dst + y * dstride);
+		for (int x = 0; x < w; x++) {
+			const guchar *p = px + y * stride + x * channels;
+			unsigned a = channels == 4 ? p[3] : 255;
+			row[x] = a << 24 | (p[0] * a / 255) << 16 | (p[1] * a / 255) << 8 | (p[2] * a / 255);
+		}
+	}
+	cairo_surface_mark_dirty(cs);
+	return cs;
+}
+
+/* The picture at path, as a surface its bubble draws at w x h; NULL if it
+ * cannot be read. Kept for the next look. */
+static cairo_surface_t *thumb(const char *path, double *w, double *h) {
+	for (int i = 0; i < 24; i++) {
+		if (thumbs[i].surface && !strcmp(thumbs[i].path, path)) {
+			*w = thumbs[i].w;
+			*h = thumbs[i].h;
+			return thumbs[i].surface;
+		}
+	}
+	int px = (int)ceil(THUMB * (zmc.scale > 0 ? zmc.scale : 1));
+	GdkPixbuf *raw = gdk_pixbuf_new_from_file_at_scale(path, px, px, TRUE, NULL);
+	if (!raw) return NULL;
+	GdkPixbuf *pb = gdk_pixbuf_apply_embedded_orientation(raw);
+	g_object_unref(raw);
+	if (!pb) return NULL;
+	int slot = thumb_next++ % 24;
+	if (thumbs[slot].surface) cairo_surface_destroy(thumbs[slot].surface);
+	thumbs[slot].surface = surface_of(pb);
+	double scale = zmc.scale > 0 ? zmc.scale : 1;
+	thumbs[slot].w = gdk_pixbuf_get_width(pb) / scale;
+	thumbs[slot].h = gdk_pixbuf_get_height(pb) / scale;
+	g_object_unref(pb);
+	snprintf(thumbs[slot].path, sizeof(thumbs[slot].path), "%s", path);
+	*w = thumbs[slot].w;
+	*h = thumbs[slot].h;
+	return thumbs[slot].surface;
+}
+
+static bool picture_name(const char *name) {
+	const char *dot = strrchr(name, '.');
+	return dot && (!strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".jpeg") || !strcasecmp(dot, ".png"));
+}
+
+struct picture { char path[300]; time_t at; };
+
+static int picture_newer(const void *a, const void *b) {
+	const struct picture *x = a, *y = b;
+	return x->at < y->at ? 1 : x->at > y->at ? -1 : 0;
+}
+
+/* The index-th newest picture in ~/Pictures and the folders in it; false if
+ * there are not that many. */
+static bool picture_at(int index, char *out, size_t size) {
+	static struct picture found[200];
+	int n = 0;
+	const char *home = getenv("HOME");
+	char root[300];
+	snprintf(root, sizeof(root), "%s/Pictures", home ? home : "");
+	char dirs[16][300];
+	int n_dirs = 1;
+	snprintf(dirs[0], sizeof(dirs[0]), "%s", root);
+	for (int d = 0; d < n_dirs; d++) {
+		DIR *dir = opendir(dirs[d]);
+		struct dirent *e;
+		while (dir && (e = readdir(dir))) {
+			if (e->d_name[0] == '.') continue;
+			char path[600];
+			snprintf(path, sizeof(path), "%s/%s", dirs[d], e->d_name);
+			struct stat st;
+			if (stat(path, &st)) continue;
+			if (S_ISDIR(st.st_mode) && d == 0 && n_dirs < 16) {
+				snprintf(dirs[n_dirs++], sizeof(dirs[0]), "%.299s", path);
+			} else if (S_ISREG(st.st_mode) && picture_name(e->d_name) && n < 200 && strlen(path) < 300) {
+				snprintf(found[n].path, sizeof(found[n].path), "%s", path);
+				found[n++].at = st.st_mtime;
+			}
+		}
+		if (dir) closedir(dir);
+	}
+	qsort(found, (size_t)n, sizeof(found[0]), picture_newer);
+	if (index < 0 || index >= n) return false;
+	snprintf(out, size, "%s", found[index].path);
+	return true;
+}
+
+/* The picture made small enough to send, as a JPEG in ztmmsd's outbox. */
+static bool picture_for_sending(const char *path, char *out, size_t size) {
+	struct stat st;
+	if (stat(MMS_OUTBOX, &st) || !S_ISDIR(st.st_mode)) return false;
+	static const int sides[] = { 1280, 960, 640 };
+	for (int i = 0; i < 3; i++) {
+		int w = 0, h = 0;
+		if (!gdk_pixbuf_get_file_info(path, &w, &h)) return false;
+		GdkPixbuf *raw = w > sides[i] || h > sides[i] ?
+			gdk_pixbuf_new_from_file_at_scale(path, sides[i], sides[i], TRUE, NULL) :
+			gdk_pixbuf_new_from_file(path, NULL);
+		if (!raw) return false;
+		GdkPixbuf *pb = gdk_pixbuf_apply_embedded_orientation(raw);
+		g_object_unref(raw);
+		if (!pb) return false;
+		snprintf(out, size, "%s/%d-%ld.jpg", MMS_OUTBOX, (int)getuid(), (long)time(NULL));
+		gboolean saved = gdk_pixbuf_save(pb, out, "jpeg", NULL, "quality", i ? "70" : "80", NULL);
+		g_object_unref(pb);
+		if (!saved) return false;
+		chmod(out, 0644);
+		if (!stat(out, &st) && st.st_size <= MMS_MAX_BYTES) return true;
+		unlink(out);
+	}
+	return false;
+}
+
 static void load(void) {
 	char path[500], line[16512];
 	if (sample) {
@@ -229,6 +393,9 @@ static void load(void) {
 		m->at = (time_t)atol(next_field(&cursor));
 		snprintf(m->number, sizeof(m->number), "%s", next_field(&cursor));
 		unescape(m->text, sizeof(m->text), next_field(&cursor));
+		const char *extra = next_field(&cursor);
+		m->pic[0] = 0;
+		if (!strncmp(extra, "pic:", 4)) snprintf(m->pic, sizeof(m->pic), "%s", extra + 4);
 		m->state = M_PENDING;
 		if (m->number[0]) {
 			n_messages++;
@@ -246,7 +413,7 @@ static void load(void) {
 		char *cursor = line;
 		char *dir = next_field(&cursor);
 		time_t at = (time_t)atol(next_field(&cursor));
-		char *number = next_field(&cursor), *text = next_field(&cursor);
+		char *number = next_field(&cursor), *text = next_field(&cursor), *extra = next_field(&cursor);
 		if (!strcmp(dir, "in")) {
 			if (pass-- > 0) continue;
 			struct message *m = &messages[n_messages++];
@@ -254,6 +421,7 @@ static void load(void) {
 			m->at = at;
 			snprintf(m->number, sizeof(m->number), "%s", number);
 			unescape(m->text, sizeof(m->text), text);
+			mms_picture(extra, m->pic, sizeof(m->pic));
 		} else if (!strcmp(dir, "out")) {
 			/* the oldest one to that number still waiting, sent before this */
 			for (int i = 0; i < sent; i++) {
@@ -469,7 +637,7 @@ static void draw_compose(cairo_t *cr, double y, int page) {
 	const double strip = box_h + 94, box_w = zmc.width - 2 * MARGIN;
 	bool dots = zmc.style == ZMC_STYLE_DOTMATRIX;
 	cairo_set_source_rgb(cr, 0, 0, 0);
-	cairo_rectangle(cr, 0, y, zmc.width, strip + (more ? 44 : 0));
+	cairo_rectangle(cr, 0, y, zmc.width, strip + (more ? 88 : 0));
 	cairo_fill(cr);
 	/* Metro's box is pale with dark text; in dots a pale fill would drown
 	 * the text, so there it is an outline */
@@ -504,7 +672,7 @@ static void draw_compose(cairo_t *cr, double y, int page) {
 	/* Text leaves a current point. Never stroke it with the button paths. */
 	cairo_new_path(cr);
 	double row = y + box_h + 18;
-	double dim = draft[0] ? 1 : 0.45;
+	double dim = draft[0] || attach[0] ? 1 : 0.45;
 	cairo_set_source_rgb(cr, dim, dim, dim);
 	zmc_round_button(cr, 46, row, "send", "send", ACT_SEND, 0);
 	cairo_new_path(cr);
@@ -518,11 +686,19 @@ static void draw_compose(cairo_t *cr, double y, int page) {
 		cairo_set_source_rgb(cr, 1, 1, 1);
 		zmc_text(cr, page == P_THREAD ? "delete conversation" : "discard draft", FONT_REGULAR,
 			18, MARGIN, y + strip + 8, zmc.width - 2 * MARGIN);
+		zmc_text(cr, attach[0] ? "another picture" : "attach a picture", FONT_REGULAR,
+			18, MARGIN, y + strip + 52, zmc.width - 2 * MARGIN);
 	}
 	double say_x = 164, say_w = zmc.width - 54 - say_x;
 	if (note[0]) {
 		zmc_accent(cr);
 		zmc_text(cr, note, FONT_REGULAR, 12, say_x, row + 4, say_w);
+	} else if (attach[0]) {
+		const char *slash = strrchr(attach, '/');
+		char said[120];
+		snprintf(said, sizeof(said), "with a picture: %s", slash ? slash + 1 : attach);
+		zmc_accent(cr);
+		zmc_text(cr, said, FONT_REGULAR, 12, say_x, row + 4, say_w);
 	} else if (draft[0]) {
 		char count[32];
 		int used, of, parts;
@@ -536,7 +712,7 @@ static void draw_compose(cairo_t *cr, double y, int page) {
 
 /* The page remains a GPU-scrolled cache; only this small fixed strip changes
  * with the draft. Its touches belong to the strip, never to a row behind it. */
-static int footer_height(int page) { return page == P_THREADS ? 76 : (int)box_h + 94 + (more ? 44 : 0); }
+static int footer_height(int page) { return page == P_THREADS ? 76 : (int)box_h + 94 + (more ? 88 : 0); }
 
 static void draw_footer(cairo_t *cr, int page) {
 	if (page != P_THREADS) { draw_compose(cr, 0, page); return; }
@@ -614,8 +790,20 @@ static void bubble(cairo_t *cr, const struct message *m, double x, double y, dou
 		cairo_fill(cr);
 	}
 	cairo_new_path(cr);
+	double tw = 0, th = 0, top = 0;
+	cairo_surface_t *pic = m->pic[0] ? thumb(m->pic, &tw, &th) : NULL;
+	if (pic) {
+		cairo_save(cr);
+		cairo_translate(cr, x + pad, y + 8 + pad);
+		cairo_scale(cr, tw / cairo_image_surface_get_width(pic), th / cairo_image_surface_get_height(pic));
+		cairo_set_source_surface(cr, pic, 0, 0);
+		cairo_paint(cr);
+		cairo_restore(cr);
+		cairo_new_path(cr);
+		top = th + 8;
+	}
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	double used = zmc_text(cr, m->text, FONT_REGULAR, 15, x + pad, y + 8 + pad, w - 2 * pad);
+	double used = top + zmc_text(cr, m->text, FONT_REGULAR, 15, x + pad, y + 8 + pad + top, w - 2 * pad);
 	cairo_new_path(cr);
 	/* when, and what became of it, in the foot of the bubble */
 	double sw = zmc_text_width(stamp, FONT_REGULAR, 11.5);
@@ -638,9 +826,12 @@ static void bubble_size(cairo_t *cr, const struct message *m, char *stamp, size_
 		double one = zmc_text_width(m->text, FONT_REGULAR, 15) + 2 * pad + 2;
 		if (one < most) w = fmax(one, fmax(stamp_w, 64));
 	}
+	double tw = 0, th = 0;
+	bool pic = m->pic[0] && thumb(m->pic, &tw, &th);
+	if (pic) w = fmax(w, tw + 2 * pad);
 	w = fmin(fmax(w, stamp_w), zmc.width - 2 * MARGIN);
 	*w_out = w;
-	*h_out = text_height(cr, m->text, FONT_REGULAR, 15, w - 2 * pad) + 2 * pad + 17;
+	*h_out = text_height(cr, m->text, FONT_REGULAR, 15, w - 2 * pad) + 2 * pad + 17 + (pic ? th + 8 : 0);
 }
 
 static double draw_thread(cairo_t *cr) {
@@ -777,6 +968,44 @@ static double render(cairo_t *cr, int page) {
 
 /* ---- what taps do --------------------------------------------------------- */
 
+static void sent_now(const char *digits);
+
+/* With a picture: made small, put in the outbox, and handed to ztmmsd. */
+static void send_picture(const char *digits, const char *flat) {
+	char out[400];
+	if (dry_run) {
+		struct stat st;
+		bool ok = !stat(attach, &st);
+		snprintf(note, sizeof(note), "Test send with a picture (%ld KB); nothing sent.", ok ? (long)st.st_size / 1024 : 0L);
+		return;
+	}
+	if (!picture_for_sending(attach, out, sizeof(out))) {
+		snprintf(note, sizeof(note), "Picture messages are not set up, or that picture cannot be read.");
+		return;
+	}
+	char command[MAX_TEXT * 2 + 600];
+	int n = snprintf(command, sizeof(command), "send %s %s %s\n", digits, out, flat);
+	int fd = open(MMS_CTL, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	bool sent = n > 0 && (size_t)n < sizeof(command) && fd >= 0 && write(fd, command, (size_t)n) == n;
+	if (fd >= 0) close(fd);
+	if (!sent) {
+		unlink(out);
+		snprintf(note, sizeof(note), "Picture messages are not running. Your draft is kept.");
+		return;
+	}
+	char path[400];
+	data_path(path, sizeof(path), "messages");
+	FILE *f = fopen(path, "a");
+	if (f) {
+		fprintf(f, "out\t%ld\t%s\t%s\tpic:%s\n", (long)time(NULL), digits, flat, out);
+		fclose(f);
+	}
+	attach[0] = 0;
+	attach_index = -1;
+	note[0] = 0;
+	sent_now(digits);
+}
+
 static void send_draft(void) {
 	const char *number = zmc.page == P_NEW ? to : with;
 	char digits[32];
@@ -809,7 +1038,7 @@ static void send_draft(void) {
 		if (zmc.page == P_NEW) focus = 1;
 		return;
 	}
-	if (!draft[0]) {
+	if (!draft[0] && !attach[0]) {
 		snprintf(note, sizeof(note), "Nothing to send yet.");
 		focus = 0;
 		return;
@@ -826,6 +1055,10 @@ static void send_draft(void) {
 		}
 	}
 	flat[o] = 0;
+	if (attach[0]) {
+		send_picture(digits, flat);
+		return;
+	}
 	if (dry_run) {
 		snprintf(note, sizeof(note), "Test send: %zu bytes; modem untouched.", strlen(draft));
 		fprintf(stderr, "dry-run sms %s: %zu UTF-8 bytes\n", digits, strlen(draft));
@@ -843,6 +1076,11 @@ static void send_draft(void) {
 		note[0] = 0;
 	}
 	message_save_record("out", time(NULL), digits, flat);
+	sent_now(digits);
+}
+
+/* What is done once a message has gone to its daemon. */
+static void sent_now(const char *digits) {
 	zmc_haptic("click");
 	draft[0] = 0;
 	snprintf(with, sizeof(with), "%s", digits);
@@ -860,6 +1098,8 @@ static void send_draft(void) {
 
 static void open_thread(const char *number) {
 	more = false;
+	attach[0] = 0;
+	attach_index = -1;
 	snprintf(with, sizeof(with), "%s", number);
 	draft[0] = 0;
 	note[0] = 0;
@@ -905,6 +1145,17 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_MORE:
 		more = !more;
+		break;
+	case ACT_ATTACH:
+		more = false;
+		note[0] = 0;
+		if (picture_at(attach_index + 1, attach, sizeof(attach))) {
+			attach_index++;
+		} else {
+			if (attach_index < 0) snprintf(note, sizeof(note), "No pictures in Pictures.");
+			attach[0] = 0;
+			attach_index = -1;
+		}
 		break;
 	case ACT_DISCARD:
 		more = false;
@@ -989,6 +1240,7 @@ static bool touch(int phase, int id, double x, double y, uint32_t time) {
 	if (phase == 2 && fabs(x - down_x) < 20 && fabs(y - down_y) < 20) {
 		if (zmc.page == P_THREADS) activate(x < zmc.width / 2 ?
 			(selecting ? ACT_DELETE : ACT_NEW) : ACT_SELECT, 0);
+		else if (y >= top + box_h + 138) activate(ACT_ATTACH, 0);
 		else if (y >= top + box_h + 94) activate(ACT_DISCARD, 0);
 		else if (y < top + box_h + 14) activate(ACT_BOX, 0);
 		else if (x >= zmc.width - 54) activate(ACT_MORE, 0);

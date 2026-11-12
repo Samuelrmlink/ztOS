@@ -21,7 +21,12 @@
  * CTL, /run/ztmmsd.ctl, one line each:
  *	send NUMBERS FILES TEXT	NUMBERS: one or more, comma separated; FILES:
  *				paths, '|' separated, or "-" for none; TEXT
- *				escaped as in the SMS log (\n, \t, \\)
+ *				escaped as in the SMS log (\n, \t, \\).
+ *				Anyone may write CTL, and this daemon is
+ *				root: a file is sent only from OUTBOX
+ *				(sticky, like /tmp), a regular file owned
+ *				by a user, not root, and not a link. So
+ *				nobody can send what they could not read.
  *	retry			fetch what is waiting again now
  *
  * The settings: CONF (Settings > cellular + SIM > MMS), "key = value":
@@ -77,6 +82,7 @@
 #define PUSH_DIR	MMS_DIR "/push"		/* from ztoscorenetworkingd */
 #define WAIT_DIR	MMS_DIR "/waiting"	/* notifications not fetched yet */
 #define STORE		MMS_DIR "/store"
+#define OUTBOX		MMS_DIR "/outbox"	/* pictures to send: the apps write them here */
 #define SMS_LOG		"/var/lib/ztoscorenetworking/sms/log"
 #define MAX_MMS		(1024 * 1024)	/* T-Mobile's and Android's usual limit */
 #define HTTP_TIMEOUT_MS	45000
@@ -963,6 +969,20 @@ static const char *type_for(const char *path)
 
 /* An m-send-req for numbers (comma separated), files ('|' separated or "-")
  * and text into *pdu. */
+static bool outbox_only = true;	/* off for the offline tools */
+
+/* A file someone may have us send: see CTL above. */
+static bool sendable(const char *path)
+{
+	if (!outbox_only)
+		return true;
+	size_t n = strlen(OUTBOX);
+	if (strncmp(path, OUTBOX "/", n + 1) || strchr(path + n + 1, '/') || strstr(path, ".."))
+		return false;
+	struct stat st;
+	return !lstat(path, &st) && S_ISREG(st.st_mode) && st.st_uid != 0 && st.st_nlink == 1;
+}
+
 static bool build_send(const char *numbers, const char *files, const char *text, uint8_t **pdu, size_t *len)
 {
 	char nums[512], fl[2048];
@@ -984,6 +1004,11 @@ static bool build_send(const char *numbers, const char *files, const char *text,
 	if (strcmp(fl, "-")) {
 		for (char *save = NULL, *f = strtok_r(fl, "|", &save); f && n_att < 8; f = strtok_r(NULL, "|", &save)) {
 			size_t l;
+			if (!sendable(f)) {
+				say("an attachment not in the outbox, or not a user's own file: refused");
+				ok = false;
+				break;
+			}
 			if (!read_file(f, &datas[n_att], &l, MAX_MMS)) {
 				say("an attachment could not be read, or is over %d KB", MAX_MMS / 1024);
 				ok = false;
@@ -1089,8 +1114,11 @@ static int run(void)
 	mkdir(PUSH_DIR, 0700);
 	mkdir(WAIT_DIR, 0700);
 	mkdir(STORE, 0755);
+	mkdir(OUTBOX, 01777);
+	chmod(OUTBOX, 01777);
 	unlink(CTL);
-	mkfifo(CTL, 0620);
+	mkfifo(CTL, 0666);
+	chmod(CTL, 0666);	/* the apps send through it (umask aside) */
 	int ctl = open(CTL, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 	int in = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (ctl < 0 || in < 0 || inotify_add_watch(in, PUSH_DIR, IN_MOVED_TO | IN_CLOSE_WRITE) < 0) {
@@ -1232,8 +1260,10 @@ int main(int argc, char **argv)
 		return tool_decode(argv[2]);
 	if (argc >= 3 && !strcmp(argv[1], "--apn"))
 		return tool_apn(argc - 2, argv + 2);
-	if (argc >= 5 && !strcmp(argv[1], "--encode-send"))
+	if (argc >= 5 && !strcmp(argv[1], "--encode-send")) {
+		outbox_only = false;
 		return tool_encode_send(argc - 2, argv + 2);
+	}
 	if (argc >= 5 && !strcmp(argv[1], "--store-test"))
 		return tool_store(argv[2], argv[3], argv[4]);
 	if (argc >= 4 && !strcmp(argv[1], "--push")) {
