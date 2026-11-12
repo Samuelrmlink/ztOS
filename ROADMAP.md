@@ -1,7 +1,7 @@
 # ztOS fork roadmap
 
 Working list for development on an SM-G960F (Exynos) from a Rocky Linux 10 PC.
-Last updated 2026-11-11.
+Last updated 2026-11-12.
 
 **Evidence:** **Confirmed** = seen in logs or code. **Likely** = strong reading of the evidence, not yet
 proven. **Unknown** = symptom seen, cause not found. **Review** = found by reading code, not seen failing.
@@ -206,3 +206,4 @@ Status words as above. **Agent** names the branch where an agent is working on i
 | 8.18 | **Battery accounting**: "Unaccounted" down from 33% to ~2–3%. The old ~480 mW "Always-on" lump: **~235 mW is Wi-Fi idle** (measured 300 mW radio-off vs 65 modelled; 2.4 GHz at −70 dBm keeps the radio up), and **~365 mW is still unsplit** (not Wi-Fi, not voltage or load). Tailscale, daemons, sensor hub, PipeWire and apps are each under the ~25 mA noise floor. Savings outside the lump: no cpuidle at all (3.5); MIF pinned at 1794 MHz while awake; the audio DSP never idles (~1030 IRQ/s); fuel-gauge IRQ ~2/s; UFS and dwc3 never runtime-suspend. | M | Measured (`power/always-on`, merged). Profile updated on the phone (backup `power_profile.pre-always-on`); new ztacctd not yet deployed. Next: a longer quiet run to split the 365 mW; owner approval for awake MIF DVFS; kernel/module work for abox idle-off, cpuidle, gauge IRQ. |
 | 8.19 | **Owner checks still open**: real dock unplug for 8.1; Ethernet through the dock (DHCP); gadget/deadman check with the dock unplugged; keyboard dongle; whether a plain OTG adapter counts as a dock for 8.3. | S | Waiting on the owner. |
 | 8.20 | **Volume streams: Media, Alarm, Calls/Notification ring.** All three sliders in the audio tile's modal. Volume keys change ring/notification when nothing is playing, media when something is, and show a minimal one-slider overlay with a caret that expands to all three. | M | Confirmed. Media, Calls + notifications and Alarm streams; volume-key overlay with caret; keys follow media playing. 11/11 loudness checks, keys and overlay screenshots on the phone (alarm floor 20%). Not yet tried: real call, Bluetooth audio. `feature/volume-streams`, merged |
+| 8.21 | **Front and rear cameras working.** Bring the October RAW driver (`camera/driver`, `/dev/zrn-cam`) and the Camera app back on the current kernel, check real scenes on both cameras, and make the camera cost nothing when closed. | M | Agent: `feature/camera` |
