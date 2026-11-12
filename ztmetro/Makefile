@@ -165,7 +165,7 @@ gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
 EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
 EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
-settings/ztsettings: settings/ztsettings.c power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
+settings/ztsettings: settings/ztsettings.c settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c mms/apnconf.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h devtest/devtest-power.c devtest/devtest-power.h power/battery-health.h $(CORE_DEPS)
@@ -263,7 +263,7 @@ mms/ztmmsd: mms/ztmmsd.c $(MMS_DEPS)
 ledd/zrn-ledd: ledd/zrn-ledd.c ledd/led-policy.h ztos-user.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ ledd/zrn-ledd.c
 
-notifyd/ztnotifyd: notifyd/ztnotifyd.c notifyd/download-watch.h
+notifyd/ztnotifyd: notifyd/ztnotifyd.c notifyd/download-watch.h notifyd/therm-watch.h
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd) -o $@ notifyd/ztnotifyd.c \
 		$(shell pkg-config --libs libsystemd)
 
@@ -613,6 +613,12 @@ check-swipe-cost: $(CORE_DEPS)
 	$(SWIPE_BUILD) -c -o /tmp/ztmetro-swipe-pages.o sound/sound-pages.c
 	$(SWIPE_BUILD) -o /tmp/ztmetro-swipe-cost-test tests/swipe-cost.c /tmp/ztmetro-swipe-app.o /tmp/ztmetro-swipe-pages.o $(SWIPE_CORE) $(SWIPE_LIBS)
 	SWIPE_DIR=/tmp/ztmetro-swipe-cost /tmp/ztmetro-swipe-cost-test apps
+
+# ztnotifyd's battery-temperature-sensor watch, in a scratch directory
+.PHONY: check-therm-watch
+check-therm-watch:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-therm-watch-test tests/therm-watch.c
+	/tmp/ztmetro-therm-watch-test
 
 .PHONY: check-settings-tree
 check-settings-tree:

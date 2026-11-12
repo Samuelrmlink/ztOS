@@ -5,13 +5,25 @@
 #
 # Unattended phone: a mark is on the disk while it loads. Found at the next
 # boot, the load never finished (the phone froze or reset): it is not loaded
-# again until someone looks and removes the failed mark,
-#   sudo rm /var/lib/zrn-therm/load-failed
+# again until someone looks and clears the failed mark. The shell shows a
+# notification while the mark is there (ztnotifyd), and Settings > Battery
+# has "Try again", which runs, as root through sudo (one rule, this command
+# with --retry only):
+#
+#   zrn-therm-load --retry	clear the failed mark and load it now
+#
+# By hand, the same: sudo rm /var/lib/zrn-therm/load-failed; sudo zrn-therm-load
 D=/var/lib/zrn-therm
 M=$D/loading
 F=$D/load-failed
 # the running kernel's own build (another release's is refused: vermagic)
 KO=/usr/lib/modules/$(uname -r)/extra/zrn-therm.ko
+case "${1:-}" in
+--retry)
+	[ -e "$F" ] && { echo "zrn-therm: load-failed cleared by hand ($(cat "$F" 2>/dev/null))"; rm -f "$F"; sync; } ;;
+'') ;;
+*) echo "usage: zrn-therm-load [--retry]" >&2; exit 2 ;;
+esac
 [ -d /sys/module/zrn_therm ] && exit 0
 mkdir -p "$D"
 if [ -e "$M" ]; then
