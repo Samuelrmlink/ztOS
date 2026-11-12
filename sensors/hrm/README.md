@@ -1,10 +1,35 @@
 # Heart rate and SpO2 sensor (ROADMAP 8.26): research
 
-Status: **step 0 run on 2026-11-12 at 07:01 CST (owner's "Approve ID read"). No
-ID was read: the bus lines stayed low with LDO8 on, so no I2C transfer was
-made to the sensor bus.** See "Step 0 result" below.
+Status: **the chip is confirmed: MAX86915, PART_ID 0x2B, REV_ID 0x42, read at
+0x57 on gpp5-0/1 on 2026-11-12 at 08:07 CST.** The first try (07:01) failed
+because the bus pull-up rail, VDD_NFC_1P8, was off. The rerun switched it on
+through ACPM, as approved.
 
-## Step 0 result (observed)
+## Step 0, second run: ID read (observed)
+
+This was commit 3cf3258: bus 104 and LDO38 handling, run inside
+`ztlock run hrm`. The battery was at 59 %.
+
+```
+LDO38 0x6f = 0x2c
+LDO38 0x6f update 0x80/0xc0, reads 0xac
+zrn-hrm-probe: S2MPB02 0x25 = 0x30
+zrn-hrm-probe: S2MPB02 0x25 <- 0xb0: 0, reads 0xb0
+zrn-hrm-probe: lines with LDO8 on: SCL 1 SDA 1
+zrn-hrm-probe: 0x57 reg 0xfe: rev 0x42 part 0x2b (MAX86915), try 1
+zrn-hrm-probe: S2MPB02 0x25 <- 0x30 (restore): 0, reads 0x30
+gpp5-0/1 after: CON 0, DAT 1, PUD 1   (both lines pulled up while LDO38 was still on)
+LDO38 0x6f <- 0x2c (restore), reads 0x2c
+```
+
+- With VDD_NFC_1P8 on, the lines idle high even against the SoC's pull-down,
+  so the external pull-ups are fed by that rail. LDO38 is a hard requirement
+  for this bus, and for the NFC chip on it.
+- REV_ID is **0x42**, not the `0x01` the vendor header defines. The vendor code
+  only checks PART_ID, so 0x42 is a later silicon revision (inferred).
+- Both rails are restored and were read back: 0x6F = 0x2C and 0x25 = 0x30.
+
+## Step 0, first run (observed)
 
 `probe/zrn-hrm-probe.c`, run by `probe/run-probe.sh` inside `ztlock run hrm`.
 The battery was at 29 %, zrn-cam and zrn_nfc were not loaded, and gpp5-0/1
