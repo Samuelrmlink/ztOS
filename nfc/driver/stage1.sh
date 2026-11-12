@@ -24,7 +24,23 @@ val=$(echo "$out" | sed -n 's/.*val=\(0x[0-9a-fA-F]*\).*/\1/p')
 [ -n "$val" ] || { say "STOP: no ACPM answer"; exit 1; }
 mode=$(( (val >> 6) & 3 ))
 say "LDO38 = $val (mode $mode)"
-[ "$mode" -ne 0 ] || { say "STOP: LDO38 off"; exit 1; }
+ldo_read() { python3 "$ACPM" read 1 0x6f | sed -n 's/.*val=\(0x[0-9a-fA-F]*\).*/\1/p'; }
+restore_ldo() {
+	say "stage 1b: restore LDO38 to $val"
+	python3 "$ACPM" write 1 0x6f "$val"
+	say "LDO38 now $(ldo_read)"
+}
+if [ "$mode" -eq 0 ]; then
+	# stage 1b (owner-approved 2026-11-12): only from the approved 0x2c
+	[ "$(printf %d "$val")" -eq $((0x2c)) ] || { say "STOP: LDO38 off but not 0x2c"; exit 1; }
+	trap restore_ldo EXIT
+	say "stage 1b: LDO38 on (update 0x6f 0x80 mask 0xc0)"
+	python3 "$ACPM" update 1 0x6f 0x80 0xc0
+	now=$(ldo_read)
+	say "LDO38 now $now"
+	[ "$(printf %d "$now")" -eq $((0xac)) ] || { say "STOP: LDO38 did not read 0xac"; exit 1; }
+	sleep 0.005
+fi
 
 exp_regs() {
 	for r in 0x00 0x01 0x02 0x04 0x05 0x06 0x0c 0x0d 0x0e; do

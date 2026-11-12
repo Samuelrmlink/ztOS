@@ -582,6 +582,90 @@ This assumes stage 1/1b worked and the chip answers NCI. New accesses in
 - **Cards:** only the owner's own test tags/cards, placed on the back of the
   phone by the owner.
 
+## Run log: stage 1b on 2026-11-12 (chip did not ACK)
+
+Owner-approved (LDO38 on/restore + stage 1). Run at 07:28 CST inside `ztlock
+run nfc`, kernel #62, battery 70%, no `zrn_hrm`, gpp5 free. Observed:
+
+```
+LDO38 read 0x2c (off) -> update 0x80/0xc0 -> reads 0xac
+PCAL6524 before: in 00..02 = 92 00 20   out 04..06 = ff ff ff   cfg 0c..0e = 6d ff ff
+zrn-nfc: [start]        VEN=1 FIRM=0 IRQ=0 CLK_REQ=0 irqs=1
+zrn-nfc: [off]          VEN=1 FIRM=0 IRQ=0 CLK_REQ=0 irqs=1
+zrn-nfc: [ven-on]       VEN=0 FIRM=0 IRQ=0 CLK_REQ=0 irqs=1
+zrn-nfc: [wake]         VEN=0 FIRM=1 IRQ=0 CLK_REQ=0 irqs=1
+zrn-nfc: TX 20 00 01 00 -> -6
+zrn-nfc: [powered-down] VEN=1 FIRM=0 IRQ=0 CLK_REQ=0 irqs=1
+PCAL6524 after:  in 00..02 = 92 08 20   out 04..06 = ff fd ff   cfg 0c..0e = 6d f5 ff
+rmmod ok, gpp5 unclaimed again, i2c-103 gone
+LDO38 restored: write 0x2c -> reads 0x2c
+```
+
+What this shows:
+
+- **The chip did not acknowledge address 0x27.** `-6` is `-ENXIO`, which
+  i2c-algo-bit returns on an address NACK. So no NCI response, no NCI version
+  and no firmware version. CORE_INIT was not sent, because the module stops
+  after a failed write.
+- No interrupt from the chip, and CLK_REQ stayed low throughout. `irqs=1` was
+  already 1 at the start: one spurious edge when the EINT was set up.
+- **VEN/FIRM before the run:**
+  - Port 1 of the expander was all inputs (`0x0D = 0xff`), with input `0x01 =
+    0x00`. So VEN and FIRM were not driven: they floated low, with the 1.8 V
+    rail off until just before.
+  - After the run, VEN is an output driven high (chip off), and FIRM is an
+    output driven low (`0x05 = 0xfd`, `0x0D = 0xf5`, input `0x01 = 0x08`). They
+    were left that way, as designed.
+- The other expander lines were unchanged: 0x0C stays 0x6d, 0x04/0x06 stay
+  0xff, and port 0/2 inputs stay the same.
+- Nothing hung, and the phone did not reset. Everything was restored.
+
+Likely causes, most likely first (all inferred):
+
+1. **The chip was still starting up and NACKed the first write.** Mainline
+   `s3fwrn5_i2c_write()` retries once after 110 ms for exactly this case:
+   "chip was in standby". The vendor driver also has a 150 ms
+   `CONFIG_SEC_NFC_MARGINTIME` variant of the 20 ms VEN wait.
+2. **No reference clock.** The chip asserts CLK_REQ when it wants the AP's
+   CLKOUT, and it never did. If it cannot boot without XI, it would neither
+   ask nor answer. CLKOUT is not touched by anything on mainline.
+3. **The bus itself.** The pull-ups may not be on LDO38, or the bus may be
+   wired differently. The HRM agent's ID read at 0x57 on the same pins will
+   show whether this bus works at all.
+
+### Proposal: stage 1c (for owner approval)
+
+The same accesses as stage 1b, with only timing and retry changes. There are
+no new registers and no new commands.
+
+- VEN on, then wait **150 ms** (vendor margin time) before WAKE.
+- On a NACK, retry the same CORE_RESET write **once after 110 ms**, as
+  mainline does. Retry at most once.
+- Additionally, before powering the chip, sample SDA and SCL levels as GPIO
+  inputs. This is a read, and shows whether the pull-ups are powered.
+
+If that also NACKs, the next proposal is the CLKOUT read (stage 2a in the
+stage 2 draft), moved ahead of stage 2.
+
+### zrn-i2c20 (code, host-tested only)
+
+[`driver/zrn-i2c20.c`](driver/zrn-i2c20.c) and `zrn-i2c20.h` implement the
+shared bus owner described above:
+
+- **Bus:** `i2c-103` on gpp5-0/1.
+- **`zrn_i2c20_get()`:**
+  - the first caller reads 0x6F;
+  - if bits 7:6 are 0, it updates to mode 2, reads back, and waits 5 ms;
+  - it returns the adapter.
+- **`zrn_i2c20_put()`:** the last caller restores the exact value read before.
+  `leave_on=1` skips the restore.
+- **Unload:** also restores.
+- **Load:** fails with `-EBUSY` if gpp5 is already taken.
+
+It is built against `linux-7.1-dp/out-target-bt` with no warnings. It has not
+been loaded on the phone. `zrn-nfc` (stage 1) is still standalone; stage 1c
+can move it onto `zrn_i2c20_get()`.
+
 ## Biggest unknowns
 
 1. **Clock.** Is CLKOUT (`oscclk_nfc`) running under ztOS, and does the chip
