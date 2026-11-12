@@ -129,6 +129,24 @@ w "$B" voltage_now=4100000; t 420 "1800 1090 inhibit-charge"
 w "$B" voltage_now=3990000; t 420 "1800 1090 auto"
 w "$B" voltage_now=4100000; t 420 "1800 1090 auto"
 w "$B" voltage_now=4200000; t 380 "1800 2100 auto"
+# the aged float: Samsung's count (EFS batt_discharge_level / 100) at 1000 or more
+AGE=$R/run/android/mnt/vendor/efs/FactoryApp/batt_discharge_level
+fv() { local f; read -r f < "$C/constant_charge_voltage"; echo "$f"; }
+fresh; plug dcp; mkdir -p "$(dirname "$AGE")"
+echo 103986 > "$AGE"; t 250 "1800 2100 auto"; check "1039 cycles: 4.24 V" 4240000 "$(fv)"
+t 415 "1800 1090 auto"; check "aged and warm: 4.15 V" 4150000 "$(fv)"
+t 385 "1800 2100 auto"; check "aged, warm cleared: back to 4.24 V" 4240000 "$(fv)"
+t 50 "1800 700 auto"; check "aged and cold: 4.15 V" 4150000 "$(fv)"
+t 250 "1800 2100 auto"; check "aged, cold cleared: back to 4.24 V" 4240000 "$(fv)"
+echo 99999 > "$AGE"; t 250 "1800 2100 auto"; check "999 cycles: 4.35 V" 4350000 "$(fv)"
+echo 100000 > "$AGE"; t 250 "1800 2100 auto"; check "1000 cycles: 4.24 V" 4240000 "$(fv)"
+rm "$AGE"; t 250 "1800 2100 auto"; check "count unreadable: 4.35 V" 4350000 "$(fv)"
+echo garbage > "$AGE"; t 250 "1800 2100 auto"; check "count garbage: 4.35 V" 4350000 "$(fv)"
+# aged on an older kernel whose float can't be set: stop at 4.24 V, go on below 4.09 V
+fresh; plug dcp; mkdir -p "$(dirname "$AGE")"; echo 103986 > "$AGE"; rm "$C/constant_charge_voltage"
+w "$B" voltage_now=4245000; t 250 "1800 2100 inhibit-charge"
+w "$B" voltage_now=4100000; t 250 "1800 2100 inhibit-charge"
+w "$B" voltage_now=4085000; t 250 "1800 2100 auto"
 # no charge_behaviour: a stop is the least charge current
 fresh; plug dcp; rm "$C/charge_behaviour"; echo '[auto]' > "$C/charge_behaviour.x"
 w "$TH" battery=520; tick 1; run; check "stop without charge_behaviour" "100" "$(( $(cat "$C/constant_charge_current") / 1000 ))"
