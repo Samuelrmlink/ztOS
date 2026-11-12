@@ -419,6 +419,7 @@ class Shell:
 			return
 		if not plain:
 			self.open[key] = (title, text)
+		self.pending = [l for l in self.pending if not l.startswith('notekey %s|' % key)][-16:]
 		self.pending.append(self._note(key, title, text, quiet, plain))
 		self.flush()
 
@@ -500,7 +501,10 @@ class Thermald:
 			why = ('the battery was at %s (%d readings in a row; stock powers off above %s). Let it cool '
 			       'before charging.' % (fmt(bat), self.confirm.n, fmt(SHUTDOWN_BATTERY)))
 			log('POWER OFF: ' + why, 0)
-			self.record(why)
+			try:
+				self.record(why)
+			except OSError as e:
+				log('the reason could not be kept (%s); powering off anyway' % e.strerror, 3)
 			self.powering_off = not (DRY_RUN or self.fake is not None)
 			self.poweroff(why)
 
