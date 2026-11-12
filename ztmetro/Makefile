@@ -163,13 +163,13 @@ gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 	$(APP_BUILD) $(JPEG_FLAGS) -o $@ gallery/ztgallery.c $(CORE) $(APP_LIBS) $(JPEG_LIBS) -lpthread
 
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
-EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c desktop/desktop-page.c
-EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
+EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
+EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
 settings/ztsettings: settings/ztsettings.c power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
-devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h $(CORE_DEPS)
-	$(APP_BUILD) -o $@ devtest/zrndevtest.c devtest/devtest-pages.c $(CORE) $(APP_LIBS)
+devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h devtest/devtest-power.c devtest/devtest-power.h power/battery-health.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-power.c $(CORE) $(APP_LIBS)
 
 # Devices and Services: what is running, crashed or missing
 # ztSound: the equalizer and effects (the engine, ztos-soundd, ships in rootfs/overlay/usr/local/bin)

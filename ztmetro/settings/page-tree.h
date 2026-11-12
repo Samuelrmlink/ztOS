@@ -55,6 +55,7 @@ enum page {
 	/* ZrnDevTest's (devtest/devtest-pages.h), in its order */
 	PAGE_DEVTEST, PAGE_DEVTEST_SYSTEM, PAGE_DEVTEST_SENSORS, PAGE_DEVTEST_JOURNAL, PAGE_DEVTEST_KERNEL,
 	PAGE_DEVTEST_SHELL, PAGE_DEVTEST_HARDWARE, PAGE_DEVTEST_LOGS, PAGE_DEVTEST_ANIM, PAGE_DEVTEST_PREVIEW,
+	PAGE_DEVTEST_TEMPS, PAGE_DEVTEST_CHARGING,
 	N_PAGES
 };
 
@@ -114,6 +115,8 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_DEVTEST_SYSTEM] = PAGE_DEVTEST,
 	[PAGE_DEVTEST_SENSORS] = PAGE_DEVTEST,
 	[PAGE_DEVTEST_HARDWARE] = PAGE_DEVTEST,
+	[PAGE_DEVTEST_TEMPS] = PAGE_DEVTEST,
+	[PAGE_DEVTEST_CHARGING] = PAGE_DEVTEST,
 	[PAGE_DEVTEST_ANIM] = PAGE_DEVTEST,
 	[PAGE_DEVTEST_PREVIEW] = PAGE_DEVTEST_ANIM,
 	[PAGE_DEVTEST_JOURNAL] = PAGE_DEVTEST_LOGS,
@@ -184,6 +187,8 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "devtest-logs", PAGE_DEVTEST_LOGS },
 	{ "devtest-animations", PAGE_DEVTEST_ANIM },
 	{ "devtest-preview", PAGE_DEVTEST_PREVIEW },
+	{ "devtest-temperatures", PAGE_DEVTEST_TEMPS },
+	{ "devtest-charging", PAGE_DEVTEST_CHARGING },
 };
 #define N_PAGE_NAMES (int)(sizeof(PAGE_NAMES) / sizeof(PAGE_NAMES[0]))
 
@@ -193,7 +198,7 @@ enum { WALL_TARGET_TILES = 1, WALL_TARGET_LOCK = 2 };
 /* Pages that are another module's, in a row. */
 static inline bool page_is_sound(int page) { return page >= PAGE_SOUND_EQ && page <= PAGE_SOUND_APPS; }
 static inline bool page_is_pods(int page) { return page >= PAGE_PODS_STATUS && page <= PAGE_PODS_ABOUT; }
-static inline bool page_is_devtest(int page) { return page >= PAGE_DEVTEST && page <= PAGE_DEVTEST_PREVIEW; }
+static inline bool page_is_devtest(int page) { return page >= PAGE_DEVTEST && page <= PAGE_DEVTEST_CHARGING; }
 
 /* Where back goes from a page. */
 static inline int page_parent(int page, int wall_target) {

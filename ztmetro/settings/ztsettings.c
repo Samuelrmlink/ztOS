@@ -3831,7 +3831,7 @@ static double render_page_content(cairo_t *cr, int p) {
 		return pods_render(cr, p);
 	case PAGE_DEVTEST: case PAGE_DEVTEST_SYSTEM: case PAGE_DEVTEST_SENSORS: case PAGE_DEVTEST_JOURNAL:
 	case PAGE_DEVTEST_KERNEL: case PAGE_DEVTEST_SHELL: case PAGE_DEVTEST_HARDWARE: case PAGE_DEVTEST_LOGS:
-	case PAGE_DEVTEST_ANIM: case PAGE_DEVTEST_PREVIEW:
+	case PAGE_DEVTEST_ANIM: case PAGE_DEVTEST_PREVIEW: case PAGE_DEVTEST_TEMPS: case PAGE_DEVTEST_CHARGING:
 		return devtest_render(cr, p);
 	case PAGE_APP_SCALE: return draw_app_scale(cr);
 	case PAGE_THEME: return draw_theme(cr);

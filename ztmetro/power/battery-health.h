@@ -7,7 +7,9 @@
  * - The fuel gauge's Cycles register counts in 1 % of a cycle (MAX17055
  *   family, ModelGauge m5; Samsung's own fg_cycle divides it by 100), and the
  *   kernel's cycle_count hands it over raw. It counts since the gauge's
- *   counter last started, not over the battery's life.
+ *   counter last started, not over the battery's life. (If the kernel
+ *   change in power/max17042-gauge-proposal.patch goes in, cycle_count is
+ *   whole cycles and the / 100 below must go with it.)
  * - charge_full is what the gauge has learned the battery holds; health is
  *   that over the design capacity, an estimate that moves as it relearns.
  * - Samsung's count is Android's: the per cent of charge discharged over the
