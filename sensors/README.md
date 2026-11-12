@@ -119,6 +119,35 @@ shell side was run in the headless container (`desktop/dev/run.sh`): it
 refuses a blank outside a call, blanks during one, unblanks on the power key
 and holds that until far, and clears on call end and on screen off.
 
+### Orientation, for auto-rotation (ROADMAP 8.33, 2026-11-12)
+
+- The shell sends `orient on` on `/run/ztoscsf-sensord.ctl` only while
+  auto-rotation could use it: Settings' Auto-rotate on, Rotation Lock off,
+  the screen on and no AOD. `orient off` otherwise. With it off, nothing
+  runs for it.
+- On, and with the screen on, the accelerometer runs at 100 ms
+  (`ORIENT_MS`; a watch asking for faster keeps its own rate) and
+  `sensord/orient.h` turns each reading into a quarter turn: 0 portrait,
+  1 turned left (earpiece on the left), 3 turned right, 2 upside down (off
+  unless `orient_180 on`).
+- Against flapping: a reading far from 1 g is ignored, so is a phone
+  within 25 degrees of flat (the last orientation stays), a new one must be
+  within 30 degrees of its centre (15 degrees of hysteresis either side of
+  the 45-degree line) and hold 300 ms. The first reading after it comes on,
+  or after the screen comes on, is taken at once.
+- Each change goes to the shell as `orientation N` and into
+  `/run/ztoscsf-sensors/orientation`; `status` has `orient=on|off N`. The
+  accelerometer's own file is written only while it is watched.
+- The hub's axes are taken as Android's (x right, y up, z out of the glass).
+  If the phone shows they are not, `orient_axes -y+x+z` (any signed order)
+  maps them, and is remembered in the state file.
+- Hub sensor 48 (`AUTO_ROTATION_SENSOR`) is not used: whether this firmware
+  has it is in its `0xF4` bitmap (`zrn-ssp.py info`), not yet read, and
+  adding a sensor the hub lacks may assert it. The accelerometer is known to
+  work.
+
+Host test: `sensord/test-sensord-orient.py` (in `make check-sensord`).
+
 ### The protocol, in short
 
 The phone opens with 9 bytes: command, length (2), options (2), data (4).
