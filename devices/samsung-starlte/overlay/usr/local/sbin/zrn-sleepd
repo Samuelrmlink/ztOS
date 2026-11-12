@@ -492,6 +492,164 @@ def screen_off():
 	return bool(states) and all(s == 'disabled' for s in states)
 
 
+# ---- a hung shell (ztmetro/burn-in.h, ROADMAP 8.37) -------------------------
+#
+# A shell that hangs leaves its last picture lit on the OLED until the battery
+# ends. ztmetro writes $XDG_RUNTIME_DIR/ztmetro.alive on its minute tick (pid,
+# CLOCK_MONOTONIC seconds, whether the panel should be lit, how long a frame
+# has waited). With the phone's own panel lit and that heartbeat
+# SHELL_HUNG_S old, or a frame waiting that long, the shell is ended. Its
+# display file closing is DRM's own way to dark: the framebuffers it owned
+# are removed, which switches the CRTC off and puts the panel to sleep
+# (s9p_panel_down, as for any screen off). No panel command is sent from here.
+# fb0's blank is then asked too, for the console in case it took the panel
+# (it only works with no compositor holding the display). greetd starts a new
+# shell; one that hangs again is ended again, and after SHELL_KILLS_MAX in
+# SHELL_KILLS_WINDOW_S the session is stopped, dark, until a reboot.
+# Checked every SHELL_WATCH_EVERY_S, inside the loop's own 2 s pass: no wakeup
+# of its own, and nothing at all while the SoC sleeps (the panel is dark then).
+
+SHELL_HUNG_S = 300		# 5 missed minute ticks: well past any slow minute
+SHELL_WATCH_EVERY_S = 30
+SHELL_KILLS_MAX = 3
+SHELL_KILLS_WINDOW_S = 1800
+SHELL_NAME = 'ztmetro'
+FB_BLANK = Path('/sys/class/graphics/fb0/blank')
+
+
+def panel_lit(drm=Path('/sys/class/drm')):
+	"""The phone's own panel (DSI) shows something: the screen or the AOD.
+	An external monitor (DP) is not the OLED this is about."""
+	for p in drm.glob('card*-DSI-*'):
+		if read(p / 'enabled') == 'enabled' and read(p / 'dpms', 'On') == 'On':
+			return True
+	return False
+
+
+class ShellWatch:
+	def __init__(self, runtime=Path('/run/user'), proc=Path('/proc'), drm=Path('/sys/class/drm'),
+		     fb_blank=FB_BLANK, clock=time.monotonic, kill=os.kill, wait=time.sleep,
+		     stop_session=lambda: run('systemctl', 'stop', 'greetd', timeout=30),
+		     tell=None, say=None):
+		self.runtime, self.proc, self.drm, self.fb_blank = Path(runtime), Path(proc), Path(drm), Path(fb_blank)
+		self.clock, self.kill, self.wait, self.stop_session = clock, kill, wait, stop_session
+		self.tell = tell or tell_shell
+		self.say = say or log
+		self.next_at = 0
+		self.kills = collections.deque()
+		self.ended = None	# the pid last ended: the next shell hears of it
+		self.stopped = False	# the session was stopped: nothing more to watch
+		self.traced_told = None
+
+	def heartbeat(self):
+		"""The newest ztmetro.alive under the runtime directories, parsed, or None."""
+		best = None
+		for uid in range(1000, 1010):
+			path = self.runtime / str(uid) / 'ztmetro.alive'
+			fields = {}
+			for line in read(path).splitlines():
+				k, _, v = line.partition(' ')
+				try:
+					fields[k] = float(v)
+				except ValueError:
+					pass
+			if 'pid' in fields and 'mono' in fields and (best is None or fields['mono'] > best['mono']):
+				best = fields
+		return best
+
+	def status(self, pid):
+		"""(name, tracer pid) of a live process, or None."""
+		text = read(self.proc / str(pid) / 'status')
+		if not text:
+			return None
+		name, tracer, state = '', 0, ''
+		for line in text.splitlines():
+			k, _, v = line.partition(':')
+			v = v.strip()
+			if k == 'Name':
+				name = v
+			elif k == 'TracerPid':
+				tracer = int(v or 0)
+			elif k == 'State':
+				state = v[:1]
+		if state in ('Z', 'X'):
+			return None
+		return name, tracer
+
+	def gone(self, pid, seconds):
+		for _ in range(int(seconds * 4)):
+			if self.status(pid) is None:
+				return True
+			self.wait(0.25)
+		return self.status(pid) is None
+
+	def check(self):
+		"""One look, at most every SHELL_WATCH_EVERY_S. Returns what it did
+		('hung', 'stopped') or None."""
+		now = self.clock()
+		if now < self.next_at or self.stopped:
+			return None
+		self.next_at = now + SHELL_WATCH_EVERY_S
+		hb = self.heartbeat()
+		if hb is None:
+			return None	# no shell that writes one (an older build, another session)
+		pid = int(hb['pid'])
+		st = self.status(pid)
+		if st is None or st[0] != SHELL_NAME:
+			return None	# that shell is gone: greetd's business
+		age = now - hb['mono']
+		if self.ended is not None and pid != self.ended and age < 120:
+			self.tell('notify Shell|The screen had frozen|The shell stopped answering and was '
+				  'started again. Its log is ~/.local/state/ztmetro.log.1.')
+			self.ended = None
+		if not panel_lit(self.drm):
+			return None
+		waiting = hb.get('waiting', 0)
+		if age < SHELL_HUNG_S and not (waiting > 0 and waiting + age >= SHELL_HUNG_S):
+			return None
+		if st[1]:
+			if self.traced_told != pid:
+				self.say(f'shell watch: pid {pid} is hung but under a debugger (tracer {st[1]}): left alone')
+				self.traced_told = pid
+			return None
+		self.say(f'shell watch: {SHELL_NAME} pid {pid} hung with the panel lit (heartbeat {age:.0f} s old, '
+			 f'a frame waiting {waiting:.0f} s): ending it so the panel goes dark')
+		for sig in (signal.SIGTERM, signal.SIGCONT):
+			try:
+				self.kill(pid, sig)
+			except OSError:
+				pass
+		if not self.gone(pid, 5):
+			try:
+				self.kill(pid, signal.SIGKILL)
+			except OSError:
+				pass
+			self.gone(pid, 5)
+		self.ended = pid
+		self.kills.append(now)
+		while self.kills and now - self.kills[0] > SHELL_KILLS_WINDOW_S:
+			self.kills.popleft()
+		what = 'hung'
+		if len(self.kills) >= SHELL_KILLS_MAX:
+			self.say(f'shell watch: {len(self.kills)} hung shells in {SHELL_KILLS_WINDOW_S // 60} min: '
+				 'the session is stopped, dark, until a reboot')
+			self.stop_session()
+			self.stopped = True
+			what = 'stopped'
+		self.blank()
+		return what
+
+	def blank(self):
+		"""The console's blank (FB_BLANK_POWERDOWN), in case it took the panel."""
+		try:
+			write(self.fb_blank, 4)
+		except OSError as e:
+			if e.errno not in (errno.ENOENT, errno.EBUSY, errno.EINVAL):
+				self.say(f'shell watch: {self.fb_blank}: {e}')
+		lit = panel_lit(self.drm)
+		self.say(f'shell watch: the panel is {"still lit (a new shell?)" if lit else "dark"}')
+
+
 def plugged():
 	for p in Path('/sys/class/power_supply').iterdir():
 		if read(p / 'type') in ('USB', 'Mains') and read(p / 'online') == '1':
@@ -1210,6 +1368,7 @@ def main():
 	last = {}
 	totals = Totals()
 	summary_at = time.monotonic() + SUMMARY_S
+	shell_watch = ShellWatch()
 	try:
 		while True:
 			# an inhibit change while awake is no reason to stay awake:
@@ -1217,6 +1376,10 @@ def main():
 			watch = ensure_watch()
 			if watch is not None:
 				watch.drain()
+			try:
+				shell_watch.check()	# a hung shell, its picture lit (burn-in)
+			except Exception as e:	# never the loop's end
+				log(f'shell watch: {e!r}')
 			why = why_awake()
 			if screen_off():
 				off_since = off_since or time.monotonic()

@@ -53,6 +53,7 @@
 #include "../pods/pods-pages.h"
 #include "../devtest/devtest-pages.h"
 #include "../desktop/desktop-page.h"
+#include "../power/battery-health.h"
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -143,6 +144,7 @@ enum action {
 	ACT_CLOCK_24H,		/* "21:41" or "9:41 PM", for every clock */
 	ACT_LOCK_TIMEOUT,	/* a picker: how long the lock screen stays lit */
 	ACT_DOUBLE_TAP_WAKE,	/* a double tap on the always-on display wakes it */
+	ACT_BURNIN_SHIFT,	/* the bars and the lock clock move a few pixels (burn-in) */
 	ACT_AOD_AUTO,		/* the always-on display's level from the room */
 	ACT_AOD_LOW_OFF,	/* and dark below 15 % on battery */
 	ACT_AOD_THEME,		/* a theme's preview tapped: its index in CLOCK_THEME_IDS */
@@ -282,6 +284,7 @@ static struct {
 	bool aod_force_mark;	/* "aod_force_mark" */
 	int lock_timeout_idx;	/* "lock_timeout": an index into LOCK_TIMEOUT_SECONDS */
 	bool double_tap_wake;	/* "double_tap_wake" */
+	bool burnin_shift;	/* "burn_in_shift": the shell's burn-in.h */
 	bool about_show_repo;
 	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
 	int haptic_strength;	/* percent */
@@ -406,6 +409,7 @@ static void config_load(void) {
 	app.aod_image_faint = 0;
 	app.aod_force_mark = true;
 	app.double_tap_wake = true;
+	app.burnin_shift = true;
 	app.android_bt_remove_bond = true;
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
@@ -542,6 +546,8 @@ static void config_load(void) {
 			app.aod_auto = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "double_tap_wake") == 0) {
 			app.double_tap_wake = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
+		} else if (strcmp(key, "burn_in_shift") == 0) {
+			app.burnin_shift = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "lock_timeout") == 0) {
 			int t = atoi(val), best = 0;	/* the nearest choice */
 			for (int i = 0; i < N_LOCK_TIMEOUTS; i++) {
@@ -733,6 +739,7 @@ static void config_format(void) {
 	KEY("clock_24h", "%s", app.clock_24h ? "on" : "off");
 	KEY("lock_timeout", "%d", LOCK_TIMEOUT_SECONDS[app.lock_timeout_idx]);
 	KEY("double_tap_wake", "%s", app.double_tap_wake ? "on" : "off");
+	KEY("burn_in_shift", "%s", app.burnin_shift ? "on" : "off");
 	KEY("aod_auto_brightness", "%s", app.aod_auto ? "on" : "off");
 	KEY("aod_low_battery_off", "%s", app.aod_low_off ? "on" : "off");
 	KEY("aod_theme", "%s", app.aod_theme);
@@ -2233,6 +2240,9 @@ static double draw_display(cairo_t *cr) {
 	}
 	static const char *const fs_bars[] = { "2 seconds", "3 seconds", "5 seconds", "10 seconds" };
 	y = picker(cr, y, "Bars stay after a swipe in full screen", fs_bars, 4, app.fs_bars_idx, ACT_FS_BARS_CYCLE);
+	/* the status bar, the nav bar and the lock clock a few pixels off their
+	 * place, a new one every 3 minutes (the shell's burn-in.h) */
+	y = zmc_switch(cr, y, "Shift the bars against burn-in", app.burnin_shift, ACT_BURNIN_SHIFT);
 
 	return y + 20;
 }
@@ -3228,7 +3238,14 @@ static double draw_battery(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Battery information", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "3000 mAh Li-Ion, Health Good", FONT_REGULAR, 15, MARGIN, y + 20, 0);
+	struct battery_health bh;	/* power/battery-health.h: a learned estimate */
+	char info[96];
+	battery_health_read(hw_battery(), &bh);
+	if (bh.health_pct >= 0)
+		snprintf(info, sizeof(info), "3000 mAh Li-Ion, holds about %ld mAh (%d %%)", bh.full_mah, bh.health_pct);
+	else
+		snprintf(info, sizeof(info), "3000 mAh Li-Ion");
+	zmc_text(cr, info, FONT_REGULAR, 15, MARGIN, y + 20, 0);
 
 	return y + 60;
 }
@@ -3823,7 +3840,7 @@ static double render_page_content(cairo_t *cr, int p) {
 		return pods_render(cr, p);
 	case PAGE_DEVTEST: case PAGE_DEVTEST_SYSTEM: case PAGE_DEVTEST_SENSORS: case PAGE_DEVTEST_JOURNAL:
 	case PAGE_DEVTEST_KERNEL: case PAGE_DEVTEST_SHELL: case PAGE_DEVTEST_HARDWARE: case PAGE_DEVTEST_LOGS:
-	case PAGE_DEVTEST_ANIM: case PAGE_DEVTEST_PREVIEW:
+	case PAGE_DEVTEST_ANIM: case PAGE_DEVTEST_PREVIEW: case PAGE_DEVTEST_TEMPS: case PAGE_DEVTEST_CHARGING:
 		return devtest_render(cr, p);
 	case PAGE_APP_SCALE: return draw_app_scale(cr);
 	case PAGE_THEME: return draw_theme(cr);
@@ -4429,6 +4446,10 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_AOD_AUTO:
 		app.aod_auto = !app.aod_auto;
+		config_save();
+		break;
+	case ACT_BURNIN_SHIFT:
+		app.burnin_shift = !app.burnin_shift;
 		config_save();
 		break;
 	case ACT_DOUBLE_TAP_WAKE:
