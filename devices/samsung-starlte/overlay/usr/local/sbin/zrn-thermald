@@ -1,0 +1,703 @@
+#!/usr/bin/env python3
+"""zrn-thermald: the S9's thermal policy, from the measured temperatures.
+
+Stock throttles the processor when the phone runs hot, warns, and powers the
+phone off when the battery overheats (power/THERMAL.md). ztOS had none of it:
+on 2026-11-12, idle with the AOD showing, the battery reached 55.2 C at 2 %.
+This does the three things, from what zrn-therm measures (tenths of a degree
+in /sys/kernel/zrn_therm/{battery,ap,...}; a read that fails is unknown) and
+the SoC's own sensors where the kernel shows them (s9p_cpufreq's temp_big,
+temp_little and temp_gpu, in C; any thermal zone but the gauge's, in mC).
+
+  Throttle  a level 0-4 from the hottest input, each with its own marks and a
+	    3 C fall-back. Each level is a ceiling on both clusters'
+	    scaling_max_freq and a state of the GPU's devfreq cooling device.
+	    zrnperfd also writes scaling_max_freq (its boost ladder): what it
+	    asks for is kept and given back when the ceiling lifts, and while a
+	    ceiling is on, /run is watched (inotify) so a new rung of zrnperfd's
+	    is clamped at once.
+  Warn	    a notification while the battery or the AP passes its warning mark,
+	    and while the battery's temperature is unknown (then nothing below
+	    can protect it). Through the shell's control pipe, as ztnotifyd's own
+	    system notifications go ("notekey KEY|FLAGS|PERCENT|WHO|APP|TITLE|TEXT").
+  Power off the battery at stock's overheat power-off mark on CONFIRM fresh
+	    readings in a row (zrn-therm's sample count must move between them).
+	    Unknown or stale is never a reason to power off: it resets the count
+	    and warns. The reason goes to /var/lib/zrn-thermald/shutdown first,
+	    and is shown as a notification at the next start.
+
+Cost: one timer, CLOCK_BOOTTIME, at zrn-therm's own period (5 s with the
+screen on or a charger in, 60 s otherwise). It never wakes a sleeping phone:
+a boottime timer that came due during sleep fires at the next resume. No
+other wakeups, except the /run watch while a ceiling is on.
+
+  zrn-thermald [--dry-run] [--root DIR] [--fake FILE] [--once]
+	--dry-run   say "would power off" instead of doing it (the tests)
+	--root DIR  every path under DIR (the host tests' fake sysfs)
+	--fake FILE readings from FILE instead (lines "battery 523", tenths of
+		    a degree, "unknown" for a failed read); implies --dry-run
+	--once      one look, then exit (caps stay as they are left)
+  zrn-thermald status      what the running daemon last saw and did
+"""
+import ctypes, os, select, signal, struct, subprocess, sys, time
+
+DRY_RUN = False
+
+# ---- the policy (power/THERMAL.md has where each number comes from) --------
+# tenths of a degree C, as zrn-therm gives them
+
+# Battery overheat power-off: stock's kernel never powers off on temperature;
+# Android's BatteryService does, when the battery thermistor is above 68.0 C
+# (config_shutdownBatteryTemperature 680, strictly above, on one reading).
+# Here: above it on CONFIRM fresh readings in a row, never lower.
+SHUTDOWN_BATTERY = 680
+CONFIRM = 3
+
+# Warnings, and the fall-back before a warning closes. The battery's is where
+# stock stops charging (battery,temp_high 500).
+WARN = {'battery': 500, 'ap': 580}
+WARN_HYST = 30
+UNKNOWN_WARN_TICKS = 3	# looks in a row without a battery reading
+UNKNOWN_WARN_S = 30	# and at least this long awake
+
+# Throttle marks per input: (the temperature at which each level 1-4 starts,
+# the fall-back before a level lets go). The SoC's sensors follow stock's TMU
+# trips (DT fallbacks; ECT may move them): big control 83, cores out at 96;
+# LITTLE 76/86/96/101; GPU 78/88; 5 C hysteresis. The thermistors stand in
+# for SSRM (closed source): ztOS's own choice, power/THERMAL.md.
+THROTTLE = {
+	'ap':      ((480, 520, 560, 600), 30),
+	'battery': ((450, 500, 540, 580), 30),
+	'big':     ((830, 910, 960, 1050), 50),
+	'little':  ((760, 860, 960, 1010), 50),
+	'gpu':     ((780, 880, 1050, 1100), 50),
+	'tz':      ((830, 910, 960, 1050), 50),
+}
+
+# Each level's ceilings (kHz; the highest step at or under it) and the GPU
+# cooling device's state (clipped to its max_state). Level 0: none.
+CAPS = {
+	1: {'little': 1794000, 'big': 1794000, 'gpu': 0},
+	2: {'little': 1499333, 'big': 1469000, 'gpu': 1},
+	3: {'little': 1150500, 'big': 1066000, 'gpu': 2},
+	4: {'little': 650000, 'big': 400000, 'gpu': 2},
+}
+
+# ---- paths --------------------------------------------------------------------
+ROOT = ''
+THERM = '/sys/kernel/zrn_therm'
+TMU = '/sys/module/s9p_cpufreq/parameters'
+TZ = '/sys/class/thermal'
+CPUFREQ = '/sys/devices/system/cpu/cpufreq'
+GPU_DEVFREQ = '/sys/class/devfreq/17500000.gpu'
+BATTERY = '/sys/class/power_supply/max170xx_battery'
+STATE = '/var/lib/zrn-thermald'
+STATUS = '/run/zrn-thermald.status'
+RUN = '/run'
+PERFD_STATUS = 'zrnperfd.status'
+USER_RUN = '/run/user'
+INPUTS = ('battery', 'ap', 'charger', 'usb', 'wifi', 'pa')
+TZ_SKIP = ('max170xx_battery',)	# the gauge's: a copy of zrn-therm's battery
+DEFAULT_PERIOD_MS = 60000
+
+
+def p(path):
+	return ROOT + path
+
+
+def log(msg, prio=6):
+	print('<%d>zrn-thermald: %s' % (prio, msg), file=sys.stderr, flush=True)
+
+
+def read(path):
+	"""A file's first line, or None (missing, refused, ENODATA: unknown)."""
+	try:
+		with open(p(path)) as f:
+			return f.readline().strip()
+	except OSError:
+		return None
+
+
+def read_int(path):
+	s = read(path)
+	try:
+		return int(s) if s is not None else None
+	except ValueError:
+		return None
+
+
+def write(path, value):
+	try:
+		with open(p(path), 'w') as f:
+			f.write('%s\n' % value)
+		return True
+	except OSError as e:
+		log('%s: %s' % (path, e.strerror), 4)
+		return False
+
+
+def cap1(s):
+	return s[:1].upper() + s[1:]
+
+
+def fmt(deci):
+	return 'unknown' if deci is None else '%.1f C' % (deci / 10)
+
+
+# ---- what is measured -----------------------------------------------------------
+
+def therm_status():
+	"""zrn-therm's sample count and period, or (None, None) when it is not there."""
+	s = read(THERM + '/status')
+	if s is None:
+		return None, None
+	f = s.split()
+	try:
+		return int(f[f.index('samples') + 1]), int(f[f.index('period_ms') + 1])
+	except (ValueError, IndexError):
+		return None, None
+
+
+def sane(deci):
+	return deci if deci is not None and -400 <= deci <= 1500 else None
+
+
+def readings(fake=None):
+	"""Every input in tenths of a degree, None for unknown."""
+	r = {}
+	if fake is not None:
+		r = {k: None for k in INPUTS}
+		try:
+			with open(fake) as f:
+				for line in f:
+					k, _, v = line.partition(' ')
+					try:
+						r[k.strip()] = int(v)
+					except ValueError:
+						r[k.strip()] = None
+		except OSError:
+			pass
+		return r
+	for k in INPUTS:
+		r[k] = sane(read_int(THERM + '/' + k))
+	for k in ('big', 'little', 'gpu'):
+		c = read_int(TMU + '/temp_' + k)
+		r[k] = sane(c * 10) if c is not None and c > 0 else None
+	hot = None
+	try:
+		zones = sorted(os.listdir(p(TZ)))
+	except OSError:
+		zones = []
+	for z in zones:
+		if not z.startswith('thermal_zone') or read(TZ + '/%s/type' % z) in TZ_SKIP:
+			continue
+		mc = read_int(TZ + '/%s/temp' % z)
+		t = sane(mc // 100) if mc is not None else None
+		if t is not None and (hot is None or t > hot):
+			hot = t
+	r['tz'] = hot
+	return r
+
+
+# ---- the decisions (pure: the host tests drive these) ------------------------------
+
+def throttle_level(level, r):
+	"""The new level from the old one: up to the highest mark any input has
+	reached, down one level at a time only when every input is its fall-back under the
+	mark of the level it would leave. Unknown inputs neither raise nor hold it."""
+	want = 0
+	for k, (marks, hyst) in THROTTLE.items():
+		t = r.get(k)
+		if t is None:
+			continue
+		for i, m in enumerate(marks):
+			if t >= m:
+				want = max(want, i + 1)
+	if want >= level:
+		return want
+	while level > want:
+		held = any(r.get(k) is not None and r[k] >= marks[level - 1] - hyst
+			   for k, (marks, hyst) in THROTTLE.items())
+		if held:
+			break
+		level -= 1
+	return level
+
+
+def warn_state(shown, r):
+	"""Which warnings are on: an input at its mark, kept until HYST under it."""
+	on = set()
+	for k, mark in WARN.items():
+		t = r.get(k)
+		if t is None:
+			if k in shown:
+				on.add(k)	# unknown does not close a warning
+			continue
+		if t >= mark or (k in shown and t >= mark - WARN_HYST):
+			on.add(k)
+	return on
+
+
+class Confirm:
+	"""The power-off's confirmation: CONFIRM fresh battery readings in a row at
+	above SHUTDOWN_BATTERY. A reading counts only if zrn-therm's sample count
+	has moved since the last one counted (with --fake: every look counts)."""
+
+	def __init__(self):
+		self.n = 0
+		self.last_sample = None
+
+	def see(self, battery, sample):
+		if battery is None or battery <= SHUTDOWN_BATTERY:
+			self.n = 0
+			self.last_sample = None
+			return False
+		if sample is None or sample == self.last_sample:
+			return self.n >= CONFIRM	# not a new reading: no new evidence
+		self.last_sample = sample
+		self.n += 1
+		return self.n >= CONFIRM
+
+
+class Unknown:
+	"""The battery's temperature unknown for UNKNOWN_WARN_TICKS looks and
+	UNKNOWN_WARN_S seconds: after a sleep the first look can come before
+	zrn-therm's own, so one alone says nothing."""
+
+	def __init__(self):
+		self.ticks = 0
+		self.since = None
+
+	def see(self, battery, now):
+		if battery is not None:
+			self.ticks, self.since = 0, None
+			return False
+		self.ticks += 1
+		if self.since is None:
+			self.since = now
+		return self.ticks >= UNKNOWN_WARN_TICKS and now - self.since >= UNKNOWN_WARN_S
+
+
+# ---- the ceilings -----------------------------------------------------------------
+
+class Cpu:
+	"""One cpufreq policy's ceiling. `wish` is what someone else (zrnperfd) last
+	asked for: kept while we hold it lower, given back when we let go."""
+
+	def __init__(self, policy, cluster):
+		self.dir = CPUFREQ + '/' + policy
+		self.cluster = cluster
+		self.wish = None
+		self.ours = None	# what we last wrote
+
+	def steps(self):
+		s = read(self.dir + '/scaling_available_frequencies')
+		return sorted(int(x) for x in s.split()) if s else []
+
+	def apply(self, ceiling):
+		cur = read_int(self.dir + '/scaling_max_freq')
+		if cur is None:
+			return
+		if cur != self.ours:
+			self.wish, self.ours = cur, None	# someone else's (or the start's)
+		steps = self.steps()
+		cap = None if ceiling is None else max([f for f in steps if f <= ceiling] or steps[:1] or [ceiling])
+		if cap is None or self.wish <= cap:
+			# no ceiling, or theirs is under it: theirs stands
+			if self.ours is not None and write(self.dir + '/scaling_max_freq', self.wish):
+				log('%s: ceiling off, back to %d kHz' % (self.cluster, self.wish))
+			self.ours = None
+			return
+		if cur != cap and not write(self.dir + '/scaling_max_freq', cap):
+			return
+		self.ours = cap
+
+
+def policies():
+	"""(policy, cluster) for each cpufreq policy: the fastest is 'big'."""
+	try:
+		names = sorted(n for n in os.listdir(p(CPUFREQ)) if n.startswith('policy'))
+	except OSError:
+		return []
+	tops = {n: read_int(CPUFREQ + '/%s/cpuinfo_max_freq' % n) or 0 for n in names}
+	top = max(tops.values() or [0])
+	return [(n, 'big' if tops[n] == top and len(names) > 1 else 'little') for n in names]
+
+
+def gpu_cooling():
+	"""The GPU's devfreq cooling device, or None."""
+	name = 'devfreq-' + os.path.basename(GPU_DEVFREQ)
+	try:
+		for c in sorted(os.listdir(p(TZ))):
+			if c.startswith('cooling_device') and read(TZ + '/%s/type' % c) == name:
+				return TZ + '/' + c
+	except OSError:
+		pass
+	return None
+
+
+def gpu_apply(dev, state):
+	"""The GPU's cooling state. Its devfreq reads the GPU's busy counters on a
+	new limit, which a runtime-suspended GPU cannot answer, so it is held
+	awake for the write, as zrnperfd does for its own limits."""
+	if dev is None:
+		return
+	top = read_int(dev + '/max_state') or 0
+	state = min(state, top)
+	if read_int(dev + '/cur_state') == state:
+		return
+	ctl = GPU_DEVFREQ + '/device/power/control'
+	was = read(ctl)
+	if was is not None and was != 'on':
+		write(ctl, 'on')
+	write(dev + '/cur_state', state)
+	if was is not None and was != 'on':
+		write(ctl, was)
+
+
+# ---- the shell's notifications -------------------------------------------------------
+
+class Shell:
+	"""Notifications as lines down the shell's control pipe. A line that could
+	not be sent (no shell yet) is sent at the next look; a new pipe (the shell
+	restarted) gets every open one again, quietly."""
+
+	def __init__(self):
+		self.open = {}		# key -> (title, text)
+		self.pending = []	# lines not yet taken
+		self.pipe_id = None
+
+	def pipe(self):
+		try:
+			users = sorted(os.listdir(p(USER_RUN)))
+		except OSError:
+			return None
+		for u in users:
+			path = USER_RUN + '/' + u + '/ztmetro.ctl'
+			if os.path.exists(p(path)):
+				return path
+		return None
+
+	def _send(self, line):
+		path = self.pipe()
+		if path is None:
+			return False
+		try:
+			fd = os.open(p(path), os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+		except OSError:
+			return False
+		try:
+			st = os.fstat(fd)
+			ident = (st.st_dev, st.st_ino)
+			if self.pipe_id is not None and ident != self.pipe_id:
+				self.pipe_id = ident
+				for k, (title, text) in self.open.items():
+					os.write(fd, self._note(k, title, text, True).encode())
+			self.pipe_id = ident
+			os.write(fd, line.encode())
+			return True
+		except OSError:
+			return False
+		finally:
+			os.close(fd)
+
+	@staticmethod
+	def _note(key, title, text, quiet, plain=False):
+		clean = lambda s: s.replace('|', '/').replace('\n', ' ')
+		return 'notekey %s|%s|%d||System|%s|%s\n' % (key, 'q' if quiet else '-', -1 if plain else -2,
+							   clean(title), clean(text))
+
+	def flush(self):
+		while self.pending and self._send(self.pending[0]):
+			self.pending.pop(0)
+		if not self.pending:
+			self._send('')	# notices a restarted shell (resends the open ones)
+
+	def show(self, key, title, text, plain=False):
+		quiet = key in self.open and self.open[key][0] == title
+		if self.open.get(key) == (title, text):
+			return
+		if not plain:
+			self.open[key] = (title, text)
+		self.pending.append(self._note(key, title, text, quiet, plain))
+		self.flush()
+
+	def close(self, key):
+		if self.open.pop(key, None) is not None:
+			self.pending.append('noteclose %s\n' % key)
+			self.flush()
+
+
+# ---- the daemon --------------------------------------------------------------------------
+
+class Thermald:
+	def __init__(self, fake=None, poweroff=None):
+		self.fake = fake
+		self.level = 0
+		self.warned = set()
+		self.unknown_shown = False
+		self.confirm = Confirm()
+		self.unknown = Unknown()
+		self.shell = Shell()
+		self.cpus = [Cpu(n, c) for n, c in policies()]
+		self.gpu = gpu_cooling()
+		self.poweroff = poweroff or self._poweroff
+		self.powering_off = False
+		self.r = {}
+		self.period_ms = DEFAULT_PERIOD_MS
+		self.boot_notice()
+
+	def boot_notice(self):
+		"""The last power-off's reason, said once at the next start."""
+		f = STATE + '/shutdown'
+		why = read(f)
+		if why is None:
+			return
+		log('the last power-off was ours: ' + why, 4)
+		self.shell.show('zrn-thermald-shutdown', 'The phone was switched off for heat', why, plain=True)
+		try:
+			os.replace(p(f), p(STATE + '/shutdown.last'))
+		except OSError as e:
+			log('%s: %s' % (f, e.strerror), 4)
+
+	def _poweroff(self, why):
+		if DRY_RUN or self.fake is not None:
+			log('DRY RUN: would power off now: ' + why, 2)
+			return
+		subprocess.run(['systemctl', 'poweroff'], check=False)
+
+	def record(self, why):
+		os.makedirs(p(STATE), exist_ok=True)
+		stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+		line = '%s: %s' % (stamp, why)
+		name = STATE + ('/shutdown.dry-run' if DRY_RUN or self.fake is not None else '/shutdown')
+		fd = os.open(p(name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+		try:
+			os.write(fd, (line + '\n').encode())
+			os.fsync(fd)
+		finally:
+			os.close(fd)
+		with open(p(STATE + '/events.log'), 'a') as f:
+			f.write(line + '\n')
+			f.flush()
+			os.fsync(f.fileno())
+
+	def caps(self):
+		c = CAPS.get(self.level, {})
+		for cpu in self.cpus:
+			cpu.apply(c.get(cpu.cluster))
+		gpu_apply(self.gpu, c.get('gpu', 0))
+
+	def tick(self, now):
+		sample, period = therm_status()
+		if period:
+			self.period_ms = period
+		self.r = r = readings(self.fake)
+		bat, ap = r.get('battery'), r.get('ap')
+
+		# power off: confirmed readings only
+		if self.confirm.see(bat, sample if self.fake is None else object()) and not self.powering_off:
+			why = ('the battery was at %s (%d readings in a row; stock powers off above %s). Let it cool '
+			       'before charging.' % (fmt(bat), self.confirm.n, fmt(SHUTDOWN_BATTERY)))
+			log('POWER OFF: ' + why, 0)
+			self.record(why)
+			self.powering_off = not (DRY_RUN or self.fake is not None)
+			self.poweroff(why)
+
+		# throttle
+		level = throttle_level(self.level, r)
+		if level != self.level:
+			hot = ', '.join('%s %s' % (k, fmt(v)) for k, v in r.items() if v is not None)
+			log('throttle level %d -> %d (%s)' % (self.level, level, hot), 5 if level > self.level else 6)
+			self.level = level
+		self.caps()
+
+		# warnings
+		on = warn_state(self.warned, r)
+		for k in on - self.warned:
+			log('warning: %s at %s' % (k, fmt(r[k])), 4)
+		for k in self.warned - on:
+			log('warning over: %s at %s' % (k, fmt(r.get(k))), 6)
+		self.warned = on
+		if on:
+			parts = ['the battery at %s' % fmt(bat)] if 'battery' in on else []
+			parts += ['the processor at %s' % fmt(ap)] if 'ap' in on else []
+			self.shell.show('zrn-thermald', 'Phone is hot',
+					'%s. The processor is slowed (level %d) until it cools. Unplug it, take it '
+					'out of a case or off a bed, and close what you are not using.'
+					% (cap1(' and '.join(parts)), self.level))
+		else:
+			self.shell.close('zrn-thermald')
+		if self.unknown.see(bat, now) and not self.unknown_shown:
+			log('the battery temperature is unknown: overheat power-off is paused', 4)
+			self.shell.show('zrn-thermald-unknown', 'Battery temperature unknown',
+					'The overheat protection cannot see the battery, so it cannot act. '
+					'Keep the phone cool; Settings > Battery has the sensor.')
+			self.unknown_shown = True
+		elif bat is not None and self.unknown_shown:
+			log('the battery temperature is back: %s' % fmt(bat))
+			self.shell.close('zrn-thermald-unknown')
+			self.unknown_shown = False
+		self.shell.flush()
+		self.status()
+
+	def status(self):
+		lines = ['level=%d' % self.level, 'period_ms=%d' % self.period_ms,
+			 'confirm=%d/%d' % (self.confirm.n, CONFIRM),
+			 'warn=%s' % (','.join(sorted(self.warned)) or '-'),
+			 'unknown=%s' % ('yes' if self.unknown_shown else 'no'),
+			 'dry_run=%s' % ('yes' if DRY_RUN or self.fake is not None else 'no')]
+		lines += ['%s=%s' % (k, '-' if v is None else v) for k, v in self.r.items()]
+		lines += ['cap_%s=%s' % (c.cluster, c.ours if c.ours is not None else '-') for c in self.cpus]
+		lines += ['gpu_state=%s' % (read(self.gpu + '/cur_state') if self.gpu else '-')]
+		try:
+			with open(p(STATUS) + '.new', 'w') as f:
+				f.write('\n'.join(lines) + '\n')
+			os.replace(p(STATUS) + '.new', p(STATUS))
+		except OSError:
+			pass
+
+	def release(self):
+		self.level = 0
+		self.caps()
+
+
+# ---- the loop: a boottime timer, and /run while a ceiling is on -----------------------------
+
+CLOCK_BOOTTIME = 7
+
+
+def timerfd():
+	if hasattr(os, 'timerfd_create'):
+		return os.timerfd_create(CLOCK_BOOTTIME, flags=os.TFD_CLOEXEC)
+	libc = ctypes.CDLL(None, use_errno=True)
+	fd = libc.timerfd_create(CLOCK_BOOTTIME, 0o2000000)
+	if fd < 0:
+		raise OSError(ctypes.get_errno(), 'timerfd_create')
+	return fd
+
+
+def timer_set(fd, seconds):
+	if hasattr(os, 'timerfd_settime'):
+		os.timerfd_settime(fd, initial=seconds, interval=0)
+		return
+	libc = ctypes.CDLL(None, use_errno=True)
+	s = int(seconds)
+	spec = struct.pack('qqqq', 0, 0, s, int((seconds - s) * 1e9))
+	buf = ctypes.create_string_buffer(spec)
+	if libc.timerfd_settime(fd, 0, buf, None) < 0:
+		raise OSError(ctypes.get_errno(), 'timerfd_settime')
+
+
+class Watch:
+	"""inotify on /run for zrnperfd's status (written after each change of its
+	limits), only while a ceiling is on."""
+	IN_MOVED_TO, IN_CLOSE_WRITE = 0x80, 0x8
+
+	def __init__(self):
+		self.libc = ctypes.CDLL(None, use_errno=True)
+		self.fd = self.libc.inotify_init1(0o4000 | 0o2000000)	# NONBLOCK, CLOEXEC
+		self.wd = -1
+
+	def want(self, on):
+		if self.fd < 0:
+			return
+		if on and self.wd < 0:
+			self.wd = self.libc.inotify_add_watch(self.fd, p(RUN).encode(), self.IN_MOVED_TO | self.IN_CLOSE_WRITE)
+		elif not on and self.wd >= 0:
+			self.libc.inotify_rm_watch(self.fd, self.wd)
+			self.wd = -1
+
+	def drain(self):
+		hit = False
+		try:
+			buf = os.read(self.fd, 4096)
+		except OSError:
+			return False
+		i = 0
+		while i + 16 <= len(buf):
+			wd, mask, cookie, n = struct.unpack_from('iIII', buf, i)
+			name = buf[i + 16:i + 16 + n].split(b'\0')[0].decode(errors='replace')
+			hit |= name == PERFD_STATUS
+			i += 16 + n
+		return hit
+
+
+def run(once=False):
+	d = Thermald(fake=FAKE)
+	if once:
+		d.tick(time.monotonic())
+		return
+	stop = []
+	signal.signal(signal.SIGTERM, lambda *a: stop.append(1))
+	signal.signal(signal.SIGINT, lambda *a: stop.append(1))
+	tfd = timerfd()
+	watch = Watch()
+	log('started%s: power off at %s (battery, %d readings), warnings at %s'
+	    % (' (dry run)' if DRY_RUN or FAKE else '', fmt(SHUTDOWN_BATTERY), CONFIRM,
+	       ', '.join('%s %s' % (k, fmt(v)) for k, v in WARN.items())))
+	d.tick(time.monotonic())
+	due = time.clock_gettime(CLOCK_BOOTTIME) + d.period_ms / 1000
+	timer_set(tfd, d.period_ms / 1000)
+	while not stop:
+		watch.want(d.level > 0)
+		fds = [tfd] + ([watch.fd] if watch.wd >= 0 else [])
+		try:
+			ready, _, _ = select.select(fds, [], [])
+		except InterruptedError:
+			continue
+		if watch.wd >= 0 and watch.fd in ready and watch.drain():
+			d.caps()	# zrnperfd moved its limits: clamp them again now
+		if tfd in ready:
+			try:
+				os.read(tfd, 8)
+			except OSError:
+				pass
+			late = time.clock_gettime(CLOCK_BOOTTIME) - due
+			if late > 2:
+				time.sleep(1)	# just resumed: zrn-therm's own look first
+			d.tick(time.monotonic())
+			due = time.clock_gettime(CLOCK_BOOTTIME) + d.period_ms / 1000
+			timer_set(tfd, d.period_ms / 1000)
+	if not d.powering_off:
+		d.release()
+		log('stopped: ceilings lifted')
+
+
+FAKE = None
+
+
+def main(argv):
+	global DRY_RUN, ROOT, FAKE
+	args = list(argv)
+	if args[:1] == ['status']:
+		try:
+			print(open(STATUS).read(), end='')
+		except OSError:
+			print('not running')
+		for f in ('shutdown.last', 'shutdown', 'shutdown.dry-run'):
+			s = read(STATE + '/' + f)
+			if s:
+				print('%s: %s' % (f, s))
+		return 0
+	once = False
+	while args:
+		a = args.pop(0)
+		if a == '--dry-run':
+			DRY_RUN = True
+		elif a == '--root':
+			ROOT = args.pop(0).rstrip('/')
+		elif a == '--fake':
+			FAKE = args.pop(0)
+			DRY_RUN = True
+		elif a == '--once':
+			once = True
+		else:
+			print(__doc__, file=sys.stderr)
+			return 2
+	run(once)
+	return 0
+
+
+if __name__ == '__main__':
+	sys.exit(main(sys.argv[1:]))
