@@ -845,7 +845,9 @@ struct zt_server {
 	bool shade_torch;
 	bool shade_rotation;
 	bool shade_airplane;
-	bool shade_location;
+	bool shade_location;		/* the location switch is on (ztos-gnss-gate's state) */
+	bool loc_known, loc_active;	/* the gate runs; the GNSS engine is on */
+	uint32_t loc_tile_ms;		/* the tile's last tap: the gate gets 2 s to follow */
 	bool shade_notifs_cleared;
 	int shade_brightness;
 	int shade_pressed;		/* -1: none, 0..7: quick toggles, 8: clear all, 9: collapse */
@@ -6019,6 +6021,21 @@ static void status_row(struct zt_server *server, cairo_t *cr, bool details, bool
 		/* (it comes and goes: what follows slides with it) */
 		x += (s + icon_gap) * server->st_wifi;
 	}
+	/* Location in use: the GNSS engine is on for some reader (the
+	 * Location tile's mark, small); gone when it stops */
+	if (server->loc_active) {
+		double r = icon_h * 0.36;
+		cairo_save(cr);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		cairo_set_line_width(cr, fmax(1.0, round(icon_h * 0.11)));
+		cairo_new_sub_path(cr);
+		cairo_arc(cr, x + r, base - icon_h / 2, r, 0, 2 * M_PI);
+		cairo_stroke(cr);
+		cairo_arc(cr, x + r, base - icon_h / 2, r * 0.45, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_restore(cr);
+		x += 2 * r + icon_gap;
+	}
 	/* Bluetooth: white with a device connected, dimmed when only on; it
 	 * blinks (one second each) while sound streams to the device */
 	if (server->bt_on) {
@@ -6891,6 +6908,49 @@ static bool bt_state_read(struct zt_server *server) {
 	return changed;
 }
 
+/* /run/ztos-gnss/state (devices/samsung-starlte/.../ztos-gnss-gate): the
+ * location switch and whether the GNSS engine is on. True if either changed. */
+#ifndef LOC_STATE
+#define LOC_STATE "/run/ztos-gnss/state"
+#define LOC_CTL "/run/ztos-gnss/control"
+#endif
+/* Tell the gate to turn location on or off; false if there is no gate. */
+static bool loc_switch(bool on) {
+	int fd = open(LOC_CTL, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	const char *cmd = on ? "on\n" : "off\n";
+	bool ok = fd >= 0 && write(fd, cmd, strlen(cmd)) == (ssize_t)strlen(cmd);
+	if (!ok) {
+		wlr_log(WLR_INFO, "location switch: %s", strerror(errno));
+	}
+	if (fd >= 0) {
+		close(fd);
+	}
+	return ok;
+}
+static bool loc_state_read(struct zt_server *server) {
+	char line[64];
+	bool known = false, on = false, active = false;
+	FILE *f = fopen(LOC_STATE, "r");
+	while (f && fgets(line, sizeof(line), f)) {
+		known = true;
+		if (strncmp(line, "enabled=", 8) == 0) on = line[8] == '1';
+		else if (strncmp(line, "engine=", 7) == 0)
+			active = strncmp(line + 7, "starting", 8) == 0 || strncmp(line + 7, "tracking", 8) == 0;
+	}
+	if (f) {
+		fclose(f);
+	}
+	/* just tapped: the tile shows what was asked until the gate has had time */
+	if (server->loc_tile_ms && now_ms() - server->loc_tile_ms < 2000) {
+		on = server->shade_location;
+	}
+	bool changed = known != server->loc_known || on != server->shade_location || active != server->loc_active;
+	server->loc_known = known;
+	server->shade_location = on;
+	server->loc_active = active;
+	return changed;
+}
+
 static int net_tick(void *data) {
 	struct zt_server *server = data;
 	if (!server->screen_on || server->width == 0) {
@@ -6937,7 +6997,7 @@ static int net_tick(void *data) {
 	if (pods_bar_read(&server->pods_bar)) {
 		redraw = true;
 	}
-	if (bt_state_read(server)) {
+	if (bt_state_read(server) | loc_state_read(server)) {
 		redraw = true;
 		if (server->shade_open || server->shade_h > 0.1f) {
 			draw_shade(server);	/* its tile follows */
@@ -7091,16 +7151,17 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 		cairo_fill(cr);
 		return;
 	}
-	/* Bluetooth, rotation and location have nothing behind them on this
-	 * phone yet (no driver, no service), nor the flashlight while
-	 * zrn-flash is not loaded: shown, faint, and not pretending to switch */
-	bool missing = q == Q_ROTATION || q == Q_LOCATION ||
+	/* Rotation has nothing behind it on this phone yet, nor Bluetooth,
+	 * location or the flashlight while their service or driver is not
+	 * there (ztos-gnss-gate for location): shown, faint, and not
+	 * pretending to switch */
+	bool missing = q == Q_ROTATION || (q == Q_LOCATION && !server->loc_known) ||
 		(q == Q_FLASHLIGHT && access(TORCH_PATH, W_OK) != 0) ||
 		(q == Q_BLUETOOTH && access("/sys/class/bluetooth/hci0", F_OK) != 0);
 	bool on = q == Q_WIFI ? server->shade_wifi : q == Q_AIRPLANE ? server->shade_airplane :
 		q == Q_DATA ? server->cell_data_on : q == Q_VIBRATE ? server->haptics_enabled :
 		q == Q_FLASHLIGHT ? server->shade_torch : q == Q_BLUETOOTH ? server->shade_bt :
-		q == Q_BRIGHTNESS;
+		q == Q_LOCATION ? server->shade_location : q == Q_BRIGHTNESS;
 	const struct audio_output *audio = q == Q_AUDIO ? audio_active_output(server) : NULL;
 	if (q == Q_AUDIO) {
 		on = audio != NULL;
@@ -9108,8 +9169,20 @@ static void shade_activate(struct zt_server *server, int index) {
 		server->audio_modal_auto = server->audio_modal_expanded = false;
 		audio_modal_show(server);
 		break;
+	case 100 + Q_LOCATION: {
+		/* ztos-gnss-gate's switch: off keeps GPS off for every reader */
+		if (!loc_switch(!server->shade_location)) {
+			break;	/* no gate: the tile is drawn faint */
+		}
+		hap(server, HAP_TAP, HG_SYSTEM);
+		server->shade_location = !server->shade_location;
+		server->loc_tile_ms = now_ms() ? now_ms() : 1;
+		draw_shade(server);
+		draw_status(server);
+		damage(server);
+		break;
+	}
 	case 100 + Q_ROTATION:
-	case 100 + Q_LOCATION:
 	case 100 + Q_NONE:
 		break;	/* nothing behind them yet: see shade_tile_draw */
 	case 100 + Q_AIRPLANE: /* the modem's radio: Wi-Fi and Bluetooth stay as they are */

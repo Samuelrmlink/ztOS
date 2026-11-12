@@ -531,6 +531,12 @@ check-reload-hub: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
 		-o /tmp/ztmetro-reload-hub-test tests/reload-hub.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-reload-hub-test
 
+.PHONY: check-location
+check-location: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-location-test tests/location-tile.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+	/tmp/ztmetro-location-test
+
 .PHONY: check-bt-list
 check-bt-list:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-list-test tests/bt-list.c
