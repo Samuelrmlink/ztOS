@@ -54,7 +54,7 @@ static bool headset_mic;
 module_param(headset_mic, bool, 0444);
 MODULE_PARM_DESC(headset_mic, "record from the headset's microphone while a headset is in");
 static int hs_mic_gain = 12;	/* 0.5 dB steps over 0 dB: +6 dB */
-module_param(hs_mic_gain, int, 0444);
+module_param(hs_mic_gain, int, 0644);
 static int hp_max_db = HS_HP_CEIL_DB;
 module_param(hp_max_db, int, 0444);
 MODULE_PARM_DESC(hp_max_db, "headphone ceiling in dB, never above " __stringify(HS_HP_CEIL_DB));
