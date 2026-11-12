@@ -3401,6 +3401,7 @@ static void load_config(struct zt_server *server) {
 	server->size_step = 1.0f;
 	server->units = 6;		/* three medium tiles across */
 	server->rot.enabled = false;	/* auto-rotation: Settings turns it on */
+	server->rot.units = server->units;	/* (also without a config file: load_config returns early) */
 	server->cover.enabled = true;	/* a flip cover closed turns the screen off */
 	server->rot.locked = false;
 	server->menu_speed = 75;
@@ -18262,6 +18263,7 @@ static void rotation_apply(struct zt_server *server, int r) {
 	server->rot.applied = r;
 	server->width = r & 1 ? ph : pw;
 	server->height = r & 1 ? pw : ph;
+	if (server->rot.units <= 0) server->rot.units = server->units > 0 ? server->units : 6;
 	server->units = rot_units(r, server->rot.units, MAX_UNITS);
 	wlr_log(WLR_INFO, "rotation: %d -> %d, %dx%d points, %d columns", was, r,
 		server->width, server->height, server->units);

@@ -80,8 +80,10 @@ static struct {
 	/* the desktop, from $XDG_RUNTIME_DIR/ztmetro-desktop.state */
 	bool available, session, locked;
 	char name[32];
-	int px_w, px_h;		/* its pixels */
+	int px_w, px_h;		/* its pixels, as laid out (turned, if it is) */
 	double lw, lh;		/* and points */
+	int transform;		/* the output's wl_output transform: the capture is the
+				 * panel's own buffer, turned back here (frame_corners) */
 	struct wl_output *output;
 
 	struct zwlr_virtual_pointer_v1 *ptr;
@@ -189,7 +191,7 @@ static void state_read(void) {
 	snprintf(path, sizeof(path), "%s/ztmetro-desktop.state", runtime ? runtime : "/tmp");
 	bool available = false, session = false, locked = false;
 	char name[32] = "";
-	int w = 0, h = 0;
+	int w = 0, h = 0, transform = 0;
 	double scale = 1;
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
@@ -200,13 +202,16 @@ static void state_read(void) {
 			session = true;
 		} else if (!strncmp(line, "locked yes", 10)) {
 			locked = true;
+		} else if (sscanf(line, "transform %d", &transform) == 1) {
+			transform &= 7;
 		}
 	}
 	if (f) fclose(f);
 	/* a locked desktop is not shown (the shell covers it, and refuses our clicks) */
 	available = available && !locked;
 	bool changed = available != d.available || session != d.session || locked != d.locked || strcmp(name, d.name) ||
-		w != d.px_w || h != d.px_h;
+		w != d.px_w || h != d.px_h || transform != d.transform;
+	d.transform = transform;
 	d.available = available;
 	d.session = session;
 	d.locked = locked;
@@ -783,18 +788,45 @@ static void arrow_make(void) {
 	cairo_destroy(cr);
 }
 
+/* Where the capture's corners go (top left, top right, bottom left, bottom
+ * right of the buffer, as copied): on the desktop's corners as laid out,
+ * turned back by the output's transform (the capture is not turned for us),
+ * and flipped if the copy came upside down. */
+static void frame_corners(double x0, double y0, double x1, double y1, double c[4][3]) {
+	for (int i = 0; i < 4; i++) {
+		double bx = i & 1, by = i & 2 ? 1 : 0, ux = bx, uy = by;
+		if (d.y_invert) by = 1 - by;
+		/* the buffer's corner (bx, by), 0..1, on the laid-out desktop (ux, uy):
+		 * wl_output transform 90 is the content turned a quarter
+		 * anticlockwise into the buffer, and so on */
+		switch (d.transform & 3) {
+		case 1: ux = 1 - by; uy = bx; break;
+		case 2: ux = 1 - bx; uy = 1 - by; break;
+		case 3: ux = by; uy = 1 - bx; break;
+		default: ux = bx; uy = by; break;
+		}
+		if (d.transform & 4) ux = 1 - ux;	/* the flipped ones: mirrored across */
+		c[i][0] = x0 + ux * (x1 - x0);
+		c[i][1] = y0 + uy * (y1 - y0);
+		c[i][2] = 0;
+	}
+}
+
 static void overlay(int page) {
 	if (!d.available) return;
+	/* a new size (the phone turned: auto-rotation): the bar drawn again for it */
+	static double chrome_w, chrome_h;
+	if (zmc.width != chrome_w || zmc.height != chrome_h) {
+		chrome_w = zmc.width, chrome_h = zmc.height;
+		d.chrome_stale = true;
+	}
 	if (d.chrome_stale || !d.chrome) chrome_draw();
 	view_clamp();
 	double x0, y0, x1, y1;
 	to_screen(0, 0, &x0, &y0);
 	to_screen(d.lw, d.lh, &x1, &y1);
-	double c[4][3] = { { x0, y0, 0 }, { x1, y0, 0 }, { x0, y1, 0 }, { x1, y1, 0 } };
-	if (d.y_invert) {
-		c[0][1] = c[1][1] = y1;
-		c[2][1] = c[3][1] = y0;
-	}
+	double c[4][3];
+	frame_corners(x0, y0, x1, y1, c);
 	if (d.showing >= 0 && d.bufs[d.showing].image) {
 		zmc_gpu_dmabuf(d.bufs[d.showing].image, c, 1);
 	} else if (d.shm_ready && d.shm_surface) {
