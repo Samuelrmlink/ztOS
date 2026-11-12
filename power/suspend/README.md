@@ -1,3 +1,44 @@
+# Why is it awake: every blocker, and the lock screen's line — 2026-11-12
+
+ROADMAP 8.30. `zrn-sleepd status` keeps its old lines (`why=` is still the
+first reason the loop found) and adds one `blocker=` line for each thing that
+holds sleep off now, then `woke_last_hour=`:
+
+    state=awake
+    why=aod showing
+    ...
+    enabled
+    blocker=wakeup: Wireless charger (kernel) (p9320-wireless) - p9320-wireless held for 36 min
+    blocker=aod: Always-on display showing (ztmetro) - zrn-sleepd does not sleep while it shows
+    woke_last_hour=0: Did not sleep in the last hour
+
+`zrn-sleepd why [--json | --shell [--always] [--wakers]]` gives the same in
+other forms. Both run `zrn-sleep-why` (beside zrn-sleepd), which the shell's
+lock screen also runs as the user (ztmetro/lock-awake.c). It reads, only when
+asked: the call, zrnperfd's `tickle_audio` and then PipeWire's sink inputs
+(app names, never media titles), the inhibit files and who wrote them, the GNSS
+engine and its readers on 127.0.0.1:10110, the camera devices' holders, the
+kernel wakeup sources active now, a USB/mains charger, zrn-sleepd's own state
+(switched off, paused, doze or Wi-Fi window, just woke), the always-on display
+and an external display. zrn-sleepd's loop is not changed and nothing new runs
+on a timer.
+
+**What woke it.** Each `woke:` line in the log now ends with `by=NAME+N,...`:
+the kernel wakeup sources whose `wakeup_count` moved across that sleep (it
+moves only while a suspend is being checked). zrn-sleep-why counts the last
+hour's wakes from the log: "Woke 4 times in the last hour, mostly by the modem
+(umts_ipc0)". The sheet on the lock screen adds the busiest processes (context
+switches of all their threads) and IRQs, per minute, against a snapshot an
+earlier look left in `$XDG_RUNTIME_DIR/zrn-sleep-why/` (root: `/run/zrn-sleepd/why/`;
+one every 5 min at most, only when asked), else averaged since each started.
+
+**Inhibit files** may say who holds them: `pid=N`, `app=NAME` or `label=TEXT`
+lines (all optional; empty files still work). The known ones (`timed-gnss`,
+`timed-hub`, `timed-ztclock`, `timed-push`, ztOSIAL's `timed-ial-N`) are named
+from a table; for `timed-ial-N` only the caller's name is shown, not its reason.
+
+Tests: `python3 power/suspend/test-sleep-why.py` (fake root).
+
 # Overnight logging, wake interval and Wi-Fi windows — 2026-11-11
 
 **soc.csv.** zrn-sleepd appends a row to `/var/lib/zrn-sleep/soc.csv` (kept

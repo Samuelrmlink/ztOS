@@ -42,6 +42,11 @@ writes its inhibit before it starts the thing it protects.
   zrn-sleepd once [SECONDS] [--ignore-inhibit NAME]...
                         one cycle now, conditions or not (screen must be off)
   zrn-sleepd enable | disable | status
+                        status: the daemon's line (why= is its first reason),
+                        then every blocker (blocker=) and the last hour's
+                        wakes, from zrn-sleep-why, computed as it is read
+  zrn-sleepd why [--json | --shell [--always] [--wakers]]
+                        the same in other forms (zrn-sleep-why)
   zrn-sleepd log [N | all]
                         the last N lines of the log (50), NUL bytes dropped
 """
@@ -1098,6 +1103,39 @@ def modem_rx(before, after):
 	return ', '.join(moved)
 
 
+def wake_counts():
+	"""{wakeupN: (name, wakeup_count)} of every kernel wakeup source. A
+	source's wakeup_count moves only while a suspend is being checked for
+	(after the wakeup_count write): what moved across a sleep woke it or
+	stopped it. For the log's by= and zrn-sleep-why; never fails a cycle."""
+	out = {}
+	try:
+		for p in WAKEUP.iterdir():
+			try:
+				out[p.name] = (read(p / 'name'), int(read(p / 'wakeup_count', '0') or 0))
+			except ValueError:
+				continue
+	except Exception:
+		return {}
+	return out
+
+
+def woke_by(before, after):
+	"""The sources whose wakeup_count moved between two wake_counts(), by
+	name, most first: 'umts_ipc0+2,alarmtimer.0.auto+1' ('' if none)."""
+	moved = {}
+	for key, (name, count) in after.items():
+		if key in before and before[key][0] == name and count > before[key][1]:
+			name = name or key
+			moved[name] = moved.get(name, 0) + count - before[key][1]
+	return ','.join(f'{n}+{c}' for n, c in sorted(moved.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def by_text(info):
+	"""' by=SOURCES' for the woke line, or ''."""
+	return f' by={info["by"]}' if info.get('by') else ''
+
+
 def woke_text(reason, info):
 	"""The reason as the log gives it: a modem wake names its channels."""
 	rx = info.get('modem_rx')
@@ -1239,6 +1277,7 @@ def cycle(ignore=(), ignore_inhibits=()):
 			# second after the return is what woke the phone (the frames that
 			# wake it are read by the resume path within milliseconds)
 			rx_before = modem_counts()
+			by_before = wake_counts()
 			# only now is the sleep going ahead (an append is no wakeup
 			# event); it reaches the disk with the next sync or writeback
 			soc_row('sleep', awake=(boottime() - last_wake_boot) if last_wake_boot else None,
@@ -1256,6 +1295,7 @@ def cycle(ignore=(), ignore_inhibits=()):
 				last_sleep['charge_out'] = charge_uah()
 			time.sleep(1.0)
 			last_sleep['modem_rx'] = modem_rx(rx_before, modem_counts())
+			last_sleep['by'] = woke_by(by_before, wake_counts())
 		except Cancelled as e:
 			log(f'sleep cancelled: {e}')
 			reason = 'cancelled'
@@ -1537,7 +1577,7 @@ def main():
 				if info.get('slept') is not None:
 					charge = (f' (asleep {info["slept"]:.1f}s, charge {mah(info.get("charge_in"))}'
 						  f'->{mah(info.get("charge_out"))} mAh)')
-				log(f'woke: {woke_text(reason, info)} wake_stat={stat:#010x} after {slept}s{charge}')
+				log(f'woke: {woke_text(reason, info)} wake_stat={stat:#010x} after {slept}s{charge}{by_text(info)}')
 				if reason == 'alarm':
 					log_alarm_wake()
 				mono = time.monotonic()
@@ -1662,7 +1702,7 @@ def once(argv):
 		if info.get('slept') is not None:
 			charge = (f' (asleep {info["slept"]:.1f}s, charge {mah(info.get("charge_in"))}'
 				  f'->{mah(info.get("charge_out"))} mAh)')
-		log(f'once: woke: {woke_text(reason, info)} wake_stat={stat:#010x}{charge}')
+		log(f'once: woke: {woke_text(reason, info)} wake_stat={stat:#010x}{charge}{by_text(info)}')
 		if reason == 'alarm':
 			log_alarm_wake('once: ')
 		if reason == 'fw-abort':
@@ -1671,6 +1711,19 @@ def once(argv):
 		if reason not in ('aborted', 'fw-abort', 'alarm-due', 'hub-busy'):
 			break
 		time.sleep(5)
+
+
+def sleep_why():
+	"""zrn-sleep-why (beside this file), loaded as a module; None if missing."""
+	import importlib.machinery, importlib.util
+	source = Path(__file__).resolve().with_name('zrn-sleep-why')
+	if not source.exists():
+		return None
+	loader = importlib.machinery.SourceFileLoader('zrn_sleep_why', str(source))
+	spec = importlib.util.spec_from_loader(loader.name, loader)
+	module = importlib.util.module_from_spec(spec)
+	loader.exec_module(module)
+	return module
 
 
 if __name__ == '__main__':
@@ -1691,6 +1744,16 @@ if __name__ == '__main__':
 				print(f'paused for another {max(0, left) / 60:.0f} min:', read(PAUSED))
 			except ValueError:
 				print('paused:', read(PAUSED))
+		# every blocker, not only why= (computed here, as it is read)
+		why_tool = sleep_why()
+		if why_tool is not None:
+			print('\n'.join(why_tool.status_lines(why_tool.collect())))
+	elif cmd == 'why':
+		# zrn-sleepd why [--json | --shell [--always] [--wakers]]: see zrn-sleep-why
+		why_tool = sleep_why()
+		if why_tool is None:
+			sys.exit('zrn-sleep-why is not installed')
+		why_tool.main(sys.argv[2:])
 	elif cmd == 'log':
 		# zrn-sleepd log [N | all]: the last N lines (50), NUL bytes dropped
 		arg = sys.argv[2] if len(sys.argv) > 2 else '50'
