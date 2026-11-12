@@ -17,7 +17,8 @@
 #	pd						the source's current, <= 3000 and <= 15 W / 2150
 #	wireless (Qi 5 V)				 900 / 1200	(10 V: 650 / 1200)
 #
-# On top of that, from max170xx_battery/temp (tenths of a degree), with stock's
+# On top of that, from the battery thermistor (tenths of a degree; zrn-therm,
+# power/thermistors/: the gauge's own temp is not measured), with stock's
 # hysteresis:
 #	>= 50 C stop, resume at 45;  <= 0 C stop, resume at 5
 #	>= 41 C 1090 mA (700 on a pad) and a 4.15 V float, back at 39;  <= 5 C 700 mA
@@ -65,6 +66,7 @@ W=$PS/max77705-wireless		# WCIN: online, input limit
 U=$PS/max77705-usbc		# what the source is
 B=$PS/max170xx_battery
 RX=$PS/p9320-wireless		# the receiver: its output voltage, if it says
+TH=$R/sys/kernel/zrn_therm	# the thermistors, from zrn-therm: fresh or unreadable
 DRM=$R/sys/class/drm
 LED=$R/run/zrn-led/charge
 RUN=$R/run/zrn-charge
@@ -442,8 +444,10 @@ pass() {	# look, decide, write; nap: when to look again without an event (s)
 	[ -n "$caps" ] && caps_was=$caps
 
 	# the battery's temperature, with stock's hysteresis
-	# unreadable (the gauge probes after us at boot): 25 C for the limits, never 9 V
-	num "$B/temp" && { T=$REPLY; tknown=1; }
+	# unknown (no zrn-therm, an ADC error, a reading gone stale) counts as hot
+	# for the voltage: 5 V only, on a cable and on a pad. 25 C for the limits.
+	# Never the gauge's temp: nothing measures it (power/battery-cycles.md).
+	num "$TH/battery" && { T=$REPLY; tknown=1; }
 	[ $T -ge 500 ] && hot_stop=1;	[ $T -le 450 ] && hot_stop=0
 	[ $T -le 0 ] && cold_stop=1;	[ $T -ge 50 ] && cold_stop=0
 	[ $T -ge 410 ] && warm=1;	[ $T -le 390 ] && warm=0

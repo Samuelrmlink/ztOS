@@ -49,10 +49,12 @@
 #include "config-merge.h"
 #include "page-tree.h"
 #include "../ledd/led-policy.h"
+#include "../mms/apnconf.h"
 #include "../sound/sound-pages.h"
 #include "../pods/pods-pages.h"
 #include "../devtest/devtest-pages.h"
 #include "../desktop/desktop-page.h"
+#include "../power/battery-health.h"
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
  * /run/user/<our UID> when whatever started us did not set it. */
@@ -144,6 +146,7 @@ enum action {
 	ACT_LOCK_TIMEOUT,	/* a picker: how long the lock screen stays lit */
 	ACT_DOUBLE_TAP_WAKE,	/* a double tap on the always-on display wakes it */
 	ACT_LOCK_AWAKE,		/* the lock screen says what keeps the phone awake */
+	ACT_BURNIN_SHIFT,	/* the bars and the lock clock move a few pixels (burn-in) */
 	ACT_AOD_AUTO,		/* the always-on display's level from the room */
 	ACT_AOD_LOW_OFF,	/* and dark below 15 % on battery */
 	ACT_AOD_THEME,		/* a theme's preview tapped: its index in CLOCK_THEME_IDS */
@@ -160,6 +163,8 @@ enum action {
 	ACT_APN_FIELD,		/* arg: which box */
 	ACT_APN_AUTH,
 	ACT_APN_SAVE,
+	ACT_APN_FILL,		/* the access points of the SIM's carrier, from apns-conf.xml */
+	ACT_MMS_ENABLE,
 	ACT_ABOUT_REPO,
 	ACT_IB_MODE,		/* arg: 0 off, 1 shadow, 2 on */
 	ACT_IB_ENGINE,		/* arg: 0 the processor, 1 SCORE */
@@ -284,6 +289,7 @@ static struct {
 	int lock_timeout_idx;	/* "lock_timeout": an index into LOCK_TIMEOUT_SECONDS */
 	bool double_tap_wake;	/* "double_tap_wake" */
 	int lock_awake;		/* "lock_awake": 0 off, 1 on, 2 always (config only) */
+	bool burnin_shift;	/* "burn_in_shift": the shell's burn-in.h */
 	bool about_show_repo;
 	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
 	int haptic_strength;	/* percent */
@@ -409,6 +415,7 @@ static void config_load(void) {
 	app.aod_force_mark = true;
 	app.double_tap_wake = true;
 	app.lock_awake = 1;
+	app.burnin_shift = true;
 	app.android_bt_remove_bond = true;
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
@@ -547,6 +554,8 @@ static void config_load(void) {
 			app.double_tap_wake = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "lock_awake") == 0) {
 			app.lock_awake = !strcmp(val, "off") || !strcmp(val, "0") ? 0 : !strcmp(val, "always") ? 2 : 1;
+		} else if (strcmp(key, "burn_in_shift") == 0) {
+			app.burnin_shift = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "lock_timeout") == 0) {
 			int t = atoi(val), best = 0;	/* the nearest choice */
 			for (int i = 0; i < N_LOCK_TIMEOUTS; i++) {
@@ -739,6 +748,7 @@ static void config_format(void) {
 	KEY("lock_timeout", "%d", LOCK_TIMEOUT_SECONDS[app.lock_timeout_idx]);
 	KEY("double_tap_wake", "%s", app.double_tap_wake ? "on" : "off");
 	KEY("lock_awake", "%s", app.lock_awake == 0 ? "off" : app.lock_awake == 2 ? "always" : "on");
+	KEY("burn_in_shift", "%s", app.burnin_shift ? "on" : "off");
 	KEY("aod_auto_brightness", "%s", app.aod_auto ? "on" : "off");
 	KEY("aod_low_battery_off", "%s", app.aod_low_off ? "on" : "off");
 	KEY("aod_theme", "%s", app.aod_theme);
@@ -1053,8 +1063,13 @@ static struct {
 	bool data, data_on, airplane, known;
 } cell;
 static char apn_field[3][102] = { "dialogbb", "", "" };	/* apn, user, password */
-static int apn_auth, apn_focus = -1;
+static int apn_auth, apn_focus = -1;	/* 0..2 apn_field, 3..6 mms_field */
 static char apn_note[96];
+/* MMS (ztmmsd): MMS_FILE, "key = value": enabled, mmsc, proxy, port, apn */
+#define MMS_FILE "/etc/ztoscorenetworking/mms"
+#define SIM_FILE "/run/ztoscorenetworking/sim"
+static char mms_field[4][256];	/* MMSC, proxy, port, MMS access point */
+static bool mms_enabled;
 
 static void cell_load(void) {
 	char line[128];
@@ -2242,6 +2257,9 @@ static double draw_display(cairo_t *cr) {
 	}
 	static const char *const fs_bars[] = { "2 seconds", "3 seconds", "5 seconds", "10 seconds" };
 	y = picker(cr, y, "Bars stay after a swipe in full screen", fs_bars, 4, app.fs_bars_idx, ACT_FS_BARS_CYCLE);
+	/* the status bar, the nav bar and the lock clock a few pixels off their
+	 * place, a new one every 3 minutes (the shell's burn-in.h) */
+	y = zmc_switch(cr, y, "Shift the bars against burn-in", app.burnin_shift, ACT_BURNIN_SHIFT);
 
 	return y + 20;
 }
@@ -2768,6 +2786,74 @@ static void apn_load(void) {
 	if (f) fclose(f);
 }
 
+static void mms_load(void) {
+	char line[400];
+	for (int i = 0; i < 4; i++) mms_field[i][0] = 0;
+	mms_enabled = false;
+	FILE *f = fopen(MMS_FILE, "r");
+	while (f && fgets(line, sizeof(line), f)) {
+		char *eq = strchr(line, '=');
+		if (line[0] == '#' || !eq) continue;
+		*eq = 0;
+		char *key = trim(line), *val = trim(eq + 1);
+		if (!strcmp(key, "enabled")) mms_enabled = atoi(val) == 1;
+		else if (!strcmp(key, "mmsc")) snprintf(mms_field[0], sizeof(mms_field[0]), "%s", val);
+		else if (!strcmp(key, "proxy")) snprintf(mms_field[1], sizeof(mms_field[1]), "%s", val);
+		else if (!strcmp(key, "port")) snprintf(mms_field[2], sizeof(mms_field[2]), "%s", val);
+		else if (!strcmp(key, "apn")) snprintf(mms_field[3], sizeof(mms_field[3]), "%s", val);
+	}
+	if (f) fclose(f);
+}
+
+/* ztmmsd reads the file for each message; told to look at what waits. */
+static bool mms_save(void) {
+	FILE *f = fopen(MMS_FILE, "w");
+	if (!f) return false;
+	fprintf(f, "# picture messages (Settings > cellular + SIM > access point)\n"
+		"enabled = %d\nmmsc = %s\nproxy = %s\nport = %s\napn = %s\n",
+		mms_enabled, mms_field[0], mms_field[1], mms_field[2], mms_field[3]);
+	bool ok = !fclose(f);
+	pipe_tell("/run/ztmmsd.ctl", "retry\n");
+	return ok;
+}
+
+/* The SIM's carrier's access points (stock apns-conf.xml, then ours): the
+ * boxes filled in, not saved until "save". */
+static void apn_fill(void) {
+	char line[128], mccmnc[8] = "";
+	struct sim_id sim;
+	memset(&sim, 0, sizeof(sim));
+	FILE *f = fopen(SIM_FILE, "r");
+	while (f && fgets(line, sizeof(line), f)) {
+		line[strcspn(line, "\r\n")] = 0;
+		if (!strncmp(line, "mccmnc=", 7)) snprintf(mccmnc, sizeof(mccmnc), "%.6s", line + 7);
+		else if (!strncmp(line, "gid1=", 5)) snprintf(sim.gid1, sizeof(sim.gid1), "%.32s", line + 5);
+		else if (!strncmp(line, "spn=", 4)) snprintf(sim.spn, sizeof(sim.spn), "%.32s", line + 4);
+	}
+	if (f) fclose(f);
+	if (strlen(mccmnc) < 5) {
+		snprintf(apn_note, sizeof(apn_note), "no SIM read yet");
+		return;
+	}
+	sim_id_from_mccmnc(&sim, mccmnc, 0);
+	struct apn_choice a;
+	const char *files[] = { APNS_STOCK, APNS_EXTRA, NULL };
+	if (!apn_lookup(files, &sim, &a)) {
+		snprintf(apn_note, sizeof(apn_note), "this SIM's network is not in the list");
+		return;
+	}
+	snprintf(apn_field[0], sizeof(apn_field[0]), "%s", a.apn);
+	snprintf(apn_field[1], sizeof(apn_field[1]), "%s", a.user);
+	snprintf(apn_field[2], sizeof(apn_field[2]), "%s", a.password);
+	apn_auth = !strcmp(a.auth, "pap") ? 1 : !strcmp(a.auth, "chap") ? 2 : 0;
+	snprintf(mms_field[0], sizeof(mms_field[0]), "%s", a.mmsc);
+	snprintf(mms_field[1], sizeof(mms_field[1]), "%s", a.mms_proxy);
+	if (a.mms_port && a.mms_proxy[0]) snprintf(mms_field[2], sizeof(mms_field[2]), "%d", a.mms_port);
+	else mms_field[2][0] = 0;
+	snprintf(mms_field[3], sizeof(mms_field[3]), "%s", a.mms_apn);
+	snprintf(apn_note, sizeof(apn_note), "filled in for %.60s: save to use", a.carrier);
+}
+
 /* ztoscorenetworkingd reads the file when it next connects, and is told to do that now. */
 static void apn_save(void) {
 	static const char *const auths[] = { "none", "pap", "chap" };
@@ -2781,7 +2867,8 @@ static void apn_save(void) {
 	fclose(f);
 	pipe_tell("/run/ztoscorenetworking.ctl", "apn\n");
 	pipe_tell("/run/zrn-modem.ctl", "apn\n");
-	snprintf(apn_note, sizeof(apn_note), "saved; reconnecting with it");
+	snprintf(apn_note, sizeof(apn_note), mms_save() ? "saved; reconnecting with it" :
+		"saved; the MMS settings could not be (%s)", strerror(errno));
 }
 
 static double draw_mobile(cairo_t *cr) {
@@ -2827,6 +2914,15 @@ static double draw_apn(cairo_t *cr) {
 		y = zmc_textbox(cr, y, captions[i], apn_field[i], apn_focus == i, ACT_APN_FIELD, i);
 	}
 	y = picker(cr, y, "Authentication", auths, 3, apn_auth, ACT_APN_AUTH);
+	/* picture messages: where the carrier's MMSC is, and whether to use it */
+	static const char *const mms_captions[] = { "MMSC", "MMS proxy", "MMS port", "MMS APN (empty: the one above)" };
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "Picture messages (MMS)", FONT_REGULAR, 13, MARGIN, y + 6, 0);
+	y = zmc_switch(cr, y + 28, "Picture messages", mms_enabled, ACT_MMS_ENABLE) - 18;
+	y += 14;
+	for (int i = 0; i < 4; i++)
+		y = zmc_textbox(cr, y, mms_captions[i], mms_field[i], apn_focus == 3 + i, ACT_APN_FIELD, 3 + i);
+	y = zmc_entry(cr, y, "fill in for this SIM", "The carrier's settings, from the phone's list", ACT_APN_FILL, 0);
 	y = zmc_entry(cr, y, "save", apn_note[0] ? apn_note : "Write it and connect again", ACT_APN_SAVE, 0);
 	return y + 20;
 }
@@ -3017,13 +3113,15 @@ static void typed(const char *text) {
 		return;
 	}
 	if (zmc.page != PAGE_APN || apn_focus < 0) return;
-	char *field = apn_field[apn_focus];
-	size_t len = strlen(field), max = apn_focus == 0 ? 100 : 32;
+	char *field = apn_focus < 3 ? apn_field[apn_focus] : mms_field[apn_focus - 3];
+	size_t len = strlen(field), max = apn_focus == 0 ? 100 : apn_focus < 3 ? 32 : apn_focus == 5 ? 5 :
+		apn_focus == 6 ? 100 : 250;
 	apn_note[0] = 0;
+	if (apn_focus == 5 && text[0] > ' ' && !isdigit((unsigned char)text[0])) return;	/* a port */
 	if (text[0] == '\b') {
 		if (len) field[len - 1] = 0;
 	} else if (text[0] == '\n') {
-		apn_focus = apn_focus < 2 ? apn_focus + 1 : -1;	/* on to the next box */
+		apn_focus = apn_focus < 6 ? apn_focus + 1 : -1;	/* on to the next box */
 		if (apn_focus < 0) zmc_keyboard(false);
 	} else if (len < max && text[0] > ' ') {
 		field[len] = text[0];
@@ -3237,7 +3335,14 @@ static double draw_battery(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Battery information", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "3000 mAh Li-Ion, Health Good", FONT_REGULAR, 15, MARGIN, y + 20, 0);
+	struct battery_health bh;	/* power/battery-health.h: a learned estimate */
+	char info[96];
+	battery_health_read(hw_battery(), &bh);
+	if (bh.health_pct >= 0)
+		snprintf(info, sizeof(info), "3000 mAh Li-Ion, holds about %ld mAh (%d %%)", bh.full_mah, bh.health_pct);
+	else
+		snprintf(info, sizeof(info), "3000 mAh Li-Ion");
+	zmc_text(cr, info, FONT_REGULAR, 15, MARGIN, y + 20, 0);
 
 	return y + 60;
 }
@@ -3832,7 +3937,7 @@ static double render_page_content(cairo_t *cr, int p) {
 		return pods_render(cr, p);
 	case PAGE_DEVTEST: case PAGE_DEVTEST_SYSTEM: case PAGE_DEVTEST_SENSORS: case PAGE_DEVTEST_JOURNAL:
 	case PAGE_DEVTEST_KERNEL: case PAGE_DEVTEST_SHELL: case PAGE_DEVTEST_HARDWARE: case PAGE_DEVTEST_LOGS:
-	case PAGE_DEVTEST_ANIM: case PAGE_DEVTEST_PREVIEW:
+	case PAGE_DEVTEST_ANIM: case PAGE_DEVTEST_PREVIEW: case PAGE_DEVTEST_TEMPS: case PAGE_DEVTEST_CHARGING:
 		return devtest_render(cr, p);
 	case PAGE_APP_SCALE: return draw_app_scale(cr);
 	case PAGE_THEME: return draw_theme(cr);
@@ -3976,6 +4081,15 @@ static void activate(int action, int arg) {
 		apn_focus = -1;
 		zmc_keyboard(false);
 		apn_save();
+		break;
+	case ACT_APN_FILL:
+		apn_focus = -1;
+		zmc_keyboard(false);
+		apn_fill();
+		break;
+	case ACT_MMS_ENABLE:
+		mms_enabled = !mms_enabled;
+		apn_note[0] = 0;
 		break;
 	case ACT_ABOUT_REPO:
 		app.about_show_repo = !app.about_show_repo;
@@ -4438,6 +4552,10 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_AOD_AUTO:
 		app.aod_auto = !app.aod_auto;
+		config_save();
+		break;
+	case ACT_BURNIN_SHIFT:
+		app.burnin_shift = !app.burnin_shift;
 		config_save();
 		break;
 	case ACT_DOUBLE_TAP_WAKE:
@@ -4925,6 +5043,7 @@ static void arrived(int page) {
 	} else if (page == PAGE_APN) {
 		zmc_every(0, NULL);
 		apn_load();
+		mms_load();
 	}
 	if (page == PAGE_BLUETOOTH) {
 		/* found by others while it is open, and looking for them */

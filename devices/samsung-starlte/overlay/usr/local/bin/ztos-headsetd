@@ -1,0 +1,283 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""ztos-headsetd: the Galaxy S9's 3.5 mm jack, for PipeWire and the player.
+
+The driver (snd-zrn-abox headset=1, audio/driver/zrn-headset.c) detects the
+plug and reports it on the input device "S9 Headset Jack": SW_HEADPHONE_INSERT
+and SW_MICROPHONE_INSERT, and the headset's buttons as keys (the shell takes
+those, as it takes the phone's own volume keys). With hp_route=1 the driver
+itself sends the sound to the jack while headphones are in.
+
+What this daemon adds, while headphones are in:
+
+  - an output "Headphones" (node ztos-headphones): a plain loopback into the
+    card, beside the speaker's crossover and limiter chain (ztos-speaker),
+    which is made for the two speakers and wrong for ears. It has a higher
+    priority than the speaker, and ztos-audiod moves the global output to it
+    when it appears (as for Bluetooth), so the sound follows the plug. It is
+    only there while headphones are in and the driver plays to the jack:
+    played without them it would reach the speakers unprotected;
+  - its volume the first time ever: FIRST_PERCENT, low. WirePlumber
+    remembers it from then on (stream-properties, Audio/Sink:media.name:
+    Headphones), as it does the speaker's;
+  - on unplugging, every player paused (as phones do), before the sound could
+    come out of the speakers. The driver keeps the speakers off for a moment
+    for the same reason.
+
+The microphone needs nothing here: with headset_mic=1 the driver records from
+the headset's microphone while it is in, through the same source.
+
+    ztos-headsetd           run (a user service: ztos-headsetd.service)
+    ztos-headsetd status    what the jack reports now
+"""
+import fcntl
+import glob
+import json
+import os
+import select
+import signal
+import struct
+import subprocess
+import sys
+import time
+
+JACK_NAME = "S9 Headset Jack"
+PARAMS = "/sys/module/snd_zrn_abox/parameters"
+CARD_SINK = "alsa_output.platform-snd-zrn-abox.stereo-fallback"
+SINK = "ztos-headphones"
+SINK_DESC = "Headphones"
+FIRST_PERCENT = 40          # wpctl's scale: 40 % is -24 dB, under the driver's own cap
+PRIORITY = 1100             # over the speaker chain's 1009
+HOME = os.path.expanduser("~")
+WP_STREAMS = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local/state")),
+                          "wireplumber/stream-properties")
+WP_KEY = "Audio/Sink:media.name:" + SINK_DESC
+LOOK_EVERY = 15.0           # no jack device yet (driver loaded without headset=1)
+RESTART_GAP = 2.0
+
+EV_SW = 0x05
+SW_HEADPHONE_INSERT = 0x02
+SW_MICROPHONE_INSERT = 0x04
+SW_JACK_PHYSICAL_INSERT = 0x07
+EVENT = struct.Struct("qqHHi")      # struct input_event on a 64-bit kernel
+
+
+def eviocgsw(length):
+    return (2 << 30) | (length << 16) | (ord("E") << 8) | 0x1b
+
+
+def log(*a):
+    print("ztos-headsetd:", *a, file=sys.stderr, flush=True)
+
+
+def find_device(sysfs="/sys/class/input"):
+    for path in sorted(glob.glob(os.path.join(sysfs, "event*"))):
+        try:
+            with open(os.path.join(path, "device/name"), encoding="utf-8") as f:
+                if f.read().strip() == JACK_NAME:
+                    return "/dev/input/" + os.path.basename(path)
+        except OSError:
+            continue
+    return None
+
+
+def switches_from_bits(bits):
+    """EVIOCGSW's bitmap to (headphones, microphone, plug)."""
+    def bit(n):
+        return bool(bits[n // 8] & (1 << (n % 8))) if n // 8 < len(bits) else False
+    return bit(SW_HEADPHONE_INSERT), bit(SW_MICROPHONE_INSERT), bit(SW_JACK_PHYSICAL_INSERT)
+
+
+def driver_routes_jack(params=PARAMS):
+    """The driver plays to the jack (hp_route=1): only then is a headphone output safe."""
+    try:
+        with open(os.path.join(params, "hp_route"), encoding="ascii") as f:
+            return f.read().strip() in ("Y", "1")
+    except OSError:
+        return False
+
+
+def known_volume(path=WP_STREAMS, key=WP_KEY):
+    """Whether WirePlumber already keeps a volume for the headphones."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                k = line.split("=", 1)[0].strip().replace("\\", "")
+                if k == key:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def loopback_argv():
+    capture = {
+        "media.class": "Audio/Sink",
+        "node.name": SINK,
+        "node.description": SINK_DESC,
+        "media.name": SINK_DESC,
+        "device.form-factor": "headphone",
+        "priority.session": PRIORITY,
+        "priority.driver": PRIORITY,
+        "audio.position": ["FL", "FR"],
+    }
+    playback = {
+        "node.name": SINK + ".out",
+        "target.object": CARD_SINK,
+        "node.passive": True,
+        "node.dont-reconnect": False,
+        "stream.dont-remix": True,
+        "audio.position": ["FL", "FR"],
+    }
+    return ["pw-loopback", "-n", SINK, "-i", json.dumps(capture), "-o", json.dumps(playback)]
+
+
+def node_id(name, timeout=3.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            dump = json.loads(subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=5).stdout or "[]")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            dump = []
+        for o in dump:
+            p = (o.get("info") or {}).get("props") or {}
+            if o.get("type", "").endswith(":Node") and p.get("node.name") == name:
+                return o["id"]
+        time.sleep(0.2)
+    return None
+
+
+class Jack:
+    def __init__(self):
+        self.proc = None
+        self.started = 0.0
+        self.hp = self.mic = self.plug = False
+
+    def want_sink(self):
+        return self.hp and driver_routes_jack()
+
+    def sink_up(self):
+        if self.proc and self.proc.poll() is None:
+            return
+        if time.time() - self.started < RESTART_GAP:
+            return
+        first = not known_volume()
+        self.started = time.time()
+        try:
+            self.proc = subprocess.Popen(loopback_argv(), stdin=subprocess.DEVNULL)
+        except OSError as e:
+            log("pw-loopback:", e)
+            self.proc = None
+            return
+        log("headphones in: output %s" % SINK)
+        if first:
+            nid = node_id(SINK)
+            if nid is not None:
+                subprocess.run(["wpctl", "set-volume", str(nid), "%d%%" % FIRST_PERCENT], timeout=5)
+                log("first time: headphones at %d%%" % FIRST_PERCENT)
+
+    def sink_down(self):
+        if not self.proc:
+            return
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.proc = None
+        log("output %s gone" % SINK)
+
+    def apply(self, hp, mic, plug):
+        was = self.hp
+        self.hp, self.mic, self.plug = hp, mic, plug
+        if was and not hp:
+            # becoming noisy: stop the players before anything reaches the speakers
+            subprocess.run(["playerctl", "--all-players", "pause"], timeout=5,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log("headphones out: players paused")
+        if self.want_sink():
+            self.sink_up()
+        else:
+            self.sink_down()
+        if hp != was:
+            log("jack: %s" % ("headset (microphone)" if hp and mic else "headphones" if hp else "empty"))
+
+
+def run():
+    jack = Jack()
+    stop = []
+    signal.signal(signal.SIGTERM, lambda *a: stop.append(1))
+    signal.signal(signal.SIGINT, lambda *a: stop.append(1))
+    fd = None
+    try:
+        while not stop:
+            if fd is None:
+                path = find_device()
+                if not path:
+                    time.sleep(LOOK_EVERY)
+                    continue
+                try:
+                    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+                except OSError as e:
+                    log(path, e)
+                    time.sleep(LOOK_EVERY)
+                    continue
+                bits = bytearray(8)
+                fcntl.ioctl(fd, eviocgsw(len(bits)), bits)
+                jack.apply(*switches_from_bits(bits))
+                log("watching", path)
+            r, _, _ = select.select([fd], [], [], RESTART_GAP + 0.5)
+            if not r:
+                if jack.want_sink():
+                    jack.sink_up()     # pw-loopback ended (PipeWire restarted): again
+                continue
+            try:
+                data = os.read(fd, EVENT.size * 64)
+            except OSError:
+                os.close(fd)      # the driver unloaded: look for the device again
+                fd = None
+                jack.apply(False, False, False)
+                continue
+            hp, mic, plug = jack.hp, jack.mic, jack.plug
+            for i in range(0, len(data) - EVENT.size + 1, EVENT.size):
+                _, _, typ, code, value = EVENT.unpack_from(data, i)
+                if typ != EV_SW:
+                    continue
+                if code == SW_HEADPHONE_INSERT:
+                    hp = bool(value)
+                elif code == SW_MICROPHONE_INSERT:
+                    mic = bool(value)
+                elif code == SW_JACK_PHYSICAL_INSERT:
+                    plug = bool(value)
+            if (hp, mic, plug) != (jack.hp, jack.mic, jack.plug):
+                jack.apply(hp, mic, plug)
+    finally:
+        jack.sink_down()
+        if fd is not None:
+            os.close(fd)
+
+
+def status():
+    path = find_device()
+    state = None
+    try:
+        with open(os.path.join(PARAMS, "headset_state"), encoding="ascii") as f:
+            state = f.read().strip()
+    except OSError:
+        pass
+    print("device:", path or "none (snd-zrn-abox without headset=1?)")
+    print("driver:", state or "unknown")
+    print("hp_route:", driver_routes_jack())
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "status":
+        status()
+        return 0
+    run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
