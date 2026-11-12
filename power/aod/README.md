@@ -126,8 +126,10 @@ No kernel or boot image change. In `ztmetro/ztmetro.c` (search `aod_`):
   in step with the nine). The force event's 753,2899 is where the finger
   pressed, not the mark's place. Not drawn with the force press or "Show
   where to press for Start" switched off.
-- A hung shell leaves a static picture lit until the battery ends. Stage 3
-  (the panel's own self-move) is the only real fix.
+- A hung shell used to leave a static picture lit until the battery ended.
+  zrn-sleepd's shell watch now ends a shell whose heartbeat is 5 minutes old
+  with the panel lit, which darkens it (`ztmetro/BURN-IN.md`). Stage 3 (the
+  panel's own self-move) would also cover the 5 minutes before that.
 
 ### Themes
 

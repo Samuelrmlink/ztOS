@@ -163,13 +163,13 @@ gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 	$(APP_BUILD) $(JPEG_FLAGS) -o $@ gallery/ztgallery.c $(CORE) $(APP_LIBS) $(JPEG_LIBS) -lpthread
 
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
-EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c desktop/desktop-page.c
-EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
-settings/ztsettings: settings/ztsettings.c volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
+EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
+EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
+settings/ztsettings: settings/ztsettings.c power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
-devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h $(CORE_DEPS)
-	$(APP_BUILD) -o $@ devtest/zrndevtest.c devtest/devtest-pages.c $(CORE) $(APP_LIBS)
+devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h devtest/devtest-power.c devtest/devtest-power.h power/battery-health.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-power.c $(CORE) $(APP_LIBS)
 
 # Devices and Services: what is running, crashed or missing
 # ztSound: the equalizer and effects (the engine, ztos-soundd, ships in rootfs/overlay/usr/local/bin)
@@ -188,7 +188,7 @@ osial/ztosial: osial/ztosial.c $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ osial/ztosial.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 # Power Management: battery fuel gauge, sleep diagnostics, wake history
-power/ztpower: power/ztpower.c $(CORE_DEPS)
+power/ztpower: power/ztpower.c power/battery-health.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ power/ztpower.c $(CORE) $(APP_LIBS)
 
 perfd/zrnperfd: perfd/zrnperfd.c perfd/wlpm.c perfd/wlpm.h perfd/tickle.c perfd/tickle.h background-apps.h ztos-user.h perfd/iblog.c perfd/iblog.h perfd/ibnet.c perfd/ibnet.h perfd/perfial.c perfd/perfial.h
@@ -481,21 +481,21 @@ clean:
 
 # Uses a private Wayland seat; does not touch the running compositor or display.
 .PHONY: check-arch check-keyboard
-check-keyboard: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-keyboard: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-keyboard-test
 
 .PHONY: check-launch
-check-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-launch-test tests/launch-state.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-launch-test tests/launch-state.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-launch-test
 
 .PHONY: check-auth
-check-auth: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-auth: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-auth-test
 
 # what the Bluetooth agent asks the shell, and the agent itself (no D-Bus, no phone)
@@ -532,9 +532,9 @@ check-csf:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -o /tmp/ztmetro-csf-test ../sensors/test-csf-failure.c
 	/tmp/ztmetro-csf-test && /tmp/ztmetro-csf-test reset-fails
 
-check-reload-hub: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-reload-hub-test tests/reload-hub.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-reload-hub: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-reload-hub-test tests/reload-hub.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-reload-hub-test
 
 .PHONY: check-bt-list
@@ -660,6 +660,14 @@ check-power-key:
 check-rotation:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-rotation-test tests/rotation.c -lm
 	/tmp/ztmetro-rotation-test
+
+.PHONY: check-burn-in
+# burn-in.h: the shift's schedule (equal shares, one step at a time, 2-4 px)
+# and the heartbeat file zrn-sleepd's watch reads; then that watch itself
+check-burn-in:
+	$(CC) -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -o /tmp/ztmetro-burn-in-test tests/burn-in.c
+	/tmp/ztmetro-burn-in-test
+	python3 ../power/suspend/test-shell-watch.py
 
 .PHONY: check-osk-numeric
 check-osk-numeric:
