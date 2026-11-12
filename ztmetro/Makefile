@@ -521,6 +521,11 @@ check-modem-sim:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c
 	/tmp/ztmetro-modem-sim-test
 
+.PHONY: check-sensord
+check-sensord:
+	python3 sensord/test-sensord-queue.py
+	python3 sensord/test-sensord-prox.py
+
 .PHONY: check-csf
 check-csf:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -o /tmp/ztmetro-csf-test ../sensors/test-csf-failure.c

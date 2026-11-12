@@ -652,6 +652,9 @@ struct zt_server {
 	bool locked;
 	bool call_over_lock;	/* only the phone call, or a ringing alarm, may cover the lock */
 	char over_lock_app[24];	/* which of them: its app_id, "ztphone" or "ztclock-ring" */
+	/* a call held to the ear (prox_blank_set); the power key woke it, so
+	 * the next "near" waits for a "far" first */
+	bool prox_blank, prox_override;
 	/* app switcher: the apps as a row of cards, newest on the right */
 	bool switcher;
 	float switch_t;			/* 0 the app at full size, 1 cards */
@@ -12757,8 +12760,9 @@ static const char *aod_why(struct zt_server *server) {
 		return "the demo loop runs";
 	}
 	if (server->call_over_lock) {
-		/* no proximity sensor in use: a lit, double-tappable screen
-		 * against a cheek is worse than the dark */
+		/* a dark, untouchable screen: a lit, double-tappable one
+		 * against a cheek is worse (the proximity sensor's blank is
+		 * prox_blank_set, with the screen on) */
 		return "a call is under way";
 	}
 	if (aod_charger(server)) {
@@ -13587,6 +13591,7 @@ static void screen_set(struct zt_server *server, bool on) {
 	if (!server->output || server->screen_on == on) {
 		return;
 	}
+	server->prox_blank = server->prox_override = false;	/* a real sleep from a blank */
 	/* nested, a disabled output is the window gone, with nothing left to
 	 * wake it; and the Waydroid freeze below is not this machine's */
 	if (!on && g_nested) {
@@ -13730,6 +13735,48 @@ static void activity(struct zt_server *server) {
 	}
 }
 
+static void touches_cancel_all(struct zt_server *server);
+
+/* A call held to the ear: ztoscsf-sensord's proximity sensor ("prox_blank
+ * on|off" on the control pipe; sensors/README.md, "Proximity in calls").
+ * The panel goes off and the glass is ignored, but it is not the screen's
+ * sleep: no lock, no sound, nothing frozen, and the phone taken away (or the
+ * power key) brings it straight back. Only during a call's screen; anything
+ * else refuses it. */
+static void prox_blank_set(struct zt_server *server, bool on) {
+	if (on == server->prox_blank) {
+		return;
+	}
+	if (on && (!server->output || !server->screen_on || server->aod || g_nested ||
+			!server->call_over_lock || strcmp(over_lock_id(server), "ztphone") ||
+			server->prox_override)) {
+		return;
+	}
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_enabled(&state, !on);
+	bool ok = wlr_output_commit_state(server->output->wlr_output, &state);
+	wlr_output_state_finish(&state);
+	if (!ok) {
+		wlr_log(WLR_ERROR, "proximity: could not switch the display %s", on ? "off" : "on");
+		return;
+	}
+	server->prox_blank = on;
+	if (on) {
+		touches_cancel_all(server);	/* a cheek's touch ends here, unseen */
+	} else {
+		if (bl.mode == BL_TABLE && ramp.goal > 0.0) {
+			ramp_snap(ramp.goal);
+		} else {
+			backlight_set(server->shade_brightness);
+		}
+		activity(server);
+		damage(server);
+	}
+	wlr_log(WLR_INFO, "proximity: %s", on ? "near, the panel off" : "far, the panel back");
+	state_file_write(server);
+}
+
 /* An Android app in front keeps its screen on (FLAG_KEEP_SCREEN_ON, as a map
  * does while it navigates). Waydroid does not pass that on; the location
  * bridge (android/waydroid/location) looks at Android's wake locks while it
@@ -13784,6 +13831,12 @@ static int idle_fired(void *data) {
 		 * it (a dark screen takes no touch). It ends by itself, at the
 		 * latest after ztclockd's autostop. */
 		if (server->screen_on && alarm_ringing(server)) {
+			wl_event_source_timer_update(server->idle_timer, 15000);
+			return 0;
+		}
+		/* held to the ear: the screen is wanted back the moment it
+		 * leaves, not asleep behind the power key */
+		if (server->screen_on && server->prox_blank) {
 			wl_event_source_timer_update(server->idle_timer, 15000);
 			return 0;
 		}
@@ -14257,6 +14310,9 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 	if (!server->screen_on) {
 		aod_tap_down(server, id, x, y);	/* only a double tap on the always-on display */
 		return;	/* asleep: the glass does nothing until the power key */
+	}
+	if (server->prox_blank) {
+		return;	/* a cheek, in a call */
 	}
     if (!server->locked && server->android_compiling && server->pending_pid > 0 && !server->shown) {
         float mid = STATUS_H + (server->height - STATUS_H - NAV_H) / 2.0f;
@@ -15461,6 +15517,7 @@ static void state_file_write(struct zt_server *server) {
 	fprintf(f, "points %d %d\nscale %.2f\npixels %d %d\nscreen %s\naod %s\naod_frames %u\n", server->width,
 		server->height, server->scale, o->width, o->height, server->screen_on ? "on" : "off",
 		server->aod ? "on" : "off", server->aod_frames);
+	fprintf(f, "prox_blank %s\n", server->prox_blank ? "on" : "off");
 	fclose(f);
 	rename(tmp, path);
 }
@@ -15653,6 +15710,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 	} else if (!strcmp(line, "call_screen end")) {
 		char mark_path[256];
 		unlink(runtime_file(mark_path, sizeof(mark_path), "ztmetro-call-locked"));
+		server->prox_override = false;
+		prox_blank_set(server, false);
 		server->call_over_lock = false;
 		apps_suspend_sync(server);
 		draw_status(server);
@@ -15985,6 +16044,11 @@ static void ctl_command(struct zt_server *server, char *line) {
 			strncmp(line + 4, "on", 2) == 0 ? AOD_ON : AOD_OFF;
 		wlr_log(WLR_INFO, "aod: mode %d (ctl)", server->aod_mode);
 		aod_sync(server);
+	} else if (strncmp(line, "prox_blank ", 11) == 0) {
+		/* ztoscsf-sensord, in a call: near (on) or far (off) */
+		bool near = strncmp(line + 11, "on", 2) == 0;
+		if (!near) server->prox_override = false;
+		prox_blank_set(server, near);
 	} else if (strncmp(line, "screen off", 10) == 0) {
 		screen_set(server, false);
 	} else if (strncmp(line, "screen on", 9) == 0) {
@@ -16171,6 +16235,12 @@ static bool hardware_nav_keys(void) {
 static void power_key_apply(struct zt_server *server, enum power_key_action action) {
 	switch (action) {
 	case POWER_KEY_WAKE:
+		if (server->prox_blank) {
+			/* held to the ear: back on, and it stays on until the
+			 * sensor has seen far and near again */
+			prox_blank_set(server, false);
+			server->prox_override = true;
+		}
 		screen_set(server, true);
 		activity(server);
 		break;
@@ -16356,7 +16426,8 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 		/* the power key is the shell's alone: see power/power-key.h */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 			bool on = server->screen_on;
-			power_key_apply(server, power_key_pressed(&server->power_key, server->screen_on));
+			power_key_apply(server, power_key_pressed(&server->power_key,
+				server->screen_on && !server->prox_blank));
 			if (on && server->voldown_held) {
 				/* the chord: volume down is down already */
 				server->voldown_pending = false;
@@ -16386,8 +16457,8 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 	}
 	if (keyboard && keyboard->force) {
 		/* the touchscreen's force press: a home key, felt, that the finger
-		 * pressing it doesn't also tap with */
-		if (!server->force_press) {
+		 * pressing it doesn't also tap with (not a cheek's, in a call) */
+		if (!server->force_press || server->prox_blank) {
 			return;
 		}
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
