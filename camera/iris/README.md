@@ -286,6 +286,30 @@ written.**
 - One I2C read transaction to 0x10.
 - No SMC.
 
+### The code (approved 2026-11-12, attended; not yet run)
+
+- `probe/iris-seq.h` holds steps 1–8. `probe/test-iris-seq.c` runs them on
+  simulated hardware and fails on any access outside the approved list, on any
+  write to 0x13 other than 0x00, and on any sensor register write.
+- `probe/zrn-iris-probe.c` is the module glue: S2MPB02 through zrn-flash's
+  i2c-97, ACPM for the LDOs, gpiolib for gpg2-3, and ioremap for the rest.
+- `probe/build.sh` runs the host test and builds the module against
+  `build/linux-7.1-dp/out-target`, whose config hash matches the phone's.
+- `fp-irq-probe.c` is the fingerprint experiment: GPIO character device v2,
+  userspace.
+- `run-fp.sh` and `run-iris.sh` run on the phone. They refuse outside
+  `ztlock run iris`, before 07:00, below 15 % battery, with `zrn_cam` loaded,
+  or with a mark left by an unfinished run.
+
+Clock gates (step 5a), from `cmucal-sfr.c` (`SFR_ACCESS`) and `ra.c`
+`ra_set_gate()`:
+
+- Each of 0x10802050, 0x10802090, 0x108020DC and 0x108020E0 has bit 20 MANUAL,
+  bit 21 CG_VAL and bit 28 ENABLE_AUTOMATIC_CLKGATING.
+- To open a gate: if MANUAL is 1, set bit 21; if MANUAL is 0, clear bit 28.
+- Each register gets its saved value back at step 8.
+- 0x10803034 (Q-channel) is only read.
+
 ## Size
 
 - **The experiment:** about 250 lines added to zrn-cam (a polled HSI2C master
