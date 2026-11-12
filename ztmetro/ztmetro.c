@@ -16487,6 +16487,15 @@ static void key_event(struct zt_server *server, struct zt_keyboard *keyboard, st
 	if (alarm_key(server, event)) {
 		return;
 	}
+	if (event->keycode == KEY_PLAYPAUSE || event->keycode == KEY_MEDIA) {
+		/* a wired headset's button (the 3.5 mm jack) or a keyboard's media
+		 * key: the player, screen on or off, not the window in front. Its
+		 * volume buttons are KEY_VOLUMEUP/DOWN, the phone's own, below. */
+		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+			run_detached("playerctl", "play-pause", NULL, NULL);
+		}
+		return;
+	}
 	if (event->keycode == KEY_POWER) {
 		/* the power key is the shell's alone: see power/power-key.h */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
