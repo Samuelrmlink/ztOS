@@ -26,6 +26,12 @@ import time
 from pathlib import Path
 
 PANEL_CMD = Path('/sys/devices/platform/soc@0/16030000.decon/panel_cmd')
+
+# 2026-11-12: this exact trial blanked the panel ~2 min after the enable (DECON's
+# flips stopped completing; a forced power-off brought it back). Self-move is
+# proposal-only again (ztmetro/BURN-IN.md, post-mortem). Kept as the record;
+# it refuses to run.
+sys.exit('selfmove-trial: retired after the 2026-11-12 blank panel; see ztmetro/BURN-IN.md')
 RUNTIME = '/run/user/1000'
 ENV = dict(os.environ, XDG_RUNTIME_DIR=RUNTIME, WAYLAND_DISPLAY='wayland-0')
 APPROVED_FIRST = {0xFC, 0xF0, 0xB0, 0xFE, 0x76, 0x77, 0x7C, 0x7D}
