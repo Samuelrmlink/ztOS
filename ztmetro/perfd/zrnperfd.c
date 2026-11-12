@@ -22,6 +22,12 @@
  *				game, say), at the big rung's ~2.3 GHz until it
  *				pins them too; normal, as any app.
  *				Forgotten when that process ends.
+ *	thermal-cap LITTLE BIG | off
+ *				zrn-thermald's ceilings, in kHz (0: none), applied
+ *				to every limit written here, over the ladder,
+ *				IntelligentBoost and the profiles alike; not kept
+ *				across a restart (zrn-thermald sends it again when
+ *				the status's thermal_cap= differs)
  *	tickle battery|charging|saver none|nominal|moderate|high
  *				the tickle mode for each condition (see tickle.c):
  *				on battery, plugged in, and with the power saver
@@ -485,6 +491,7 @@ static long capped(const long *table, int n, double share) {
 enum boost { IDLE0, NOMINAL, INTERACTIVE, BIG, RAPID };
 static const char *const boost_names[] = { "idle0", "nominal", "interactive", "big", "rapid" };
 static int thermal_level;		/* the thermal limit (thermal_update): 0 cool, 1-3 marks passed */
+static long thermal_cap_khz[2];		/* zrn-thermald's ceilings, little and big (0: none) */
 static enum boost boost = IDLE0;	/* the resting state: two cores near 1.3 GHz */
 #define BOOST_SAMPLE_MS	250
 /* up a rung: above this share of one core, held this long (eco apps only
@@ -1130,6 +1137,15 @@ static void apply(void) {
 					fit = table[i];
 			max = fit;
 		}
+		/* zrn-thermald's ceiling, over everything above */
+		long tcap = thermal_cap_khz[big ? 1 : 0];
+		if (tcap > 0 && max > tcap) {
+			long fit = table[0];	/* the highest step under it */
+			for (int i = 0; i < n; i++)
+				if (table[i] <= tcap && table[i] > fit)
+					fit = table[i];
+			max = fit;
+		}
 		if (c == 0) {
 			little_floor = table[0];
 			little_ceiling = max;
@@ -1302,6 +1318,7 @@ static void status(void) {
 			deepsleep ? "on" : "off", screen_on ? "on" : "off");
 		fprintf(f, "cpus=%d\nclusters=%d\n", cpu_count, n_clusters);
 		fprintf(f, "condition=%s\nboost=%s\n", conditions[condition()], boost_names[boost]);
+		fprintf(f, "thermal_cap=%ld,%ld\n", thermal_cap_khz[0], thermal_cap_khz[1]);
 		fprintf(f, "wifi=%s\n", wifi_asleep ? "sleeping" : "on");
 		fprintf(f, "mif_scale=%s\nmif_khz=%ld\n", mif_scale ? "on" : "off", mif_khz);
 		fprintf(f, "wifi_sleep=%s\nwifi_powersave=%s\n", wifi_sleep_enabled ? "on" : "off",
@@ -1345,6 +1362,20 @@ static int command(char *line, bool persist) {
 	char what[32] = "", value[32] = "", extra[64] = "";
 	if (sscanf(line, "%31s %31s %63s", what, value, extra) < 2) {
 		return 0;
+	}
+	if (strcmp(what, "thermal-cap") == 0) {
+		bool off = strcmp(value, "off") == 0;
+		long l = off ? 0 : atol(value), b = off ? 0 : atol(extra);
+		l = l < 0 ? 0 : l;
+		b = b < 0 ? 0 : b;
+		if (l == thermal_cap_khz[0] && b == thermal_cap_khz[1]) {
+			return 0;
+		}
+		thermal_cap_khz[0] = l;
+		thermal_cap_khz[1] = b;
+		fprintf(stderr, "zrnperfd: thermal ceiling %s (little %ld, big %ld kHz, from zrn-thermald)\n",
+			l || b ? "on" : "off", l, b);
+		return 2;
 	}
     if (strcmp(what, "compile") == 0) {
         pid_t pid = atoi(value);

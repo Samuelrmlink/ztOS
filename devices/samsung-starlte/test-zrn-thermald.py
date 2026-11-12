@@ -290,6 +290,73 @@ class Daemon(unittest.TestCase):
 		self.d.tick(10)
 		self.assertEqual((self.d.level, self.f.get(big)), (3, '1066000'))
 
+	def perfd(self, cap='0,0', reader=True):
+		"""A zrnperfd that knows thermal-cap: its status, and its pipe with a reader."""
+		self.f.put('/run/zrnperfd.status', 'profile=balanced\nthermal_cap=%s' % cap)
+		path = self.f.root + T.PERFD_CTL
+		if not os.path.exists(path):
+			os.mkfifo(path)
+		if reader:
+			self.ctl = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+			self.addCleanup(os.close, self.ctl)
+
+	def sent(self):
+		try:
+			return os.read(self.ctl, 4096).decode().splitlines()
+		except BlockingIOError:
+			return []
+
+	def test_caps_through_zrnperfd(self):
+		big = T.CPUFREQ + '/policy4/scaling_max_freq'
+		self.perfd()
+		self.f.therm(ap=M('ap')[1])			# level 2
+		self.d.tick(0)
+		self.assertEqual(self.sent(), ['thermal-cap 1499333 1469000'])
+		self.assertTrue(self.d.via_perfd)
+		self.assertEqual(self.f.get(big), '2704000')	# not written here
+		self.assertEqual(self.f.get(T.TZ + '/cooling_device0/cur_state'), '1')	# the GPU still is
+		self.d.tick(5)
+		self.assertEqual(self.sent(), ['thermal-cap 1499333 1469000'])	# not taken yet: again
+		self.f.put('/run/zrnperfd.status', 'thermal_cap=1499333,1469000')
+		self.d.tick(10)
+		self.assertEqual(self.sent(), [])			# taken: quiet
+		self.f.therm(ap=300)
+		self.d.tick(15)
+		self.assertEqual(self.sent(), ['thermal-cap off'])
+		self.assertIn('cpu_caps=zrnperfd', self.f.get(T.STATUS))
+
+	def test_zrnperfd_without_the_command(self):
+		big = T.CPUFREQ + '/policy4/scaling_max_freq'
+		self.f.put('/run/zrnperfd.status', 'profile=balanced')	# an older zrnperfd
+		self.f.therm(ap=M('ap')[1])
+		self.d.tick(0)
+		self.assertFalse(self.d.via_perfd)
+		self.assertEqual(self.f.get(big), '1469000')	# clamped here
+
+	def test_zrnperfd_gone(self):
+		big = T.CPUFREQ + '/policy4/scaling_max_freq'
+		self.perfd(reader=False)			# its status left behind, nobody reading
+		self.f.therm(ap=M('ap')[1])
+		self.d.tick(0)
+		self.assertFalse(self.d.via_perfd)
+		self.assertEqual(self.f.get(big), '1469000')
+
+	def test_zrnperfd_comes_back(self):
+		big = T.CPUFREQ + '/policy4/scaling_max_freq'
+		self.f.therm(ap=M('ap')[1])
+		self.d.tick(0)
+		self.assertEqual(self.f.get(big), '1469000')	# clamped here meanwhile
+		self.perfd()
+		self.d.tick(5)
+		self.assertTrue(self.d.via_perfd)
+		self.assertEqual(self.sent(), ['thermal-cap 1499333 1469000'])
+		self.assertEqual(self.f.get(big), '1469000')	# ours stays until zrnperfd has it
+		self.f.put('/run/zrnperfd.status', 'thermal_cap=1499333,1469000')
+		self.f.put(big, '1469000')			# zrnperfd's own write, capped
+		self.d.tick(10)
+		self.assertIsNone(self.d.cpus[1].ours)		# forgotten, not written back
+		self.assertEqual(self.f.get(big), '1469000')
+
 	def test_release_on_stop(self):
 		big = T.CPUFREQ + '/policy4/scaling_max_freq'
 		self.f.therm(ap=M('ap')[3])
