@@ -93,3 +93,5 @@ chmod 755 "$R"/usr/local/sbin/* 2>/dev/null || true
 DEVICE_UNITS="systemd-networkd ztos-variant zboot-boot-ok zboot-usb-gadget zboot-firstboot zboot-charge-hold zrn-charge ztoscirrusaudio
 	ztoscsf-sensorhub ztoscsf-sensord ztoscorenetworking-modem ztoscorenetworking zrnperfd ztprofile zrn-ledd zrn-sleepd
 	ztos-panel-selfmask ztos-panel-selfmask-again.timer ztos-panel-bl zrn-bluetooth bluetooth ztos-gnss-gate ztos-gnss-lto.timer ztos-waydroid-location"
+# the 3.5 mm jack: the headphone output and pausing on unplug (a user service)
+ch systemctl --global enable ztos-headsetd.service
