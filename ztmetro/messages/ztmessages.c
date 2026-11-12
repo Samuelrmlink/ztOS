@@ -329,7 +329,7 @@ static bool picture_at(int index, char *out, size_t size) {
 		while (dir && (e = readdir(dir))) {
 			if (e->d_name[0] == '.') continue;
 			char path[600];
-			snprintf(path, sizeof(path), "%s/%s", dirs[d], e->d_name);
+			snprintf(path, sizeof(path), "%.299s/%.255s", dirs[d], e->d_name);
 			struct stat st;
 			if (stat(path, &st)) continue;
 			if (S_ISDIR(st.st_mode) && d == 0 && n_dirs < 16) {
@@ -696,7 +696,7 @@ static void draw_compose(cairo_t *cr, double y, int page) {
 	} else if (attach[0]) {
 		const char *slash = strrchr(attach, '/');
 		char said[120];
-		snprintf(said, sizeof(said), "with a picture: %s", slash ? slash + 1 : attach);
+		snprintf(said, sizeof(said), "with a picture: %.100s", slash ? slash + 1 : attach);
 		zmc_accent(cr);
 		zmc_text(cr, said, FONT_REGULAR, 12, say_x, row + 4, say_w);
 	} else if (draft[0]) {
