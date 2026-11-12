@@ -505,3 +505,133 @@ installed on the phone (`pacman -Q`); only the overlay's
 `90-ztos-gnss.conf` and the gpsd drop-in wait for them. A draft interface,
 `ial/spec/org.ztos.ial.Location1.xml`, says what the GSI should get from a
 device (NMEA endpoint, engine state, fix age); it has no backend yet.
+
+## 9. Check-up, 12 November 2026 (ROADMAP 8.29)
+
+Indoors, the phone lying flat in a room with a window, no movement, AOD on,
+screen off, awake (AOD holds sleep off). Each run: `sensors/gnss/
+test-gnss-session.sh session NAME SECS PREP`, read by `gnss-stats.py`, which
+writes no position. Summaries: `sensors/gnss/sessions/2026-11-12/`. The raw
+NMEA stayed in `/run` on the phone and was deleted.
+
+### Constellations: all four used, GLONASS included
+
+The vendor gpsd has no GLONASS switch. Its config keys (`strings` of
+`/vendor/bin/hw/gpsd`, md5 4e0c9bfa) are `EnableBeidou`, `DisableBeidou`,
+`EnableGalileo`, `SBASDisable` and per-satellite blacklists (`BadGlonassOSNs`,
+`BadQzssPRNs`, `BadNavicPRNs`, `BadSbasPRNs`); no `EnableGlonass`,
+`EnableQzss` or `EnableNavic`. GPS and GLONASS are the base the engine always
+runs; stock gps.xml and ours turn BeiDou and Galileo on. Nothing to change.
+
+"Used" is a satellite in a GSA sentence for that fix. The engine sends talker
+GSA for GP, GA, BD, QZ, GI and three GN GSA per epoch; GLONASS (PRN 65-96)
+is only in GN GSA, which is why the 30 October count saw no `GLGSA`.
+
+| Run | Prep | TTFF | GPS v/t/u | GLONASS v/t/u | Galileo v/t/u | BeiDou v/t/u | Sats in fix (GGA) | Accuracy median / p95 | HDOP |
+|---|---|---|---|---|---|---|---|---|---|
+| s1 | as found: no store, LTO 1.5 days, no last fix | 24.1 s | 10/9/8 | 9/9/8 | 11/8/7.5 | 9/7/6 | 30 (max 35) | 6 / 8 m | 0.6 |
+| s2 | hot: store 20 min old | 23.5 s | 9/9/8 | 10/9/7 | 11/8/6.5 | 7/7/6 | 28 (max 34) | 8 / 12 m | 0.8 |
+| s3 | hot: store 30 min old | 15.7 s | 11/10/9 | 9/9/8 | 10/8/7 | 8/6/5 | 30 (max 33) | 8 / 32 m | 0.8 |
+| s4 | warm: no store; LTO and last fix | 63.7 s | 11/10/9 | 10/8/8 | 12/8/7 | 8/7/6 | 31 (max 38) | 6 / 16 m | 0.6 |
+| s5 | cold: no store, LTO or last fix (NTP time only) | 139.7 s | 4/4/0* | 1/1/0* | 1/1/0 | 0 | 5 (max 7) | 32 / 128 m | 3.2 |
+
+v/t/u: medians over the run of satellites in view (GSV), tracked (SNR > 0)
+and used (GSA). SNR medians 24-31 dB-Hz, maxima 35-42. No QZSS satellite was
+in view this time; NavIC (GI) GSA comes empty as before (L1-only front end).
+No SBAS. (*) In s5 the GGA counted 5-7 satellites but the GSA carried none of
+them, so the per-system "used" is 0 there; first fixes from GPS (and 2
+GLONASS) only. TTFF counts from a reader connecting, so it includes the
+unit's start (`--pre`, 3 s, the HAL), about 5 s to "engine on".
+
+- **LTO is what makes a warm start.** Without the store the engine still
+  had 30+ satellites in its fix within 64 s; without LTO and the store it
+  had 5 after 140 s, at 32 m. The LTO file on the phone was 1.5 days old
+  (7-day file, `ztos-gnss-lto.timer` active, last fetch 10 Nov 20:10, the
+  fetch on 11 Nov skipped as fresh), and it was used: compare s4 with s5.
+- **The hot start is slower than on 29 October** (16-24 s against 7-11 s).
+  The store did not exist this morning (`gldata.sto` absent, as was the
+  gate's last fix: both directories had been reset since), so s2/s3 ran on
+  a store written by a 4-minute session. Not chased further.
+- **Re-attach** while the gate holds the engine (120 s after the last reader)
+  is still under a second (not re-measured).
+
+### The sensor framework restart after each session: removed
+
+ztos-gnss's `ExecStopPost` restarted ztoscoresensorframework after every
+session. Measured with it switched off by a runtime drop-in for 4 stops:
+
+- A restart of that unit restarts only `ztoscsf`, the supervisor. lhd (PID
+  unchanged), ztoscsf-sensorhub and ztoscsf-sensord were not touched by it
+  (s1's stop: ActiveEnterTimestamp of the hub 05:21, lhd 1015 throughout). So
+  it never "reset" the hub; and ztoscsf looks at the hub every PERIOD_S on
+  its own anyway.
+- After a stop without it: lhd keeps one thread in `select` and two in
+  `fifo_open`/`wait_for_partner` (waiting for the next gpsd to open the
+  pipe). No CPU (1 tick in 60-90 s), about 1 context switch a second (the
+  hub's own traffic, the same with or without GNSS). The BCM4773 kept
+  talking on ttyBCM (49 IRQs in 40 s), hub `ready` stayed 1, no
+  `ESW:CRASHED`, `MCU_REQ_RESP timeout`, assert or hub reset lines.
+- The next session after such a stop got a fix (s3: 15.7 s; s4 after a
+  reboot and stop).
+- The 27 October failure (lhd blocked writing, the hub stopped) came from
+  killing gpsd with the engine streaming. Since 29 October the HAL client
+  stops the engine (`GPSD:CORE_OFF` in the kernel log) before gpsd exits,
+  so no GNSS data waits for a pipe with no reader.
+
+So `ztos-gnss.service` no longer restarts the framework.
+
+### Power and sleep
+
+- **Current**, on battery, awake with AOD, screen off; 30 s with the engine
+  off, then the session, samples after its first 60 s: s2 +34 mA (+125 mW),
+  s3 +27 mA (+102 mW), s5 -12 mA, s4 -72 mA. Other agents were working on
+  the phone throughout (installs, a reboot, sensor tests), so the baseline
+  spread (-350 to -750 mA) is larger than the effect: **GNSS costs a few
+  tens of mA here, not hundreds; one noisy run each, not a result.** A
+  quiet A/B is left for the owner (below).
+- **CPU:** vendor gpsd used 29.4 s of CPU in a 4 min 20 s session (about 11 %
+  of one core); lhd 5 s.
+- **After the gate stops it:** ztos-gnss inactive, no gpsd process, no
+  inhibit in `/run/zrn-sleepd/inhibit/`, lhd idle as above.
+- **Idle gate:** 0 context switches in 60 s (it waits on accept and its
+  FIFO, no timers). zrn-sleepd's `why=` named only "aod showing". A real
+  SoC sleep with the gate idle was shown on 30 October (phases A, C, E
+  above); nothing in the gate's idle path changed since but the FIFO read,
+  which blocks.
+
+### Who can use location
+
+| Reader | Today |
+|---|---|
+| Android apps in Waydroid | yes, through the bridge (section 7) |
+| Linux gpsd clients (cgps, gpsmon, Navit, FoxtrotGPS) | gpsd is not installed; the drop-in (`tcp://127.0.0.1:10110`) is ready. `pacman -S gpsd` (3.27.5) |
+| geoclue (GNOME Maps, Firefox, WebKit, Qt Positioning) | not installed; `90-ztos-gnss.conf` ready. `pacman -S geoclue` (2.8.2). geoclue asks an agent (normally GNOME Shell's) before it lets an app read; ztOS has none, so apps would need per-app `[app-id] allowed=true system=true` sections or a small ztOS agent (not tested: geoclue not installed) |
+| Anything reading the socket | `/run/ztos-gnss/nmea.sock` (0666) or `127.0.0.1:10110`, NMEA 0183 |
+| The Metro shell | the Location tile and the status-bar mark (below) |
+| A native maps app | none. Proposal: a small Metro map using geoclue or the NMEA socket, with offline tiles |
+
+### The location switch, tile and mark (new)
+
+- `ztos-gnss-gate` has a switch: `/var/lib/ztos-gnss/off` (kept across
+  boots). Off: a running engine stops at once, no new start, readers stay
+  connected but get nothing, not even the last fix (`$PZTLF`). Set through
+  `/run/ztos-gnss/control` (FIFO, 0620, root and the phone user's group) or
+  `ztos-location on|off|status`.
+- `/run/ztos-gnss/state` (0644): `enabled=`, `engine=`
+  (off/starting/tracking/capped/disabled), `readers=`; rewritten only when
+  it changes, no position. `readers` is exact only while the engine runs
+  (the gate notices a reader leaving when it next writes to it).
+- Every reader goes through the gate, so the switch covers Waydroid, gpsd
+  and geoclue. geoclue's own network sources (Wi-Fi, 3G, CDMA, modem GPS,
+  static) are now off in `90-ztos-gnss.conf`, so geoclue cannot get around
+  it, and no nearby networks go to a lookup server.
+- The shell's Location tile was faint and did nothing; it now shows the
+  switch, a tap switches it, and it is faint only when the gate is not
+  running. While the engine is starting or tracking, a small ring-and-dot
+  mark stands in the status row after Wi-Fi.
+- On the phone (s1-s5): the gate's switch drove every session start and
+  stop above (`location off; GPS off` stopped the engine in 0.1 s, the unit
+  in 1.6 s).
+- Gaps: Android in Waydroid still sees its provider enabled while location
+  is off (it just gets no fixes); no Settings page for location (the tile
+  and `ztos-location` only); no per-app permission.
