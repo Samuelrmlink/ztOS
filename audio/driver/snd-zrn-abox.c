@@ -3496,7 +3496,8 @@ static void aud_idle_fn(struct work_struct *work)
 {
 	mutex_lock(&stream_lock);
 	if (!aud_idle_possible() || aud_idle_off || aud_users || call_route || dsm_on ||
-	    cap.opened || suspending || !booted || READ_ONCE(dsp_fault) || any_active())
+	    cap.opened || cap.path_on || hs_hp_active() || suspending || !booted ||
+	    READ_ONCE(dsp_fault) || any_active())
 		goto out;
 	if (!aud_block_off()) {
 		idle_offs++;
