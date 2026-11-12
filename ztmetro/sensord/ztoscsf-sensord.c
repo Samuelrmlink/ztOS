@@ -683,7 +683,13 @@ static void pocket_tell(int covered) {
 static void pocket_end(void) {
 	pocket_burst = false;
 	sensors_apply();
-	pocket_next = now_ns() + pocket_every;
+	uint64_t now = now_ns();
+	pocket_next = now + pocket_every;
+	/* the last check, for a look: proximity, lux, how long it took */
+	char text[64];
+	snprintf(text, sizeof(text), "%s %d %llu\n", pocket_prox < 0 ? "none" : pocket_prox ? "near" : "far",
+		pocket_lux, (unsigned long long)((now - pocket_started) / 1000000));
+	publish("pocket", text);
 	if (pocket_prox < 0) {
 		fprintf(stderr, "ztoscsf-sensord: pocket: no proximity reading, nothing changed\n");
 	} else if (pocket_on) {
