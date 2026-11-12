@@ -120,6 +120,22 @@ static struct wakeup_source *stream_ws;
 #define APM_INTSR1	0x28
 #define APM_DVFS_CHANNEL 0
 #define INTCAM_KHZ	690000	/* the top of stock's freq_info for dvfs_intcam (5) and dvfs_cam (7) */
+/*
+ * dvfs_cam's lowest level, asked for when a stream ends (approved 2026-11-12,
+ * REGISTERS.md (a)). Stock DT devfreq_cam freq_info = <690000 590000 690000
+ * 590000 690000 690000>: initial, default_qos, suspend?, min, max, reboot; the
+ * only lower value in it is 590000, its idle and minimum.
+ */
+#define CAM_REST_KHZ	590000
+
+static int apm_set(u32 domain, u32 khz);
+
+static void cam_rest(void)
+{
+	int ret = apm_set(7, CAM_REST_KHZ);
+
+	pr_info("zrn-cam: APM dvfs_cam back to %u kHz: %d\n", CAM_REST_KHZ, ret);
+}
 
 static void __iomem *apm_mbox, *apm_sram;
 static struct {
@@ -566,6 +582,7 @@ static int stream_run(bool front, bool want_frame, bool pattern)
 		ret = cis_write16(0x0204, again);
 	if (ret) {
 		note("sensor set-up failed: %d, nothing streamed", ret);
+		cam_rest();
 		return ret;
 	}
 	cis_status("set up");
@@ -592,6 +609,7 @@ static int stream_run(bool front, bool want_frame, bool pattern)
 	cis_write8(0x0100, 0);
 	msleep(50);
 	csis_off();
+	cam_rest();
 	__pm_relax(stream_ws);
 	if (want_frame) {
 		dma_rmb();

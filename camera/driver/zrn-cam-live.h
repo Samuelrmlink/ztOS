@@ -193,6 +193,7 @@ static int live_thread(void *d)
 	msleep(50);
 	csis_off();
 	live_power_down();
+	cam_rest();
 	__pm_relax(stream_ws);
 	pr_info("zrn-cam: live stopped: %u, %u frames, %u errors\n", why, live_info.seq, errs);
 	spin_lock(&live_slock);
@@ -318,6 +319,7 @@ static int live_start(bool front, bool full)
 	goto out;
 off:
 	live_power_down();
+	cam_rest();
 	live_info.stopped = LS_FAILED;
 out:
 	mutex_unlock(&lock);

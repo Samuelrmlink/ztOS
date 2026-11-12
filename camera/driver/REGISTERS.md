@@ -1,8 +1,9 @@
 # zrn-cam: the SoC and PMIC writes it makes
 
 **Approved by the owner 2026-11-12** ("Approve list + (b)"): exactly A to K below,
-with the values given, plus (b). Anything not here, including releasing
-`dvfs_cam` (item (a) at the end), needs its own approval first.
+with the values given, plus (b). Later the same day the owner also approved (a)
+(release `dvfs_cam` at close) and BUCK2 off at close. Anything not here needs
+its own approval first.
 
 "Oct" means the October 2026 driver already made this write with this value.
 
@@ -43,7 +44,8 @@ with the values given, plus (b). Anything not here, including releasing
 | LDO5 | 0x22 | 36 |
 
 - When: set at power-up (Oct values); cleared at power-off.
-- Exception at power-off: a rail found already on at power-up gets its enable bits and voltage put back as found, not switched off. BUCK2 boots at 0x0D = 0x58, 0x0E = 0x40. Approved 2026-11-12.
+- Exception at power-off: a rail found already on at power-up gets its enable bits and voltage put back as found, not switched off. Approved 2026-11-12.
+- BUCK2 is the exception to that exception: it boots at 0x0D = 0x58, 0x0E = 0x40 (enable bits 01), and at close 0x0D bits 7:6 are written 00 whatever they were. The rail map found nothing it feeds. Approved 2026-11-12.
 - LDO9 (0x26, the sensor hub's) is never written.
 
 **C. GPIO. (Oct)**
@@ -114,6 +116,11 @@ with the values given, plus (b). Anything not here, including releasing
 - Iris: S2MPS18 LDO39 to LDO41 (0x70 to 0x72) are written only with `iris_allowed=1`, which is never set.
 - No CMU register is written. 0x1A241094 and 0x1A241890 are read only.
 
-## Waiting
+## Added 2026-11-12
 
-**(a) Releasing `dvfs_cam` at close.** This would be a second APM request on domain 7 at its lowest level, read from the ECT. It is not approved. First measure whether the 690000 level costs power with the app closed.
+**(a) Release `dvfs_cam` when a stream ends**, and on the error paths after it was raised.
+- Request: the same transport as J, domain 7, at 590000 kHz.
+- The value: stock DT `devfreq_cam` has `freq_info = <690000 590000 690000 590000 690000 690000>`, so 590000 is its default and minimum. The ECT itself (inside sboot) isn't on this PC or readable from the phone, so it was not used.
+- The debugfs `dvfs-` command accepts only 7-690000 and 7-590000.
+
+The ACPM DVFS channel 0 is shared with snd-zrn-abox (domain 9) and the planned MIF request (power/rail-map). Each sender takes only replies with its own sequence number, and leaves the others' in the queue. Two senders writing the queue at the same instant are not locked against each other across modules, so tests that use the channel are serialised with `ztlock`.
