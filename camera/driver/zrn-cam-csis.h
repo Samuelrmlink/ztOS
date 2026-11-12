@@ -98,7 +98,7 @@ static const struct csi_path *pth;
 #define CANARY_FRONT	0xa5
 #define CANARY_REAR	0x5a
 
-static void __iomem *csis, *csis_vc, *csis_phy, *csis_dma, *sys_phy, *top_cmu, *pmu;
+static void __iomem *csis, *csis_vc, *csis_phy, *csis_dma, *sys_phy, *pmu;
 static u32 coarse, again;
 module_param(coarse, uint, 0644);	/* 0: the table's own */
 module_param(again, uint, 0644);

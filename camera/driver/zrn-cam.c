@@ -596,6 +596,37 @@ static int read16(struct i2c_client *cl, u16 reg, void *buf, int len)
 	return ret == 2 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
+static void __iomem *top_cmu;
+
+/* Read only: what the pads and the PMICs look like with the camera up, when it does not answer */
+static void id_diag(const struct camera *c)
+{
+	char line[200];
+	size_t n = 0;
+	int i;
+
+	note("%s: pads: bus bank CON %08x DAT %08x PUD %08x; gpc1 CON %08x DAT %08x PUD %08x DRV %08x",
+	     c->name, readl(peri + c->i2c_bank + REG_CON), readl(peri + c->i2c_bank + REG_DAT),
+	     readl(peri + c->i2c_bank + REG_PUD), readl(peri + BANK_GPC1 + REG_CON),
+	     readl(peri + BANK_GPC1 + REG_DAT), readl(peri + BANK_GPC1 + REG_PUD),
+	     readl(peri + BANK_GPC1 + REG_DRV));
+	for (i = 0; i <= 9; i++)
+		n += scnprintf(line + n, sizeof(line) - n, " %02x", i2c_smbus_read_byte_data(pmic[PB03], i) & 0xff);
+	note("S2MPB03 00-09:%s", line);
+	n = 0;
+	for (i = 0x22; i <= 0x2d; i++)
+		n += scnprintf(line + n, sizeof(line) - n, " %02x", i2c_smbus_read_byte_data(pmic[PB02], i) & 0xff);
+	note("S2MPB02 22-2d:%s", line);
+	note("%s: reset pin reads %d", c->name, gpiod_get_value_cansleep(reset_gpio));
+	/* CMU_TOP CIS_CLK0/1: mux 0x1018/0x101c, div 0x1814/0x1818, gate 0x2018/0x201c (cmucal-sfr.c) */
+	if (!top_cmu)
+		top_cmu = ioremap(0x1a240000, 0x3000);
+	if (top_cmu)
+		note("CIS_CLK0 mux %08x div %08x gate %08x; CIS_CLK1 mux %08x div %08x gate %08x",
+		     readl(top_cmu + 0x1018), readl(top_cmu + 0x1814), readl(top_cmu + 0x2018),
+		     readl(top_cmu + 0x101c), readl(top_cmu + 0x1818), readl(top_cmu + 0x201c));
+}
+
 static void read_id(const struct camera *c)
 {
 	u8 id[2], rev;
@@ -609,6 +640,7 @@ static void read_id(const struct camera *c)
 	}
 	if (ret) {
 		note("%s: no answer at 0x%02x: %d", c->name, c->addr, ret);
+		id_diag(c);
 		return;
 	}
 	if (read16(sensor, 0x0002, &rev, 1))
@@ -969,6 +1001,12 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 	ir_led_note();
 	if (!strcmp(cmd, "pmic")) {
 		pmic_dump();
+		if (!top_cmu)
+			top_cmu = ioremap(0x1a240000, 0x3000);
+		if (top_cmu)
+			note("CIS_CLK0 mux %08x div %08x gate %08x; CIS_CLK1 mux %08x div %08x gate %08x",
+			     readl(top_cmu + 0x1018), readl(top_cmu + 0x1814), readl(top_cmu + 0x2018),
+			     readl(top_cmu + 0x101c), readl(top_cmu + 0x1818), readl(top_cmu + 0x201c));
 		goto done;
 	}
 	if (!strncmp(cmd, "dvfs-", 5)) {
