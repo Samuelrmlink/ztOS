@@ -1,3 +1,32 @@
+# Overnight logging, wake interval and Wi-Fi windows — 2026-11-11
+
+**soc.csv.** zrn-sleepd appends a row to `/var/lib/zrn-sleep/soc.csv` (kept
+across boots, rotated to soc.csv.1 past 8 MB) at every sleep entry (`sleep`),
+every return (`wake`), every Wi-Fi return after a wake (`wifi`, with the
+reassociation time), every `tick_s` while it stays awake (`awake`), and at
+start (`start`). Columns: time, epoch, boot_s, event, soc, charge_now_mah,
+charge_counter_mah, voltage_mv, current_now_ma, current_avg_ma, temp_c,
+asleep_s, awake_s, reason (a wake's purpose: `tick` = our RTC alarm with Wi-Fi
+left parked, `wifi` = our RTC alarm with Wi-Fi back, `alarm` = someone's
+alarmtimer, `key`, `modem`, `bt`, `hub`, ...), wifi, display (on, aod, off),
+charger, note (a wake's `prep`/`restore` seconds: what one cycle costs awake).
+One O_APPEND write a row, no fsync: the sync before each sleep puts them on
+the disk. `power/suspend/soc-report.py soc.csv [--png out.png]` sums a night.
+
+**/var/lib/zrn-sleep/config** (key=value, re-read before each sleep):
+`wake_interval_s` (MAX_SLEEP_S, 1800), `wifi_interval_s` (0: Wi-Fi back at
+every wake; N: our own RTC wakes leave brcmfmac unbound until N s since it
+was last bound), `wifi_window_s` (30: after a wake with Wi-Fi up before the
+sleep, stay up until wlp1s0 is up, at most this), `wifi_grace_s` (10: then
+this much more, for mail, a push, ssh), `tick_s` (600), `doze_sleep_s`.
+
+**The RTC at boot.** zrn-rtc.service (30 Oct) was never in layer.sh's
+DEVICE_UNITS, so a fresh install had no /sys/class/rtc until zrn-sleepd's
+first sleep: no CLOCK_*_ALARM timer could program a wake before that. Now
+enabled with the image. `alarm-timerfd.py SECONDS LOG` arms a
+CLOCK_REALTIME_ALARM timerfd (needs CAP_WAKE_ALARM: EPERM without) and logs
+its lateness; `sleep-alarm-test.sh` runs it across a `once` sleep.
+
 # End-to-end bench after round 2 — 2026-10-30
 
 **Every check passed on the charger.** The hub, the sensors, GNSS, Wi-Fi, push,
