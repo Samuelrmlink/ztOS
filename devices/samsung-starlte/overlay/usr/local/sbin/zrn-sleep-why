@@ -496,7 +496,7 @@ def wakeup_blockers(sources=None):
 		label = source_label(s['name'], s['driver'])
 		name = s['name'] or s['dir']
 		out.append(blocker('wakeup', f'{label} (kernel)', f'Kernel: {label}', proc=name,
-				   detail=f'{name} held for {ago(s["active_ms"] / 1000)}'))
+				   detail=f'held for {ago(s["active_ms"] / 1000)}'))
 	return out
 
 
@@ -779,10 +779,11 @@ def shell_lines(result, always=False):
 			parts.append(b['proc'])
 		if b['pid']:
 			parts.append(f'pid {b["pid"]}')
-		if b['unit']:
-			parts.append(b['unit'])
+		# what it is doing before which unit: the line is cut at the end
 		if b['detail']:
 			parts.append(b['detail'])
+		if b['unit']:
+			parts.append(b['unit'])
 		lines.append(f'item\t{b["kind"]}\t{clean(b["label"])}\t{clean(" · ".join(parts))}')
 	lines.append(f'woke\t{clean(result["wakes_text"])}')
 	w = result.get('wakers')

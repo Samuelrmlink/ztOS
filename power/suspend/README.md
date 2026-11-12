@@ -8,7 +8,7 @@ holds sleep off now, then `woke_last_hour=`:
     why=aod showing
     ...
     enabled
-    blocker=wakeup: Wireless charger (kernel) (p9320-wireless) - p9320-wireless held for 36 min
+    blocker=wakeup: Wireless charger (kernel) (p9320-wireless) - held for 36 min
     blocker=aod: Always-on display showing (ztmetro) - zrn-sleepd does not sleep while it shows
     woke_last_hour=0: Did not sleep in the last hour
 
