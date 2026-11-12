@@ -359,6 +359,42 @@ Samsung's `blkpwr_aud` and the existing `aud_power_cycle`, split into off and on
 - **L43 back to 3.0 V**: S2MPS18 0x74 = **0xf0**, with mask 0x3f on the voltage bits only, through ACPM. The current value is 0xfc. First find what set 0x3c.
 - **S2MPB02 BUCK2 off at camera close**: 0x0d bits 7:6 = 00 (mask 0xc0), through bus 97.
 
+## Fixes applied and measured (2026-11-12)
+
+The owner approved fixes 1, 2 and the L43 part of 4 on 2026-11-12. Fix 3 and the S2MPB02 buck belong to the camera agent (zrn-cam).
+
+| Fix | Code | On the phone |
+|---|---|---|
+| 1. MIF 421 MHz at screen off | `power/rails/zrn-rails.c` (`mif_khz`, kill switch `mif_enable`), `zrnperfd` (`mif-scale on\|off`, 1794 MHz while a DP connector is `connected`) | `/etc/modules-load.d/zrn-rails.conf`; zrnperfd rebuilt |
+| 2. Audio block off when idle | `audio/driver/snd-zrn-abox.c`, the block "the audio block off while nothing plays" (`idle_off_ms`, 0 = kill switch) | `extra/snd-zrn-abox.ko` (includes `feature/headset`) |
+| 4. L43 (touch AVDD) at 3.0 V | `zrn-rails.c` at load: 0x74 voltage bits = 0x30 (`l43_fix`) | with zrn-rails |
+
+Backups: `*.pre-rail-map` next to each replaced file. Restore with `sudo sh power/rails/install.sh restore`, then reboot.
+
+### Measurements
+
+All runs used `power/rails/ab.sh`: screen off, AOD off (sleep inhibited), awake, on battery, interleaved A (fix off) / B (fix on) rounds, 60 s settle, then 60 one-second samples. The rows below are **obs**.
+
+| Fix | A | B | Difference |
+|---|---|---|---|
+| 1. MIF | 455, 341, 355 mA | 317, 304, 314 mA | The two clean pairs (A2/B2, A3/B3) give **37 and 41 mA, i.e. 141 and 154 mW**. A1 ran at 67 % CPU busy and is left out of the estimate. CPU busy rose from 12-17 % to 27-34 % at 421 MHz, so memory-bound work takes longer. |
+| 2. Audio idle | 369, 346, 461 mA; abox IRQ ~1050-1090/s | 362, 350, 459 mA; abox IRQ **0/s** | +7, -4, +2 mA (+27, -13, +11 mW). That is **under 10 mW, within the noise**: the CPU ran at 67 % busy from another agent's load in all six windows. |
+
+- An earlier run on the charger is discarded. The charge current was tapering by 70 mA per window.
+- **Audio wake:** power-on of the block plus the DSP boot takes **143-196 ms** (`wake_us_last`, 8 wakes, 0 failures).
+- **Audio playback after a wake:**
+  - A 10 ms `aplay` to hw:ZrnAbox,1 took 513-619 ms with the block off, against 311-506 ms with it on.
+  - PipeWire (`pw-play`) woke the block, played, and the block was off again ~7 s later: WirePlumber's 5 s suspend plus 0.5 s.
+- **The 1 kHz DSP tick comes from a fresh module load, not from open streams.**
+  - At 07:00 every PCM was closed (`/proc/asound/card0/pcm*/sub0/status`), and the DSP still raised ~1000 IRQ/s.
+  - After a wake from idle the DSP does not tick.
+  - pid 94 from the overnight watch was gone after that boot, so it could not be identified.
+- **MIF requests:** 19 sent, 0 failures, 0.5-4 ms each. Screen on (09:19) raised MIF to 1794 MHz in 1.4 ms: the lock screen drew normally, and MIF went back to 421 at screen off.
+- **L43 (touch AVDD):**
+  - 0xfc became 0xf0 at the first load.
+  - The boot after the 08:09 reboot (not this agent's) left the voltage bits at 0x30 already.
+  - The touch driver stayed bound, with no errors.
+
 ## Open reads
 
 These are reads, no writes. Each needs a go-ahead because it loads a module or uses a selector file.

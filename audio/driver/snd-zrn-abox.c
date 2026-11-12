@@ -230,6 +230,13 @@ static int lv2_used = 1;	/* table 0 stays empty: what unmapped space points at *
 static bool started, booted;
 static bool suspending, dsp_fault, irq_quiesced;
 static void dsp_recover(void);
+/* the idle power-off (see "the audio block off while nothing plays") */
+static bool aud_idle_off;
+static bool call_held, dsm_held;	/* a call or DSM holds the block on */
+static int aud_get(void);
+static void aud_put(void);
+static void aud_idle_kick(void);
+static struct delayed_work aud_idle_work;
 static const struct firmware *fw_sram, *fw_dram, *fw_iva;
 static struct snd_pcm *playback[2];
 static DEFINE_MUTEX(stream_lock);
@@ -739,6 +746,8 @@ static void gear_tell(struct work_struct *work)
 	u32 hz;
 	u32 m[6] = { IPC_SYSTEM, 0, ABOX_CHANGED_GEAR, 0, 0, 0 };
 
+	if (READ_ONCE(aud_idle_off))
+		return;		/* the block is off: nothing to tell, nothing to read */
 	if (work)
 		gear_apply();
 	/* what the APM runs it at; without the APM, what CMU_AUD says */
@@ -1470,8 +1479,10 @@ static int st_msg(struct stream *st, u32 type, u32 a, u32 b, u32 c)
 
 static int abox_pcm_open(struct snd_pcm_substream *s)
 {
-	int ret;
+	int ret = aud_get();	/* the block on, if it was off for idleness */
 
+	if (ret)
+		return ret;
 	mutex_lock(&stream_lock);
 	if (suspending || !booted) {
 		ret = -EIO;
@@ -1484,6 +1495,8 @@ static int abox_pcm_open(struct snd_pcm_substream *s)
 	ret = st_msg(stream_of(s), PCM_PLTDAI_OPEN, 0, 0, 0);
 out:
 	mutex_unlock(&stream_lock);
+	if (ret)
+		aud_put();
 	return ret;
 }
 
@@ -1506,6 +1519,7 @@ static int abox_pcm_close(struct snd_pcm_substream *s)
 	if (!call_route && !dsm_on && !any_active())
 		mixp_flush();
 	mutex_unlock(&stream_lock);
+	aud_put();
 	return 0;
 }
 
@@ -1801,7 +1815,9 @@ static void abox_watchdog(struct work_struct *work)
 		}
 	}
 	mutex_unlock(&stream_lock);
-	schedule_delayed_work(&watchdog_work, msecs_to_jiffies(113));
+	/* the block off for idleness: no ticks until it is used again (aud_get) */
+	if (!READ_ONCE(aud_idle_off))
+		schedule_delayed_work(&watchdog_work, msecs_to_jiffies(113));
 }
 
 static int abox_pcm_mmap(struct snd_pcm_substream *s, struct vm_area_struct *vma)
@@ -2408,8 +2424,10 @@ static int cap_config(void)
 
 static int cap_open(struct snd_pcm_substream *s)
 {
-	int ret;
+	int ret = aud_get();
 
+	if (ret)
+		return ret;
 	mutex_lock(&stream_lock);
 	if (suspending || !booted) {
 		ret = -EIO;
@@ -2428,6 +2446,8 @@ static int cap_open(struct snd_pcm_substream *s)
 		cap.opened = true;
 out:
 	mutex_unlock(&stream_lock);
+	if (ret)
+		aud_put();
 	return ret;
 }
 
@@ -2441,6 +2461,7 @@ static int cap_close(struct snd_pcm_substream *s)
 	cap_path_off();
 	cap.opened = false;
 	mutex_unlock(&stream_lock);
+	aud_put();
 	return 0;
 }
 
@@ -2690,7 +2711,16 @@ static int call_put(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
 		return -EINVAL;
 	if (route == call_route)
 		return 0;
+	if (route && !call_held) {
+		if (aud_get())
+			return -EIO;
+		call_held = true;
+	}
 	call_set(route);
+	if (!route && call_held) {
+		call_held = false;
+		aud_put();
+	}
 	return 1;
 }
 
@@ -2713,9 +2743,21 @@ static int dsm_put(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
 {
 	bool on = v->value.integer.value[0];
 
+	int ret;
+
 	if (on == dsm_on)
 		return 0;
-	return dsm_set(on) ? -EINVAL : 1;
+	if (on && !dsm_held) {
+		if (aud_get())
+			return -EIO;
+		dsm_held = true;
+	}
+	ret = dsm_set(on) ? -EINVAL : 1;
+	if (dsm_held && !dsm_on) {
+		dsm_held = false;
+		aud_put();
+	}
+	return ret;
 }
 
 static const struct snd_kcontrol_new dsm_control = {
@@ -2744,7 +2786,13 @@ static int dsmr_get(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
 
 static int dsmr_put(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
 {
-	return dsm_read(v->value.integer.value[0], 4) ? -EIO : 1;
+	int ret = aud_get();
+
+	if (ret)
+		return ret;
+	ret = dsm_read(v->value.integer.value[0], 4) ? -EIO : 1;
+	aud_put();
+	return ret;
 }
 
 static const struct snd_kcontrol_new dsmr_control = {
@@ -2818,6 +2866,8 @@ static int fx_info(struct snd_kcontrol *k, struct snd_ctl_elem_info *info)
 	return 0;
 }
 
+static u32 saved_effects[ARRAY_SIZE(effects)][26];	/* defined again below (tentative) */
+
 static int fx_get(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
 {
 	const struct effect *e = &effects[k->private_value];
@@ -2825,6 +2875,9 @@ static int fx_get(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
 	int i;
 
 	spin_lock_irqsave(&aud_lock, flags);
+	/* the block off for idleness: the values it will be given at the next start */
+	for (i = 0; i < e->count && aud_off && aud_idle_off; i++)
+		v->value.integer.value[i] = (s32)saved_effects[k->private_value][i];
 	for (i = 0; i < e->count && !aud_off; i++)
 		v->value.integer.value[i] = (s32)readl(sram + EFFECTS + e->base + 0x10 + i * 4);
 	spin_unlock_irqrestore(&aud_lock, flags);
@@ -2838,6 +2891,14 @@ static int fx_put(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
 	int i;
 
 	spin_lock_irqsave(&aud_lock, flags);
+	if (aud_off && aud_idle_off) {
+		/* kept for the next start (aud_block_on writes them in) */
+		for (i = 0; i < e->count; i++)
+			saved_effects[k->private_value][i] =
+				(u32)clamp_t(long, v->value.integer.value[i], e->min, e->max);
+		spin_unlock_irqrestore(&aud_lock, flags);
+		return 1;
+	}
 	if (aud_off) {
 		spin_unlock_irqrestore(&aud_lock, flags);
 		return -EBUSY;
@@ -3065,7 +3126,17 @@ static int abox_pm_event(struct notifier_block *nb, unsigned long event, void *u
 		/* the codec and UAIF0 path have no suspend/resume here yet */
 		if (READ_ONCE(cap.opened))
 			return notifier_from_errno(-EBUSY);
+		cancel_delayed_work_sync(&aud_idle_work);
 		cancel_delayed_work_sync(&watchdog_work);
+		if (READ_ONCE(aud_idle_off)) {
+			/* already off: nothing to stop, nothing may be touched */
+			mutex_lock(&stream_lock);
+			suspending = true;
+			for (i = 0; i < ARRAY_SIZE(streams); i++)
+				streams[i].needs_reset = true;
+			mutex_unlock(&stream_lock);
+			break;
+		}
 		snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
 		for (i = 0; i < ARRAY_SIZE(playback); i++)
 			snd_pcm_suspend_all(playback[i]);
@@ -3092,6 +3163,14 @@ static int abox_pm_event(struct notifier_block *nb, unsigned long event, void *u
 	case PM_POST_SUSPEND:
 		if (!suspending)
 			break;
+		if (READ_ONCE(aud_idle_off)) {
+			/* stays off: the next user starts it (aud_get) */
+			mutex_lock(&stream_lock);
+			suspending = false;
+			pm_ready = true;
+			mutex_unlock(&stream_lock);
+			break;
+		}
 		mutex_lock(&stream_lock);
 		cmu_compare();
 		ret = dsp_boot();
@@ -3236,6 +3315,253 @@ static void dsp_recover(void)
 	pr_warn("snd-zrn-abox: watchdog restarted DSP (%d), streams require prepare\n", ret);
 }
 
+/* ---- the audio block off while nothing plays (power/RAIL-MAP.md, gap 2) -----
+ *
+ * Samsung powers the block off 500 ms after its last user (abox.c:
+ * pm_runtime autosuspend 500 ms, abox_disable, then genpd takes pd-aud down).
+ * Ours ran from boot: the DSP's 1 ms tick, ~1000 interrupts a second, the
+ * block's clocks and leakage, for ever. This does Samsung's sequence, the one
+ * dsp_recover's power cycle already uses, split in two halves:
+ *
+ *  off, idle_off_ms (500) after the last user: the DSP told to suspend and
+ *	left in WFI, its DRAM request dropped (SYSPOWER_CTRL), SYSMMU and GIC
+ *	off, pad retention (PMU 0x1424 bit 0), the clock registers saved
+ *	(aud_regs), SMC PREPARE_PD_ONOFF save (0x17c10204), PMU AUD_CONFIGURATION
+ *	(0x4000) bits 3:0 = 0, AUD_STATUS polled to 0;
+ *  on, at the next user: AUD_CONFIGURATION = 0xf and polled, SMC restore,
+ *	the clock registers back in order (PLL_AUD waits for its lock), then the
+ *	DSP booted as at probe (dsp_boot) and the effects put back.
+ *
+ * Owner-approved 2026-11-12 (ROADMAP 8.31 fix 2). A user is an open playback
+ * or capture device, a call route, DSM, or a DSM read. Mixer effects written
+ * while off are kept and given to the DSP at the next start.
+ * idle_off_ms=0 is the kill switch (the block is powered on and stays on).
+ */
+static unsigned int idle_off_ms = 500;
+static int aud_users;			/* stream_lock */
+
+static unsigned int idle_offs, idle_wakes, idle_fails, wake_us_last, wake_us_max;
+module_param(idle_offs, uint, 0444);
+module_param(idle_wakes, uint, 0444);
+module_param(idle_fails, uint, 0444);
+module_param(wake_us_last, uint, 0444);
+module_param(wake_us_max, uint, 0444);
+MODULE_PARM_DESC(wake_us_last, "the last power-on of the block and DSP boot, in us");
+
+static bool aud_idle_possible(void)
+{
+	return idle_off_ms && !aud_broken && !rx_task && abox_irq > 0 && idle_fails < 3;
+}
+
+static void aud_idle_kick(void)
+{
+	if (aud_idle_possible())
+		mod_delayed_work(system_wq, &aud_idle_work, msecs_to_jiffies(idle_off_ms));
+}
+
+/* stream_lock held, the DSP booted and quiet: block off. 0, or the DSP is
+ * running again as before. */
+static int aud_block_off(void)
+{
+	u32 m[6] = { IPC_SYSTEM, 0, ABOX_SUSPEND, 0, 0, 0 };
+	struct arm_smccc_res res;
+	unsigned long flags;
+	bool dma, wfi;
+	int i, j, k;
+
+	for (i = 0; i < ARRAY_SIZE(effects); i++)
+		for (j = 0; j < effects[i].count; j++)
+			saved_effects[i][j] = readl(sram + EFFECTS + effects[i].base + 0x10 + j * 4);
+	amp_set(false);
+	disable_irq(abox_irq);
+	irq_quiesced = true;
+	cancel_delayed_work_sync(&gear_work);
+	cancel_delayed_work_sync(&gear_again);
+	for (k = 0; k < 100; k++) {
+		dma = (readl(sfr + ABOX_RDMA0 + RDMA_STATUS) |
+		       readl(sfr + ABOX_RDMA0 + 0x100 + RDMA_STATUS)) & BIT(31);
+		if (!dma)
+			break;
+		usleep_range(500, 1000);
+	}
+	if (!dma)
+		ipc_send(m, 6);
+	for (k = 0; k < 1000 && !(readl(pmu + PMU_ABOX_CPU_STANDBY) & ABOX_CPU_WFI); k++)
+		udelay(10);
+	wfi = readl(pmu + PMU_ABOX_CPU_STANDBY) & ABOX_CPU_WFI;
+	booted = false;
+	if (dma || !wfi) {
+		pr_warn("snd-zrn-abox: idle: DSP %s, DMA %s: stays powered\n",
+			wfi ? "idle" : "busy", dma ? "running" : "stopped");
+		goto restart;
+	}
+	writel(0, sfr + ABOX_SYSPOWER_CTRL);
+	writel(0, mmu + MMU_CTRL);
+	writel(0, gicd);
+	pmu_update(PMU_GPIO_MODE_ABOX, 0x1, 0x1);
+	for (i = 0; i < ARRAY_SIZE(aud_regs); i++)
+		aud_saved[i] = readl(aud_reg(i)) & aud_regs[i].mask;
+	spin_lock_irqsave(&aud_lock, flags);
+	for (i = 0; i < ARRAY_SIZE(effects); i++)	/* a mixer write since is kept */
+		for (j = 0; j < effects[i].count; j++)
+			saved_effects[i][j] = readl(sram + EFFECTS + effects[i].base + 0x10 + j * 4);
+	aud_off = true;
+	WRITE_ONCE(aud_idle_off, true);
+	spin_unlock_irqrestore(&aud_lock, flags);
+	res.a0 = 0;
+	if (aud_smc)
+		arm_smccc_smc(SMC_PD_ONOFF, PD_SAVE, AUD_TZPC, 0, 0, 0, 0, 0, &res);
+	if (res.a0) {
+		pr_warn("snd-zrn-abox: idle: secure monitor would not save the block (%lx)\n", res.a0);
+		spin_lock_irqsave(&aud_lock, flags);
+		aud_off = false;
+		WRITE_ONCE(aud_idle_off, false);
+		spin_unlock_irqrestore(&aud_lock, flags);
+		goto restart;
+	}
+	pmu_update(PMU_AUD_CONFIGURATION, 0xf, 0x0);
+	if (!pmu_wait(PMU_AUD_STATUS, 0xf, 0x0))
+		pr_warn("snd-zrn-abox: idle: block did not report off (%x)\n", readl(pmu + PMU_AUD_STATUS));
+	return 0;
+
+restart:
+	idle_fails++;
+	if (dsp_boot()) {
+		WRITE_ONCE(dsp_fault, true);
+		return -EIO;
+	}
+	for (i = 0; i < ARRAY_SIZE(effects); i++) {
+		for (j = 0; j < effects[i].count; j++)
+			writel(saved_effects[i][j], sram + EFFECTS + effects[i].base + 0x10 + j * 4);
+		writel(1, sram + EFFECTS + effects[i].base);
+	}
+	return -EBUSY;
+}
+
+/* stream_lock held, the block off: power, clocks, DSP, effects. */
+static int aud_block_on(bool boot)
+{
+	struct arm_smccc_res res;
+	unsigned long flags;
+	int i, j, ret;
+
+	pmu_update(PMU_AUD_CONFIGURATION, 0xf, 0xf);
+	if (!pmu_wait(PMU_AUD_STATUS, 0xf, 0xf)) {
+		aud_broken = true;	/* aud_off stays: nothing may touch it */
+		pr_err("snd-zrn-abox: idle: block did not power on (%x)\n", readl(pmu + PMU_AUD_STATUS));
+		return -EIO;
+	}
+	res.a0 = 0;
+	if (aud_smc)
+		arm_smccc_smc(SMC_PD_ONOFF, PD_RESTORE, AUD_TZPC, 0, 0, 0, 0, 0, &res);
+	if (res.a0)
+		pr_warn("snd-zrn-abox: idle: secure monitor would not restore the block (%lx)\n", res.a0);
+	for (i = 0; i < ARRAY_SIZE(aud_regs); i++) {
+		void __iomem *r = aud_reg(i);
+
+		if (aud_regs[i].mask == ~0U)
+			writel(aud_saved[i], r);
+		else
+			writel((readl(r) & ~aud_regs[i].mask) | aud_saved[i], r);
+		if (!aud_regs[i].sys && aud_regs[i].off == AUD_PLL_CON0 && (aud_saved[i] & BIT(31))) {
+			for (j = 0; j < 1000 && !(readl(r) & BIT(29)); j++)
+				udelay(10);
+			if (!(readl(r) & BIT(29)))
+				pr_warn("snd-zrn-abox: idle: PLL_AUD did not lock\n");
+		}
+	}
+	gear_applied_khz = 0;	/* the APM level is set again (dsp_boot) */
+	spin_lock_irqsave(&aud_lock, flags);
+	aud_off = false;
+	spin_unlock_irqrestore(&aud_lock, flags);
+	WRITE_ONCE(aud_idle_off, false);
+	if (!boot)
+		return 0;
+	ret = dsp_boot();
+	if (ret) {
+		booted = false;
+		WRITE_ONCE(dsp_fault, true);
+		return ret;
+	}
+	for (i = 0; i < ARRAY_SIZE(effects); i++) {
+		for (j = 0; j < effects[i].count; j++)
+			writel(saved_effects[i][j], sram + EFFECTS + effects[i].base + 0x10 + j * 4);
+		writel(1, sram + EFFECTS + effects[i].base);
+	}
+	vss_started = false;
+	return 0;
+}
+
+static void aud_idle_fn(struct work_struct *work)
+{
+	mutex_lock(&stream_lock);
+	if (!aud_idle_possible() || aud_idle_off || aud_users || call_route || dsm_on ||
+	    cap.opened || cap.path_on || hs_hp_active() || suspending || !booted ||
+	    READ_ONCE(dsp_fault) || any_active())
+		goto out;
+	if (!aud_block_off()) {
+		idle_offs++;
+		pr_info("snd-zrn-abox: idle: audio block off\n");
+	}
+out:
+	mutex_unlock(&stream_lock);
+}
+
+/* A user arrives: the block on (if it was off) and counted, in one go. */
+static int aud_get(void)
+{
+	ktime_t t0;
+	int ret = 0;
+
+	cancel_delayed_work_sync(&aud_idle_work);
+	mutex_lock(&stream_lock);
+	if (aud_idle_off && !suspending) {
+		t0 = ktime_get();
+		ret = aud_block_on(true);
+		wake_us_last = ktime_us_delta(ktime_get(), t0);
+		if (wake_us_last > wake_us_max)
+			wake_us_max = wake_us_last;
+		idle_wakes++;
+		pr_info("snd-zrn-abox: idle: audio block on, DSP %s in %u us\n",
+			ret ? "failed" : "running", wake_us_last);
+		if (!ret)
+			schedule_delayed_work(&watchdog_work, msecs_to_jiffies(113));
+	}
+	if (!ret)
+		aud_users++;
+	mutex_unlock(&stream_lock);
+	return ret;
+}
+
+static void aud_put(void)
+{
+	mutex_lock(&stream_lock);
+	if (aud_users > 0)
+		aud_users--;
+	mutex_unlock(&stream_lock);
+	aud_idle_kick();
+}
+
+/* the kill switch: 0 powers the block back on and keeps it on */
+static int idle_off_ms_set(const char *val, const struct kernel_param *kp)
+{
+	int ret = param_set_uint(val, kp);
+
+	if (ret || !pdev)
+		return ret;
+	if (!idle_off_ms) {
+		ret = aud_get();
+		if (!ret)
+			aud_put();
+		return ret;
+	}
+	aud_idle_kick();
+	return 0;
+}
+static const struct kernel_param_ops idle_off_ms_ops = { .set = idle_off_ms_set, .get = param_get_uint };
+module_param_cb(idle_off_ms, &idle_off_ms_ops, &idle_off_ms, 0644);
+MODULE_PARM_DESC(idle_off_ms, "power the audio block off this long after its last user (0: never)");
+
 static int __init abox_init(void)
 {
 	struct snd_pcm *snd_pcm;
@@ -3247,6 +3573,7 @@ static int __init abox_init(void)
 	INIT_DELAYED_WORK(&gear_work, gear_tell);
 	INIT_DELAYED_WORK(&gear_again, gear_tell);
 	INIT_DELAYED_WORK(&watchdog_work, abox_watchdog);
+	INIT_DELAYED_WORK(&aud_idle_work, aud_idle_fn);
 	apm_init();
 	pdev = platform_device_register_simple("snd-zrn-abox", -1, NULL, 0);
 	if (IS_ERR(pdev))
@@ -3449,6 +3776,7 @@ static int __init abox_init(void)
 		goto err;
 	pm_ready = true;
 	schedule_delayed_work(&watchdog_work, msecs_to_jiffies(113));
+	aud_idle_kick();	/* nothing opened within idle_off_ms: off */
 	return 0;
 
 err:
@@ -3459,6 +3787,12 @@ err:
 static void __exit abox_exit(void)
 {
 	unregister_pm_notifier(&abox_pm);
+	idle_off_ms = 0;
+	cancel_delayed_work_sync(&aud_idle_work);
+	mutex_lock(&stream_lock);
+	if (aud_idle_off)
+		aud_block_on(false);	/* teardown writes the block's registers */
+	mutex_unlock(&stream_lock);
 	teardown();
 }
 

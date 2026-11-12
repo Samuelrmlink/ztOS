@@ -39,6 +39,9 @@
  *				(700 by default; 0: every DTIM)
  *	motion MS		the touch boost's lift, held for MS (at most 3 s):
  *				the shell animating on its own clock past a touch
+ *	mif-scale on | off	with the screen off, the memory clock at 421 MHz
+ *				instead of 1794 (zrn-rails; on by default; held
+ *				at 1794 while DP is connected)
  *
  * /run/zrnperfd.ctl is that pipe (anyone may write), /run/zrnperfd.status
  * says what is set (and front=PID APP_ID: the app in front, for ztacctd),
@@ -1243,6 +1246,54 @@ static void ib_publish(int ladder, int want) {
 }
 
 /* the tickle mode for the condition the phone is in, and what is set, for anyone to read */
+/* ---- the memory clock (power/rails/zrn-rails.c, power/RAIL-MAP.md gap 1) ------
+ * With the screen off the memory interface goes from its boot level, 1794 MHz,
+ * to stock's idle level, 421 MHz; back at screen on. It stays at 1794 MHz
+ * while an external display (DP) is connected. "mif-scale off" is the kill
+ * switch (kept across boots); zrn-rails mif_enable parameter is the other.
+ * One request per change, nothing on a timer. Without zrn-rails nothing happens. */
+#define MIF_PARAM	"/sys/module/zrn_rails/parameters/mif_khz"
+#define MIF_LOW		421000
+#define MIF_BOOT	1794000
+static bool mif_scale = true;
+static long mif_khz = MIF_BOOT;		/* what zrn-rails last accepted from us */
+
+static bool dp_connected(void) {
+	glob_t g;
+	bool on = false;
+	if (glob("/sys/class/drm/card*-DP-*/status", 0, NULL, &g) == 0) {
+		for (size_t i = 0; i < g.gl_pathc && !on; i++) {
+			char s[16] = "";
+			FILE *f = fopen(g.gl_pathv[i], "r");
+			if (f) {
+				if (fgets(s, sizeof(s), f)) {}
+				fclose(f);
+			}
+			on = strncmp(s, "connected", 9) == 0;
+		}
+		globfree(&g);
+	}
+	return on;
+}
+
+static void mif_apply(void) {
+	long want = (!screen_on && mif_scale && !dp_connected()) ? MIF_LOW : MIF_BOOT;
+	if (want == mif_khz) {
+		return;
+	}
+	int fd = open(MIF_PARAM, O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return;		/* zrn-rails not loaded: the memory stays where it is */
+	}
+	if (dprintf(fd, "%ld\n", want) > 0) {
+		mif_khz = want;
+		fprintf(stderr, "zrnperfd: memory clock %ld kHz\n", want);
+	} else {
+		fprintf(stderr, "zrnperfd: memory clock %ld kHz refused: %s\n", want, strerror(errno));
+	}
+	close(fd);
+}
+
 static void status(void) {
 	tickle_set_mode(tickle_when[condition()]);
 	FILE *f = fopen(STATUS ".new", "w");
@@ -1252,6 +1303,7 @@ static void status(void) {
 		fprintf(f, "cpus=%d\nclusters=%d\n", cpu_count, n_clusters);
 		fprintf(f, "condition=%s\nboost=%s\n", conditions[condition()], boost_names[boost]);
 		fprintf(f, "wifi=%s\n", wifi_asleep ? "sleeping" : "on");
+		fprintf(f, "mif_scale=%s\nmif_khz=%ld\n", mif_scale ? "on" : "off", mif_khz);
 		fprintf(f, "wifi_sleep=%s\nwifi_powersave=%s\n", wifi_sleep_enabled ? "on" : "off",
 			wifi_powersave ? "on" : "off");
 		wlpm_status(f);
@@ -1278,6 +1330,7 @@ static void save(void) {
 			wifi_powersave ? "on" : "off");
 		fprintf(f, "wifi-suspend %s\nwifi-filter %s\nwifi-listen %d\n", wlpm_suspend_enabled ? "on" : "off",
 			wlpm_filter_enabled ? "on" : "off", wlpm_listen_ms);
+		fprintf(f, "mif-scale %s\n", mif_scale ? "on" : "off");
 		fprintf(f, "ib %s\n", ib_names[ib_mode]);
 		fprintf(f, "ib engine %s\n", ibnet_using_score() ? "score" : "cpu");
 		for (int c = 0; c < 3; c++) {
@@ -1425,11 +1478,18 @@ static int command(char *line, bool persist) {
 			wlpm_reconfigure();
 			fprintf(stderr, "zrnperfd: %s %s\n", what, value);
 		}
+	} else if (strcmp(what, "mif-scale") == 0) {
+		mif_scale = strcmp(value, "on") == 0;
+		if (persist) {
+			mif_apply();
+			fprintf(stderr, "zrnperfd: mif-scale %s\n", value);
+		}
 	} else if (strcmp(what, "screen") == 0) {
 		screen_on = strcmp(value, "off") != 0;
 		persist = false;
 		tickle_screen(screen_on);
 		wlpm_screen(screen_on);
+		mif_apply();
 		if (screen_on) {
 			/* the screen takes the radio back at once; the timer stops */
 			wifi_sleep_at = 0;
@@ -1517,6 +1577,13 @@ int main(void) {
 	} else if (!screen_on && !plugged && !wifi_asleep) {
 		wifi_sleep_at = boost_ms();
 	}
+	/* the module's level, so a restart of this daemon puts it right */
+	f = fopen(MIF_PARAM, "r");
+	if (f) {
+		if (fscanf(f, "%ld", &mif_khz) != 1) mif_khz = MIF_BOOT;
+		fclose(f);
+	}
+	mif_apply();
 	apply();
 	status();
 
@@ -1694,6 +1761,10 @@ int main(void) {
 			ssize_t got;
 			while ((got = recv(uev, msg, sizeof(msg) - 1, 0)) > 0) {
 				msg[got] = 0;
+				if (memmem(msg, got, "SUBSYSTEM=drm", 13)) {
+					mif_apply();	/* DP in or out: 1794 MHz while it is there */
+					changed = changed ? changed : 1;
+				}
 				if (memmem(msg, got, "SUBSYSTEM=power_supply", 22)) {
 					bool now = read_plugged();
 					if (now != plugged && !changed) {
@@ -1740,6 +1811,8 @@ int main(void) {
 	if (touch_until) {
 		touch_release();
 	}
+	screen_on = true;
+	mif_apply();		/* the memory back at its boot level */
 	big_cores(true);	/* nothing is left switched off behind us */
 	cores_allowed("0-7");
 	fprintf(stderr, "zrnperfd: stopped, every app running\n");

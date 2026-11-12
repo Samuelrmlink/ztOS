@@ -725,8 +725,7 @@ static void hs_exit(void)
 		hs_report_key(0);
 	if (hs.up && codec_rst) {
 		mutex_lock(&codec_lock);
-		hs_micd_idle();
-		codec_update(MADERA_JACK_DETECT_ANALOGUE, MADERA_JD1_ENA | MADERA_JD2_ENA, 0);
+		hs_micd_idle();	/* JD stays on: teardown puts the codec in reset next */
 		mutex_unlock(&codec_lock);
 	}
 	hs.up = false;
