@@ -65,6 +65,7 @@ module_param(iris_allowed, bool, 0644);
 
 enum { PB03, PB02, PMIC_N };
 
+#define BUS_FLASH	97	/* leds/zrn-flash.c: the S2MPB02 on gpp6-0/1 */
 #define BUS_PB03	99
 #define BUS_PB02	100
 #define BUS_SENSOR	101
@@ -196,6 +197,13 @@ static char result[16384];
 static size_t result_len;
 static void __iomem *peri;
 static struct i2c_client *pmic[PMIC_N];
+static struct i2c_client pb02_shared;
+/*
+ * A rail found on at power-up (BUCK2 boots with enable bits 01, for one) is
+ * someone's state, not ours: its enable and voltage registers, 0x100 | value,
+ * are put back at power-off instead of switching it off.
+ */
+static u16 found_en[PMIC_N][0x40], found_v[PMIC_N][0x40];
 static struct i2c_gpio_platform_data i2c_100k = { .udelay = 5 };
 
 static struct gpiod_lookup_table pb03_gpios = {
@@ -255,6 +263,26 @@ static int pmic_buses(void)
 
 		if (pmic[b[i].id])
 			continue;
+		/*
+		 * zrn-flash, loaded at boot for the sensor hub's LDO9, already owns
+		 * the S2MPB02's pins as bus 97 with a client at 0x59. A second bus on
+		 * the same pins cannot get them, and a second client at 0x59 is
+		 * refused, so the chip is reached through that bus by an unregistered
+		 * client. The adapter's lock keeps the two drivers' transfers apart;
+		 * their registers do not overlap (flash, LDO9 there; camera LDOs here).
+		 */
+		if (b[i].id == PB02) {
+			ad = i2c_get_adapter(BUS_FLASH);
+			if (ad && !strcmp(ad->name, "i2c-gpio" __stringify(BUS_FLASH))) {
+				pb02_shared.adapter = ad;	/* the reference is kept */
+				pb02_shared.addr = ADDR_PB02;
+				strscpy(pb02_shared.name, "zrn-cam-pb02", sizeof(pb02_shared.name));
+				pmic[PB02] = &pb02_shared;
+				continue;
+			}
+			if (ad)
+				i2c_put_adapter(ad);
+		}
 		gpiod_add_lookup_table(b[i].t);
 		pd = platform_device_register_data(NULL, "i2c-gpio", b[i].bus, &i2c_100k, sizeof(i2c_100k));
 		if (IS_ERR(pd))
@@ -280,12 +308,16 @@ static int rail_set(const struct rail *r, bool on)
 	if (en < 0)
 		return en;
 	if (on) {
-		if (en & r->en_mask)
-			note("%s: already on (0x%02x) before us", r->name, en);
 		/* the voltage first, with the LDO off, and read back */
 		v = i2c_smbus_read_byte_data(c, r->v_reg);
 		if (v < 0)
 			return v;
+		if (en & r->en_mask) {
+			note("%s: already on (0x%02x, voltage 0x%02x) before us; put back so at off",
+			     r->name, en, v);
+			found_en[r->pmic][r->en_reg & 0x3f] = 0x100 | en;
+			found_v[r->pmic][r->en_reg & 0x3f] = 0x100 | v;
+		}
 		if ((v & r->v_mask) != r->code) {
 			ret = i2c_smbus_write_byte_data(c, r->v_reg, (v & ~r->v_mask) | r->code);
 			if (ret)
@@ -301,6 +333,22 @@ static int rail_set(const struct rail *r, bool on)
 			return en;
 		ret = i2c_smbus_write_byte_data(c, r->en_reg, en | r->en_mask);
 	} else {
+		u16 was = found_en[r->pmic][r->en_reg & 0x3f], wv = found_v[r->pmic][r->en_reg & 0x3f];
+
+		if (was) {
+			found_en[r->pmic][r->en_reg & 0x3f] = 0;
+			found_v[r->pmic][r->en_reg & 0x3f] = 0;
+			if ((en & r->en_mask) != (was & r->en_mask)) {
+				ret = i2c_smbus_write_byte_data(c, r->en_reg, (en & ~r->en_mask) | (was & r->en_mask));
+				if (ret)
+					return ret;
+			}
+			v = i2c_smbus_read_byte_data(c, r->v_reg);
+			if (v >= 0 && (v & r->v_mask) != (wv & r->v_mask))
+				ret = i2c_smbus_write_byte_data(c, r->v_reg, (v & ~r->v_mask) | (wv & r->v_mask));
+			note("%s: put back as found (0x%02x, voltage 0x%02x): %d", r->name, was & 0xff, wv & 0xff, ret);
+			return ret;
+		}
 		ret = i2c_smbus_write_byte_data(c, r->en_reg, en & ~r->en_mask);
 	}
 	if (ret)
