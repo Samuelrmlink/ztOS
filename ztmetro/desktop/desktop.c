@@ -33,6 +33,7 @@
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
+#include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include "zt-environment-v1-protocol.h"
 #if WLR_HAS_XWAYLAND
@@ -214,6 +215,15 @@ struct zt_desk {
 	int mon_w, mon_h, mon_hz;	/* a monitor's mode (monitor_mode =); 0: its preferred */
 	float scale;			/* 0: by the monitor's size */
 	bool xwayland_on;
+	/* rotation = 0|90|180|270: the desktop's outputs turned, for a monitor
+	 * stood on its side (sway's "transform": 90 for one turned a quarter
+	 * clockwise). wlr_scene draws it, the cursor and touch follow the
+	 * layout; ztdesk turns its capture back (ROADMAP 8.33) */
+	enum wl_output_transform transform;
+	/* wlr-output-management: the desktop's outputs (never the phone's
+	 * panel) for XFCE's Display settings, wlr-randr and the like */
+	struct wlr_output_manager_v1 *outman;
+	struct wl_listener outman_apply, outman_test;
 
 	struct wl_listener new_layer, new_vptr, new_vkbd, request_cursor, request_shape,
 		request_primary, request_drag, start_drag,
@@ -253,6 +263,7 @@ static void desk_config_load(struct zt_desk *desk) {
 	desk->mon_w = desk->mon_h = desk->mon_hz = 0;
 	desk->scale = 0.0f;
 	desk->xwayland_on = true;
+	desk->transform = WL_OUTPUT_TRANSFORM_NORMAL;
 	char path[512], line[256];
 	const char *home = getenv("HOME");
 	snprintf(path, sizeof(path), "%s/.config/ztmetro/desktop", home ? home : "");
@@ -291,6 +302,10 @@ static void desk_config_load(struct zt_desk *desk) {
 			desk->scale = s >= 1.0f && s <= 3.0f ? s : 0.0f;
 		} else if (strcmp(key, "xwayland") == 0) {
 			desk->xwayland_on = on;
+		} else if (strcmp(key, "rotation") == 0) {
+			int deg = atoi(value);
+			desk->transform = deg == 90 ? WL_OUTPUT_TRANSFORM_90 : deg == 180 ? WL_OUTPUT_TRANSFORM_180 :
+				deg == 270 ? WL_OUTPUT_TRANSFORM_270 : WL_OUTPUT_TRANSFORM_NORMAL;
 		}
 	}
 	fclose(f);
@@ -3125,6 +3140,7 @@ static void desk_output_request_state(struct wl_listener *l, void *data) {
 }
 
 static void desk_use_output(struct zt_desk *desk, struct desk_output *o);
+static void desk_outman_update(struct zt_desk *desk);
 
 static void desk_output_destroy(struct wl_listener *l, void *data) {
 	struct desk_output *o = wl_container_of(l, o, destroy);
@@ -3148,6 +3164,7 @@ static void desk_output_destroy(struct wl_listener *l, void *data) {
 	}
 	free(o);
 	wlr_log(WLR_INFO, "desktop: output %s gone", name);
+	desk_outman_update(desk);
 	if (real) {
 		/* the DP Alt Mode agent's hook (stage 6: desktop/DESIGN.md) */
 		desk_spawn("ztos-desktop-hotplug", "remove", name);
@@ -3301,6 +3318,7 @@ static void desk_new_output(struct zt_server *server, struct wlr_output *wo) {
 	}
 	wlr_output_state_set_scale(&state, virtual ? (desk->scale > 0 ? desk->scale : 1.0f) :
 		desk_auto_scale(desk, wo, px_w));
+	wlr_output_state_set_transform(&state, desk->transform);	/* (rotation =) */
 	if (!wlr_output_commit_state(wo, &state)) {
 		wlr_log(WLR_ERROR, "desktop: output %s did not take its mode", wo->name);
 	}
@@ -3340,6 +3358,7 @@ static void desk_new_output(struct zt_server *server, struct wlr_output *wo) {
 	if (!virtual) {
 		desk_spawn("ztos-desktop-hotplug", "add", wo->name);
 	}
+	desk_outman_update(desk);
 	if ((virtual ? desk->autostart_virtual : desk->autostart) && desk->session_pid <= 0) {
 		desk_session_start(desk);
 	}
@@ -3535,9 +3554,13 @@ static void desk_state_write(struct zt_desk *desk) {
 	if (desk->out) {
 		struct wlr_box b;
 		wlr_output_layout_get_box(desk->layout, desk->out->wo, &b);
+		/* (turned, the size as laid out: its pixels with width and height swapped) */
+		int tw, th;
+		wlr_output_transformed_resolution(desk->out->wo, &tw, &th);
 		fprintf(f, "output %s %s %d %d %.2f %d %d\n", desk->out->wo->name,
-			desk->out->virtual ? "virtual" : "monitor", desk->out->wo->width, desk->out->wo->height,
+			desk->out->virtual ? "virtual" : "monitor", tw, th,
 			desk->out->wo->scale, b.x, b.y);
+		fprintf(f, "transform %d\n", (int)desk->out->wo->transform);
 		/* the mode it runs at (refresh in mHz; 0 when the output has none) */
 		fprintf(f, "mode %d %d %d\n", desk->out->wo->width, desk->out->wo->height,
 			desk->out->wo->refresh);
@@ -3577,6 +3600,116 @@ static struct desk_view *desk_view_named(struct zt_desk *desk, const char *name)
 	return NULL;
 }
 
+/* ---- turning the desktop (rotation =, desktop rotate, output management) --- */
+
+/* After an output's mode or transform changed: the desktop laid out on it
+ * again, and XFCE's pieces put up again at the new size. */
+static void desk_output_changed(struct zt_desk *desk, struct desk_output *o) {
+	if (desk->out == o) {
+		desk->out = NULL;	/* its windows, panel and cursor laid out again */
+		desk_use_output(desk, o);
+		if (desk->session_pid > 0) {
+			desk_spawn("ztos-desktop-session", "--refresh", NULL);
+		}
+	}
+}
+
+/* Every desktop output turned (they are one desktop); the phone's panel is
+ * not one of them. */
+static void desk_set_transform(struct zt_desk *desk, enum wl_output_transform t) {
+	desk->transform = t;
+	struct desk_output *o;
+	wl_list_for_each(o, &desk->outputs, link) {
+		if (o->wo->transform == t) continue;
+		struct wlr_output_state state;
+		wlr_output_state_init(&state);
+		wlr_output_state_set_transform(&state, t);
+		bool ok = wlr_output_commit_state(o->wo, &state);
+		wlr_output_state_finish(&state);
+		wlr_log(WLR_INFO, "desktop: %s transform %d: %s", o->wo->name, (int)t, ok ? "set" : "refused");
+		if (ok) desk_output_changed(desk, o);
+	}
+	desk_state_write(desk);
+	desk_outman_update(desk);
+}
+
+static struct desk_output *desk_output_of(struct zt_desk *desk, struct wlr_output *wo) {
+	struct desk_output *o;
+	wl_list_for_each(o, &desk->outputs, link) {
+		if (o->wo == wo) return o;
+	}
+	return NULL;
+}
+
+/* What the clients see: the desktop's outputs as they are now. */
+static void desk_outman_update(struct zt_desk *desk) {
+	if (!desk->outman) return;
+	struct wlr_output_configuration_v1 *config = wlr_output_configuration_v1_create();
+	if (!config) return;
+	struct desk_output *o;
+	wl_list_for_each(o, &desk->outputs, link) {
+		struct wlr_output_configuration_head_v1 *head = wlr_output_configuration_head_v1_create(config, o->wo);
+		struct wlr_box b;
+		wlr_output_layout_get_box(desk->layout, o->wo, &b);
+		if (head) head->state.x = b.x, head->state.y = b.y;
+	}
+	wlr_output_manager_v1_set_configuration(desk->outman, config);
+}
+
+/* A client's configuration: mode, scale and transform of the desktop's
+ * outputs. Turning one off, moving it, or anything for an output that is not
+ * the desktop's (the phone's panel), is refused whole. */
+static void desk_outman_handle(struct zt_desk *desk, struct wlr_output_configuration_v1 *config, bool apply) {
+	bool ok = true;
+	struct wlr_output_configuration_head_v1 *head;
+	wl_list_for_each(head, &config->heads, link) {
+		struct desk_output *o = desk_output_of(desk, head->state.output);
+		if (!o || !head->state.enabled) {
+			ok = false;
+			break;
+		}
+		struct wlr_output_state state;
+		wlr_output_state_init(&state);
+		wlr_output_head_v1_state_apply(&head->state, &state);
+		ok = wlr_output_test_state(o->wo, &state);
+		wlr_output_state_finish(&state);
+		if (!ok) break;
+	}
+	if (ok && apply) {
+		wl_list_for_each(head, &config->heads, link) {
+			struct desk_output *o = desk_output_of(desk, head->state.output);
+			struct wlr_output_state state;
+			wlr_output_state_init(&state);
+			wlr_output_head_v1_state_apply(&head->state, &state);
+			state.committed &= ~WLR_OUTPUT_STATE_ENABLED;	/* (it is on) */
+			bool done = wlr_output_commit_state(o->wo, &state);
+			wlr_output_state_finish(&state);
+			wlr_log(WLR_INFO, "desktop: %s configured by a client (transform %d, scale %.2f): %s",
+				o->wo->name, (int)head->state.transform, head->state.scale, done ? "set" : "refused");
+			ok = ok && done;
+			if (done) {
+				desk->transform = head->state.transform;
+				desk_output_changed(desk, o);
+			}
+		}
+		desk_state_write(desk);
+	}
+	if (ok) wlr_output_configuration_v1_send_succeeded(config);
+	else wlr_output_configuration_v1_send_failed(config);
+	wlr_output_configuration_v1_destroy(config);
+	if (apply) desk_outman_update(desk);
+}
+
+static void desk_outman_apply(struct wl_listener *l, void *data) {
+	struct zt_desk *desk = wl_container_of(l, desk, outman_apply);
+	desk_outman_handle(desk, data, true);
+}
+
+static void desk_outman_test(struct wl_listener *l, void *data) {
+	struct zt_desk *desk = wl_container_of(l, desk, outman_test);
+	desk_outman_handle(desk, data, false);
+}
+
 /*
  * "desktop ..." on $XDG_RUNTIME_DIR/ztmetro.ctl:
  *
@@ -3592,6 +3725,8 @@ static struct desk_view *desk_view_named(struct zt_desk *desk, const char *name)
  *     desktop theme             read xfwm4's theme and settings again (deco.c)
  *     desktop mode WxH[@HZ]|preferred   the monitors' mode, now (monitor_mode = in
  *                               ~/.config/ztmetro/desktop keeps one across plugs)
+ *     desktop rotate 0|90|180|270   the desktop's outputs turned, now (rotation =
+ *                               in the same file keeps it)
  */
 static void desk_ctl(struct zt_server *server, const char *args) {
 	struct zt_desk *desk = server->desk;
@@ -3669,6 +3804,10 @@ static void desk_ctl(struct zt_server *server, const char *args) {
 				}
 			}
 		}
+		desk_outman_update(desk);
+	} else if (sscanf(args, "rotate %d", &n) == 1) {
+		desk_set_transform(desk, n == 90 ? WL_OUTPUT_TRANSFORM_90 : n == 180 ? WL_OUTPUT_TRANSFORM_180 :
+			n == 270 ? WL_OUTPUT_TRANSFORM_270 : WL_OUTPUT_TRANSFORM_NORMAL);
 	} else if (!strcmp(args, "start")) {
 		desk_session_start(desk);
 		desk_state_write(desk);
@@ -3890,6 +4029,13 @@ static void desk_init(struct zt_server *server, struct wlr_compositor *composito
 	desk->new_vkbd.notify = desk_new_vkbd;
 	wl_signal_add(&desk->vkbd_mgr->events.new_virtual_keyboard, &desk->new_vkbd);
 	desk->ft_mgr = wlr_foreign_toplevel_manager_v1_create(server->wl_display);
+	desk->outman = wlr_output_manager_v1_create(server->wl_display);
+	if (desk->outman) {
+		desk->outman_apply.notify = desk_outman_apply;
+		wl_signal_add(&desk->outman->events.apply, &desk->outman_apply);
+		desk->outman_test.notify = desk_outman_test;
+		wl_signal_add(&desk->outman->events.test, &desk->outman_test);
+	}
 	/* every app may ask where its windows are (phone or desktop) */
 	wl_global_create(server->wl_display, &zt_environment_manager_v1_interface, 1, desk, desk_env_bind);
 

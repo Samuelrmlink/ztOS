@@ -99,6 +99,8 @@ enum action {
 	ACT_FORCE_REL_STRENGTH,	/* and its strength: a slider */
 	ACT_WIFI_RADIO,
 	ACT_WIFI_SUSPEND,
+	ACT_AUTO_ROTATE,
+	ACT_FLIP_COVER,
 	ACT_WIFI_POWERSAVE,	/* the chip's 802.11 power save, through zrnperfd */
 	ACT_WIFI_CONNECT,
 	ACT_WIFI_RESCAN,
@@ -252,6 +254,8 @@ static struct {
 
 	bool wifi_on, wifi_loading;
 	bool wifi_suspend;
+	bool auto_rotate;	/* the screen turns with the phone (off by default) */
+	bool flip_cover;	/* a flip cover closed turns the screen off, opened on */
 	bool android_bt_remove_bond;	/* Android apps may remove Bluetooth pairings (ztos-btbridge reads it) */
 	struct network networks[MAX_NETWORKS];
 	int n_networks;
@@ -308,6 +312,7 @@ static struct {
 	.wall_target = WALL_TARGET_TILES,
 	.haptic_strength = 80,
 	.force_press = true,
+	.flip_cover = true,
 	.force_ms = FORCE_MS_DEFAULT,
 	.force_strength = FORCE_STRENGTH_DEFAULT,
 	.force_rel_ms = FORCE_MS_DEFAULT,
@@ -528,6 +533,10 @@ static void config_load(void) {
 			app.android_bt_remove_bond = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			app.wifi_suspend = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
+		} else if (strcmp(key, "auto_rotate") == 0) {
+			app.auto_rotate = strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
+		} else if (strcmp(key, "flip_cover") == 0) {
+			app.flip_cover = strcmp(val, "off") != 0 && strcmp(val, "0") != 0;
 		} else if (strcmp(key, "aod") == 0) {
 			app.aod = strcmp(val, "charging") == 0 || strcmp(val, "on") == 0 || strcmp(val, "1") == 0;
 			/* switched off, it comes back on in the default mode */
@@ -738,6 +747,8 @@ static void config_format(void) {
 	}
 	KEY("quick", "%s", quick);
 	KEY("wifi_suspend", "%s", app.wifi_suspend ? "on" : "off");
+	KEY("auto_rotate", "%s", app.auto_rotate ? "on" : "off");
+	KEY("flip_cover", "%s", app.flip_cover ? "on" : "off");
 	KEY("android_bt_remove_bond", "%s", app.android_bt_remove_bond ? "on" : "off");
 	KEY("aod", "%s", !app.aod ? "off" : app.aod_charging ? "charging" : "on");
 	KEY("clock_24h", "%s", app.clock_24h ? "on" : "off");
@@ -2249,6 +2260,11 @@ static double draw_display(cairo_t *cr) {
 	}
 	static const char *const fs_bars[] = { "2 seconds", "3 seconds", "5 seconds", "10 seconds" };
 	y = picker(cr, y, "Bars stay after a swipe in full screen", fs_bars, 4, app.fs_bars_idx, ACT_FS_BARS_CYCLE);
+	/* Start and apps turn with the phone; the lock screen and calls stay
+	 * upright. The action centre's Rotation Lock holds it upright. */
+	y = zmc_switch(cr, y, "Auto-rotate", app.auto_rotate, ACT_AUTO_ROTATE);
+	/* the hall sensor (sensors/hall): closed, the screen goes off and locks */
+	y = zmc_switch(cr, y, "Flip cover turns the screen off and on", app.flip_cover, ACT_FLIP_COVER);
 	/* the status bar, the nav bar and the lock clock a few pixels off their
 	 * place, a new one every 3 minutes (the shell's burn-in.h) */
 	y = zmc_switch(cr, y, "Shift the bars against burn-in", app.burnin_shift, ACT_BURNIN_SHIFT);
@@ -4318,6 +4334,14 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_ANDROID_BT_REMOVE_BOND:
 		app.android_bt_remove_bond = !app.android_bt_remove_bond;
+		config_save();
+		break;
+	case ACT_AUTO_ROTATE:
+		app.auto_rotate = !app.auto_rotate;
+		config_save();	/* (the shell reads it again on SIGHUP) */
+		break;
+	case ACT_FLIP_COVER:
+		app.flip_cover = !app.flip_cover;
 		config_save();
 		break;
 	case ACT_WIFI_SUSPEND:

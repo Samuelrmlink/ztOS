@@ -49,7 +49,7 @@ ZTENV_CODE = core/zt-environment-v1-protocol.c core/xdg-shell-protocol.c
 desktop/zt-environment-v1-protocol.h: $(ZTENV)
 	wayland-scanner server-header $< $@
 
-ztmetro: ztmetro.c volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+ztmetro: ztmetro.c rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -246,7 +246,7 @@ install-acct: acct/ztacctd acct/ztacct acct/ztusage
 touchkeyd/ztos-touchkeyd: touchkeyd/ztos-touchkeyd.c
 	$(CC) $(CFLAGS) $(WARN) -o $@ touchkeyd/ztos-touchkeyd.c
 
-sensord/ztoscsf-sensord: sensord/ztoscsf-sensord.c
+sensord/ztoscsf-sensord: sensord/ztoscsf-sensord.c sensord/orient.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ sensord/ztoscsf-sensord.c -lm
 
 # the modem's state for the shell (signal, operator, data), and airplane mode, SMS
@@ -498,21 +498,21 @@ clean:
 
 # Uses a private Wayland seat; does not touch the running compositor or display.
 .PHONY: check-arch check-keyboard
-check-keyboard: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-keyboard: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-keyboard-test
 
 .PHONY: check-launch
-check-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-launch-test tests/launch-state.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-launch-test tests/launch-state.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-launch-test
 
 .PHONY: check-auth
-check-auth: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-auth: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-auth-test
 
 # what the Bluetooth agent asks the shell, and the agent itself (no D-Bus, no phone)
@@ -557,15 +557,16 @@ check-mms: mms/ztmmsd modemd/ztoscorenetworkingd
 check-sensord:
 	python3 sensord/test-sensord-queue.py
 	python3 sensord/test-sensord-prox.py
+	python3 sensord/test-sensord-orient.py
 
 .PHONY: check-csf
 check-csf:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -o /tmp/ztmetro-csf-test ../sensors/test-csf-failure.c
 	/tmp/ztmetro-csf-test && /tmp/ztmetro-csf-test reset-fails
 
-check-reload-hub: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-reload-hub-test tests/reload-hub.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-reload-hub: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-reload-hub-test tests/reload-hub.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-reload-hub-test
 
 .PHONY: check-bt-list
@@ -692,6 +693,11 @@ check-ntfyd: ntfy/ztos-ntfyd ntfy/ztntfy notifyd/ztnotifyd
 check-power-key:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-power-key-test tests/power-key.c
 	/tmp/ztmetro-power-key-test
+
+.PHONY: check-rotation
+check-rotation:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-rotation-test tests/rotation.c -lm
+	/tmp/ztmetro-rotation-test
 
 .PHONY: check-burn-in
 # burn-in.h: the shift's schedule (equal shares, one step at a time, 2-4 px)
