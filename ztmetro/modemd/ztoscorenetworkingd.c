@@ -21,6 +21,9 @@
  *				texts carry on: see "packet data" below
  *	sms NUMBER TEXT		one message, in PDU mode (text mode is refused
  *				by this modem)
+ *	svc enter CODE|key N|back|end|ping|netinfo
+ *				Samsung's ServiceMode menus, to look at only:
+ *				servicemode.h
  *
  * Nothing is written to EFS. The modem's file channel is read, and its
  * requests may be answered without storing anything (see "what the modem
@@ -1396,6 +1399,8 @@ static bool ipc_send_ack(int main_cmd, int sub, int type, int aseq, const unsign
 	return ipc_write(main_cmd, sub, type, aseq, data, len);
 }
 
+#include "servicemode.h"
+
 /* ---- packet data, through IPC ---------------------------------------------
  *
  * The layouts are libsec-ril's (IpcProtocol41::IpcTxDefinePdpContext and
@@ -1954,15 +1959,19 @@ static void ipc_message(int main_cmd, int sub, int type, int mseq, const unsigne
 		/* what is the phone's or the SIM's own is not written down: its
 		 * presence only; nor any SMS (main 04) */
 		bool private = (main_cmd == 0x0d && sub == 0x09) || main_cmd == 0x0a || main_cmd == 0x04 ||
+			main_cmd == 0x0b /* ServiceMode screens: cell identities */ ||
 			(main_cmd == 0x05 && sub == 0x0c) || (main_cmd == 0x08 && sub == 0x06);
 		for (size_t i = 0; i < len && i < 64 && !private; i++)
 			sprintf(hex + 2 * i, "%02x", data[i]);
 		fprintf(stderr, "ztoscorenetworkingd: ipc <- %02x%02x t%d, %zu bytes: %s\n", main_cmd, sub, type, len,
 			private ? "(not logged)" : hex);
 	}
+	if (svc_message(main_cmd, sub, type, data, len))
+		return;
 	if (main_cmd == 0x01 && sub == 0x01) {
 		/* the modem has (re)started: whatever was up is not any more */
 		fprintf(stderr, "ztoscorenetworkingd: the modem started\n");
+		svc_modem_started();
 		replies_modem_started();
 		rfs_logged = 0;		/* a start's requests are logged again */
 		probe_out = false;
@@ -2112,6 +2121,8 @@ static void command(char *l)
 		screen_off = !strcmp(l, "screen off");
 		if (screen_off != was_off)
 			screen_tell_modem();
+		if (screen_off)
+			svc_end("the screen went off");	/* nobody is looking at it */
 		if (!screen_off) {
 			silent_polls = 0;	/* someone is looking: back to the normal rate */
 			next_poll = ms();	/* discard the old screen-off deadline */
@@ -2244,6 +2255,8 @@ static void command(char *l)
 			}
 			ipc_send((int)m, (int)sb, (int)t, data, len);
 		}
+	} else if (!strncmp(l, "svc ", 4)) {
+		svc_command(l + 4);
 	} else if (!strcmp(l, "refresh")) {
 		written_once = false;
 	} else if (!strcmp(l, "replies")) {
@@ -2566,6 +2579,9 @@ int main(int argc, char **argv)
 			wait = 500;
 		if (busy && AT_TIMEOUT_MS - (ms() - sent_at) < wait)
 			wait = AT_TIMEOUT_MS - (ms() - sent_at);
+		long svc_left = svc_idle_left();
+		if (svc_left >= 0 && svc_left < wait)
+			wait = svc_left;
 		if (wait < 0)
 			wait = 0;
 		if (poll(fds, 4, (int)wait) < 0 && errno != EINTR)

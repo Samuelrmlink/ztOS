@@ -246,7 +246,7 @@ sensord/ztoscsf-sensord: sensord/ztoscsf-sensord.c
 	$(CC) $(CFLAGS) $(WARN) -o $@ sensord/ztoscsf-sensord.c -lm
 
 # the modem's state for the shell (signal, operator, data), and airplane mode, SMS
-modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c
+modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c modemd/servicemode.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ modemd/ztoscorenetworkingd.c
 
 # notifications from other programs, what is playing, and push
@@ -520,6 +520,12 @@ check-bt-pair-sheet: xdg-shell-protocol.h
 check-modem-sim:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c
 	/tmp/ztmetro-modem-sim-test
+
+# ServiceMode (modemd/servicemode.h): what reaches the CP, which keys pass; no modem
+.PHONY: check-servicemode
+check-servicemode:
+	$(CC) -std=c11 -Wall -Wno-unused-parameter -o /tmp/ztmetro-servicemode-test modemd/tests/servicemode.c
+	/tmp/ztmetro-servicemode-test
 
 .PHONY: check-sensord
 check-sensord:
