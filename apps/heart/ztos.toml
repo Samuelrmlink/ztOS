@@ -1,0 +1,13 @@
+[app]
+id = "com.zerone.heart"
+name = "Heart"
+caps = "HEART"
+version = "0.1.0"
+entry = "main.py"
+icon = "icon.svg"
+description = "Heart rate (and experimental SpO2) from the sensor beside the camera"
+requires = []
+performance = "eco"
+
+[build]
+include = ["**/*.py", "**/*.svg"]
