@@ -1,7 +1,52 @@
 # Heart rate and SpO2 sensor (ROADMAP 8.26): research
 
-Status: **phase 1 done (read-only). Nothing has been written to the phone.** The
-experiment below needs the owner's approval before anything is touched.
+Status: **step 0 run on 2026-11-12 at 07:01 CST (owner's "Approve ID read"). No
+ID was read: the bus lines stayed low with LDO8 on, so no I2C transfer was
+made to the sensor bus.** See "Step 0 result" below.
+
+## Step 0 result (observed)
+
+`probe/zrn-hrm-probe.c`, run by `probe/run-probe.sh` inside `ztlock run hrm`.
+The battery was at 29 %, zrn-cam and zrn_nfc were not loaded, and gpp5-0/1
+were unclaimed.
+
+```
+zrn-hrm-probe: S2MPB02 0x25 = 0x30
+zrn-hrm-probe: S2MPB02 0x25 <- 0xb0: 0, reads 0xb0
+zrn-hrm-probe: lines with LDO8 on: SCL 0 SDA 0
+zrn-hrm-probe: bus not idle-high, no transfer made
+zrn-hrm-probe: S2MPB02 0x25 <- 0x30 (restore): 0, reads 0x30
+```
+
+- LDO8 (HRM_1.8V_AP) switched on and off as planned. **0x25 was restored to
+  0x30.** LDO8 was on for about 11 ms.
+- With LDO8 on, both SCL and SDA still read 0. The MAX86915 got no transfer.
+  0x57 and 0x27 were never addressed.
+- Afterwards, gpp5-0/1 are back as they were: unclaimed, CON 0, PUD 1
+  (pull-down). The module is not loaded and bus 99 does not exist.
+
+So the bus pull-ups are not powered. That rules out the earlier explanation
+(an unpowered MAX86915 clamping the lines), and it points at the pull-up
+rail, **VDD_NFC_1P8 (S2MPS18 LDO38), being off** on mainline (inferred).
+
+The "on" reading in the table below came from
+`s2mps18-regs-mainline.txt`. It is not trustworthy:
+- it is an older capture;
+- it is not known which S2MPS18 I2C page it was taken from;
+- on the PMIC page (0xCC, per `s2mps18-private.h`), 0x00 is INT1 and 0x12 is
+  BUCHG, not the PMIC ID and RTC_BUF that the hub notes assumed.
+
+A stuck-low SDA from an unpowered NFC chip (sec-nfc@27) is the other possible
+cause. It needs the same rail.
+
+Next steps, each needing a new approval:
+1. Read-only: find out whether LDO38 is on (S2MPS18 PMIC register 0x6F). Use
+   whatever method produced `s2mps18-regs*.txt`.
+2. If it is off: switch VDD_NFC_1P8 on for the read. That is a main-PMIC write,
+   so the owner decides. It could be coordinated with `research/nfc`, which
+   needs the same rail for the NFC chip. Then re-run step 0 unchanged.
+3. Fallback 7c (clearing the gpp5 pull-down) will not help on its own while
+   the pull-up rail is off.
 
 Every finding is labelled:
 
@@ -53,7 +98,7 @@ bit-banged bus, and whether it needs its LED boost on to answer.
 | LED supply | A separate boost converter, switched on by gpg1-6. Its input is most likely VBAT/VSYS; the part is unknown | inferred from the name and the driver; the DT names no LED regulator, and `led_3p3` is compiled out for the MAX86915 |
 | VDD (1.8 V) | **`HRM_1.8V_AP`** = **S2MPB02 LDO8** (sub-PMIC, I2C 0x59). Control register **0x25**: bit 7 enable, bits 6:0 voltage select, 600 mV + 25 mV/step, so 1.8 V = `0x30` and on = `0xB0` | source: DTB `s2mpb02-ldo8`; `s2mpb02-private.h` (L8CTRL is 0x25, next to L9CTRL 0x26 that `leds/zrn-flash.c` already uses); `s2mpb02-regulator.c` (LDO8: MIN1 600 mV, STEP2 25 mV). observed in TWRP: off (use 0) |
 | I2C pull-up rail | **`VDD_NFC_1P8`** = **S2MPS18 LDO38**, register 0x6F | source: DTB (`hrmsensor,i2c_1p8`), `s2mps18-private.h` |
-| Pull-up rail now | Probably on at 1.8 V. The mainline dump has `0x6F = 0xAC`: bits 7:6 = 10 means enabled, and select `0x2C` gives 700 + 44×25 = 1800 mV | observed: `sensors/stock-state/s2mps18-regs-mainline.txt`, an older capture. "Still on today" is inferred |
+| Pull-up rail now | **Probably off**: with LDO8 on, both lines read 0 (step 0). An older mainline dump has `0x6F = 0xAC`, which would mean on at 1.8 V, but it is not known which I2C page that dump came from | observed: step 0. The dump is `sensors/stock-state/s2mps18-regs-mainline.txt` |
 | S2MPB02 bus in ztOS | bus **97**, bit-banged on gpp6-0/1, owned by `zrn-flash` (client 0x59), and shared by `zrn-cam` | observed: `/sys/bus/i2c/devices/97-0059`, lsmod; source: `leds/zrn-flash.c` |
 | Mainline DT | No node for the bus or the chip. Only `i2c@104b0000`, `14360000` and `14370000` exist | observed: `/sys/firmware/devicetree/base/soc@0` |
 | Kernel | 7.1.0-zboot-wd-dp6. `CONFIG_I2C_CHARDEV=y`, `CONFIG_I2C_EXYNOS5=y`, `CONFIG_EXYNOS_USI=y`. **`CONFIG_IIO` is not set** | observed: `/proc/config.gz` |
@@ -246,7 +291,39 @@ never touches `0x25` (its S2MPB02 list is `0x03`, `0x04`, `0x0d`, `0x0e`,
 - The module leaves nothing loaded, and LDO8 is restored to what it read.
 - If the phone wedges, reboot: LDO8 is not always-on, so it comes up off.
 
-## Not done (phase 1 rules)
+## Phase 1 rules
 
-There were no I2C transfers, GPIO, regulator or module changes, and no devmem
-on the phone. `stock/EFS.img` was not read.
+Phase 1 made no I2C transfers, GPIO, regulator or module changes, and no devmem
+access on the phone. `stock/EFS.img` was never read.
+
+## Draft: register list for the first LED test (step 2, not approved)
+
+This is for the owner to approve or change, and only after step 0 has read
+`0x2B`. It is modelled on the stock `max86915_init_hrm_reg()`, cut down to the
+IR and red LEDs at about a quarter of stock current.
+
+The test runs 10 s with a finger on the sensor. Every write goes to the
+MAX86915 at 0x57 on bus 99.
+
+| # | Reg | Value | Meaning | Stock |
+|---|---|---|---|---|
+| 0 | gpg1-6 | output 1 | LED boost on (GPIO) | same |
+| 1 | 0x09 MODE_CONFIG | 0x40 | soft reset | same |
+| 2 | read 0x00, 0x01 | | clear the interrupt status | same |
+| 3 | 0x0C LED1_PA (IR) | 0x30 | 9.6 mA at range 0 | 0x46 at range 2 = 42 mA |
+| 4 | 0x0D LED2_PA (red) | 0x30 | 9.6 mA at range 0 | 0x41 at range 2 = 39 mA (SpO2 mode) |
+| 5 | 0x0E, 0x0F (green, blue) | 0x00 | off | 0x00 |
+| 6 | 0x11 LED_RANGE | 0x00 | every LED at range 0: 0.2 mA per step, 51 mA max | 0xAA (range 2) |
+| 7 | 0x26, 0x27 crosstalk DACs | 0x00 | none | same |
+| 8 | 0x02 INT_ENABLE | 0x80 | FIFO almost full, not per-sample | 0x40 (PPG_RDY) |
+| 9 | 0x13 LED_SEQ_1 | 0x21 | slot 1 IR, slot 2 red | same |
+| 10 | 0x14 LED_SEQ_2 | 0x00 | slots 3 and 4 off | same |
+| 11 | 0x0A MODE_CONFIG_2 | 0x65 | ADC range 3, 100 Hz (SR = 1, to be checked against the datasheet), pulse width 1 | 0x6D (400 Hz) |
+| 12 | 0x08 FIFO_CONFIG | 0x4F | average 4, almost-full at 15 free | 0x40 |
+| 13 | 0x09 MODE_CONFIG | 0x03 | flex mode, run | same |
+| - | reads | 0x04-0x07 | FIFO pointers and data (3 bytes per slot) | |
+| 14 | 0x09 MODE_CONFIG | 0x80 | shutdown at the end | |
+| 15 | gpg1-6 | input | boost off (the pull-down holds it low) | same |
+
+Before this is asked for, check two things against the MAX86915 datasheet:
+the 0x0A sample-rate code, and the 0x08 averaging bits.

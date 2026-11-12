@@ -26,4 +26,4 @@ echo "battery $cap%, $(TZ=America/Chicago date)"
 mark=$(awk '{print $1}' /proc/uptime)
 sudo insmod "$KO"; echo "insmod: $? (failure expected: the module never stays)"
 sudo dmesg | grep 'zrn-hrm-probe' | awk -v m="$mark" '{t=$0; sub(/^\[ */,"",t); sub(/\].*/,"",t); if (t+0 >= m-1) print}'
-sudo grep -E 'gpp5-[01] ' /sys/kernel/debug/pinctrl/10830000.pinctrl-samsung-pinctrl/pins
+sudo grep -E 'gpp5-[01]\)' /sys/kernel/debug/pinctrl/10830000.pinctrl-samsung-pinctrl/pins
