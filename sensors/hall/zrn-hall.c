@@ -29,6 +29,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <dt-bindings/gpio/gpio.h>
 
@@ -51,6 +52,7 @@ MODULE_PARM_DESC(wakeup, "the cover wakes a sleeping phone (default yes)");
 static struct of_changeset cs;
 static bool cs_applied;
 static struct platform_device *pdev;
+static bool pdev_ours;	/* made here, not by the platform bus's notifier */
 
 static int __init zrn_hall_init(void)
 {
@@ -96,7 +98,14 @@ static int __init zrn_hall_init(void)
 		goto fail;
 	cs_applied = true;
 
-	pdev = of_platform_device_create(np, "zrn-hall", NULL);
+	/* a node under the root is populated by the platform bus's own
+	 * notifier as the changeset applies (seen on the phone: the device was
+	 * there, and of_platform_device_create refused a second) */
+	pdev = of_find_device_by_node(np);
+	if (!pdev) {
+		pdev = of_platform_device_create(np, "zrn-hall", NULL);
+		pdev_ours = pdev != NULL;
+	}
 	if (!pdev) {
 		ret = -ENODEV;
 		goto fail;
@@ -113,8 +122,10 @@ fail:
 
 static void __exit zrn_hall_exit(void)
 {
-	if (pdev)
+	if (pdev && pdev_ours)
 		of_platform_device_destroy(&pdev->dev, NULL);
+	else if (pdev)
+		put_device(&pdev->dev);	/* the revert's notifier removes it */
 	of_changeset_revert(&cs);
 	of_changeset_destroy(&cs);
 }
