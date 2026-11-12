@@ -119,6 +119,20 @@ shell side was run in the headless container (`desktop/dev/run.sh`): it
 refuses a blank outside a call, blanks during one, unblanks on the power key
 and holds that until far, and clears on call end and on screen off.
 
+On the phone, 12 Nov 2026, with simulated calls (`fake_dial`, `fake_ring`
+and `fake_answer` on `/run/ztoscorenetworking.ctl`; no radio command):
+
+- **Outgoing call:** proximity came on at dialling. The sensor said `near`, with an ADC of about 8700 to 8800. The phone's top was covered: light read 0 lux on every channel. The shell blanked 150 ms later. At the call's end the panel came back.
+- **Incoming call:** ringing kept the sensor off; answering turned it on.
+- **The shell's blank:**
+  - a screenshot fails while it's blanked, because the output is off;
+  - a tap doesn't unblank it;
+  - after an unblank, the screenshot draws again.
+- **Barometer:** `986.72 hPa`, with 35.8 °C at the chip.
+- **Hub:** no asserts.
+
+Not yet seen on the phone: a hand coming and going over an uncovered sensor.
+
 ### The protocol, in short
 
 The phone opens with 9 bytes: command, length (2), options (2), data (4).
