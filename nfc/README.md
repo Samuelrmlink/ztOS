@@ -666,7 +666,7 @@ It is built against `linux-7.1-dp/out-target-bt` with no warnings. It has not
 been loaded on the phone. `zrn-nfc` (stage 1) is still standalone; stage 1c
 can move it onto `zrn_i2c20_get()`.
 
-## Stage 1c (approved 2026-11-12): ready, blocked by the phone lock
+## Stage 1c (approved 2026-11-12)
 
 The HRM agent then showed that the bus itself works. With LDO38 on, SCL and
 SDA idled high, and the MAX86915 at 0x57 answered PART_ID 0x2B (08:07 CST).
@@ -693,7 +693,66 @@ after 30 min. `/run/ztbench/lock` is held by **`ztnotifyd` (pid 17519, started
 08:24:59)**, which inherited the locked fd 9 from a `ztlock run`. gnss and
 thermal are queued behind it too. This lock leak is not ours to fix.
 
-### If 1c still NACKs: the read-only clock-output check (proposal)
+### Stage 1c result, 09:19 CST: the chip answers
+
+The lock was freed (ztnotifyd restarted without fd 9; ztlock now closes fd 9
+for its commands). Run inside `ztlock run nfc`, kernel #62, battery 33%, no
+`zrn_hrm`. Raw output (observed):
+
+```
+LDO38 0x2c -> 0xac (restored to 0x2c at the end, reads 0x2c)
+PCAL6524 before: in 90 08 20  out fd fd ff  cfg 6d f5 ff   (VEN output high = off, left from 1b)
+zrn-nfc: bus idle SCL=1 SDA=1
+zrn-nfc: [start]  VEN=1 FIRM=0 IRQ=0 CLK_REQ=0 irqs=1
+zrn-nfc: [off]    VEN=1 FIRM=0 IRQ=0 CLK_REQ=0 irqs=1
+zrn-nfc: [ven-on] VEN=0 FIRM=0 IRQ=0 CLK_REQ=0 irqs=1      (150 ms)
+zrn-nfc: [wake]   VEN=0 FIRM=1 IRQ=0 CLK_REQ=0 irqs=1
+zrn-nfc: TX 20 00 01 00 -> 0
+zrn-nfc: RX 40 00 03 00 10 01
+zrn-nfc: TX 20 01 00 -> 0
+zrn-nfc: RX 40 01 14 00 02 0e 02 00 03 01 02 03 02 2e 04 ff 10 00 0e 45 00 4b 02
+zrn-nfc: RX timeout after 50 ms (irq line 0, irqs 3)        (no notifications)
+zrn-nfc: [powered-down] VEN=1 FIRM=0 IRQ=0 CLK_REQ=0 irqs=3
+PCAL6524 after: unchanged; rmmod ok; gpp5/gpa1-2/gpa2-6 unclaimed again
+```
+
+The first CORE_RESET was ACKed, so the retry was not needed. **The 1b NACK
+was the 20 ms start-up wait being too short. 150 ms works** (inferred from
+the difference between the two runs).
+
+Decoded (from source: NCI 1.0 spec layout, the same as `nci_core_init_rsp`):
+
+| Field | Value | Meaning |
+|---|---|---|
+| CORE_RESET_RSP | status 0x00, **NCI version 0x10 = NCI 1.0**, config status 0x01 | The chip reports its configuration as reset, although we asked to keep it: a cold start, so nothing was stored (inferred). |
+| NFCC features | `02 0e 02 00` | Octet 1 `0x0e`: technology-, protocol- and **AID-based routing** supported, which HCE needs. Octet 0 bit 1: configuration by DH and NFCEEs. Octet 2: a power-state option. |
+| RF interfaces | `01 02 03` | **Frame**, **ISO-DEP**, **NFC-DEP**. No proprietary interface (NXP lists 0x80 for MIFARE Classic). |
+| Max logical connections | 2 | — |
+| Max routing table | 0x042E = 1070 bytes | — |
+| Max control payload | 255 | — |
+| Max large parameters | 16 | — |
+| Manufacturer ID | **0x0E = Samsung** | ISO/IEC 7816-6 IC manufacturer code |
+| **Firmware version** | **`45 00 4b 02`** | **Identical to bytes 0x10–0x13 of VENDOR's `sec_s3nrn82_firmware.bin` (dated 2018-10-15).** The chip runs exactly the image Android shipped, so no download is ever needed. Mainline's version check would also see "equal" (major 0x45, build 0x00/0x4b). |
+
+Other results:
+
+- **IRQ path works.** `irqs` went from 1 to 3: one rising edge per response
+  on gpa1-2.
+- **CLK_REQ stayed low throughout.** The host interface runs without the AP
+  clock. Whether the RF side needs CLKOUT1 is still open (stage 2a).
+- The chip sent no unsolicited notifications.
+- **Revised MIFARE Classic outlook:**
+  - The chip lists no proprietary RF interface, so Classic would have to go
+    through the Frame interface with protocol 0x81.
+  - The stock JNI's NXP `EXTNS_Mfc` layer suggests the Samsung HAL maps it,
+    but this lowers confidence.
+  - The "MIFARE Classic with dictionary keys" row stays
+    **unknown-needs-test**, now leaning "no" (inferred).
+
+Next is stage 2 (RF field, card reads). Its draft is above and is not approved
+yet. The CLKOUT1 read below (stage 2a) is its first step.
+
+### The read-only clock-output check (proposal, stage 2a)
 
 From the vendor CAL (LineageOS universal9810,
 `cal-if/exynos9810/clkout_exynos9810.c`, `clk-exynos9810.c`, `cal-if/ra.c`)
