@@ -1,12 +1,13 @@
 #!/bin/sh
 # Stage 2 (card reading), owner-approved 2026-11-12. Run as root inside
 # `ztlock run nfc`, only after the owner's go for the card in place.
-#   stage2.sh <dir with zrn-i2c20.ko, zrn-nfc.ko, ztnfc.py> [seconds]
+#   stage2.sh <dir> [seconds] [mode]   mode = scan (default) | identify
 # The kernel side enables CLKOUT1 and LDO38 on open of /dev/zt-nfc and
 # restores both on close, whatever happens to ztnfc; this script then
 # unloads both modules.
 D=${1:?dir}
 SECS=${2:-20}
+MODE=${3:-scan}
 say() { echo "== $*"; }
 
 cap=$(cat /sys/class/power_supply/max170xx_battery/capacity)
@@ -33,6 +34,6 @@ trap cleanup EXIT
 
 insmod "$D/zrn-i2c20.ko" || { say "STOP: zrn-i2c20 did not load"; exit 1; }
 insmod "$D/zrn-nfc.ko" || { say "STOP: zrn-nfc did not load"; exit 1; }
-say "ztnfc scan, ${SECS} s"
-python3 -I "$D/ztnfc.py" scan --seconds "$SECS"
+say "ztnfc ${MODE}, ${SECS} s"
+python3 -I "$D/ztnfc.py" "$MODE" --seconds "$SECS"
 say "ztnfc rc=$?"

@@ -11,7 +11,8 @@ DESFire GetVersion, FeliCa Polling/Read Without Encryption).
 Privacy: UIDs (NFCID1/NFCID2/PUPI/15693 UID), PANs and names are never
 printed; raw frames that carry them are logged with those bytes redacted.
 
-    ztnfc.py scan [--seconds 20] [--device /dev/zt-nfc]
+    ztnfc.py scan     [--seconds 20] [--device /dev/zt-nfc]
+    ztnfc.py identify [--seconds 20]   # stop at activation; no auth/read
 """
 import errno
 import os
@@ -38,9 +39,15 @@ class Nci:
     def close(self):
         os.close(self.fd)
 
-    def send(self, pkt, show=True):
+    def send(self, pkt, show=True, best_effort=False):
         pkt = bytes(pkt)
-        os.write(self.fd, pkt)
+        try:
+            os.write(self.fd, pkt)
+        except OSError as e:
+            if best_effort:
+                log(f"TX {hx(pkt)} (not acked: {e.strerror}; kernel powers the chip down)")
+                return
+            raise
         if show:
             log(f"TX {hx(pkt)}")
 
@@ -480,7 +487,7 @@ def read_classic(nci, info, deadline):
     log(f"full block data (not shown here) saved to {saved}")
 
 
-def scan(dev, seconds):
+def scan(dev, seconds, identify=False):
     nci = Nci(dev)
     try:
         nci.send([0x20, 0x00, 0x01, 0x00])
@@ -523,9 +530,9 @@ def scan(dev, seconds):
             return 1
         log(f"field on, polling A/B/F/V for up to {seconds:.0f} s ...")
         try:
-            return session(nci, t0, seconds)
+            return session(nci, t0, seconds, identify)
         finally:
-            nci.send([0x21, 0x06, 0x01, 0x00])
+            nci.send([0x21, 0x06, 0x01, 0x00], best_effort=True)
             nci.rsp((1, 6))
             n = nci.wait(lambda p: p[0] == 0x61 and p[1] == 0x06, 1.0)
             log(f"field off after {time.monotonic() - t0:.1f} s "
@@ -534,11 +541,15 @@ def scan(dev, seconds):
         nci.close()
 
 
-def session(nci, t0, seconds):
+def session(nci, t0, seconds, identify=False):
     deadline = t0 + min(seconds, RF_LIMIT)
     found = []
     while time.monotonic() < deadline:
         p = nci.wait(lambda p: p[0] == 0x61 and p[1] in (0x03, 0x05), 0.5)
+        while nci.pending:
+            q = nci.pending.pop(0)
+            if not (q[0] == 0x60 and q[1] == 0x06):   # skip routine credit NTFs
+                log(f"NTF {hx(q)}")
         if p is None:
             continue
         if p[1] == 0x03:			# RF_DISCOVER_NTF: id, proto, tech, len, params, type
@@ -565,6 +576,17 @@ def session(nci, t0, seconds):
         info = parse_activation(p)
         nci.credits = info["credits"]
         show(info)
+        if identify:
+            pr = info["proto"]
+            log("identify-only: " + ("MIFARE Classic (proto 0x81) on the "
+                + ({0x01: "Frame", 0x02: "ISO-DEP", 0x03: "NFC-DEP"}.get(info["iface"],
+                  hex(info["iface"])) + " interface")
+                if pr == 0x81 else
+                f"protocol {PROTO.get(pr, hex(pr))}, interface "
+                + {0x01: "Frame", 0x02: "ISO-DEP", 0x03: "NFC-DEP"}.get(info["iface"],
+                  hex(info["iface"]))))
+            log("identify-only: not authenticating or reading")
+            return 0
         if info["proto"] == 0x02:
             read_t2t(nci)
         elif info["proto"] == 0x04 and info["iface"] == 0x02:
@@ -584,17 +606,19 @@ def main(argv):
     dev = "/dev/zt-nfc"
     seconds = 20.0
     args = list(argv)
-    if not args or args[0] != "scan":
+    if not args or args[0] not in ("scan", "identify"):
         print(__doc__)
         return 1
-    args.pop(0)
+    identify = args.pop(0) == "identify"
     while args:
         a = args.pop(0)
         if a == "--seconds":
             seconds = float(args.pop(0))
         elif a == "--device":
             dev = args.pop(0)
-    return scan(dev, min(seconds, RF_LIMIT))
+        elif a == "--identify":
+            identify = True
+    return scan(dev, min(seconds, RF_LIMIT), identify)
 
 
 if __name__ == "__main__":

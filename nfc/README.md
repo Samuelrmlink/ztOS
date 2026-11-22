@@ -876,6 +876,73 @@ map, and if that is rejected it sends no map (all three are already in the
 approved command set except they would run in one session; this needs the
 owner's ok for the retry-in-one-session).
 
+## Stage 2 run 3 (identify only, 2026-11-22 17:55 CST): field on, no card seen
+
+Identification only, no authentication (owner-approved). Card: the MIFARE
+Classic 1K, flat on the back; wireless pad online = 0; battery 24%. Observed:
+
+```
+CORE_RESET/INIT/SET_CONFIG: ok
+TX 21 00 07 02 04 01 02 81 01 01   RX 41 00 01 01   two-entry map REJECTED
+TX 21 00 04 01 04 01 02            RX 41 00 01 00   ISO-DEP-only map ACCEPTED
+TX 21 03 09 04 00 01 01 01 02 01 06 01  RX 41 03 01 00   RF_DISCOVER poll A/B/F/V ok
+(field on, CLKOUT1 enabled)  -> polled 20 s -> no card found
+(close-down RF_DEACTIVATE NACKed; kernel powered the chip down and restored all)
+```
+
+Everything restored: LDO38 `0x2c`, CLKOUT1 gated again, chip off, modules
+unloaded, gpp5 released, phone clean.
+
+Findings (observed, then inferred):
+
+- **The chip accepts an ISO-DEP-only `RF_DISCOVER_MAP` and `RF_DISCOVER` in
+  poll mode; the field turns on.** So the earlier rejection was specifically
+  the protocol-0x81 / Frame-interface map entry, not DISCOVER_MAP in general.
+- **No card was detected in 20 s**, although a Classic card that reads on
+  other phones was in place. The chip reported no `RF_DISCOVER_NTF` and no
+  activation.
+- The close-down `RF_DEACTIVATE` was NACKed. The chip likely went to sleep
+  (`SLEEP_TIMEOUT=1000` in the vendor config) during the idle poll and a plain
+  I2C write no longer reached it; the kernel then powered it down regardless,
+  so nothing was left on. ztnfc now treats that last write as best-effort.
+
+### Why no card was seen (inferred), and the 0x2F stop
+
+The most likely cause is that **the chip's RF/analog configuration was never
+loaded.** Stock loads `sec_s3nrn82_rfreg.bin` (the per-board antenna / front-end
+register block seen in `/vendor/etc/nfc/`) through the **proprietary 0x2F
+commands** `START_RFREG (0x2F 0x26)`, `SET_RFREG (0x2F 0x22)` and
+`STOP_RFREG (0x2F 0x27)` — the same sequence mainline's
+`s3fwrn5_nci_rf_configure()` uses. Without it, the receiver/antenna tuning is
+at power-on defaults and a card in the field is not detected. The HAL strings
+(`Set RF register version`, `hal_vs_rfreg_update`, `Do not need to update RF
+registers`) show the RF registers are **versioned and written only when they
+differ**, like the firmware, so `SET_RFREG` is very likely an **NVM write**.
+
+That is exactly the **stop-and-report** condition: stock's read path needs a
+0x2F proprietary command, and that command probably writes the chip's
+non-volatile memory. **I did not send it.** No 0x2F command and no RF-register
+write was issued in any run.
+
+A second possibility is antenna coupling: on the SM-G960 the NFC loop and the
+WPC coil overlap but the best read spot is not exactly the coil centre. That is
+cheap to retest (reposition the card) and needs no new command.
+
+### What this leaves
+
+- **Confirmed reachable without any 0x2F:** power-up, NCI version/firmware
+  read, `CORE_SET_CONFIG`, an ISO-DEP `RF_DISCOVER_MAP`, and `RF_DISCOVER`
+  polling with the field on.
+- **Blocked on the RF-register load:** actually detecting and reading a card,
+  Classic or otherwise, if the no-detect is the RF config and not positioning.
+  Resolving it needs either (a) an owner decision on the one-time RF-register
+  load (a 0x2F sequence that likely writes NVM — its own approval, and it would
+  change the chip's stored RF block), or (b) a reposition-and-retry to rule out
+  coupling first.
+
+The reader, the allowlist and the restores all work; the open question is
+purely the analog RF bring-up, which the approvals deliberately fence off.
+
 ## Biggest unknowns
 
 1. **Clock.** Is CLKOUT (`oscclk_nfc`) running under ztOS, and does the chip
