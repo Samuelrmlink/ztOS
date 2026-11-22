@@ -156,6 +156,17 @@ void zrn_i2c20_put(struct i2c_adapter *adap)
 }
 EXPORT_SYMBOL_GPL(zrn_i2c20_put);
 
+int zrn_i2c20_lines(void)
+{
+	int v;
+
+	i2c_lock_bus(&bus, I2C_LOCK_ROOT_ADAPTER);
+	v = (gpiod_get_value_cansleep(scl) > 0) << 1 | (gpiod_get_value_cansleep(sda) > 0);
+	i2c_unlock_bus(&bus, I2C_LOCK_ROOT_ADAPTER);
+	return v;
+}
+EXPORT_SYMBOL_GPL(zrn_i2c20_lines);
+
 static int __init zrn_i2c20_init(void)
 {
 	int ret;

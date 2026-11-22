@@ -99,6 +99,11 @@ class Chip(threading.Thread):
             tp = bytes([0x44, 0x00, 7]) + FAKE_UID + bytes([1, 0x00])
             body = bytes([1, 0x01, 0x02, 0x00, 0xFF, 1, len(tp)]) + tp + bytes([0, 0, 0, 0])
             self.proto = 0x02
+        elif self.card == "classic":
+            fuid = FAKE_UID[:4]
+            tp = bytes([0x04, 0x00, 4]) + fuid + bytes([1, 0x08])
+            body = bytes([1, 0x01, 0x81, 0x00, 0xFF, 1, len(tp)]) + tp + bytes([0, 0, 0, 0])
+            self.proto = 0x81
         else:	# ISO-DEP DESFire-like
             tp = bytes([0x44, 0x03, 7]) + FAKE_UID + bytes([1, 0x20])
             ats = bytes([0x06, 0x75, 0x77, 0x81, 0x02, 0x80])
@@ -163,14 +168,17 @@ def main():
     for card, want in (("ntag", ["NTAG213", "data area 144 bytes", "URI",
                                  "atqa=0044", "sak=00", "field off"]),
                        ("desfire", ["DESFire GetVersion: HW vendor 04", "ats_len=6",
-                                    "not an EMV card", "frame 3 UID/batch redacted"])):
+                                    "not an EMV card", "frame 3 UID/batch redacted"]),
+                       ("classic", ["MIFARE Classic (prop)", "sak=08", "atqa=0004",
+                                    "uid_len=4", "identification only"])):
         rc, out, refused = run(card, flt)
         print(f"--- {card} (rc {rc})\n{out}")
         for w in want:
             if w not in out:
                 print(f"FAIL {card}: missing '{w}'")
                 fails += 1
-        if uid_hex in out.replace(" ", "") or uid_sp in out or "x.test" in out:
+        if uid_hex in out.replace(" ", "") or uid_sp in out or "x.test" in out or \
+                FAKE_UID[:4].hex() in out.replace(" ", ""):
             print(f"FAIL {card}: identifier or content leaked")
             fails += 1
         if refused:

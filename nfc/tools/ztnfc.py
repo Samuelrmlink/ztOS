@@ -402,8 +402,15 @@ def session(nci, t0, seconds):
         if p[1] == 0x03:			# RF_DISCOVER_NTF: id, proto, tech, len, params, type
             q = p[3:]
             found.append((q[0], q[1], q[2]))
+            extra = ""
+            t = q[4:4 + q[3]]
+            if q[2] & 0x7F == 0x00 and len(t) >= 3 and len(t) > 4 + t[2]:
+                atqa = t[0] | t[1] << 8
+                sak = t[4 + t[2]]
+                extra = (f", atqa={atqa:04x} sak={sak:02x} uid_len={t[2]} "
+                         f"guess={sak_guess(atqa, sak)}")
             log(f"DISCOVER_NTF: id {q[0]} protocol {PROTO.get(q[1], hex(q[1]))} "
-                f"tech {TECH.get(q[2] & 0x7F, hex(q[2]))} (identifiers not shown)")
+                f"tech {TECH.get(q[2] & 0x7F, hex(q[2]))}{extra} (UID not shown)")
             if q[-1] != 0x02:			# last notification: pick one
                 pick = next((f for f in found if f[1] in (0x02, 0x03, 0x04)), None)
                 if pick is None:

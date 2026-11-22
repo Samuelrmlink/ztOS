@@ -19,5 +19,7 @@
 /* returns the bus adapter (reference held), or an ERR_PTR */
 struct i2c_adapter *zrn_i2c20_get(void);
 void zrn_i2c20_put(struct i2c_adapter *adap);
+/* idle line levels, released: bit 1 = SCL, bit 0 = SDA (3 = both high) */
+int zrn_i2c20_lines(void);
 
 #endif

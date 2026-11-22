@@ -6,11 +6,14 @@
  * needs is taken on open() and given back on release(), which the kernel
  * calls on every exit path of the user process (normal exit, error, kill):
  *
- *   open:    PMU CLKOUT1 (0x14060A0C, OSC_NFC) must read 0x00000001; write
- *            0x00000000 (enable, SEL = TCXO) and read back;
- *            zrn_i2c20_get(): bus i2c-103 (gpp5, class 0) and LDO38 on;
- *            VEN off/FIRM low 20 ms, VEN on 150 ms, WAKE high 20 ms;
+ *   open:    zrn_i2c20_get(): bus i2c-103 (gpp5, class 0) and LDO38 on;
+ *            VEN held off (FIRM low) for SUPPLY_SETTLE_MS, then SCL/SDA must
+ *            read high; VEN on 150 ms, WAKE high 20 ms (stage 1c);
  *            gpa1-2 IRQ (rising) requested; CLK_REQ (gpa2-6) sampled only.
+ *   first RF_DISCOVER: PMU CLKOUT1 (0x14060A0C, OSC_NFC) must read
+ *            0x00000001; write 0x00000000 (enable, SEL = TCXO), read back.
+ *            The host interface runs without it (stage 1c), and stock also
+ *            turns it on only when the chip asks for it.
  *   release: WAKE low, VEN high (chip and field off), IRQ freed,
  *            zrn_i2c20_put() (LDO38 restored), CLKOUT1 written 0x00000001
  *            and read back.
@@ -50,6 +53,13 @@
 #define RF_MAX_MS	30000
 #define PKT_MAX		(3 + 255)
 #define RING		16
+/*
+ * Stage-2 run 1 (2026-11-22) opened 7 ms after LDO38 came on and the chip
+ * NACKed; stage 1c, where the supply had been on for several hundred ms
+ * (ACPM and expander reads, insmod) before VEN, answered at once. Hold the
+ * chip off on a settled supply first, as stock does (LDO on at probe).
+ */
+#define SUPPLY_SETTLE_MS	1000
 
 static struct gpiod_lookup_table ctl_gpios = {
 	.dev_id = "zrn-nfc-ctl",
@@ -229,20 +239,24 @@ static int nfc_open(struct inode *ino, struct file *f)
 	r_head = r_tail = 0;
 	active_proto = NCI_PROTO_NONE;
 
-	ret = clk_on();
-	if (ret)
-		goto fail;
+	gpiod_set_value_cansleep(g_ven, 1);	/* off while the supply comes up */
+	gpiod_set_value_cansleep(g_firm, 0);
 	adap = zrn_i2c20_get();
 	if (IS_ERR(adap)) {
 		ret = PTR_ERR(adap);
 		adap = NULL;
 		goto fail;
 	}
+	msleep(SUPPLY_SETTLE_MS);
+	ret = zrn_i2c20_lines();
+	pr_info("zrn-nfc: supply settled %d ms, bus idle SCL=%d SDA=%d\n",
+		SUPPLY_SETTLE_MS, ret >> 1 & 1, ret & 1);
+	if (ret != 3) {
+		ret = -EIO;
+		goto fail;
+	}
 
 	/* power-up, NCI mode (never bootloader): the stage-1c sequence */
-	gpiod_set_value_cansleep(g_ven, 1);
-	gpiod_set_value_cansleep(g_firm, 0);
-	msleep(20);
 	gpiod_set_value_cansleep(g_ven, 0);
 	msleep(150);
 	gpiod_set_value_cansleep(g_firm, 1);
@@ -296,10 +310,20 @@ static ssize_t nfc_write(struct file *f, const char __user *ubuf, size_t len, lo
 		ret = -EPERM;
 		goto out;
 	}
+	if (zrn_nci_is_discover(pkt) && !clk_enabled) {
+		ret = clk_on();		/* the RF side needs the reference clock */
+		if (ret)
+			goto out;
+	}
 	ret = nfc_xfer(0, pkt, len);
 	if (ret == -ENXIO) {		/* chip in standby: one retry, as mainline */
+		pr_info("zrn-nfc: NACK on %*ph, retry in 110 ms (CLK_REQ=%d IRQ=%d)\n",
+			(int)min_t(size_t, len, 4), pkt, gpiod_get_value(g_clkreq),
+			gpiod_get_value(g_irq));
 		msleep(110);
 		ret = nfc_xfer(0, pkt, len);
+		if (ret)
+			pr_info("zrn-nfc: retry failed %d\n", ret);
 	}
 	if (ret)
 		goto out;
