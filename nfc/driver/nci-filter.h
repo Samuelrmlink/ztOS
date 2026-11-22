@@ -10,14 +10,23 @@
  *                          PA_BAIL_OUT (0x08) = 1
  *   RF_DISCOVER_MAP 21 00: only ISO-DEP (0x04), poll (0x01) -> ISO-DEP if (0x02)
  *   RF_DISCOVER 21 03: only poll modes NFC-A/B/F/V (0x00 0x01 0x02 0x06)
- *   RF_DISCOVER_SELECT 21 04: protocols T2T/T3T/ISO-DEP only (never 0x81 MFC)
- *   RF_DEACTIVATE 21 06: idle (0x00) only
+ *   RF_DISCOVER_SELECT 21 04: T2T/T3T/ISO-DEP, and MIFARE Classic (0x81) on
+ *                          the Frame interface (read-only, owner-approved
+ *                          2026-11-22 for one card)
+ *   RF_DEACTIVATE 21 06: idle (0x00) or sleep (0x01, to re-select a card for
+ *                        the next key)
  * Data on the static RF connection (conn 0), by the activated protocol:
  *   T2T: READ (30 nn), GET_VERSION (60)
  *   T3T: Polling (cmd 0x00), Read Without Encryption (cmd 0x06)
  *   ISO-DEP: SELECT by name of the NDEF app or the PPSE; DESFire GetVersion
  *            (90 60 00 00 00) and its additional frames (90 AF 00 00 00)
- * Never: NFCEE (GID 2), proprietary (GID 0xF), listen modes, writes.
+ *   MIFARE Classic (proto 0x81), read only, matching AOSP rw_mfc.cc:
+ *     authenticate 60|61, block, UID(4), key(6); the key must be one of the
+ *       owner-approved defaults (zrn_mfc_keys below), nothing else;
+ *     READ (30, block).
+ *     Refused: WRITE (A0/A2), value ops (C0/C1/C2 decr/incr/restore,
+ *       B0 transfer), HALT (50 00), and the Gen1a magic frames (40/43).
+ * Never: NFCEE (GID 2), proprietary (GID 0xF), listen modes, any write.
  */
 #ifndef ZRN_NCI_FILTER_H
 #define ZRN_NCI_FILTER_H
@@ -25,7 +34,25 @@
 #define NCI_PROTO_T2T		0x02
 #define NCI_PROTO_T3T		0x03
 #define NCI_PROTO_ISO_DEP	0x04
+#define NCI_PROTO_MFC		0x81
 #define NCI_PROTO_NONE		0x00
+
+#define MFC_AUTH_A	0x60
+#define MFC_AUTH_B	0x61
+#define MFC_READ	0x30
+
+/* the only Crypto1 keys the filter lets through, owner-approved 2026-11-22 */
+static const unsigned char zrn_mfc_keys[][6] = {
+	{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },	/* factory */
+	{ 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5 },	/* MAD key A */
+	{ 0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7 },	/* NDEF key A */
+	{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+	{ 0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5 },
+	{ 0x4D, 0x3A, 0x99, 0xC3, 0x51, 0xDD },
+	{ 0x1A, 0x98, 0x2C, 0x7E, 0x45, 0x9A },
+	{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF },
+};
+
 
 static const unsigned char zrn_aid_ndef[] = { 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01 };
 static const unsigned char zrn_aid_ppse[] = "2PAY.SYS.DDF01";	/* 14 bytes */
@@ -36,6 +63,16 @@ static inline int zrn_memeq(const unsigned char *a, const unsigned char *b, unsi
 		if (*a++ != *b++)
 			return 0;
 	return 1;
+}
+
+static inline int zrn_mfc_key_ok(const unsigned char *k)
+{
+	unsigned int i;
+
+	for (i = 0; i < sizeof(zrn_mfc_keys) / 6; i++)
+		if (zrn_memeq(k, zrn_mfc_keys[i], 6))
+			return 1;
+	return 0;
 }
 
 /* returns NULL if allowed, else a short reason */
@@ -75,6 +112,13 @@ static inline const char *zrn_nci_check(const unsigned char *p, unsigned int len
 			if (q[1] == 0x06 && plen >= 14)
 				return 0;	/* Read Without Encryption */
 			return "T3T: only Polling / Read Without Encryption";
+		case NCI_PROTO_MFC:
+			if (plen == 12 && (q[0] == MFC_AUTH_A || q[0] == MFC_AUTH_B))
+				return zrn_mfc_key_ok(q + 6) ? 0 :
+					"MFC auth: key not in the approved default list";
+			if (plen == 2 && q[0] == MFC_READ)
+				return 0;
+			return "MFC: only authenticate (default key) / READ";
 		case NCI_PROTO_ISO_DEP:
 			if (plen == 5 && q[0] == 0x90 && (q[1] == 0x60 || q[1] == 0xAF) &&
 			    q[2] == 0 && q[3] == 0 && q[4] == 0)
@@ -121,11 +165,21 @@ static inline const char *zrn_nci_check(const unsigned char *p, unsigned int len
 				return "SET_CONFIG: parameter not allowed";
 		}
 		return i == plen ? 0 : "SET_CONFIG: trailing bytes";
-	case 0x100:	/* RF_DISCOVER_MAP */
-		if (plen == 4 && q[0] == 1 && q[1] == NCI_PROTO_ISO_DEP && q[2] == 0x01 &&
-		    q[3] == 0x02)
-			return 0;
-		return "DISCOVER_MAP: only ISO-DEP poll -> ISO-DEP";
+	case 0x100:	/* RF_DISCOVER_MAP: each entry proto, mode, interface */
+		if (plen < 1 || plen != 1 + 3u * q[0] || q[0] == 0)
+			return "DISCOVER_MAP: bad length";
+		for (i = 0; i < q[0]; i++) {
+			const unsigned char *e = q + 1 + 3 * i;
+
+			if (e[1] != 0x01)
+				return "DISCOVER_MAP: poll mode only";
+			if (e[0] == NCI_PROTO_ISO_DEP && e[2] == 0x02)
+				continue;	/* ISO-DEP -> ISO-DEP */
+			if (e[0] == NCI_PROTO_MFC && e[2] == 0x01)
+				continue;	/* MIFARE Classic -> Frame */
+			return "DISCOVER_MAP: only ISO-DEP->ISO-DEP or MFC->Frame, poll";
+		}
+		return 0;
 	case 0x103:	/* RF_DISCOVER */
 		if (plen < 1 || plen != 1 + 2u * q[0] || q[0] == 0)
 			return "DISCOVER: bad length";
@@ -139,15 +193,19 @@ static inline const char *zrn_nci_check(const unsigned char *p, unsigned int len
 	case 0x104:	/* RF_DISCOVER_SELECT */
 		if (plen != 3)
 			return "SELECT: bad length";
-		if (q[1] != NCI_PROTO_T2T && q[1] != NCI_PROTO_T3T && q[1] != NCI_PROTO_ISO_DEP)
+		if (q[1] != NCI_PROTO_T2T && q[1] != NCI_PROTO_T3T &&
+		    q[1] != NCI_PROTO_ISO_DEP && q[1] != NCI_PROTO_MFC)
 			return "SELECT: protocol not allowed";
 		if (q[2] != 0x01 && q[2] != 0x02)
 			return "SELECT: interface not allowed";
 		if (q[2] == 0x02 && q[1] != NCI_PROTO_ISO_DEP)
 			return "SELECT: ISO-DEP interface only for ISO-DEP";
+		if (q[1] == NCI_PROTO_MFC && q[2] != 0x01)
+			return "SELECT: MIFARE Classic only on the Frame interface";
 		return 0;
-	case 0x106:	/* RF_DEACTIVATE */
-		return (plen == 1 && q[0] == 0x00) ? 0 : "DEACTIVATE: idle only";
+	case 0x106:	/* RF_DEACTIVATE: idle (end) or sleep (re-select a card) */
+		return (plen == 1 && (q[0] == 0x00 || q[0] == 0x01)) ? 0 :
+			"DEACTIVATE: idle or sleep only";
 	}
 	return "command not allowed";
 }

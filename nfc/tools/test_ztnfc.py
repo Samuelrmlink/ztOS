@@ -87,10 +87,15 @@ class Chip(threading.Thread):
         elif p[0] == 0x21 and p[1] == 0x03:
             self.tx([0x41, 0x03, 0x01, 0x00])
             self.activate()
+        elif p[0] == 0x21 and p[1] == 0x04:
+            self.tx([0x41, 0x04, 0x01, 0x00])
+            self.activate()
         elif p[0] == 0x21 and p[1] == 0x06:
-            self.proto = 0
+            mode = p[3]
             self.tx([0x41, 0x06, 0x01, 0x00])
-            self.tx([0x61, 0x06, 0x02, 0x00, 0x00])
+            self.tx([0x61, 0x06, 0x02, mode, 0x00])
+            if mode == 0x00:
+                self.proto = 0
         elif p[0] == 0x00:
             self.data(p[3:])
 
@@ -113,6 +118,26 @@ class Chip(threading.Thread):
         self.tx(bytes([0x61, 0x05, len(body)]) + body)
 
     def data(self, q):
+        if self.proto == 0x81:
+            if q[0] in (0x60, 0x61) and len(q) == 12:
+                sec = q[1] // 4
+                key = bytes(q[6:12])
+                if sec in (0, 1) and q[0] == 0x60 and key == b"\xff" * 6:
+                    self.mfc_auth_sec = sec
+                    self.tx([0x00, 0x00, 0x01, 0x00])		# ACK
+                else:
+                    self.mfc_auth_sec = -1
+                    self.tx([0x00, 0x00, 0x01, 0x04])		# NAK: card halts
+                self.tx([0x60, 0x06, 0x03, 0x01, 0x00, 0x01])
+                return
+            if q[0] == 0x30 and getattr(self, "mfc_auth_sec", -1) == q[1] // 4:
+                blk = bytes([q[1]]) + FAKE_UID + bytes(16)
+                self.tx(bytes([0x00, 0x00, 0x10]) + blk[:16])
+                self.tx([0x60, 0x06, 0x03, 0x01, 0x00, 0x01])
+                return
+            self.tx([0x00, 0x00, 0x01, 0x04])
+            self.tx([0x60, 0x06, 0x03, 0x01, 0x00, 0x01])
+            return
         if self.proto == 0x02:
             if q[0] == 0x30:
                 pg = q[1]
@@ -165,12 +190,16 @@ def main():
     fails = 0
     uid_hex = FAKE_UID.hex()
     uid_sp = " ".join(f"{x:02x}" for x in FAKE_UID)
+    tmpf = tempfile.mktemp(suffix=".txt")
+    os.environ["ZTNFC_CLASSIC_FILE"] = tmpf
     for card, want in (("ntag", ["NTAG213", "data area 144 bytes", "URI",
                                  "atqa=0044", "sak=00", "field off"]),
                        ("desfire", ["DESFire GetVersion: HW vendor 04", "ats_len=6",
                                     "not an EMV card", "frame 3 UID/batch redacted"]),
                        ("classic", ["MIFARE Classic (prop)", "sak=08", "atqa=0004",
-                                    "uid_len=4", "identification only"])):
+                                    "2/16 sectors authenticated",
+                                    "sector  0: key A (factory)",
+                                    "sector  2: not authenticated"])):
         rc, out, refused = run(card, flt)
         print(f"--- {card} (rc {rc})\n{out}")
         for w in want:

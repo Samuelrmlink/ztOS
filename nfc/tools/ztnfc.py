@@ -350,6 +350,136 @@ def read_t3t(nci, info):
 
 # ---------------- session ----------------
 
+# ---- MIFARE Classic (read only, owner-approved default keys) ----
+
+MFC_KEYS = [
+    ("FFFFFFFFFFFF", "factory"), ("A0A1A2A3A4A5", "MAD-A"),
+    ("D3F7D3F7D3F7", "NDEF-A"), ("000000000000", "zero"),
+    ("B0B1B2B3B4B5", "B0..B5"), ("4D3A99C351DD", "4D3A.."),
+    ("1A982C7E459A", "1A98.."), ("AABBCCDDEEFF", "AABB.."),
+]
+CLASSIC_FILE = os.environ.get("ZTNFC_CLASSIC_FILE", "/var/lib/zt-nfc/last-classic.txt")
+
+
+def decode_access(trailer):
+    """return per-block access conditions C1C2C3 for blocks 0..3 of the sector"""
+    b6, b7, b8 = trailer[6], trailer[7], trailer[8]
+    # inverted nibbles are a sanity check; derive C1/C2/C3 per block
+    c1 = [(b7 >> (4 + i)) & 1 for i in range(4)]
+    c2 = [(b8 >> i) & 1 for i in range(4)]
+    c3 = [(b8 >> (4 + i)) & 1 for i in range(4)]
+    ok = (b6 & 0x0F) == (~(b7 >> 4)) & 0x0F
+    return ["".join(str(x) for x in (c1[i], c2[i], c3[i])) for i in range(4)], ok
+
+
+def mfc_reselect(nci, pick):
+    nci.send([0x21, 0x06, 0x01, 0x01])		# deactivate to sleep
+    nci.rsp((1, 6))
+    nci.wait(lambda p: p[0] == 0x61 and p[1] == 0x06, 0.5)
+    nci.send([0x21, 0x04, 0x03, pick[0], 0x81, 0x01])	# re-select on Frame
+    nci.rsp((1, 4))
+    p = nci.wait(lambda p: p[0] == 0x61 and p[1] == 0x05, 0.8)
+    if p:
+        nci.credits = p[3:][5]
+    return p is not None
+
+
+def mfc_auth(nci, block, key_a, key_hex, uid4):
+    cmd = [0x60 if key_a else 0x61, block] + list(uid4) + list(bytes.fromhex(key_hex))
+    r = nci.data(cmd, timeout=0.6)
+    return r is not None and len(r) >= 1 and r[0] == 0x00
+
+
+def read_classic(nci, info, deadline):
+    uid = info.get("_uid") or b""
+    uid4 = (uid + b"\0\0\0\0")[:4]
+    pick = (info["rf_id"], 0x81, 0x00)
+    sectors = 16			# 1K; stop early if higher blocks NAK
+    results = {}			# sector -> (keylabel, 'A'/'B')
+    access = {}
+    blocks_read = 0
+    dump = []
+    authed = False			# whether the card is currently activated+ready
+    reselects = 0
+    reselect_cap = 48			# bound the field time on an unreadable card
+    # attempt order: Key A then Key B over the default list; once a key works,
+    # it is moved to the front so later sectors usually need no re-select
+    attempts = [(True, k) for k in MFC_KEYS] + [(False, k) for k in MFC_KEYS]
+    for sec in range(sectors):
+        if time.monotonic() > deadline - 1.0:
+            log(f"time budget reached at sector {sec}")
+            break
+        base = sec * 4
+        hit = None
+        for idx, (key_a, (khex, klabel)) in enumerate(attempts):
+            if time.monotonic() > deadline - 1.0:
+                break
+            if not authed:
+                if reselects >= reselect_cap:
+                    log(f"re-select budget ({reselect_cap}) reached at sector {sec}")
+                    hit = None
+                    sec = sectors
+                    break
+                reselects += 1
+                if not mfc_reselect(nci, pick):
+                    log("re-select did not re-activate the card; stopping")
+                    sec = sectors
+                    break
+            authed = True
+            if mfc_auth(nci, base, key_a, khex, uid4):
+                hit = (klabel, "A" if key_a else "B", khex)
+                if idx:			# promote the winner for later sectors
+                    attempts.insert(0, attempts.pop(idx))
+                break
+            authed = False		# a failed auth halts the card
+        if sec >= sectors:
+            break
+        if not hit:
+            dump.append(f"sector {sec:2d}: no default key")
+            continue
+        klabel, kt, khex = hit
+        results[sec] = (klabel, kt)
+        blks = []
+        for b in range(base, base + 4):
+            r = nci.data([0x30, b], timeout=0.6)
+            if r is not None and len(r) == 16:
+                blks.append(bytes(r))
+                blocks_read += 1
+            else:
+                blks.append(None)
+                authed = False		# a NAK may halt; re-auth the next sector
+                break
+        trailer = blks[3] if len(blks) == 4 and blks[3] else None
+        if trailer:
+            cond, okc = decode_access(trailer)
+            access[sec] = cond
+        dump.append(f"sector {sec:2d}: key {kt} {klabel} ({khex})")
+        for i, bl in enumerate(blks):
+            dump.append(f"  block {base + i}: {bl.hex() if bl else 'READ FAILED'}")
+    # on-phone dump (root-only), then a redacted summary to stdout
+    out_path = os.environ.get("ZTNFC_CLASSIC_FILE", CLASSIC_FILE)
+    try:
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write("MIFARE Classic dump (owner eyes only)\n")
+            fh.write("UID: " + uid.hex() + "\n")
+            fh.write("\n".join(dump) + "\n")
+        saved = out_path
+    except OSError as e:
+        saved = f"(could not write {out_path}: {e})"
+    log(f"CLASSIC: {len(results)}/{sectors} sectors authenticated, "
+        f"{blocks_read} blocks read")
+    for sec in range(sectors):
+        if sec in results:
+            kl, kt = results[sec]
+            acc = " access " + "/".join(access[sec]) if sec in access else ""
+            log(f"  sector {sec:2d}: key {kt} ({kl}){acc}")
+        else:
+            log(f"  sector {sec:2d}: not authenticated")
+    log(f"full block data (not shown here) saved to {saved}")
+
+
 def scan(dev, seconds):
     nci = Nci(dev)
     try:
@@ -368,7 +498,7 @@ def scan(dev, seconds):
         if not r or r[3] != 0:
             log("CORE_SET_CONFIG failed")
             return 1
-        nci.send([0x21, 0x00, 0x04, 0x01, 0x04, 0x01, 0x02])
+        nci.send([0x21, 0x00, 0x07, 0x02, 0x04, 0x01, 0x02, 0x81, 0x01, 0x01])
         r = nci.rsp((1, 0))
         if not r or r[3] != 0:
             log("RF_DISCOVER_MAP failed")
@@ -412,11 +542,12 @@ def session(nci, t0, seconds):
             log(f"DISCOVER_NTF: id {q[0]} protocol {PROTO.get(q[1], hex(q[1]))} "
                 f"tech {TECH.get(q[2] & 0x7F, hex(q[2]))}{extra} (UID not shown)")
             if q[-1] != 0x02:			# last notification: pick one
-                pick = next((f for f in found if f[1] in (0x02, 0x03, 0x04)), None)
+                pick = next((f for f in found if f[1] in (0x02, 0x03, 0x04, 0x81)), None)
                 if pick is None:
-                    log("no card with an allowed protocol (T2T/T3T/ISO-DEP)")
+                    log("no card with an allowed protocol (T2T/T3T/ISO-DEP/Classic)")
                     return 0
-                nci.send([0x21, 0x04, 0x03, pick[0], pick[1], 0x02 if pick[1] == 0x04 else 0x01])
+                nci.send([0x21, 0x04, 0x03, pick[0], pick[1],
+                          0x02 if pick[1] == 0x04 else 0x01])
                 nci.rsp((1, 4))
             continue
         info = parse_activation(p)
@@ -428,6 +559,8 @@ def session(nci, t0, seconds):
             read_isodep(nci)
         elif info["proto"] == 0x03:
             read_t3t(nci, info)
+        elif info["proto"] == 0x81:
+            read_classic(nci, info, deadline)
         else:
             log("identification only for this protocol (no approved read commands)")
         return 0
