@@ -813,6 +813,69 @@ poll-mode mapping of protocol ISO-DEP (0x04) to the ISO-DEP RF interface
   framing itself, and neither is in the approved list.
 - Type 2 (NTAG/Ultralight) and FeliCa reads work without it.
 
+## Stage 2 runs: the open-path NACK, then DISCOVER_MAP rejected
+
+**Run 1 (2026-11-22 17:38 CST), card: MIFARE Classic 1K.** The first
+`os.write` of CORE_RESET returned `ENXIO`, an address NACK. Cause: `open()`
+powered the chip ~7 ms after LDO38 came on, while stage 1c (which answered)
+had the supply up for hundreds of ms first. Fixed: `open()` now holds VEN off
+for `SUPPLY_SETTLE_MS` = 1000 ms after LDO38, checks SCL/SDA read high
+(`zrn_i2c20_lines`), and enables CLKOUT1 only just before the first
+`RF_DISCOVER`. No field, everything restored.
+
+**Run 2 (2026-11-22 17:51 CST), same card.** The open path now works. The chip
+answered CORE_RESET, CORE_INIT and CORE_SET_CONFIG. It then **rejected
+`RF_DISCOVER_MAP`**:
+
+```
+TX 21 00 07 02 04 01 02 81 01 01     map: ISO-DEP->ISO-DEP, MFC(0x81)->Frame, poll
+RX 41 00 01 01                        RF_DISCOVER_MAP_RSP status 0x01 = REJECTED
+```
+
+ztnfc stopped on the error. **No RF field was ever enabled** (we never reached
+`RF_DISCOVER`). The kernel restored everything: LDO38 `0xac`->`0x2c`, CLKOUT1
+back to gated on close, chip off, modules unloaded, gpp5 released. No
+`/var/lib/zt-nfc` file was created. The supply-settle fix is confirmed: the
+earlier NACK is gone.
+
+### Diagnosis (inferred)
+
+NCI status `0x01` is `STATUS_REJECTED`. The map carries two entries; the new
+one is **protocol 0x81 (the proprietary MIFARE number from
+`NFA_PROPRIETARY_CFG`) mapped to the Frame RF interface (0x01)**. The most
+likely cause is that the S3NRN82 firmware does not accept 0x81 as a mappable
+protocol in `RF_DISCOVER_MAP`, or does not allow the Frame interface as a map
+target. The single-entry ISO-DEP map (`21 00 04 01 04 01 02`), approved
+earlier, was never sent on the phone, so we don't yet know whether the chip
+accepts *any* `RF_DISCOVER_MAP`, or only rejects the 0x81 entry.
+
+This is **not** a 0x2F command and **not** an NVM write; `RF_DISCOVER_MAP` is
+volatile config. Nothing in the stop was outside the approved set.
+
+### Proposal: one diagnostic run (needs approval)
+
+Decide which, then one `ztlock run nfc`, same battery and restore rules:
+
+1. **ISO-DEP-only map, then poll.** Send `21 00 04 01 04 01 02` (the
+   originally approved single entry). If it is accepted, `RF_DISCOVER` poll
+   A/B/F/V, present the Classic card, and **read the `RF_INTF_ACTIVATED_NTF`
+   only** (type, ATQA/SAK, UID length, redacted; protocol and interface
+   numbers). This answers the real question: on this chip, does a MIFARE
+   Classic card activate as protocol 0x81 on the Frame interface by itself? If
+   it does, auth/read can follow without mapping 0x81 at all.
+2. If even the ISO-DEP-only map is rejected, send **no `RF_DISCOVER_MAP`** and
+   rely on the chip's default mapping, then poll and read the activation the
+   same way.
+
+Either way, the follow-up only identifies the card (no auth, no read) until we
+know the activation interface; the field stays under the 30 s watchdog. If the
+chip reports Classic on an interface we can reach, the existing allowlist and
+`ztnfc` reader handle auth and READ unchanged. ztnfc is updated to fall back
+automatically: if the two-entry map is rejected, it retries the ISO-DEP-only
+map, and if that is rejected it sends no map (all three are already in the
+approved command set except they would run in one session; this needs the
+owner's ok for the retry-in-one-session).
+
 ## Biggest unknowns
 
 1. **Clock.** Is CLKOUT (`oscclk_nfc`) running under ztOS, and does the chip

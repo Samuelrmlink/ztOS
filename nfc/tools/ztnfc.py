@@ -498,11 +498,23 @@ def scan(dev, seconds):
         if not r or r[3] != 0:
             log("CORE_SET_CONFIG failed")
             return 1
-        nci.send([0x21, 0x00, 0x07, 0x02, 0x04, 0x01, 0x02, 0x81, 0x01, 0x01])
-        r = nci.rsp((1, 0))
-        if not r or r[3] != 0:
-            log("RF_DISCOVER_MAP failed")
-            return 1
+        # Some controllers reject a map entry for the proprietary MIFARE
+        # protocol (0x81) or the Frame interface. Fall back: two-entry ->
+        # ISO-DEP only -> no map (chip default). All are poll-only and in the
+        # approved command set.
+        maps = ([0x21, 0x00, 0x07, 0x02, 0x04, 0x01, 0x02, 0x81, 0x01, 0x01],
+                [0x21, 0x00, 0x04, 0x01, 0x04, 0x01, 0x02])
+        mapped = False
+        for m in maps:
+            nci.send(m)
+            r = nci.rsp((1, 0))
+            if r and r[3] == 0:
+                mapped = True
+                break
+            log(f"RF_DISCOVER_MAP rejected (status "
+                f"{'none' if not r else hex(r[3])}); trying a simpler map")
+        if not mapped:
+            log("no RF_DISCOVER_MAP accepted; using the chip's default mapping")
         nci.send([0x21, 0x03, 0x09, 0x04, 0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x06, 0x01])
         t0 = time.monotonic()
         r = nci.rsp((1, 3))

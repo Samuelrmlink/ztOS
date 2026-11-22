@@ -83,7 +83,9 @@ class Chip(threading.Thread):
         elif p[0] == 0x20 and p[1] == 0x02:
             self.tx([0x40, 0x02, 0x02, 0x00, 0x00])
         elif p[0] == 0x21 and p[1] == 0x00:
-            self.tx([0x41, 0x00, 0x01, 0x00])
+            # reject a map that contains the MFC (0x81) entry, accept ISO-DEP-only
+            has_mfc = 0x81 in p[4:4 + 3 * p[3]:3]
+            self.tx([0x41, 0x00, 0x01, 0x01 if has_mfc else 0x00])
         elif p[0] == 0x21 and p[1] == 0x03:
             self.tx([0x41, 0x03, 0x01, 0x00])
             self.activate()
@@ -196,7 +198,7 @@ def main():
                                  "atqa=0044", "sak=00", "field off"]),
                        ("desfire", ["DESFire GetVersion: HW vendor 04", "ats_len=6",
                                     "not an EMV card", "frame 3 UID/batch redacted"]),
-                       ("classic", ["MIFARE Classic (prop)", "sak=08", "atqa=0004",
+                       ("classic", ["RF_DISCOVER_MAP rejected", "MIFARE Classic (prop)", "sak=08", "atqa=0004",
                                     "2/16 sectors authenticated",
                                     "sector  0: key A (factory)",
                                     "sector  2: not authenticated"])):
