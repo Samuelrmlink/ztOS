@@ -1025,6 +1025,70 @@ whether detection starts working. I would write the exact byte stream and the
 chunk boundaries for review before any such run, and treat the whole thing as
 one owner-approved NVM operation.
 
+### Version, rollback and a better first suspect (added after run 4)
+
+- **The file's version (observed).** `sec_s3nrn82_rfreg.bin` ends with a
+  trailer: `45 4b 41 00` ("EKA"), `01 4b 1d 0e 0e 21 01 11`, `44 45 46 00`
+  ("DEF"). The HAL prints the RF version as six numbers
+  (`RF version: %d/%d/%d/%d.%d.%d`) and compares "RF Version (BIN)" against
+  "RF Version (F/W)", so this trailer is most likely that version record
+  (inferred). There is a second, **different** file under `BRI/` (md5
+  `58695bf8…` vs `d8c4edf9…` for the main one); which one this board uses is
+  decided by the HAL and is not known for certain (the main one is the likely
+  default).
+- **The chip's RF version** cannot be read without a vendor (0x2F) query; it
+  is not in `CORE_INIT` (that carries only the firmware version
+  `45 00 4b 02`). So "blob vs chip" is **unknown**.
+- **Probably already loaded.** Stock Android ran on this phone, and its HAL
+  rewrites the RF registers only when the versions differ. So the chip very
+  likely **already holds this exact RF block** in NVM. If so, the rfreg load
+  would change nothing — and would not explain the missed detection.
+- **Rollback.** There is no read-back of the current RF block, so the only
+  rollback is to stream a known blob again (the same file, or the `BRI/`
+  one). If the chip already holds this blob, re-streaming it is a no-op in
+  effect, but it still costs an NVM write cycle and a power-loss window.
+- **Risk.** A 0x2F command plus a probable NVM write of the RF block. An
+  interruption mid-stream could leave it inconsistent until it is re-streamed.
+  Main firmware, eSE, MST and EFS/BOOT are not touched.
+
+**A better first suspect: the clock configuration (`FW_CFG`, 0x2F 28).**
+In every run, CLK_REQ stayed low — even with the field on. The Samsung HAL
+calls `hal_nci_send_prop_fw_cfg` during init and checks for
+`NCI_PROP_FW_CFG_RSP`, with `FW_CFG_CLK_SPEED=0x12` from the vendor config.
+That command tells the chip which reference clock to use (type, speed, and
+whether to request it through CLK_REQ). Without it, the chip likely runs its
+RF PLL on a default it cannot lock to this board's 26 MHz AP clock, so the
+field is wrong or absent and no card answers — and the chip never asks for
+the clock. This fits all observations better than missing RF registers.
+
+- Bytes: `2F 28 03 <clk_type> <clk_speed> <clk_req>`, with `clk_speed = 0x12`
+  (vendor config). `clk_type` and `clk_req` are **not** in the vendor config;
+  their HAL defaults would have to be recovered from `nfc_nci_sec.so` before
+  this can be proposed with exact bytes. Mainline's `01 ff ff` (external
+  crystal) is wrong for this board.
+- Whether `FW_CFG` is volatile or stored is **unknown**. The HAL sending it on
+  each init suggests volatile, but this is not confirmed. It is a 0x2F command
+  either way and needs explicit approval.
+
+Suggested order, each a separate owner decision: (1) the position sweep
+below; (2) recover `FW_CFG`'s `clk_type`/`clk_req` from the HAL (read-only
+analysis of a VENDOR file), then propose `FW_CFG` alone; (3) only then the
+rfreg stream.
+
+### Position sweep (proposal, no new commands)
+
+Three identify-only runs, at most 20 s each, with the owner moving the
+Chameleon between runs (the S9's NFC loop is on the back-cover flex around
+the wireless-charging coil, so the best spot may be off-centre):
+
+1. centre of the coil;
+2. upper back, between the coil and the camera;
+3. lower back, below the coil.
+
+Each run uses the already-approved path (fixed open, ISO-DEP-only map, poll
+A/B/F/V, the single page-0 READ if T2T activates). The open path gets a
+short retry on `CORE_RESET` so a marginal start does not waste a run.
+
 **Cheaper first step (no 0x2F):** the owner can reposition the card/emulator
 over the exact NFC loop and rerun the already-approved identify scan, to rule
 out coupling before touching the RF registers. The digital path is ready; only
