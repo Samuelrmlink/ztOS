@@ -236,6 +236,7 @@ static bool call_held, dsm_held;	/* a call or DSM holds the block on */
 static int aud_get(void);
 static void aud_put(void);
 static void aud_idle_kick(void);
+static int aud_block_on(bool boot);
 static struct delayed_work aud_idle_work;
 static const struct firmware *fw_sram, *fw_dram, *fw_iva;
 static struct snd_pcm *playback[2];
@@ -3129,12 +3130,33 @@ static int abox_pm_event(struct notifier_block *nb, unsigned long event, void *u
 		cancel_delayed_work_sync(&aud_idle_work);
 		cancel_delayed_work_sync(&watchdog_work);
 		if (READ_ONCE(aud_idle_off)) {
-			/* already off: nothing to stop, nothing may be touched */
+			/*
+			 * Off for idleness: power the block back on (its DSP
+			 * stays down) before the system suspends. The AUD pads'
+			 * pin controller (pinctrl@17c60000) is in this domain,
+			 * and samsung_pinctrl_suspend reads its registers at
+			 * suspend_late: with the domain off that read is a
+			 * synchronous external abort, and the phone died in the
+			 * middle of its suspend (2026-11-12 12:32, 11-22 18:05;
+			 * pstore: samsung_pinctrl_suspend+0x98). The resume
+			 * path below then starts the DSP; idleness takes it off
+			 * again afterwards.
+			 */
 			mutex_lock(&stream_lock);
+			ret = aud_block_on(false);
+			if (ret) {
+				mutex_unlock(&stream_lock);
+				pr_err("snd-zrn-abox: idle: block would not power on: no sleep (%d)\n", ret);
+				return notifier_from_errno(-EBUSY);
+			}
+			core_off();
+			writel(0, sfr + ABOX_SYSPOWER_CTRL);
+			writel(0, mmu + MMU_CTRL);
 			suspending = true;
 			for (i = 0; i < ARRAY_SIZE(streams); i++)
 				streams[i].needs_reset = true;
 			mutex_unlock(&stream_lock);
+			pr_info("snd-zrn-abox: idle: block on for the sleep (its pins are saved)\n");
 			break;
 		}
 		snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
@@ -3163,14 +3185,7 @@ static int abox_pm_event(struct notifier_block *nb, unsigned long event, void *u
 	case PM_POST_SUSPEND:
 		if (!suspending)
 			break;
-		if (READ_ONCE(aud_idle_off)) {
-			/* stays off: the next user starts it (aud_get) */
-			mutex_lock(&stream_lock);
-			suspending = false;
-			pm_ready = true;
-			mutex_unlock(&stream_lock);
-			break;
-		}
+		/* the block is always powered here (see PM_SUSPEND_PREPARE) */
 		mutex_lock(&stream_lock);
 		cmu_compare();
 		ret = dsp_boot();
@@ -3191,6 +3206,7 @@ static int abox_pm_event(struct notifier_block *nb, unsigned long event, void *u
 		pr_info("snd-zrn-abox: resume firmware %d; streams require prepare\n", ret);
 		mutex_unlock(&stream_lock);
 		schedule_delayed_work(&watchdog_work, msecs_to_jiffies(113));
+		aud_idle_kick();	/* off again once idle (no user came back) */
 		break;
 	}
 	return NOTIFY_OK;

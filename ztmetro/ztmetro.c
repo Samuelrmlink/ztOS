@@ -840,6 +840,9 @@ struct zt_server {
 	bool ringing;		/* ztphone: an incoming call is ringing ("ringing on|off") */
 	bool ring_silenced;	/* power has silenced it once: power is its own again */
 
+	/* the always-on display in a pocket (aod_pocket): ztoscsf-sensord
+	 * checks while it would show; covered, it is hidden */
+	bool aod_covered, aod_pocket_asked;
 	/* app switcher: the apps as a row of cards, newest on the right */
 	bool switcher;
 	float switch_t;			/* 0 the app at full size, 1 cards */
@@ -17386,7 +17389,7 @@ static bool aod_charger(struct zt_server *server) {
 /* Why the screen goes dark rather than to the always-on display, or NULL if
  * it is to be shown. Every one of these is a deliberate dark (README: "When
  * the screen goes dark instead"); each dark is logged with its reason. */
-static const char *aod_why(struct zt_server *server) {
+static const char *aod_why_uncovered(struct zt_server *server) {
 	static char why[64];
 	if (server->aod_mode == AOD_OFF) {
 		return "switched off in Settings";
@@ -17421,6 +17424,16 @@ static const char *aod_why(struct zt_server *server) {
 		return why;
 	}
 	return NULL;	/* (an unreadable battery counts as enough) */
+}
+
+/* ...and covered: in a pocket or face down, as sensord last found it
+ * (power/aod/POCKET.md). Only when it would otherwise show. */
+static const char *aod_why(struct zt_server *server) {
+	const char *why = aod_why_uncovered(server);
+	if (!why && server->aod_covered) {
+		return "the phone is covered (a pocket, or face down)";
+	}
+	return why;
 }
 
 static bool aod_wanted(struct zt_server *server) {
@@ -18184,7 +18197,24 @@ later:
 /* With the screen off: the always-on display if it is wanted now, the dark if
  * not (a charger pulled out, the battery down to AOD_MIN_BATTERY, the setting
  * changed). The minute's clock, power events and a reload ask. */
+/* ztoscsf-sensord checks for a pocket only while the always-on display would
+ * show: the screen off and nothing else keeping it dark. Said again at each
+ * aod_sync (the minute's clock), so a restarted sensord takes it up again;
+ * it ignores a repeat. A screen that comes on forgets the pocket: the next
+ * screen-off shows the AOD and checks at once. */
+static void aod_pocket(struct zt_server *server) {
+	bool want = server->output && !server->screen_on && !aod_why_uncovered(server);
+	if (!want) {
+		server->aod_covered = false;
+	}
+	if (want || want != server->aod_pocket_asked) {
+		pipe_tell(AOD_SENSORD_CTL, want ? "pocket on\n" : "pocket off\n");
+	}
+	server->aod_pocket_asked = want;
+}
+
 static void aod_sync(struct zt_server *server) {
+	aod_pocket(server);
 	if (server->screen_on || !server->output) {
 		return;
 	}
@@ -18302,6 +18332,7 @@ static void screen_set(struct zt_server *server, bool on) {
 		aod_bl_release();
 	}
 	server->screen_on = on;
+	aod_pocket(server);	/* a pocket check at screen-off; none with it on */
 	if (!on) {
 		/* upright again before the AOD draws, and the sensor off. (On, the
 		 * next frame decides, after lock() below: no turn and back.) */
@@ -20935,6 +20966,7 @@ static void state_file_write(struct zt_server *server) {
 		server->height, server->scale, o->width, o->height, server->screen_on ? "on" : "off",
 		server->aod ? "on" : "off", server->aod_frames);
 	fprintf(f, "prox_blank %s\n", server->prox_blank ? "on" : "off");
+	fprintf(f, "aod_covered %s\n", server->aod_covered ? "yes" : "no");
 	fprintf(f, "cover %s%s\n", server->cover.closed ? "closed" : "open", server->cover.enabled ? "" : " ignored");
 	fprintf(f, "rotation %d\nauto_rotate %s\nrotation_lock %s\norientation %d\n", server->rot.applied,
 		server->rot.enabled ? "on" : "off", server->rot.locked ? "on" : "off",
@@ -21598,6 +21630,15 @@ static void ctl_command(struct zt_server *server, char *line) {
 			server->rot.test, rot_wanted(&c), c.screen_on, c.locked, c.call_screen, c.special, c.app_opts_out);
 		state_file_write(server);
 		damage(server);
+	} else if (strncmp(line, "pocket ", 7) == 0) {
+		/* ztoscsf-sensord: covered (a pocket, face down) or clear */
+		bool covered = strncmp(line + 7, "covered", 7) == 0;
+		if (covered != server->aod_covered && (!covered || server->aod_pocket_asked)) {
+			server->aod_covered = covered;
+			wlr_log(WLR_INFO, "aod: the phone is %s", covered ? "covered" : "uncovered");
+			aod_sync(server);
+			state_file_write(server);
+		}
 	} else if (strncmp(line, "prox_blank ", 11) == 0) {
 		/* ztoscsf-sensord, in a call: near (on) or far (off) */
 		bool near = strncmp(line + 11, "on", 2) == 0;

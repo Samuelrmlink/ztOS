@@ -220,6 +220,24 @@ the accelerometer. Ours is kept in both cases.
 - **`messages/ztmessages.c`**: upstream's themed compose strip, with our
   attachment row.
 
+### Catching up with feature/desktop-dp (854b59b)
+
+The branch was then merged with `origin/feature/desktop-dp` at 854b59b, which
+brings in aod-pocket, the snd-zrn-abox sleep fix and roadmap commits. There
+was one conflict: in ztmetro.c's server struct, upstream's `ringing` and
+`ring_silenced` fields sat beside our `aod_covered` and `aod_pocket_asked`.
+Both are kept. The `aod_covered` hook (`aod_why`, `aod_pocket`, the sensord
+`pocket covered|clear` reply and the state dump) and the sensord pocket checks
+merged by themselves.
+
+**The Power-page sleep switch** (upstream, in Settings) runs only
+`sudo -n /usr/local/sbin/zrn-sleepd enable` or `... disable`, never a bare
+`zrn-sleepd`. It reads its state from `/var/lib/zrn-sleep/enabled` and
+`/run/zrn-sleepd/status`, the same paths the daemon uses. No sudoers rule
+covers those two commands yet (`99-ztos-shell` doesn't), so `sudo -n` fails
+and the switch does nothing. That belongs with the Sleep tile work
+(`feature/sleep-toggle`, ROADMAP 8.47).
+
 ## 3. Upstream's sleep work against ours
 
 Upstream changed `power/suspend/platform.c` (the `zrn-sleep-init` module) and

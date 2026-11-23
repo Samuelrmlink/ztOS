@@ -217,6 +217,18 @@ class Parsing(Base):
 		self.root.file('run/user/1000/ztmetro.state', 'screen off\naod off\n')
 		self.assertEqual(why.display_blockers(RUNTIME, HOME), [])
 
+	def test_aod_hidden_covered(self):
+		# the AOD hidden in a pocket: no blocker, a note in every form
+		self.root.connector('card0-DSI-1', False)
+		self.root.file('run/user/1000/ztmetro.state', 'screen off\naod off\naod_covered yes\n')
+		self.assertEqual(why.display_blockers(RUNTIME, HOME), [])
+		result = why.collect()
+		self.assertEqual(result['notes'], ['AOD hidden: phone covered'])
+		self.assertIn('note=AOD hidden: phone covered', why.status_lines(result))
+		self.assertIn('note\tAOD hidden: phone covered', why.shell_lines(result))
+		self.root.file('run/user/1000/ztmetro.state', 'screen on\naod off\naod_covered no\n')
+		self.assertEqual(why.collect()['notes'], [])
+
 	def test_charger(self):
 		self.root.file('sys/class/power_supply/max77705-charger/type', 'USB\n')
 		self.root.file('sys/class/power_supply/max77705-charger/online', '1\n')
