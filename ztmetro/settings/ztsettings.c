@@ -403,6 +403,7 @@ static const char *timeout_text(char *out, size_t size, int seconds) {
 static void perf_load(void);
 static void auto_load(void);
 static void config_remember_loaded(void);
+static struct config_key *config_key_named(const char *name);
 
 /* The list picker that is open, by its action; 0 when none is. */
 static int open_picker;
