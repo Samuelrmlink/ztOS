@@ -1,7 +1,7 @@
 # Bluetooth on the Galaxy S9: working (2026-10-18)
 
 Up at boot: `zrn-bluetooth.service` loads `driver/zrn-bt.ko` and runs
-`btattach` (Broadcom protocol); `zrn-bluetooth-addr.service` gives the
+`btattach` (Broadcom protocol, 3 Mbaud: see "UART speed" below); `zrn-bluetooth-addr.service` gives the
 controller the phone's own address from EFS (`50:77:05:8E:75:B9` here,
 cached in `/var/lib/zrn-bluetooth`) before bluetoothd starts. Other devices see
 the phone's hostname (`ztos`): bluetoothd's hostname plugin overrides the `Name`
@@ -33,6 +33,56 @@ What it took, beyond the plan below:
 Tools used to find this, in the scratchpad of the session: raw register
 pokes over /dev/mem, a loopback test, and reading the UART pins as GPIO
 inputs with pull-downs (the chip drives its TX high once powered).
+
+## UART speed: 3 Mbaud (ROADMAP 8.58, 2026-11-22)
+
+Until 8.58 the HCI link ran at 115200 baud, about 90 kbit/s of payload. AAC
+music to the AirPods played for half a second and went silent (a sine tone,
+which encodes small, played). Read on the phone: `stty` 115200, UART_BT
+`UBRDIV` 0x6b / `UFRACVAL` 0x8 (200 MHz / 1736), and in the setup log the
+Read Local Name answer took 24 ms in both passes, before and after the
+firmware, which is 255 bytes at 115200.
+
+Why: `patch-btbcm.py` gave hci_bcm a 3 Mbaud fallback for starlte, but with
+btattach the line discipline already sets the operating speed to the tty's
+(`hci_uart_tty_open`: `hu->oper_speed = c_ospeed`), and that comes first. So
+hci_bcm "switched" the chip to 115200. The fallback is gone from the patch.
+
+Now `zrn-bluetooth` runs `btattach -S <speed>`. hci_bcm still talks to the chip
+at 115200 first (its `init_speed`) and loads the firmware at that speed (~11 s).
+Then it sends the Broadcom baud command 0xfc18 and moves the host UART to the
+new speed. The speed is the board's: `max-speed` in the device tree's
+`bluetooth-board` node (`kernel/make-dts.py`). A tree without it gets 3000000.
+
+* **3000000 is stock's:** stock `libbt-vendor.so` (G960FXXUHFVG4, vendor
+  partition) logs "set UART baud %i" with 3000000 twice, before and after the
+  patch download, and `userial_vendor_init` defaults to it. No
+  `bt_vendor.conf` exists to change that.
+* **The divisor:** 200 MHz / 66 makes 3,030,303 baud (+1.0 %, `UBRDIV` 3,
+  `UFRACVAL` 2), well inside the ±2–3 % a UART tolerates. No divider of
+  CMU_PERIC1's 200 MHz makes 3 Mbaud exactly (200/3 is not an integer).
+* **Not faster:** 4 Mbaud would be exact (200 MHz / 50), but samsung_tty caps
+  at 3000000. Above 3000000, hci_bcm first sends the 48 MHz UART clock command
+  (0xfc45), and it reads `bcm->dev` to do that, which is NULL under btattach.
+  It would oops.
+* **Headroom:** 2.4 Mbit/s of payload. AAC at 320 kbit/s plus a 64 kbit/s
+  voice link is about 6 times less.
+* **Why not serdev:** a `brcm,bcm4345c5` serdev child needs the UART in the
+  device tree. Here zrn-bt registers it at runtime, after it has opened the
+  clock gates and taken it out of USI reset, since an earlier read hangs the
+  bus. hci_bcm's serdev driver would also take BT_EN, HOST_WAKE and the chip's
+  runtime PM, which zrn-bt and its sleep fixes own.
+* **Restarting the service:** at 115200 a second `btattach` in the same boot
+  found the chip where the first left it. At 3 Mbaud it would not, because
+  hci_bcm always starts at 115200. So `zrn-bluetooth` resets the chip first
+  (zrn-bt's write-only `power_cycle` parameter: BT_EN low 30 ms, then high)
+  when `/run/zrn-bluetooth.attached` says it attached before in this boot.
+* **Rollback:** a drop-in with `Environment=ZRN_BT_SPEED=115200` for
+  `zrn-bluetooth.service`, or the old script, then a reboot. zrn-bt cannot be
+  reloaded within a boot.
+
+Test: `bluetooth/test-uart-speed.sh`, on the host. It checks the speed choice
+and the divisor.
 
 ## Reconnecting (ROADMAP 8.52, 2026-11-22)
 

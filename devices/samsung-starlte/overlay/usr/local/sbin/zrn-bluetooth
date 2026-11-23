@@ -3,11 +3,54 @@
 # brings up its UART (ttySAC0) (bluetooth/README.md); btattach then
 # hands the UART to the kernel's Broadcom HCI driver, which loads
 # brcm/BCM.samsung,starlte.hcd. Runs for as long as Bluetooth is attached.
+#
+# The UART's operating speed: btattach's -S. The line discipline takes the
+# tty's speed as the operating speed (hci_ldisc.c: hu->oper_speed =
+# c_ospeed); hci_bcm starts the chip at 115200 anyway, loads the firmware,
+# then sends the Broadcom baud command (0xfc18) for this speed and moves the
+# host UART to it. At 115200 A2DP music broke up (ROADMAP 8.58). The speed is
+# the board's: the device tree's bluetooth-board node (compatible
+# "ztos,zrn-bt") has max-speed, as a serdev Bluetooth node would. A tree
+# without it gets 3000000, Samsung's own (stock libbt-vendor.so: "set UART
+# baud" 3000000, no bt_vendor.conf to change it). Not above 3000000: the
+# Samsung UART driver caps there, and hci_bcm's 48 MHz clock command for
+# faster speeds needs a bcm_device that btattach does not have.
+#
+# ZRN_BT_SPEED (a systemd drop-in's Environment=) overrides both: back to the
+# old speed is ZRN_BT_SPEED=115200 and a reboot (bluetooth/README.md).
 set -e
+DT=${ZRN_BT_DT:-/proc/device-tree}
+SPEED=3000000
+for n in "$DT"/*/; do
+	if [ -r "$n/compatible" ] && tr '\0' '\n' < "$n/compatible" | grep -qx 'ztos,zrn-bt'; then
+		[ -r "$n/max-speed" ] && SPEED=$(od -An -tu4 --endian=big "$n/max-speed" | tr -d ' \n')
+		break
+	fi
+done
+SPEED=${ZRN_BT_SPEED:-$SPEED}
+case "$SPEED" in
+115200|230400|460800|921600|1000000|1500000|2000000|3000000) ;;
+*) echo "zrn-bluetooth: max-speed $SPEED not usable here; 115200"; SPEED=115200 ;;
+esac
+[ -z "${ZRN_BT_PRINT_SPEED:-}" ] || { echo "$SPEED"; exit 0; }
 modprobe zrn-bt
 # the UART's tty (ttySAC0 on a fresh boot; samsung_tty numbers by probe order)
 i=0
 until tty=$(basename "$(find /sys/devices/platform/exynos850-uart.0/ -maxdepth 4 -name "ttySAC*" 2>/dev/null | head -1)") && [ "$tty" != . ]; do
 	i=$((i + 1)); [ $i -gt 20 ] && { echo "zrn-bluetooth: no UART"; exit 1; }; sleep 0.25
 done
-exec btattach -B "/dev/$tty" -P bcm -S 115200
+# A second attach in this boot (a service restart): the chip is still at the
+# speed the first one moved it to, and hci_bcm starts at 115200. Reset it
+# first, as loading zrn-bt does on the first attach.
+MARK=/run/zrn-bluetooth.attached
+if [ -e "$MARK" ]; then
+	if [ -w /sys/module/zrn_bt/parameters/power_cycle ]; then
+		echo 1 > /sys/module/zrn_bt/parameters/power_cycle
+		echo "zrn-bluetooth: attached before in this boot: chip reset"
+	elif [ "$SPEED" != 115200 ]; then
+		echo "zrn-bluetooth: attached before at $(cat "$MARK") and zrn-bt cannot reset the chip: reboot"
+	fi
+fi
+echo "$SPEED" > "$MARK"
+echo "zrn-bluetooth: $tty at $SPEED baud"
+exec btattach -B "/dev/$tty" -P bcm -S "$SPEED"

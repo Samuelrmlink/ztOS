@@ -384,6 +384,10 @@ ROOT_NODES = """
 	bluetooth-board {
 		compatible = "ztos,zrn-bt";
 		bt-en-gpios = <&expander 7 GPIO_ACTIVE_HIGH>;
+		/* UART_BT's operating speed, Samsung's (stock libbt-vendor):
+		 * zrn-bluetooth gives it to btattach, hci_bcm switches the
+		 * chip (0xfc18) and the host UART to it after the firmware */
+		max-speed = <3000000>;
 	};
 
 	usb-sbu-mux {

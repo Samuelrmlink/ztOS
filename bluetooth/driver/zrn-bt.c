@@ -31,9 +31,11 @@
  *
  * The host stack then attaches to the UART from userspace:
  *
- *	btattach -B /dev/ttySAC0 -P bcm -S 115200
+ *	btattach -B /dev/ttySAC0 -P bcm -S 3000000
  *
- * which loads brcm/BCM4361B2.hcd through btbcm. Unloading powers it off.
+ * which loads brcm/BCM4361B2.hcd through btbcm at 115200, then moves chip and
+ * UART to the -S speed (zrn-bluetooth takes it from the device tree's
+ * bluetooth-board max-speed). Unloading powers it off.
  */
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
@@ -232,6 +234,40 @@ static int bt_power(bool on)
 }
 
 /*
+ * power_cycle: writing 1 resets the chip's Bluetooth side (BT_EN low 30 ms,
+ * high, 100 ms), as loading the module does. For a second btattach in the
+ * same boot: hci_bcm always starts at 115200, but the chip is still at the
+ * speed the first one moved it to (3 Mbaud), and only a reset brings it back.
+ * zrn-bluetooth does it before attaching again; nothing may be attached then.
+ * Ignored while the module is still loading (it cycles BT_EN itself).
+ */
+static DEFINE_MUTEX(power_lock);
+static bool ready;
+
+static int power_cycle_set(const char *val, const struct kernel_param *kp)
+{
+	bool on;
+	int ret = kstrtobool(val, &on);
+
+	if (ret || !on || !READ_ONCE(ready))
+		return ret;
+	mutex_lock(&power_lock);
+	ret = bt_power(false);
+	msleep(30);
+	if (!ret)
+		ret = bt_power(true);
+	msleep(100);
+	mutex_unlock(&power_lock);
+	pr_info("zrn-bt: power cycled (%d)\n", ret);
+	return ret;
+}
+
+static const struct kernel_param_ops power_cycle_ops = {
+	.set = power_cycle_set,
+};
+module_param_cb(power_cycle, &power_cycle_ops, NULL, 0200);
+
+/*
  * System sleep. The forced-open gates and CLKREQ_ON are a standing clock
  * request on PERIC1: the firmware gave up SoC sleep 21 ms in, every time,
  * while this module was loaded (SoC sleep worked with it unloaded). Give the
@@ -331,6 +367,7 @@ static int bt_pm_notify(struct notifier_block *nb, unsigned long event, void *un
 		WRITE_ONCE(entering_sleep, false);
 	if (!sleep_power_off)
 		return NOTIFY_DONE;
+	mutex_lock(&power_lock);
 	if (event == PM_SUSPEND_PREPARE) {
 		powered_off_for_sleep = !bt_power(false);
 		pr_info("zrn-bt: sleep: Bluetooth off (%d)\n", powered_off_for_sleep);
@@ -338,6 +375,7 @@ static int bt_pm_notify(struct notifier_block *nb, unsigned long event, void *un
 		powered_off_for_sleep = false;
 		pr_info("zrn-bt: sleep: Bluetooth on (%d)\n", bt_power(true));
 	}
+	mutex_unlock(&power_lock);
 	return NOTIFY_DONE;
 }
 static struct notifier_block bt_pm_nb = { .notifier_call = bt_pm_notify };
@@ -502,6 +540,7 @@ static int __init zrn_bt_init(void)
 	pr_info("zrn-bt: test_skip %#x\n", test_skip);
 	register_syscore(&bt_syscore);
 	register_pm_notifier(&bt_pm_nb);
+	WRITE_ONCE(ready, true);
 	return 0;
 
 err_power:
@@ -529,6 +568,9 @@ err_bt_en:
 
 static void __exit zrn_bt_exit(void)
 {
+	WRITE_ONCE(ready, false);
+	mutex_lock(&power_lock);	/* a power_cycle under way finishes first */
+	mutex_unlock(&power_lock);
 	unregister_pm_notifier(&bt_pm_nb);
 	unregister_syscore(&bt_syscore);
 	platform_device_unregister(uart_pdev);
