@@ -98,4 +98,8 @@ for attempt in 1 2; do
     fi
 done
 echo 'Waydroid launch failed after one recovery attempt.' >&2
+# ztMETRO let the tap through to start Android; now it says Android has stopped
+if [[ -p $XDG_RUNTIME_DIR/ztmetro.ctl ]]; then
+    timeout 1 bash -c 'printf "waydroid-failed\n" > "$1"' _ "$XDG_RUNTIME_DIR/ztmetro.ctl" || true
+fi
 exit 1

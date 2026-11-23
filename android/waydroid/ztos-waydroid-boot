@@ -27,13 +27,13 @@ if ! systemctl --user start ztos-waydroid-session.service; then
 	exit 0
 fi
 
-if timeout --signal=TERM --kill-after=2 45 \
+if timeout --signal=TERM --kill-after=2 150 \
 	 sudo -n /usr/local/libexec/ztos-waydroid-recover ready; then
 	if ! ztos-waydroid-power idle; then
 		logger -t ztos-waydroid-boot 'Android ready; idle freeze deferred to normal policy'
 	fi
 	logger -t ztos-waydroid-boot 'Android ready; boot marker set'
 else
-	logger -t ztos-waydroid-boot 'Android not ready within 45 seconds; continuing boot'
+	logger -t ztos-waydroid-boot 'Android not ready within 150 seconds; ztos-waydroid-ready keeps waiting'
 fi
 exit 0
