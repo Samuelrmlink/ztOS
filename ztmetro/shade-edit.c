@@ -6,9 +6,9 @@
  * Drawn as one layer over the panel's tiles and links (redrawn only when the
  * places change or a drag starts or ends) and, while a tile is carried, that
  * tile as a layer of its own under the finger. The places are the panel's own
- * (shade_tile_rect); the tray's tiles are smaller, five across, so that a
- * turned phone's side sheet (one portrait screen wide, the view's height)
- * holds two rows of them. In the theme's colours (shell_light).
+ * (shade_tile_rect); the tray's tiles are smaller, five across upright and
+ * ten turned, so that a turned panel (the view's height) holds two rows of
+ * them. In the theme's colours (shell_light).
  */
 
 #define SE_BADGE	22.0	/* a tile's minus, in its top right corner */
@@ -70,9 +70,12 @@ static double se_tray_top(struct zt_server *server) {
 }
 
 static void se_tray_tile(struct zt_server *server, int k, double *x, double *y, double *w, double *h) {
-	*w = (server->width - 2 * SHADE_SIDE - (SE_TRAY_ACROSS - 1) * SHADE_GAP) / (double)SE_TRAY_ACROSS;
+	/* five across upright; turned (the places eight across, the panel the
+	 * view's height) ten, so that two rows fit */
+	int across = server->width > server->height ? 2 * SE_TRAY_ACROSS : SE_TRAY_ACROSS;
+	*w = (server->width - 2 * SHADE_SIDE - (across - 1) * SHADE_GAP) / (double)across;
 	*h = round(*w * 0.66);
-	se_tray_rect(k, SE_TRAY_ACROSS, SHADE_SIDE, se_tray_top(server), *w, *h, SHADE_GAP, x, y);
+	se_tray_rect(k, across, SHADE_SIDE, se_tray_top(server), *w, *h, SHADE_GAP, x, y);
 }
 
 static void se_slot_rects(struct zt_server *server, double rects[SE_SLOTS][4]) {
@@ -333,8 +336,8 @@ static void shade_edit_up(struct zt_server *server, struct touch_point *p, bool 
 	int index = p->index;
 	if (se.carrying) {
 		int kind = se.carrying, from = se.from, over = se.over;
-		double w, h;
-		w = se_tile_w(server, &h);
+		double h;
+		se_tile_w(server, &h);
 		bool in_tray = se.cy + h / 2 >= se_hint_y(server) + SE_HINT_H;
 		se.carrying = 0;
 		se.over = -1;
