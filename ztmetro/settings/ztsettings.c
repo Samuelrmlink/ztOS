@@ -31,6 +31,8 @@
 #include "zrnvibe.h"
 #include "../volume-streams.h"
 #include "../sleep-toggle.h"
+#define ZT_SHADE_EDIT_LOGIC_ONLY
+#include "../shade-edit.h"	/* the quick tiles places list, as the shell keeps it (two to four rows, 8.55) */
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <sys/sysinfo.h>
@@ -218,8 +220,6 @@ static const char *const QUICK_NAMES[] = { "Wi-Fi", "Mobile data", "Bluetooth", 
 	"Rotation lock", "Flashlight", "Location", "Brightness", "All settings", "Vibration", "Audio", "Sleep", "(empty)" };
 #define N_QUICK 13
 #define QUICK_NONE 12	/* "none": an empty place */
-#define ZT_SHADE_EDIT_LOGIC_ONLY
-#include "../shade-edit.h"	/* the places' list, as the shell keeps it (two to four rows, 8.55) */
 
 #include "wifi-list.h"	/* struct network, and the rows merged by name */
 

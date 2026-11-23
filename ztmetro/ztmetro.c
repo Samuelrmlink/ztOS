@@ -7831,7 +7831,8 @@ static int bars_lit(struct zt_server *server) {
 	int want = server->cell_known && cell_registered(server) ? server->cell_bars : 0;
 	if (!server->screen_on) {
 		server->bars_shown = want;
-	} else if (server->bars_shown != want && !server->bars_step_armed) {
+	} else if (server->bars_shown != want && !server->bars_step_armed && server->bars_step_timer) {
+		/* (no timer in a --render: it crashed there) */
 		server->bars_step_armed = true;
 		wl_event_source_timer_update(server->bars_step_timer, BARS_STEP_MS);
 	}
@@ -27684,6 +27685,12 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	g_dump_name = "shade";
 	server->shade_wifi = wifi_up();
 	draw_shade(server);
+	/* its quick-action editor (shade-edit.c: the places, the row to start
+	 * one in, and the tray), then the panel as it was */
+	g_dump_name = "shade-edit";
+	shade_edit_begin(server);
+	g_dump_name = NULL;
+	shade_edit_end(server);
 	/* the same with notifications in it, one with a bar, one being swiped */
 	static const struct { const char *app, *title, *text; int percent; } SAMPLE[] = {
 		{ "Grayjay", "Freenet - Services Without Servers", "About 42% (164 MB)", 42 },
