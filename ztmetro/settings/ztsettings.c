@@ -29,6 +29,7 @@
 #include "ztos-hw.h"
 #include "zrnvibe.h"
 #include "../volume-streams.h"
+#include "../sleep-toggle.h"
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <sys/sysinfo.h>
@@ -211,10 +212,10 @@ static const struct { const char *key, *title, *about; } HAPTIC_GROUPS[] = {
 
 /* The quick actions there are, as the shell names them in `quick`. */
 static const char *const QUICK_IDS[] = { "wifi", "data", "bluetooth", "airplane", "rotation",
-	"flashlight", "location", "brightness", "settings", "vibrate", "audio", "none" };
+	"flashlight", "location", "brightness", "settings", "vibrate", "audio", "sleep", "none" };
 static const char *const QUICK_NAMES[] = { "Wi-Fi", "Mobile data", "Bluetooth", "Airplane mode",
-	"Rotation lock", "Flashlight", "Location", "Brightness", "All settings", "Vibration", "Audio", "(empty)" };
-#define N_QUICK 12
+	"Rotation lock", "Flashlight", "Location", "Brightness", "All settings", "Vibration", "Audio", "Sleep", "(empty)" };
+#define N_QUICK 13
 
 struct network {
 	char ssid[64];
@@ -684,15 +685,21 @@ static void sleep_load(void) {
 	}
 	if (f) fclose(f);
 
-	if (!app.sleepd_on)
-		snprintf(app.sleep_status, sizeof(app.sleep_status), "off");
-	else if (!state[0])
+	if (!app.sleepd_on) {
+		/* switched off by zrn-sleepd itself: why, as the quick menu's
+		 * Sleep tile says it (sleep-toggle.h) */
+		struct sleep_tile tile;
+		sleep_tile_read(&tile, SLEEP_STATE_DIR, SLEEP_RUN_DIR);
+		const char *note = tile.mode == SLEEP_OFF_ITSELF ? sleep_tile_note(&tile) : NULL;
+		snprintf(app.sleep_status, sizeof(app.sleep_status), "off%s%s", note ? ": " : "", note ? note : "");
+	} else if (!state[0]) {
 		snprintf(app.sleep_status, sizeof(app.sleep_status), "on, zrn-sleepd not running");
-	else
+	} else {
 		snprintf(app.sleep_status, sizeof(app.sleep_status), "%s%s%s, %s sleeps%s%s",
 			state, why[0] ? ", " : "", why,
 			sleeps[0] ? sleeps : "0",
 			wakes[0] ? ", wakes " : "", wakes);
+	}
 }
 
 /* `text` as one word of a shell command, whatever is in it: in single quotes,

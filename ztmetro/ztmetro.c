@@ -47,6 +47,7 @@
 #include "note-logic.h"
 #include "desktop/desktop.h"
 #include "lock-awake.h"
+#include "sleep-toggle.h"
 #include "rotation.h"
 #include <dirent.h>
 #include <errno.h>
@@ -89,6 +90,8 @@
 #include <wlr/backend/multi.h>
 #include <wlr/backend/wayland.h>
 #include <wlr/config.h>
+#include "shade-edit.h"	/* the quick actions edited in the panel (8.49) */
+
 #if WLR_HAS_X11_BACKEND
 #include <wlr/backend/x11.h>
 #endif
@@ -1096,6 +1099,8 @@ struct zt_server {
 	bool shade_airplane;
 	bool shade_location;		/* the location switch is on (ztos-gnss-gate's state) */
 	bool loc_known, loc_active;	/* the gate runs; the GNSS engine is on */
+	struct sleep_tile sleep_tile;	/* zrn-sleepd's switch, for the Sleep tile (sleep-toggle.h) */
+	uint32_t sleep_tile_ms;		/* the tile's last tap: sudo gets 2 s to follow */
 	uint32_t loc_tile_ms;		/* the tile's last tap: the gate gets 2 s to follow */
 	bool shade_notifs_cleared;
 	int shade_brightness;
@@ -4311,7 +4316,7 @@ static char *trim(char *s) {
  * actions puts one in each of the eight places; `quick` in the config). */
 enum quick {
 	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_ROTATION, Q_FLASHLIGHT, Q_LOCATION,
-	Q_BRIGHTNESS, Q_SETTINGS, Q_VIBRATE, Q_AUDIO, Q_NONE, Q_COUNT,
+	Q_BRIGHTNESS, Q_SETTINGS, Q_VIBRATE, Q_AUDIO, Q_SLEEP, Q_NONE, Q_COUNT,
 };
 static const struct { const char *id, *icon, *label; } QUICK[Q_COUNT] = {
 	{ "wifi", "wifi", "WI-FI" }, { "data", "", "MOBILE DATA" },
@@ -4319,7 +4324,9 @@ static const struct { const char *id, *icon, *label; } QUICK[Q_COUNT] = {
 	{ "rotation", "rotation", "ROTATION LOCK" }, { "flashlight", "flashlight", "FLASHLIGHT" },
 	{ "location", "location", "LOCATION" }, { "brightness", "brightness", "BRIGHTNESS" },
 	{ "settings", "gear", "ALL SETTINGS" }, { "vibrate", "", "VIBRATION" },
-	{ "audio", "", "" }, { "none", "", "" },	/* the audio tile's come from audio-state.h */
+	{ "audio", "", "" },	/* the audio tile's come from audio-state.h */
+	{ "sleep", "", "SLEEP" },	/* zrn-sleepd on or off (sleep-toggle.h, 8.47) */
+	{ "none", "", "" },
 };
 static const int QUICK_DEFAULT[8] = {
 	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_AUDIO, Q_FLASHLIGHT, Q_BRIGHTNESS, Q_SETTINGS,
@@ -9452,6 +9459,37 @@ static bool loc_state_read(struct zt_server *server) {
 	return changed;
 }
 
+/* zrn-sleepd's switch (sleep-toggle.h); true if the tile changed. Just tapped,
+ * the tile shows what was asked until zrn-sleepd's files follow. */
+static bool sleep_state_read(struct zt_server *server) {
+	struct sleep_tile now;
+	sleep_tile_read(&now, SLEEP_STATE_DIR, SLEEP_RUN_DIR);
+	if (server->sleep_tile_ms && now_ms() - server->sleep_tile_ms < 2000) {
+		return false;
+	}
+	server->sleep_tile_ms = 0;
+	bool changed = !sleep_tile_same(&now, &server->sleep_tile);
+	server->sleep_tile = now;
+	return changed;
+}
+
+static void run_detached(const char *program, const char *a1, const char *a2, const char *a3);
+
+/* The Sleep tile tapped: zrn-sleepd enable or disable, through the sudo rule
+ * for those two commands (sudoers.d/zrn-sleep-toggle). */
+static bool sleep_switch(struct zt_server *server) {
+	if (server->sleep_tile.mode == SLEEP_MISSING) {
+		return false;
+	}
+	bool on = !sleep_tile_on(&server->sleep_tile);
+	run_detached("sudo", "-n", SLEEP_CMD, on ? "enable" : "disable");
+	server->sleep_tile.mode = on ? SLEEP_ON : SLEEP_OFF;
+	server->sleep_tile.kind[0] = 0;
+	server->sleep_tile_ms = now_ms() ? now_ms() : 1;
+	wlr_log(WLR_INFO, "sleep tile: %s", on ? "enable" : "disable");
+	return true;
+}
+
 static int net_tick(void *data) {
 	struct zt_server *server = data;
 	if (!server->screen_on || server->width == 0) {
@@ -9498,7 +9536,7 @@ static int net_tick(void *data) {
 	if (pods_bar_read(&server->pods_bar)) {
 		redraw = true;
 	}
-	if (bt_state_read(server) | loc_state_read(server)) {
+	if (bt_state_read(server) | loc_state_read(server) | sleep_state_read(server)) {
 		redraw = true;
 		if (server->shade_open || server->shade_h > 0.1f) {
 			draw_shade(server);	/* its tile follows */
@@ -9663,7 +9701,7 @@ static int shade_hit(struct zt_server *server, double x, double y) {
 	}
 	double links = shade_links_y(server);
 	if (y >= links - 8 && y < links + 26) {
-		return x < server->width / 2.0 ? 8 : 9;
+		return shade_edit_links_hit(server, x);	/* 8, 11 EDIT, 9 */
 	}
 	if (server->orient == 0 && y >= SHADE_MAX_H - SHADE_HANDLE - 14) {
 		return 10;	/* (turned, its bar is along its side: see touch_begin) */
@@ -9703,8 +9741,13 @@ static const struct audio_output *audio_active_output(struct zt_server *server) 
 }
 
 /* One quick action, drawn with its top left corner at the origin. */
+static void shade_quick_draw(struct zt_server *server, cairo_t *cr, int q, double w, double h);
 static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double w, double h) {
-	int q = server->quick[i];
+	shade_quick_draw(server, cr, server->quick[i], w, h);
+}
+
+/* Quick action `q` as a tile (the panel's places, and the editor's tray). */
+static void shade_quick_draw(struct zt_server *server, cairo_t *cr, int q, double w, double h) {
 	bool light = shell_light(server);
 	if (q == Q_NONE) {
 		if (light) {
@@ -9721,20 +9764,27 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 	 * flashlight without zrn-flash: shown, faint, and not pretending to switch */
 	bool missing = (q == Q_ROTATION && !server->rot.enabled) || (q == Q_LOCATION && !server->loc_known) ||
 		(q == Q_FLASHLIGHT && access(TORCH_PATH, W_OK) != 0) ||
-		(q == Q_BLUETOOTH && access("/sys/class/bluetooth/hci0", F_OK) != 0);
+		(q == Q_BLUETOOTH && access("/sys/class/bluetooth/hci0", F_OK) != 0) ||
+		(q == Q_SLEEP && server->sleep_tile.mode == SLEEP_MISSING);
 	bool on = q == Q_WIFI ? server->shade_wifi : q == Q_AIRPLANE ? server->shade_airplane :
 		q == Q_DATA ? server->cell_data_on : q == Q_VIBRATE ? server->haptics_enabled :
 		q == Q_FLASHLIGHT ? server->shade_torch : q == Q_BLUETOOTH ? server->shade_bt :
-		q == Q_ROTATION ? server->rot.locked : q == Q_LOCATION ? server->shade_location : q == Q_BRIGHTNESS;
+		q == Q_ROTATION ? server->rot.locked : q == Q_LOCATION ? server->shade_location :
+		q == Q_SLEEP ? sleep_tile_on(&server->sleep_tile) : q == Q_BRIGHTNESS;
 	const struct audio_output *audio = q == Q_AUDIO ? audio_active_output(server) : NULL;
 	if (q == Q_AUDIO) {
 		on = audio != NULL;
 		missing = !audio;
 	}
 	/* on: the accent colour; off: a dark grey block (in light a light grey
-	 * one, with the theme's ink on it; on the accent the ink stays white) */
+	 * one, with the theme's ink on it; on the accent the ink stays white);
+	 * sleep switched off by zrn-sleepd itself (it did not wake, say): a dark
+	 * red one, white ink in either theme */
+	bool alarm_red = q == Q_SLEEP && server->sleep_tile.mode == SLEEP_OFF_ITSELF;
 	if (on) {
 		set_rgb(cr, server->accent);
+	} else if (alarm_red) {
+		cairo_set_source_rgb(cr, 0.47, 0.07, 0.07);
 	} else if (light) {
 		cairo_set_source_rgb(cr, 0.90, 0.90, 0.90);
 	} else {
@@ -9743,7 +9793,7 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 	cairo_rectangle(cr, 0, 0, w, h);
 	cairo_fill(cr);
 	/* glyph in the top left corner, label along the bottom left */
-	double ink = light && !on ? 0 : 1;
+	double ink = light && !on && !alarm_red ? 0 : 1;
 	cairo_set_source_rgba(cr, ink, ink, ink, missing ? 0.3 : 1.0);
 	if (q == Q_WIFI) {
 		draw_wifi(cr, 8, 8 + 17, 17, 3, ink, ink, ink);	/* white glyph on the tile's accent/grey */
@@ -9766,6 +9816,19 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 		}
 	} else if (q == Q_AUDIO) {
 		draw_icon(cr, audio ? audio_type_of(audio)->icon : "speaker", 8 + 9, 8 + 9, 18);
+	} else if (q == Q_SLEEP) {
+		/* a crescent moon: a disc, less a disc cut from its upper right */
+		cairo_save(cr);
+		cairo_push_group(cr);
+		cairo_new_path(cr);
+		cairo_arc(cr, 8 + 9, 8 + 9, 8, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_set_operator(cr, CAIRO_OPERATOR_DEST_OUT);
+		cairo_arc(cr, 8 + 13, 8 + 5.5, 7, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_pop_group_to_source(cr);
+		cairo_paint(cr);
+		cairo_restore(cr);
 	} else {
 		draw_icon(cr, QUICK[q].icon, 8 + 9, 8 + 9, 18);
 	}
@@ -9776,6 +9839,13 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 		draw_text(cr, type, FONT_SEMIBOLD, 7.6, 7, h - 26, w - 10, 0, false);
 		draw_text(cr, audio ? audio->desc : server->audio_state_ok && audio_daemon_alive() ? "No output" : "Unavailable",
 			FONT_REGULAR, 8, 7, h - 15, w - 10, 0, false);
+		return;
+	}
+	if (q == Q_SLEEP && sleep_tile_note(&server->sleep_tile)) {
+		/* "SLEEP OFF", and below it why (or "Paused") */
+		draw_text(cr, sleep_tile_on(&server->sleep_tile) ? "SLEEP" : "SLEEP OFF", FONT_SEMIBOLD, 7.6,
+			7, h - 26, w - 10, 0, false);
+		draw_text(cr, sleep_tile_note(&server->sleep_tile), FONT_REGULAR, 8, 7, h - 15, w - 10, 0, false);
 		return;
 	}
 	char label[32];
@@ -10137,6 +10207,7 @@ static void draw_shade(struct zt_server *server) {
 	double settings_w = text_width("ALL SETTINGS", FONT_SEMIBOLD, 10);
 	draw_text(cr, "ALL SETTINGS", FONT_SEMIBOLD, 10, server->width - 14 - settings_w, links, 0, 0, false);
 	draw_icon(cr, "gear", server->width - 14 - settings_w - 12, links + 7, 12);
+	shade_edit_draw_button(server, cr, links);
 
 	/* What has been reported (`notify` on the control pipe), as the phone's
 	 * action centre lists it: under each app's name the notifications from
@@ -10190,6 +10261,9 @@ static void draw_shade(struct zt_server *server) {
 }
 
 static void shade_set_open(struct zt_server *server, bool open) {
+	if (!open) {
+		shade_edit_end(server);	/* closing ends an edit (each change is saved as made) */
+	}
 	animate(server, &server->shade_h, open ? (float)SHADE_MAX_H : 0.0f, SHADE_MS, 0, false);
 	server->shade_open = open;
 }
@@ -13530,6 +13604,15 @@ static void shade_activate(struct zt_server *server, int index) {
 		draw_shade(server);
 		damage(server);
 		break;
+	case 100 + Q_SLEEP:
+		/* zrn-sleepd's own switch (8.47): agent mode and back */
+		if (!sleep_switch(server)) {
+			break;	/* no zrn-sleepd: the tile is drawn faint */
+		}
+		hap(server, HAP_TAP, HG_SYSTEM);
+		draw_shade(server);
+		damage(server);
+		break;
 	case 100 + Q_NONE:
 		break;	/* nothing behind them yet: see shade_tile_draw */
 	case 100 + Q_AIRPLANE: /* the modem's radio: Wi-Fi and Bluetooth stay as they are */
@@ -13584,6 +13667,9 @@ static void shade_activate(struct zt_server *server, int index) {
 		break;
 	case 10: /* the bar along the bottom */
 		shade_set_open(server, false);
+		break;
+	case 11: /* EDIT: the quick actions arranged here (shade-edit.c) */
+		shade_edit_begin(server);
 		break;
 	default:
 		if (index >= 20 && index - 20 < server->n_notes && !server->note_clearing &&
@@ -15586,6 +15672,11 @@ static int long_press_fired(void *data) {
             draw_osk(server);
             continue;
         }
+		if (p->used && p->role == ROLE_SHADE && server->shade_open && !p->moved && !p->long_pressed &&
+				!shade_edit_active() && p->index >= 0 && p->index < 8 &&
+				now - p->down_ms >= LONG_PRESS_MS - 30 && shade_edit_long_press(server, p)) {
+			continue;	/* held on a tile with no hold of its own: the editor */
+		}
 		if (p->used && p->role == ROLE_SHADE && server->shade_open && !p->moved && !p->long_pressed &&
 				p->index >= 0 && p->index < 8 && now - p->down_ms >= LONG_PRESS_MS - 30 &&
 				quick_holds(server->quick[p->index])) {
@@ -19950,17 +20041,21 @@ static void touch_begin(struct zt_server *server, int32_t id, double px, double 
 				panel_x = -1;	/* (its bar: moves it, as upright) */
 			}
 		}
+		if (shade_edit_active()) {
+			/* the quick actions being edited: the editor's, all of it */
+			shade_edit_down(server, p, on_panel ? panel_x : -1, panel_y);
+			return;
+		}
 		p->index = !on_panel ? -1 : panel_x < 0 && server->orient != 0 ? 10 : shade_hit(server, panel_x, panel_y);
 		server->shade_pressed = p->index;
 		p->note_uid = p->index >= 20 && p->index - 20 < server->n_notes ?
 			server->notes[p->index - 20].uid : 0;
 		if (p->index >= 0 && p->index < 8) {
 			shade_tile_press(server, p->index, panel_x, panel_y);
-			if (quick_holds(server->quick[p->index])) {
-				/* held: its modal, or its page of Settings */
-				p->down_ms = now_ms();
-				wl_event_source_timer_update(server->long_press_timer, LONG_PRESS_MS);
-			}
+			/* held: its modal, or its page of Settings; a tile with
+			 * neither, the editor (shade-edit.c) */
+			p->down_ms = now_ms();
+			wl_event_source_timer_update(server->long_press_timer, LONG_PRESS_MS);
 		}
 		p->scroll0 = server->shade_h;
 		/* a drag that starts over the notifications scrolls them (see
@@ -20443,6 +20538,10 @@ static void touch_update(struct zt_server *server, int32_t id, double px, double
 		break;
 	case ROLE_SHADE: {	/* (pulled on the glass; its list scrolls down the glass upright, down the view turned) */
 		double list_at = server->orient != 0 ? y : py;
+		if (shade_edit_active()) {
+			shade_edit_move(server, p, x, y);
+			break;
+		}
 		if (p->on_list) {
 			/* how fast the finger is going, evened out, for when it lets go */
 			float dt = (float)(int32_t)(time - p->t_last);
@@ -20867,6 +20966,12 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		break;
 	case ROLE_SHADE:
 		wl_event_source_timer_update(server->long_press_timer, 0);
+		if (shade_edit_active()) {
+			shade_edit_up(server, p, cancelled);
+			server->shade_pressed = -1;
+			damage(server);
+			break;
+		}
 		if (p->long_pressed && !p->moved) {
 			/* the held status bar stays a moment after the finger lifts */
 			wl_event_source_timer_update(server->peek_timer, PEEK_STAY_MS);
@@ -25015,6 +25120,7 @@ static void shade_sheet_draw(struct zt_server *server, bool shade_folded) {
 				layer->tw ? (float)layer->pw / layer->tw : 1.0f,
 				layer->th ? (float)layer->ph / layer->th : 1.0f);
 		}
+		shade_edit_draw(server, x0);	/* the editor, while it is open (shade-edit.c) */
 		glDisable(GL_SCISSOR_TEST);
 	}
 	if (server->shade_vhandle.tex) {
@@ -26637,6 +26743,7 @@ static void render_frame(struct zt_server *server) {
 				layer->tw ? (float)layer->pw / layer->tw : 1.0f,
 				layer->th ? (float)layer->ph / layer->th : 1.0f);
 		}
+		shade_edit_draw(server, 0);	/* the editor over them, while it is open */
 		/* the bar: the bottom strip of the panel, riding on the edge */
 		zt_scissor(server, 0, px_cover, px_w, px_bar);
 		layer_draw(server, &server->shade_layer, 0, reveal - (float)SHADE_MAX_H, 1.0f);
@@ -28002,6 +28109,7 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 /* desktop mode: the outputs after the panel (uses the helpers above) */
 #include "desktop/desktop.c"
 #include "lock-awake.c"
+#include "shade-edit.c"
 
 int main(int argc, char *argv[]) {
 	wlr_log_init(getenv("ZTMETRO_DEBUG") ? WLR_DEBUG : WLR_INFO, NULL);
