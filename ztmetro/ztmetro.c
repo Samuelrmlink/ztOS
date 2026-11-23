@@ -1063,7 +1063,7 @@ struct zt_server {
 	bool shade_wifi;
 	bool shade_bt;
 	/* Bluetooth as ztos-bt-state writes it: the status icon, the live tile */
-	bool bt_on, bt_streaming, bt_blink;
+	bool bt_on, bt_streaming;
 	char bt_name[64];
 	int bt_battery;			/* percent, -1 unknown */
 	bool bt_apple;			/* Apple's: AirPods get their own status icon, not the meter */
@@ -8397,23 +8397,28 @@ static void status_row_drawn(struct zt_server *server, cairo_t *cr, bool details
 		cairo_restore(cr);
 		x += 2 * r + icon_gap;
 	}
-	/* Bluetooth: white with a device connected, dimmed when only on; it
-	 * blinks (one second each) while sound streams to the device */
+	/* Bluetooth: white with a device connected, dimmed when only on. While
+	 * sound streams to the device, a small dot in the accent colour sits at
+	 * its top right (it used to blink, which read as something broken). */
 	if (server->bt_on) {
-		if (!(server->bt_streaming && server->bt_blink)) {
-			if (server->bt_name[0]) {
-				cairo_set_source_rgb(cr, fgr, fgg, fgb);
-			} else {
-				cairo_set_source_rgb(cr, dmr, dmg, dmb);
-			}
-			/* a little more room than the other gaps: the fan's dot sits
-			 * in its bottom right corner, hard against what follows */
-			x += round(icon_gap * 0.4);
-			bt_right = x + draw_status_bt(cr, x, base, icon_h * 1.08);
-			st_cell_put(server, ST_BT, x, base - icon_h * 1.08, bt_right, base);
+		if (server->bt_name[0]) {
+			cairo_set_source_rgb(cr, fgr, fgg, fgb);
 		} else {
-			x += round(icon_gap * 0.4);
-			bt_right = x + icon_h * 0.6;	/* (blinking: its place, kept) */
+			cairo_set_source_rgb(cr, dmr, dmg, dmb);
+		}
+		/* a little more room than the other gaps: the fan's dot sits
+		 * in its bottom right corner, hard against what follows */
+		x += round(icon_gap * 0.4);
+		double bt_h = icon_h * 1.08;
+		bt_right = x + draw_status_bt(cr, x, base, bt_h);
+		st_cell_put(server, ST_BT, x, base - bt_h, bt_right, base);
+		if (server->bt_streaming) {
+			double dot_r = fmax(1.5, icon_h * 0.16);
+			set_rgb(cr, server->accent);
+			cairo_new_sub_path(cr);
+			cairo_arc(cr, bt_right + dot_r * 0.6, base - bt_h + dot_r, dot_r, 0, 2 * M_PI);
+			cairo_fill(cr);
+			bt_right += dot_r * 1.6;	/* room for it before what follows */
 		}
 	}
 	cairo_set_source_rgb(cr, fgr, fgg, fgb);
@@ -9622,12 +9627,6 @@ static int net_tick(void *data) {
 		}
 	}
 	live_tick(server);
-	if (server->bt_streaming) {
-		server->bt_blink = !server->bt_blink;
-		redraw = true;
-	} else {
-		server->bt_blink = false;
-	}
 	bool charging = on_charger();
 	int battery = read_battery();
 	/* unplugged and going down through 15 % or 5 %: the low battery chime */
