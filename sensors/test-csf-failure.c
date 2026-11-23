@@ -1,14 +1,15 @@
 /* Exercise CSF recovery exhaustion without services, sysfs writes, or delays:
  * make -C ztmetro check-csf
  */
-#define CSF_CTL "/tmp/test-csf-failure.ctl"
+#define CORU_CTL "/tmp/test-csf-failure.ctl"
+#define OLD_CTL "/tmp/test-csf-failure-old.ctl"
 #define main csf_main
 #define system mock_system
 #define access mock_access
 #define fopen mock_fopen
 #define sleep mock_sleep
 #define opendir mock_opendir
-#include "../ztmetro/csf/ztoscsf.c"
+#include "../ztmetro/coru/ztoscoru.c"
 #undef main
 #undef system
 #undef access
@@ -132,10 +133,10 @@ int main(int argc, char **argv) {
 	/* The control pipe: the phone's user and root, nobody else. */
 	int fd = ctl_open();
 	struct stat st;
-	assert(fd >= 0 && lstat(CSF_CTL, &st) == 0);
+	assert(fd >= 0 && lstat(CORU_CTL, &st) == 0);
 	assert((st.st_mode & 07777) == 0620 && S_ISFIFO(st.st_mode));
 	close(fd);
-	unlink(CSF_CTL);
+	unlink(CORU_CTL);
 	puts("CSF: control pipe is 0620.");
 	return 0;
 }
