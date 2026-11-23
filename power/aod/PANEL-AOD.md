@@ -310,4 +310,19 @@ What we do differently:
 
 ## 5. Results
 
-See the stage log below (filled in as each stage is measured).
+### Stage (a): HLPM under the shell's AOD (dp42f1, through `panel_cmd`)
+
+**Run 1, 2026-11-22 18:40-18:53 CST** (`stage-a.sh /var/tmp/aodp/a1 0 4`):
+- Setup: HLPM at 2 nit. The deadman, watcher and ztlock were armed.
+- **Safe.** The entry and exit went out byte for byte, with the shell flipping its
+  AOD frames throughout:
+  - no flip-latch, vblank or DCS errors, and the watcher never tripped;
+  - frames went on latching (14 to 22), and a screen wake in the middle redrew
+    normally;
+  - after the exit and a screen on/off cycle the AOD was normal.
+- **No valid current.** `charge_behaviour=inhibit-charge` did not stop the
+  MAX77705 charging: the battery stayed at +2135 mA (the 2150 mA constant
+  current) through the first block. On top of that, the cable was pulled and
+  plugged back during the HLPM block, which woke the screen.
+- The script now reads register 54 back (HLPM's 53 value) and counts only
+  samples taken off the charger with the screen off.
