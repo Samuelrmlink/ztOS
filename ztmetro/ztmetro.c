@@ -155,6 +155,14 @@ static int nav_h = NAV_BAR_H;
 #define TERM_ROW_H	38	/* the Esc / Tab / Ctrl / arrows row for terminals */
 /* The action centre comes down over everything but the nav bar. */
 #define SHADE_HANDLE	16	/* the bar along the bottom */
+/* the action centre's quick actions: up to four rows of four places
+ * (shade-edit.h); what shade_hit() gives for the rest of the panel is past
+ * them, under the notifications' 20.. */
+#define QUICK_MAX	SE_MAX
+#define SHADE_CLEAR	16	/* CLEAR ALL */
+#define SHADE_ALLSET	17	/* ALL SETTINGS */
+#define SHADE_BAR	18	/* the bar along the bottom */
+#define SHADE_EDIT	19	/* EDIT (shade-edit.c) */
 #define SHADE_MAX_H	(shade_travel(server))	/* (how far it is pulled: shade_travel) */
 #define SHADE_MS	260	/* settling after the finger lets go */
 #define SCREEN_TIMEOUT_S 60	/* idle time before the screen sleeps, by default */
@@ -922,7 +930,8 @@ struct zt_server {
 	uint64_t shade_sig_rest;	/* shade_sig but for the status row */
 	struct wl_event_source *shade_later;	/* when to draw it */
 	/* which quick action is in each of the action centre's eight places */
-	int quick[8];
+	int quick[QUICK_MAX];	/* (the first n_quick: two to four rows of four, shade-edit.h) */
+	int n_quick;
 	/* notifications: a banner as each arrives, and the list in the action centre */
 	struct {
 		char app[32], title[48], text[200];
@@ -1104,7 +1113,7 @@ struct zt_server {
 	uint32_t loc_tile_ms;		/* the tile's last tap: the gate gets 2 s to follow */
 	bool shade_notifs_cleared;
 	int shade_brightness;
-	int shade_pressed;		/* -1: none, 0..7: quick toggles, 8: clear all, 9: collapse */
+	int shade_pressed;		/* -1: none, else shade_hit()s */
 	GLuint white_tex, black_tex;	/* 1x1 each, for plain rectangles */
 	/* The status and nav bars over Start and the app list: what passes
 	 * under them shows through blurred and grainy (frost_prepare, bar_back) */
@@ -1128,10 +1137,10 @@ struct zt_server {
 	GLuint bar_held_tex[2];	/* the held blur, copied aside as the new one is made */
 	int bar_held_w[2], bar_held_h[2];
 	bool status_clear, nav_clear;	/* their layers were drawn without a background */
-	struct zt_layer shade_tile_layer[8];	/* the quick actions, one texture each */
-	uint64_t shade_tile_sig[8];	/* what each was drawn from (shade_tile_sig) */
+	struct zt_layer shade_tile_layer[QUICK_MAX];	/* the quick actions, one texture each */
+	uint64_t shade_tile_sig[QUICK_MAX];	/* what each was drawn from (shade_tile_sig) */
 	struct zt_layer shade_vhandle;		/* turned: the sheet's bar, down its moving side */
-	float shade_tilt_x[8], shade_tilt_y[8], shade_press[8];
+	float shade_tilt_x[QUICK_MAX], shade_tilt_y[QUICK_MAX], shade_press[QUICK_MAX];
 	/* Splash screen & boot transition */
 	bool splash;
 	struct zt_layer splash_layer;
@@ -4321,19 +4330,25 @@ static const int QUICK_DEFAULT[8] = {
 	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_AUDIO, Q_FLASHLIGHT, Q_BRIGHTNESS, Q_SETTINGS,
 };
 
-/* "wifi,data,airplane,...": up to eight, the rest as they come by default. */
+/* "wifi,data,airplane,...": one id for each place, two to four rows of four
+ * (an older list of eight is two rows; a short one keeps the defaults past
+ * it). shade-edit.h's se_parse, as Settings reads it. */
 static void quick_parse(struct zt_server *server, const char *value) {
-	char copy[200], *save = NULL;
-	snprintf(copy, sizeof(copy), "%s", value);
-	int n = 0;
-	for (char *word = strtok_r(copy, ", ", &save); word && n < 8; word = strtok_r(NULL, ", ", &save)) {
-		for (int q = 0; q < Q_COUNT; q++) {
-			if (strcmp(word, QUICK[q].id) == 0) {
-				server->quick[n++] = q;
-				break;
-			}
-		}
-	}
+	static const char *ids[Q_COUNT];
+	for (int q = 0; q < Q_COUNT; q++) ids[q] = QUICK[q].id;
+	se_parse(value, ids, Q_COUNT, Q_NONE, server->quick, &server->n_quick);
+	server->notes_dirty = true;	/* (the list moves with the rows: notes_layout) */
+}
+
+/* `quick` as the places now are (the editor, and the audio tile's once-only move) */
+static void config_keep_text(const char *key, const char *value);
+static void quick_save(struct zt_server *server) {
+	static const char *ids[Q_COUNT];
+	for (int q = 0; q < Q_COUNT; q++) ids[q] = QUICK[q].id;
+	char list[240];
+	se_format(server->quick, server->n_quick, ids, list, sizeof(list));
+	config_keep_text("quick", list);
+	wlr_log(WLR_INFO, "quick actions: %s", list);
 }
 
 /* ~/.config/ztmetro/config: "key = value" lines (accent, haptics, scale,
@@ -4383,18 +4398,13 @@ static void config_keep(const char *key, int value) {
 static void quick_add_audio(struct zt_server *server) {
 	int place = -1;
 	bool has = false;
-	for (int i = 0; i < 8; i++) {
+	for (int i = 0; i < server->n_quick; i++) {
 		has = has || server->quick[i] == Q_AUDIO;
 		if (place < 0 && server->quick[i] == Q_ROTATION) place = i;
 	}
 	if (!has && place >= 0) {
-		char list[200] = "";
 		server->quick[place] = Q_AUDIO;
-		for (int i = 0; i < 8; i++) {
-			size_t at = strlen(list);
-			snprintf(list + at, sizeof(list) - at, "%s%s", i ? "," : "", QUICK[server->quick[i]].id);
-		}
-		config_keep_text("quick", list);
+		quick_save(server);
 		wlr_log(WLR_INFO, "quick: the audio tile took Rotation Lock's place (place %d)", place);
 	}
 	config_keep(QUICK_AUDIO_DONE, 1);
@@ -4932,7 +4942,10 @@ static void load_config(struct zt_server *server) {
 		server->shade_brightness = 50;
 	}
 	server->shade_pressed = -1;
-	memcpy(server->quick, QUICK_DEFAULT, sizeof(server->quick));
+	for (int i = 0; i < QUICK_MAX; i++) {
+		server->quick[i] = i < 8 ? QUICK_DEFAULT[i] : Q_NONE;
+	}
+	server->n_quick = 8;
 	server->style_config = STYLE_METRO;
 	server->frost_off = false;	/* `frost = 0`: plain bars, no blur work */
 	g_style = &server->style;
@@ -9663,16 +9676,21 @@ static void shade_tile_rect(struct zt_server *server, int index, double *x, doub
 	*y = SHADE_TOP + (index / across) * (*h + SHADE_GAP);
 }
 
-static double shade_links_y(struct zt_server *server) {
+/* the links row under `places` places (the editor's has a row more) */
+static double shade_links_y_for(struct zt_server *server, int places) {
 	double x, y, w, h;
-	shade_tile_rect(server, 7, &x, &y, &w, &h);	/* the last row's */
+	shade_tile_rect(server, places - 1, &x, &y, &w, &h);	/* the last row's */
 	return y + h + 12;
 }
+static double shade_links_y(struct zt_server *server) {
+	return shade_links_y_for(server, server->n_quick);
+}
 
-/* What is at (x, y) of the panel: 0..7 a quick action, 8 CLEAR ALL,
- * 9 ALL SETTINGS, 10 the bar along the bottom, 20.. a notification, -1 nothing. */
+/* What is at (x, y) of the panel: 0 .. n_quick-1 a quick action, SHADE_CLEAR
+ * CLEAR ALL, SHADE_ALLSET ALL SETTINGS, SHADE_EDIT EDIT, SHADE_BAR the bar
+ * along the bottom, 20.. a notification, -1 nothing. */
 static int shade_hit(struct zt_server *server, double x, double y) {
-	for (int i = 0; i < 8; i++) {
+	for (int i = 0; i < server->n_quick; i++) {
 		double tx, ty, tw, th;
 		shade_tile_rect(server, i, &tx, &ty, &tw, &th);
 		if (x >= tx && x < tx + tw && y >= ty && y < ty + th) {
@@ -9681,10 +9699,10 @@ static int shade_hit(struct zt_server *server, double x, double y) {
 	}
 	double links = shade_links_y(server);
 	if (y >= links - 8 && y < links + 26) {
-		return shade_edit_links_hit(server, x);	/* 8, 11 EDIT, 9 */
+		return shade_edit_links_hit(server, x);	/* CLEAR ALL, EDIT, ALL SETTINGS */
 	}
 	if (server->orient == 0 && y >= SHADE_MAX_H - SHADE_HANDLE - 14) {
-		return 10;	/* (turned, its bar is along its side: see touch_begin) */
+		return SHADE_BAR;	/* (turned, its bar is along its side: see touch_begin) */
 	}
 	/* a notification: only where the list shows through, and where it has
 	 * been scrolled to */
@@ -10040,7 +10058,7 @@ static uint64_t shade_tile_sig(struct zt_server *server, int i, double w, double
 }
 
 static void draw_shade_tiles(struct zt_server *server) {
-	for (int i = 0; i < 8 && !g_dump_dir; i++) {
+	for (int i = 0; i < server->n_quick && !g_dump_dir; i++) {
 		double x, y, w, h;
 		shade_tile_rect(server, i, &x, &y, &w, &h);
 		/* only those changed: all eight painted and uploaded were 7-9 ms
@@ -10066,6 +10084,7 @@ static uint64_t shade_panel_sig_gen(struct zt_server *server, uint64_t gen) {
 	s = s * 31 + (uint64_t)shell_light(server);
 	s = s * 31 + (uint64_t)server->orient;
 	s = s * 31 + (uint64_t)server->width * 7 + (uint64_t)server->height;
+	s = s * 31 + (uint64_t)server->n_quick;	/* (the links and the list move with the rows) */
 	return s | 1;
 }
 static uint64_t shade_panel_sig(struct zt_server *server) {
@@ -10171,7 +10190,7 @@ static void draw_shade(struct zt_server *server) {
 	cairo_paint(cr);
 	status_row(server, cr, true, false, true, -1);
 	/* rendering to a file has no quads to put them on: draw them in place */
-	for (int i = 0; i < 8 && g_dump_dir; i++) {
+	for (int i = 0; i < server->n_quick && g_dump_dir; i++) {
 		double x, y, w, h;
 		shade_tile_rect(server, i, &x, &y, &w, &h);
 		cairo_save(cr);
@@ -13514,10 +13533,10 @@ static void note_invoke(uint32_t nid) {
 }
 
 static void shade_activate(struct zt_server *server, int index) {
-	if (index >= 8) {
+	if (index >= QUICK_MAX) {
 		hap(server, HAP_TICK, HG_SYSTEM);
 	}
-	switch (index < 8 ? 100 + server->quick[index] : index) {
+	switch (index >= 0 && index < QUICK_MAX ? 100 + server->quick[index] : index) {
 	case 100 + Q_WIFI:
 		hap(server, HAP_TAP, HG_SYSTEM);
 		wifi_switch(server, !server->shade_wifi);
@@ -13633,7 +13652,7 @@ static void shade_activate(struct zt_server *server, int index) {
 		shade_set_open(server, false);
 		launch_cmd(server, "ztsettings");
 		break;
-	case 8: /* CLEAR ALL */
+	case SHADE_CLEAR: /* CLEAR ALL */
 		for (int i = 0; i < server->n_notes; i++) {
 			if (server->notes[i].ongoing) {
 				note_muted_add(&server->note_muted, server->notes[i].key);
@@ -13641,14 +13660,14 @@ static void shade_activate(struct zt_server *server, int index) {
 		}
 		note_clear_start(server);
 		break;
-	case 9: /* ALL SETTINGS */
+	case SHADE_ALLSET: /* ALL SETTINGS */
 		shade_set_open(server, false);
 		launch_cmd(server, "ztsettings");
 		break;
-	case 10: /* the bar along the bottom */
+	case SHADE_BAR: /* the bar along the bottom */
 		shade_set_open(server, false);
 		break;
-	case 11: /* EDIT: the quick actions arranged here (shade-edit.c) */
+	case SHADE_EDIT: /* EDIT: the quick actions arranged here (shade-edit.c); the only way in */
 		shade_edit_begin(server);
 		break;
 	default:
@@ -15652,14 +15671,11 @@ static int long_press_fired(void *data) {
             draw_osk(server);
             continue;
         }
+		/* (a held tile is its modal's, never the editor's: that is EDIT's
+		 * alone, 8.55) */
 		if (p->used && p->role == ROLE_SHADE && server->shade_open && !p->moved && !p->long_pressed &&
-				!shade_edit_active() && p->index >= 0 && p->index < 8 &&
-				now - p->down_ms >= LONG_PRESS_MS - 30 && shade_edit_long_press(server, p)) {
-			continue;	/* held on a tile with no hold of its own: the editor */
-		}
-		if (p->used && p->role == ROLE_SHADE && server->shade_open && !p->moved && !p->long_pressed &&
-				p->index >= 0 && p->index < 8 && now - p->down_ms >= LONG_PRESS_MS - 30 &&
-				quick_holds(server->quick[p->index])) {
+				!shade_edit_active() && p->index >= 0 && p->index < server->n_quick &&
+				now - p->down_ms >= LONG_PRESS_MS - 30 && quick_holds(server->quick[p->index])) {
 			int q = server->quick[p->index];
 			hap(server, HAP_HEAVY, HG_SYSTEM);
 			shade_tile_release(server, p->index);
@@ -19790,16 +19806,18 @@ static void touch_begin(struct zt_server *server, int32_t id, double px, double 
 			shade_edit_down(server, p, on_panel ? panel_x : -1, panel_y);
 			return;
 		}
-		p->index = !on_panel ? -1 : panel_x < 0 && server->orient != 0 ? 10 : shade_hit(server, panel_x, panel_y);
+		p->index = !on_panel ? -1 : panel_x < 0 && server->orient != 0 ? SHADE_BAR : shade_hit(server, panel_x, panel_y);
 		server->shade_pressed = p->index;
 		p->note_uid = p->index >= 20 && p->index - 20 < server->n_notes ?
 			server->notes[p->index - 20].uid : 0;
-		if (p->index >= 0 && p->index < 8) {
+		if (p->index >= 0 && p->index < QUICK_MAX) {
 			shade_tile_press(server, p->index, panel_x, panel_y);
-			/* held: its modal, or its page of Settings; a tile with
-			 * neither, the editor (shade-edit.c) */
-			p->down_ms = now_ms();
-			wl_event_source_timer_update(server->long_press_timer, LONG_PRESS_MS);
+			if (quick_holds(server->quick[p->index])) {
+				/* held: its modal, or its page of Settings (a tile
+				 * with neither does nothing held; EDIT edits) */
+				p->down_ms = now_ms();
+				wl_event_source_timer_update(server->long_press_timer, LONG_PRESS_MS);
+			}
 		}
 		p->scroll0 = server->shade_h;
 		/* a drag that starts over the notifications scrolls them (see
@@ -19807,7 +19825,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double px, double 
 		 * moves the panel */
 		p->axis = 0;
 		p->holding = false;
-		p->on_list = server->n_notes > 0 && p->index != 10 && on_panel && panel_y >= server->note_top &&
+		p->on_list = server->n_notes > 0 && p->index != SHADE_BAR && on_panel && panel_y >= server->note_top &&
 			panel_y < server->note_top + server->note_view;
 		p->lx = px;
 		p->ly = list_at;	/* (the list's axis: the glass upright, the view turned) */
@@ -20334,7 +20352,7 @@ static void touch_update(struct zt_server *server, int32_t id, double px, double
 			if (server->peek > 0.0f && !server->shade_open) {
 				peek_show(server, false);	/* pulled after all: the whole panel */
 			}
-			if (p->index >= 0 && p->index < 8) {
+			if (p->index >= 0 && p->index < QUICK_MAX) {
 				shade_tile_release(server, p->index);	/* it became a drag */
 			}
 			p->index = -1;
@@ -20721,7 +20739,7 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 			wl_event_source_timer_update(server->peek_timer, PEEK_STAY_MS);
 			break;
 		}
-		if (p->index >= 0 && p->index < 8) {
+		if (p->index >= 0 && p->index < QUICK_MAX) {
 			shade_tile_release(server, p->index);
 		}
 		if (p->axis == 3) {
@@ -24840,7 +24858,7 @@ static void shade_sheet_draw(struct zt_server *server, bool shade_folded) {
 			}
 			scissor_view_box(server, c0, c1, 0.0f, h, NULL);
 		}
-		for (int i = 0; i < 8; i++) {
+		for (int i = 0; i < server->n_quick; i++) {
 			struct zt_layer *layer = &server->shade_tile_layer[i];
 			double x, y, tw, th;
 			shade_tile_rect(server, i, &x, &y, &tw, &th);
@@ -26460,7 +26478,7 @@ static void render_frame(struct zt_server *server) {
 			}
 			zt_scissor(server, 0, 0, px_w, px_cover);
 		}
-		for (int i = 0; i < 8; i++) {
+		for (int i = 0; i < server->n_quick; i++) {
 			struct zt_layer *layer = &server->shade_tile_layer[i];
 			double x, y, w, h;
 			shade_tile_rect(server, i, &x, &y, &w, &h);
@@ -27912,7 +27930,7 @@ int main(int argc, char *argv[]) {
 	server.aod_scale = 1.0;
 	server.aod_budget_k = 1.0;
 	server.flip_t = 1.0;
-	for (int i = 0; i < 8; i++) {
+	for (int i = 0; i < QUICK_MAX; i++) {
 		server.shade_press[i] = 1.0f;
 	}
 	server.rot.sensor = server.rot.test = -1;	/* no orientation yet */
