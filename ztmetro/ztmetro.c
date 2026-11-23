@@ -19,10 +19,10 @@
  *
  *   tap a tile                  launch the app, or return to it if it runs
  *   drag on Start               scroll the tiles
- *   nav bar: back               Escape to the app; long press: next running app
+ *   nav bar: back               Escape to the app (Android: its Back); long press: next running app
  *   nav bar: Start              back to Start (the app keeps running)
  *   nav bar: search             show or hide the keyboard (until search exists)
- *   left edge, swipe right      close the app
+ *   left edge, swipe right      close the app (Android: its Back)
  *
  * Built on wlroots 0.20; the xdg-shell plumbing follows wlroots' tinywl.
  */
@@ -15580,6 +15580,38 @@ static int press_fired(void *data) {
 	return 0;
 }
 
+/* Back with an app in front (the nav bar, the phone's own key, the left-edge
+ * swipe on an Android app, the control pipe's "back").
+ *
+ * Android (Waydroid) gets its own Back: evdev KEY_BACK, which Waydroid's
+ * Generic.kl maps to KEYCODE_BACK, through the keyboard like any key. The
+ * app goes back within itself (a submenu, a page, its keyboard); only when
+ * it has nothing left does Android finish the activity or move its task to
+ * the back, and its window goes then, by Android's doing, not ours. Escape
+ * is not that: an app sees KEYCODE_ESCAPE first and may act on it as it
+ * likes, and only an unhandled one falls back to Back. Nor is hiding the
+ * window here, which a background app used to get: that left the app as a
+ * whole, whatever screen it was on.
+ *
+ * Everything else as before: ATL with the keyboard up loses the keyboard; a
+ * background app is hidden (it keeps running); the rest get Escape. */
+static void app_back(struct zt_server *server) {
+	struct zt_toplevel *top = server->shown;
+	if (waydroid_window(top->xdg_toplevel->app_id)) {
+		if (server->osk_visible) {
+			osk_show(server, false);	/* Android's Back closes its IME too */
+		}
+		vkbd_send(server, KEY_BACK, false);
+	} else if (top->android_runtime && server->osk_visible) {
+		osk_show(server, false);
+	} else if (background_app(top)) {
+		top->background_hidden = true;
+		show_toplevel(server, NULL);
+	} else {
+		vkbd_send(server, KEY_ESC, false);
+	}
+}
+
 /* A nav button, or the phone's own key for it, pressed and let go. */
 static void nav_activate(struct zt_server *server, int index) {
 	if (server->level_open) {
@@ -15644,17 +15676,8 @@ static void nav_activate(struct zt_server *server, int index) {
 			fs_apply(server, server->shown, false);
 			return;
 		}
-		if (server->shown && server->shown->android_runtime && server->osk_visible) {
-			osk_show(server, false);
-			const char *id = server->shown->xdg_toplevel->app_id;
-			if (id && !strncmp(id, "waydroid.", 9)) {
-				vkbd_send(server, KEY_ESC, false);
-			}
-		} else if (server->shown && background_app(server->shown)) {
-                server->shown->background_hidden = true;
-                show_toplevel(server, NULL);
-            } else if (server->shown) {
-			vkbd_send(server, KEY_ESC, false);
+		if (server->shown) {
+			app_back(server);
 		} else if (retro_on(server)) {
 			dm_launcher_back(server->dm, wall_ms());
 			damage(server);
@@ -20954,6 +20977,13 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		break;
 	case ROLE_CLOSE:
 		if (!cancelled && p->x - p->x0 > SWIPE && server->shown) {
+			if (waydroid_window(server->shown->xdg_toplevel->app_id)) {
+				/* on Android the edge swipe is Back, as on Android itself:
+				 * the app leaves only once it has nothing to go back to */
+				wlr_log(WLR_INFO, "gesture: back '%s'", app_name(server->shown));
+				app_back(server);
+				break;
+			}
 			wlr_log(WLR_INFO, "gesture: close '%s'", app_name(server->shown));
 			if (background_app(server->shown)) {
                 server->shown->background_hidden = true;
@@ -21754,7 +21784,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 		if (server->audio_modal_open) {
 			audio_modal_close(server);
 		} else if (server->shown) {
-			vkbd_send(server, KEY_ESC, false);
+			app_back(server);
 		}
 	} else if (strcmp(line, "restart") == 0) {
 		/* a new display size: greetd starts the session again at it */
