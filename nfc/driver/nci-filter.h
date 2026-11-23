@@ -13,8 +13,9 @@
  *   RF_DISCOVER_SELECT 21 04: T2T/T3T/ISO-DEP, and MIFARE Classic (0x81) on
  *                          the Frame interface (read-only, owner-approved
  *                          2026-11-22 for one card)
- *   RF_DEACTIVATE 21 06: idle (0x00) or sleep (0x01, to re-select a card for
- *                        the next key)
+ *   RF_DEACTIVATE 21 06: idle (0x00) only. (Sleep 0x01 was briefly allowed
+ *                        for Classic key iteration without an explicit
+ *                        approval; reverted 2026-11-22.)
  * Data on the static RF connection (conn 0), by the activated protocol:
  *   T2T: READ (30 nn), GET_VERSION (60)
  *   T3T: Polling (cmd 0x00), Read Without Encryption (cmd 0x06)
@@ -214,9 +215,8 @@ static inline const char *zrn_nci_check(const unsigned char *p, unsigned int len
 		if (q[1] == NCI_PROTO_MFC && q[2] != 0x01)
 			return "SELECT: MIFARE Classic only on the Frame interface";
 		return 0;
-	case 0x106:	/* RF_DEACTIVATE: idle (end) or sleep (re-select a card) */
-		return (plen == 1 && (q[0] == 0x00 || q[0] == 0x01)) ? 0 :
-			"DEACTIVATE: idle or sleep only";
+	case 0x106:	/* RF_DEACTIVATE: idle only */
+		return (plen == 1 && q[0] == 0x00) ? 0 : "DEACTIVATE: idle only";
 	}
 	return "command not allowed";
 }

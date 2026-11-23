@@ -380,15 +380,10 @@ def decode_access(trailer):
 
 
 def mfc_reselect(nci, pick):
-    nci.send([0x21, 0x06, 0x01, 0x01])		# deactivate to sleep
-    nci.rsp((1, 6))
-    nci.wait(lambda p: p[0] == 0x61 and p[1] == 0x06, 0.5)
-    nci.send([0x21, 0x04, 0x03, pick[0], 0x81, 0x01])	# re-select on Frame
-    nci.rsp((1, 4))
-    p = nci.wait(lambda p: p[0] == 0x61 and p[1] == 0x05, 0.8)
-    if p:
-        nci.credits = p[3:][5]
-    return p is not None
+    # Re-selecting a halted card needs RF_DEACTIVATE to sleep, which is not
+    # approved (the allowlist refuses it). Send nothing; the reader stops.
+    log("card halted after a failed key; re-select is not approved, stopping")
+    return False
 
 
 def mfc_auth(nci, block, key_a, key_hex, uid4):
@@ -406,9 +401,9 @@ def read_classic(nci, info, deadline):
     access = {}
     blocks_read = 0
     dump = []
-    authed = False			# whether the card is currently activated+ready
+    authed = True			# active right after activation; no re-select is approved
     reselects = 0
-    reselect_cap = 48			# bound the field time on an unreadable card
+    reselect_cap = 0			# re-select (DEACTIVATE sleep) is not approved
     # attempt order: Key A then Key B over the default list; once a key works,
     # it is moved to the front so later sectors usually need no re-select
     attempts = [(True, k) for k in MFC_KEYS] + [(False, k) for k in MFC_KEYS]
