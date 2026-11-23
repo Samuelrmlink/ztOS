@@ -1,0 +1,22 @@
+Device 40:DA:5C:62:CA:1B (public)
+	Name: AirPods Pro
+	Alias: AirPods Pro
+	Class: 0x00240418 (2360344)
+	Icon: audio-headphones
+	Paired: yes
+	Bonded: yes
+	Trusted: yes
+	Blocked: no
+	Connected: no
+	LegacyPairing: no
+	CablePairing: no
+	Modalias: bluetooth:v004Cp2024d242F
+	Connectable: yes
+DBG: cs_proxies is empty
+	BREDR.Paired: yes
+	BREDR.Bonded: yes
+	BREDR.Connected: no
+	BREDR.Connectable: yes
+	LE.Paired: no
+	LE.Bonded: no
+	LE.Connected: no

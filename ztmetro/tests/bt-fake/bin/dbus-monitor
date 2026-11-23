@@ -1,0 +1,13 @@
+#!/bin/sh
+# A dbus-monitor for tests/bt-state.sh: notes its match rules in
+# $FAKE_BT/dbus-args, then prints whatever the test drops in $FAKE_BT/emit.
+D=${FAKE_BT:?}
+printf '%s\n' "$@" > "$D/dbus-args"
+echo $$ > "$D/dbus-pid"
+while :; do
+	if [ -e "$D/emit" ]; then
+		cat "$D/emit"
+		rm -f "$D/emit"
+	fi
+	sleep 0.05
+done

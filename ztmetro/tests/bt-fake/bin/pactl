@@ -1,0 +1,3 @@
+#!/bin/sh
+# no Bluetooth sink playing
+exit 0
