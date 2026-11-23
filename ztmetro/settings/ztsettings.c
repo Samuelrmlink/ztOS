@@ -217,12 +217,7 @@ static const char *const QUICK_NAMES[] = { "Wi-Fi", "Mobile data", "Bluetooth", 
 	"Rotation lock", "Flashlight", "Location", "Brightness", "All settings", "Vibration", "Audio", "(empty)" };
 #define N_QUICK 12
 
-struct network {
-	char ssid[64];
-	int signal;
-	bool secured, in_use, known;
-	char security[24];
-};
+#include "wifi-list.h"	/* struct network, and the rows merged by name */
 
 static const struct { const char *name; unsigned color; } ACCENTS[] = {
 	{ "lime", 0xa4c400 }, { "green", 0x60a917 }, { "emerald", 0x008a00 },
@@ -963,21 +958,12 @@ static void wifi_parse(char *text) {
 			section++;
 		} else if (section == 0) {
 			app.wifi_on = strncmp(line, "enabled", 7) == 0;
-		} else if (section == 1 && app.n_networks < MAX_NETWORKS) {
+		} else if (section == 1) {
 			char *cursor = line;
 			char *in_use = nm_field(&cursor), *ssid = nm_field(&cursor);
 			char *signal = nm_field(&cursor), *security = nm_field(&cursor);
-			bool seen = !ssid[0];
-			for (int i = 0; i < app.n_networks; i++) {
-				if (strcmp(app.networks[i].ssid, ssid) == 0) seen = true;
-			}
-			if (seen) continue;
-			struct network *n = &app.networks[app.n_networks++];
-			snprintf(n->ssid, sizeof(n->ssid), "%s", ssid);
-			n->signal = atoi(signal);
-			n->secured = security[0] && strcmp(security, "--") != 0;
-			snprintf(n->security, sizeof(n->security), "%s", n->secured ? security : "open");
-			n->in_use = in_use[0] == '*';
+			/* one row per name: the line in use may come after a stronger one */
+			wifi_list_add(app.networks, &app.n_networks, MAX_NETWORKS, in_use, ssid, signal, security);
 		} else if (section == 2 && n_known < 48) {
 			char *cursor = line;
 			snprintf(known[n_known++], 64, "%s", nm_field(&cursor));
