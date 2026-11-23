@@ -1,0 +1,74 @@
+== configuration added over out-target-snd
+< CONFIG_PAHOLE_VERSION=132
+> CONFIG_PAHOLE_VERSION=0
+< CONFIG_RUSTC_LLVM_MAJOR_VERSION=0
+< CONFIG_RUSTC_LLVM_VERSION=0
+> CONFIG_RUSTC_HAS_FILE_AS_C_STR=y
+> CONFIG_RUSTC_HAS_FILE_WITH_NUL=y
+> CONFIG_RUSTC_HAS_SPAN_FILE=y
+> CONFIG_RUSTC_HAS_UNNECESSARY_TRANSMUTES=y
+> CONFIG_RUSTC_LLVM_MAJOR_VERSION=21
+> CONFIG_RUSTC_LLVM_VERSION=210108
+< CONFIG_RUSTC_VERSION=0
+> CONFIG_RUSTC_VERSION=109200
+> CONFIG_SND_HWDEP=m
+> CONFIG_SND_RAWMIDI=m
+> CONFIG_SND_USB=y
+> CONFIG_SND_USB_AUDIO=m
+note: booleans changed: > CONFIG_RUSTC_HAS_FILE_AS_C_STR=y
+> CONFIG_RUSTC_HAS_FILE_WITH_NUL=y
+> CONFIG_RUSTC_HAS_SPAN_FILE=y
+> CONFIG_RUSTC_HAS_UNNECESSARY_TRANSMUTES=y
+make: Entering directory '/home/samuel/ztos-aod-build/linux'
+  VDSOSYM include/generated/vdso-offsets.h
+  OBJCOPY arch/arm64/kernel/vdso/vdso.so
+WARNING: vmlinux.o is missing.
+         Modules may not have dependencies or modversions.
+         You may get many unresolved symbol errors.
+         You can set KBUILD_MODPOST_WARN=1 to turn errors into warning
+         if you want to proceed at your own risk.
+WARNING: modpost: "try_module_get" [sound/core/snd-hwdep.ko] undefined!
+WARNING: modpost: "dev_set_name" [sound/core/snd-hwdep.ko] undefined!
+WARNING: modpost: "kfree" [sound/core/snd-hwdep.ko] undefined!
+WARNING: modpost: "add_wait_queue" [sound/core/snd-hwdep.ko] undefined!
+WARNING: modpost: "__wake_up" [sound/core/snd-hwdep.ko] undefined!
+WARNING: modpost: "schedule" [sound/core/snd-hwdep.ko] undefined!
+WARNING: modpost: "__stack_chk_fail" [sound/core/snd-hwdep.ko] undefined!
+WARNING: modpost: "__arch_copy_to_user" [sound/core/snd-hwdep.ko] undefined!
+WARNING: modpost: "put_device" [sound/core/snd-hwdep.ko] undefined!
+WARNING: modpost: "module_put" [sound/core/snd-hwdep.ko] undefined!
+WARNING: modpost: suppressed 510 unresolved symbol warnings because there were too many)
+make: Leaving directory '/home/samuel/ztos-aod-build/linux'
+== core rebuilt with USB audio enabled vs the modules the phone runs (out-target-snd)
+same      sound/soundcore.ko ef6f37c6b2e7c769f6072164880bdcccbedc970cd80d48186cfe533e2342ee5a
+same      sound/core/snd.ko 6ce6f881bbcd64a1c6d217685a1d25a6c72664a01c7acbd943eec5e89725e1c3
+same      sound/core/snd-timer.ko 3d8ecb03ff600c2d20c9d8fc8f47d446b0f80d11fa1a14916d2263ca4e633b13
+same      sound/core/snd-pcm.ko 63491641bb0b8fae0310b113b2e997e17b33c5a96c64f105bf753113ad137186
+== audio/modules-usb
+bf080e87aa995a36a67cb6d56071dc8d4bd51d49aff15145e856f8e3381ea1fe  snd-hwdep.ko
+    vermagic=7.1.0-zboot-wd-dp6 SMP preempt mod_unload aarch64
+    depends=snd
+08681252c883e01c191a3e33105830211b49e581c730ab68e71b4dca3c6b0cf4  snd-rawmidi.ko
+    vermagic=7.1.0-zboot-wd-dp6 SMP preempt mod_unload aarch64
+    depends=snd
+0810c7503fdd8817e51f957ad0132f7b11dbade149643dd08eb54a8a9829e4a6  snd-usb-audio.ko
+    vermagic=7.1.0-zboot-wd-dp6 SMP preempt mod_unload aarch64
+    depends=snd,snd-pcm,snd-usbmidi-lib,snd-hwdep
+1dfaee09bb6898869515a0092815e94f2eaf1d67d4160ae1f3292884d08891b1  snd-usbmidi-lib.ko
+    vermagic=7.1.0-zboot-wd-dp6 SMP preempt mod_unload aarch64
+    depends=snd-rawmidi,snd
+all symbols resolve against boot-aod1 (out/vmlinux.symvers) and the sound core
+
+real	0m15.000s
+user	0m55.452s
+sys	0m4.084s
+
+== on the phone (7.1.0-zboot-wd-dp6 #63, boot-aod1), 2026-11-22, owner approved loading tonight
+21:5x CST  installed to /lib/modules/7.1.0-zboot-wd-dp6/extra, depmod -a, modprobe snd-usb-audio
+           (insmod order: soundcore snd snd-timer snd-pcm [loaded] snd-rawmidi snd-usbmidi-lib snd-hwdep snd-usb-audio index=-2)
+           dmesg: "usbcore: registered new interface driver snd-usb-audio", no errors
+           aplay -l / arecord -l: card 1 EarPods (05ac:110b), card 0 ZrnAbox unchanged
+           PipeWire: alsa_output.usb-Apple__Inc._EarPods_GP2H5W3HFR-00.analog-stereo,
+                     alsa_input.usb-Apple__Inc._EarPods_GP2H5W3HFR-00.mono-fallback
+22:04 CST  rebooted (not for this): snd-usb-audio loaded by udev at boot from modules.alias, card 1, no errors
+           2 s 440 Hz at -36 dBFS through the sink at 40 % (-24 dB): RUNNING, pw-play 0

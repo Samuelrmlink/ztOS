@@ -264,6 +264,36 @@ with a caret that opens all three; it goes 3 s after the last touch or key.
 
 `make check-volume-streams` tests both sides on the host.
 
+## USB audio (USB-C headphones, dongles): ROADMAP 8.62
+
+The kernel has no `SND_USB_AUDIO`. `audio/build-usb.sh` builds it as modules
+for boot-aod1 (7.1.0-zboot-wd-dp6 #63) without touching the image:
+`snd-hwdep`, `snd-rawmidi`, `snd-usbmidi-lib`, `snd-usb-audio`, into
+`audio/modules-usb/`. It works in a copy of the tree that built the phone's
+sound core (`out-target-snd`), adds only the USB audio options, and stops unless
+soundcore, snd, snd-timer and snd-pcm rebuilt there come out byte for byte
+the ones the phone runs, and every symbol resolves. `audio/build-usb.log` is
+the last build.
+
+On the phone they go in `/lib/modules/$(uname -r)/extra`, then `depmod`. udev
+loads them from `modules.alias` when a USB audio interface appears, at boot as
+well. `/etc/modprobe.d/ztos-usb-audio.conf` gives them `index=-2`, so card 0
+stays the speakers whichever loads first, and loads them through
+`/usr/local/sbin/ztos-usb-audio-load`. Like `ztoscirrusaudio`, that leaves a
+mark (`/var/lib/ztoscirrusaudio/usb-loading`) while it loads. A load killed
+by an oops keeps the mark, and nothing loads until it is removed
+(`audio/tests/usb-audio-load-test.sh`).
+
+PipeWire makes a sink and a source of the device. `ztos-audiod` calls it by
+its product name ("EarPods"), or "USB headphones" for a generic one, with kind
+headphones and `"mic"` set to its source. Plugged in, it takes the audio as the
+jack does, but not from Bluetooth or another USB output that is already there.
+Its microphone becomes the input with it, and also when it is chosen as the
+output. Unplugged, WirePlumber goes back to the output and input that were
+used before. The remote's buttons come as a HID keyboard (`KEY_VOLUMEUP`,
+`KEY_VOLUMEDOWN`, `KEY_PLAYPAUSE`), which the shell takes as it takes the
+jack's: play/pause to `playerctl`, and volume to the active output.
+
 ## Not done
 
 - **Speaker protection.** On the stock system the DSP runs Maxim's DSM
