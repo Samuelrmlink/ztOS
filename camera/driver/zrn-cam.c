@@ -563,9 +563,58 @@ static void power_off(const struct camera *c)
 	}
 }
 
+/*
+ * Extra waits, for finding out why a sensor does not answer: before the bus
+ * comes up (the rails settled) and after reset is released. Timing only, no
+ * register; 0 is stock's sequence.
+ */
+static unsigned int settle_ms, after_reset_ms;
+module_param(settle_ms, uint, 0644);
+module_param(after_reset_ms, uint, 0644);
+
+/*
+ * S2MPB03 LDO_SLEW2 (0x0B) as stock's s2mpb03_pmic_set_ldo_slew() leaves it from
+ * the DT (slew2,dram_dsch2 = 1, l5_slew = 0, l6_slew = 0): bit 1 set, bits 7:4
+ * clear, bits 3:2 and 0 kept; 0xfc at power-on reset becomes 0x0e. Lost when
+ * the PMIC resets, so set once per load before the rear's first power-up.
+ * Approved 2026-11-22 (REGISTERS.md).
+ */
+static bool pb03_slew_done;
+
+static int pb03_slew(void)
+{
+	int v, ret;
+
+	if (pb03_slew_done)
+		return 0;
+	v = i2c_smbus_read_byte_data(pmic[PB03], 0x0b);
+	if (v < 0)
+		return v;
+	if (v != ((v & 0x0d) | 0x02)) {
+		ret = i2c_smbus_write_byte_data(pmic[PB03], 0x0b, (v & 0x0d) | 0x02);
+		if (ret)
+			return ret;
+	}
+	ret = i2c_smbus_read_byte_data(pmic[PB03], 0x0b);
+	note("S2MPB03 0b (LDO slew): 0x%02x -> 0x%02x", v, ret & 0xff);
+	if (ret < 0 || ret != ((v & 0x0d) | 0x02))
+		return -EIO;
+	pb03_slew_done = true;
+	return 0;
+}
+
 static int power_on(const struct camera *c, bool rails_only)
 {
 	unsigned int i;
+
+	if (c == &cameras[0]) {
+		int ret = pb03_slew();
+
+		if (ret) {
+			note("S2MPB03 slew set-up failed: %d; nothing switched", ret);
+			return ret;
+		}
+	}
 
 	for (i = 0; i < c->n_on; i++) {
 		const struct step *s = &c->on[i];
@@ -574,12 +623,16 @@ static int power_on(const struct camera *c, bool rails_only)
 		if (rails_only && !s->rail && s->marker != M_RESET_LOW && s->marker != M_IRIS_EN &&
 		    s->marker < M_MPS_D_ON)
 			continue;
+		if (!s->rail && s->marker == M_BUS_ON && settle_ms)
+			msleep(settle_ms);
 		ret = s->rail ? rail_set(s->rail, true) : do_marker(c, s->marker);
 		if (ret) {
 			note("%s: on step %u failed: %d", c->name, i, ret);
 			return ret;
 		}
 		wait_us(s->us);
+		if (!s->rail && s->marker == M_RESET_HIGH && after_reset_ms)
+			msleep(after_reset_ms);
 	}
 	return 0;
 }
@@ -596,7 +649,25 @@ static int read16(struct i2c_client *cl, u16 reg, void *buf, int len)
 	return ret == 2 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
+/*
+ * CMU_TOP: vendor cmucal-sfr.c SFR_BLOCK(CMU, 0x1a240000, 0x8000); every
+ * register read here is below 0x4000 (the CIS Q-channels end at 0x3010).
+ * The 0x3000 mapping before 2026-11-22 ended below them: reading 0x3004
+ * faulted (an unmapped kernel address). Reads go through top_rd(), which
+ * refuses anything outside the mapping.
+ */
+#define TOP_CMU_BASE	0x1a240000
+#define TOP_CMU_SIZE	0x4000
 static void __iomem *top_cmu;
+
+static u32 top_rd(u32 off)
+{
+	if (!top_cmu || off > TOP_CMU_SIZE - 4 || (off & 3)) {
+		WARN_ONCE(1, "zrn-cam: CMU_TOP read 0x%x outside the mapping\n", off);
+		return 0xdeadbeef;
+	}
+	return readl(top_cmu + off);
+}
 
 /* Read only: what the pads and the PMICs look like with the camera up, when it does not answer */
 static void id_diag(const struct camera *c)
@@ -618,13 +689,27 @@ static void id_diag(const struct camera *c)
 		n += scnprintf(line + n, sizeof(line) - n, " %02x", i2c_smbus_read_byte_data(pmic[PB02], i) & 0xff);
 	note("S2MPB02 22-2d:%s", line);
 	note("%s: reset pin reads %d", c->name, gpiod_get_value_cansleep(reset_gpio));
+	{	/* the 2L3's other address, by its ID pin; a read */
+		u8 id[2] = { 0, 0 };
+		u16 was = sensor->addr;
+		int r;
+
+		sensor->addr = 0x2d;
+		r = read16(sensor, 0x0000, id, 2);
+		sensor->addr = was;
+		note("%s: at 0x2d: %d, id %02x%02x", c->name, r, id[0], id[1]);
+	}
 	/* CMU_TOP CIS_CLK0/1: mux 0x1018/0x101c, div 0x1814/0x1818, gate 0x2018/0x201c (cmucal-sfr.c) */
 	if (!top_cmu)
-		top_cmu = ioremap(0x1a240000, 0x3000);
+		top_cmu = ioremap(TOP_CMU_BASE, TOP_CMU_SIZE);
 	if (top_cmu)
 		note("CIS_CLK0 mux %08x div %08x gate %08x; CIS_CLK1 mux %08x div %08x gate %08x",
-		     readl(top_cmu + 0x1018), readl(top_cmu + 0x1814), readl(top_cmu + 0x2018),
-		     readl(top_cmu + 0x101c), readl(top_cmu + 0x1818), readl(top_cmu + 0x201c));
+		     top_rd(0x1018), top_rd(0x1814), top_rd(0x2018),
+		     top_rd(0x101c), top_rd(0x1818), top_rd(0x201c));
+		/* DMYQCH_CON_DFTMUX_TOP_QCH_CIS_CLK0..3: bit 0 enable, 1 clock_req, 2 ignore_force_pm_en */
+		if (top_cmu)
+			note("CIS_CLK0-3 QCH %08x %08x %08x %08x", top_rd(0x3004), top_rd(0x3008),
+			     top_rd(0x300c), top_rd(0x3010));
 }
 
 static void read_id(const struct camera *c)
@@ -1002,18 +1087,22 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 	if (!strcmp(cmd, "pmic")) {
 		pmic_dump();
 		if (!top_cmu)
-			top_cmu = ioremap(0x1a240000, 0x3000);
+			top_cmu = ioremap(TOP_CMU_BASE, TOP_CMU_SIZE);
 		if (top_cmu)
 			note("CIS_CLK0 mux %08x div %08x gate %08x; CIS_CLK1 mux %08x div %08x gate %08x",
-			     readl(top_cmu + 0x1018), readl(top_cmu + 0x1814), readl(top_cmu + 0x2018),
-			     readl(top_cmu + 0x101c), readl(top_cmu + 0x1818), readl(top_cmu + 0x201c));
+			     top_rd(0x1018), top_rd(0x1814), top_rd(0x2018),
+			     top_rd(0x101c), top_rd(0x1818), top_rd(0x201c));
+		/* DMYQCH_CON_DFTMUX_TOP_QCH_CIS_CLK0..3: bit 0 enable, 1 clock_req, 2 ignore_force_pm_en */
+		if (top_cmu)
+			note("CIS_CLK0-3 QCH %08x %08x %08x %08x", top_rd(0x3004), top_rd(0x3008),
+			     top_rd(0x300c), top_rd(0x3010));
 		goto done;
 	}
 	if (!strncmp(cmd, "dvfs-", 5)) {
 		u32 dom = 0, khz = 0;
 
 		if (!top_cmu)
-			top_cmu = ioremap(0x1a240000, 0x3000);
+			top_cmu = ioremap(TOP_CMU_BASE, TOP_CMU_SIZE);
 		bus_note("before");
 		/* only the approved request (REGISTERS.md, J): dvfs_cam at 690000 */
 		if (sscanf(cmd, "dvfs-%u-%u", &dom, &khz) == 2 && dom == 7 &&
@@ -1029,7 +1118,7 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 	}
 	if (!strncmp(cmd, "stream-", 7) || !strncmp(cmd, "fstream-", 8)) {
 		if (!top_cmu)
-			top_cmu = ioremap(0x1a240000, 0x3000);
+			top_cmu = ioremap(TOP_CMU_BASE, TOP_CMU_SIZE);
 		stream = true;
 		st_front = cmd[0] == 'f';
 		st_frame = strstr(cmd, "-frame");
@@ -1085,6 +1174,16 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 			goto done;
 		}
 	}
+	/*
+	 * The rear sensor answered only after dvfs_cam was raised (the app's path
+	 * does it first; 22 Nov): every cycle asks for it, as a stream does, and
+	 * gives it back below. Approved values only (REGISTERS.md J and (a)).
+	 */
+	if (!stream) {
+		int r = apm_set(7, INTCAM_KHZ);
+
+		note("APM dvfs_cam %u: %d", INTCAM_KHZ, r);
+	}
 	ret = power_on(c, rails);
 	if (!ret && stream)
 		ret = stream_run(st_front, st_frame, st_tp);
@@ -1095,6 +1194,8 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 	if (!ret && rails)
 		note("%s: rails up", c->name);
 	power_off(c);
+	if (!stream)
+		cam_rest();
 	note("%s: off", c->name);
 	gpiod_put(reset_gpio);
 	reset_gpio = NULL;

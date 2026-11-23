@@ -65,6 +65,7 @@ static const struct csi_path path_front_full = {
 static const struct csi_path *pth;
 
 #define PMU_SIZE	0x5000
+#define PMU_DSIM0_ISO	0x70c	/* the rear CSIS0 PHY's isolation, shared with the panel's DSI */
 #define PMU_ISPPRE_STATUS 0x404c
 
 #define CSIS_VERSION	0x000
@@ -236,7 +237,7 @@ static int apm_set(u32 domain, u32 khz)
 /* mux select and divider of the ISPPRE bus in CMU_TOP; read only */
 static void bus_note(const char *when)
 {
-	u32 mux = readl(top_cmu + 0x1094), div = readl(top_cmu + 0x1890);
+	u32 mux = top_rd(0x1094), div = top_rd(0x1890);
 
 	note("%s: ISPPRE bus mux 0x%x div 0x%x", when, mux, div);
 }
@@ -307,6 +308,30 @@ static void rmw(void __iomem *r, u32 mask, u32 val)
 	writel((readl(r) & ~mask) | val, r);
 }
 
+/*
+ * Every PMU write goes through here. The display shares part of the camera's
+ * PMU registers (stock DT, twrp-live.dts / BOOT.img):
+ *  - 0x70c: isolation of the M4S4 PHY at 0x16160000, which is both the rear
+ *    CSIS0's (mipi_phy_csis0_m4s4_top, owner 1) and the panel's DSIM0's
+ *    (mipi_phy_dsim, owner 0; dsim_0 maps 0x16160000 0x4000). Clearing bit 0
+ *    isolates the panel's PHY: on 22 Nov that froze the screen.
+ *  - 0x704: the DisplayPort PHY's isolation (displayport_phy). Not ours.
+ * A write that would clear 0x70c bit 0, or any write to 0x704, is refused.
+ */
+static int pmu_rmw(u32 off, u32 mask, u32 val)
+{
+	if (off == 0x704 || (off == PMU_DSIM0_ISO && (mask & BIT(0)) && !(val & BIT(0)))) {
+		WARN_ONCE(1, "zrn-cam: refused PMU write 0x%x mask 0x%x val 0x%x: the display's\n",
+			  off, mask, val);
+		note("refused PMU 0x%x write: shared with the display", off);
+		return -EPERM;
+	}
+	if (off > PMU_SIZE - 4)
+		return -EINVAL;
+	rmw(pmu + off, mask, val);
+	return 0;
+}
+
 static int csis_map(const struct csi_path *p)
 {
 	if (csis) {
@@ -350,7 +375,7 @@ static void csis_on(void)
 	unsigned int i;
 
 	/* phy_power_on: PMU isolation bypass, then release the PHY's reset */
-	rmw(pmu + p->iso, BIT(0), BIT(0));
+	pmu_rmw(p->iso, BIT(0), BIT(0));
 	rmw(sys_phy, BIT(p->rst_bit), 0);
 	rmw(sys_phy, BIT(p->rst_bit), BIT(p->rst_bit));
 
@@ -359,6 +384,12 @@ static void csis_on(void)
 		udelay(10);
 
 	/* csi_hw_s_phy_default_value */
+	/*
+	 * The rear PHY at 0x16160000 is the panel's too (DSIM0 maps 0x16160000
+	 * 0x4000). These are the CSIS side's own settings from the vendor
+	 * csi_hw_s_phy_default_value, which stock writes with the panel running;
+	 * nothing here isolates or resets the PHY (see pmu_rmw()).
+	 */
 	if (p->csis == path_rear.csis) {
 		writel(0x10, csis_phy + 0x404);
 		writel(0x05, csis_phy + 0x40c);
@@ -435,8 +466,15 @@ static void csis_off(void)
 	writel(0, csis + CSIS_MSK1);
 	writel(0, csis_vc + CMN_MASK);
 	rmw(sys_phy, BIT(pth->rst_bit), 0);
-	/* both PHYs back into isolation, as phy_power_off; the rear's since 2026-11-12 */
-	rmw(pmu + pth->iso, BIT(0), 0);
+	/*
+	 * The front PHY back into isolation, as phy_power_off. The rear's never:
+	 * PMU 0x70c is also the panel's. CSIS0's M4S4 PHY at 0x16160000 is
+	 * shared with DSIM0 (stock DT mipi_phy_dsim, owner 0, isolation 0x70c),
+	 * and clearing it at rear stop (item (b), 12-22 Nov) isolated the DSI PHY:
+	 * the panel lost vblanks and the shell froze (22 Nov, 21:56 CST).
+	 */
+	if (pth->iso != PMU_DSIM0_ISO)
+		pmu_rmw(pth->iso, BIT(0), 0);
 }
 
 static void dma_prepare(void)

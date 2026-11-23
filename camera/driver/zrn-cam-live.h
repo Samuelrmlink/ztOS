@@ -132,7 +132,17 @@ static void live_power_down(void)
 static int live_thread(void *d)
 {
 	unsigned long start = jiffies, last_temp = jiffies, err_from = jiffies;
-	unsigned int cur = 0, fs = 0, why = LS_RUNNING, errs = 0, recent = 0, logged = 0;
+	/*
+	 * writing: the buffer the frame in progress goes to; programmed: the address
+	 * the receiver takes at the next frame start. The next address is written
+	 * as soon as a frame has started, so it has a whole frame to land. It used
+	 * to be written after frame end, and the front's vertical blanking (1266
+	 * lines for 1224, about 1 ms) is shorter than this loop's poll: the next
+	 * frame often started into the buffer just published, and the picture tore.
+	 * tight counts polls that saw a frame end and the next start together.
+	 */
+	unsigned int writing = 0, programmed = 0, tight = 0;
+	unsigned int fs = 0, why = LS_RUNNING, errs = 0, recent = 0, logged = 0;
 	bool armed = false;
 
 	while (why == LS_RUNNING) {
@@ -162,14 +172,19 @@ static int live_thread(void *d)
 			writel(BIT(0) | BIT(1), csis_vc + VC_CTRL);
 			armed = true;
 		}
-		if (dm & BIT(8)) {	/* a frame finished: publish it, the next goes elsewhere */
+		if ((dm & BIT(8)) && (dm & BIT(4)))
+			tight++;
+		if (dm & BIT(8)) {	/* a frame finished: publish the buffer it went to */
 			spin_lock(&live_slock);
 			live_info.seq++;
-			live_info.index = cur;
+			live_info.index = writing;
 			live_info.errors = errs;
 			spin_unlock(&live_slock);
-			cur = (cur + 1) % live_bufs;
-			live_addr(cur);
+		}
+		if (dm & BIT(4)) {	/* a frame started into programmed: aim the next one */
+			writing = programmed;
+			programmed = (writing + 1) % live_bufs;
+			live_addr(programmed);
 		}
 		if (READ_ONCE(live_stop_asked) || stop_now)
 			why = LS_ASKED;
@@ -195,7 +210,8 @@ static int live_thread(void *d)
 	live_power_down();
 	cam_rest();
 	__pm_relax(stream_ws);
-	pr_info("zrn-cam: live stopped: %u, %u frames, %u errors\n", why, live_info.seq, errs);
+	pr_info("zrn-cam: live stopped: %u, %u frames, %u errors, %u end+start in one poll\n",
+		why, live_info.seq, errs, tight);
 	spin_lock(&live_slock);
 	live_info.stopped = why;
 	spin_unlock(&live_slock);
@@ -220,7 +236,7 @@ static int live_start(bool front, bool full)
 	result_len = 0;
 	result[0] = 0;
 	if (!top_cmu)
-		top_cmu = ioremap(0x1a240000, 0x3000);
+		top_cmu = ioremap(TOP_CMU_BASE, TOP_CMU_SIZE);
 	ret = pmic_buses();
 	if (!ret)
 		ir_led_note();

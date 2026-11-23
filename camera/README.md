@@ -13,6 +13,28 @@ leaving a mark so a hang is not retried. Rear 0x20C3 rev 0xA5 (S5K2L3), front
 0x3081 rev 0xA3, three cycles each. Iris: no answer. The secure world holds both
 `gpio_iris_en` (gpg0-7) and the iris I2C pads gpp4-6/7 (`camera/iris/README.md`).
 
+## On the 7.1 dp6 kernels (2026-11-12 to 11-23)
+
+Both cameras stream in ztcamera on kernels #62-#64. What it took, and what to keep:
+
+- **Build and load.** zrn-cam is in `scripts/build-bt-modules.sh`'s set; `camera/driver/build.sh` builds it
+  alone against the target tree. `/dev/zrn-cam` has a fixed minor (10:250) and a devname alias: the node
+  exists from boot and the first open loads the module. `camera/driver/install.sh` installs it.
+- **S2MPB02 bus.** zrn-flash owns the S2MPB02's pins (bus 97) from boot; zrn-cam goes through that bus.
+- **Rear needs dvfs_cam up.** The 2L3 answers on I2C only after the APM's `dvfs_cam` request (690000).
+  October's level "stayed until reboot", which hid it. Every path asks for it first and returns it to
+  590000 (stock's minimum) at close.
+- **The rear PHY is the panel's too.** CSIS0's M4S4 PHY at 0x16160000 is shared with DSIM0 (stock DT
+  `mipi_phy_dsim`, PMU isolation 0x70c). Clearing 0x70c at rear stop froze the screen (22 Nov).
+  `pmu_rmw()` refuses it, and any write to 0x704.
+- **Front preview tore.** The front mode's vertical blanking (~1 ms) is shorter than the live thread's
+  poll; two thirds of front frames ended and the next started within one poll, so the next frame often
+  went into the buffer just handed to the app. The next address is now written at frame start.
+- **S2MPB03 LDO_SLEW2 (0x0B) = 0x0e**, as stock's probe sets it; lost when the PMIC resets.
+- Every SoC and PMIC write, with its approval date: `camera/driver/REGISTERS.md`.
+- Still open: rear scene judged in light (the phone lay on its back), AE/AF/colour on a real scene,
+  closed-app drain off the charger, the DMA bit 12 now seen a few times a minute.
+
 ## RAW capture (2026-10-31)
 
 `camera/driver` now takes frames from the rear and front through CSIS with no ISP,
