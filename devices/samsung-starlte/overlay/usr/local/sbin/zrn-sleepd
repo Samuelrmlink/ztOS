@@ -69,6 +69,12 @@ def ko(name):
 STATE = Path('/var/lib/zrn-sleep')
 ENABLED = STATE / 'enabled'
 MARK = STATE / 'sleeping'
+# why zrn-sleepd switched sleeping off by itself ('KIND text'); gone once
+# it is switched on or off by hand. The shell's Sleep tile shows it.
+OFF_REASON = STATE / 'off_reason'
+# one `run` at a time: a second daemon saw the first one's mark and
+# switched sleeping off (22 Nov), and its insmod met the loaded module
+RUN_LOCK = Path('/run/zrn-sleepd/run.lock')
 LOG = STATE / 'log'
 INHIBIT = Path('/run/zrn-sleepd/inhibit')
 STATUS = Path('/run/zrn-sleepd/status')
@@ -564,11 +570,43 @@ def unforce_grp4():
 		pass
 
 
+def backend_loaded(syms=None):
+	"""zrn_sleep_init is loaded as setup() loads it: deep sleep enabled, and
+	(where the module shows them) our EINT wake mask and the entry points."""
+	if not SLEEP.exists() or read(SLEEP / 'enable_deep') != 'Y':
+		return False
+	eint = EINT_WAKE
+	for word in module_options():
+		key, _, value = word.partition('=')
+		if key == 'eint_wake':
+			try:
+				eint = int(value, 0)
+			except ValueError:
+				pass
+	# bit 15 (the hub's host_req) is the module's own to open and shut (eint_follow)
+	checks = {'eint_wake': (eint, ~(1 << 15) & 0xffffffff)}
+	if syms:
+		checks.update(suspend_enter=(int(syms['cpu_suspend'], 16), ~0),
+			      resume=(int(syms['cpu_resume'], 16), ~0))
+	for name, (want, mask) in checks.items():
+		have = read(SLEEP / name, '')
+		if not have:
+			continue	# not shown by this module: not held against it
+		try:
+			value = int(have, 0)
+		except ValueError:
+			continue	# not a number this module shows: not held against it
+		if value & mask != want & mask:
+			return False
+	return True
+
+
 def setup():
 	"""The backend and what it leans on, as mif-trial.sh brings them up."""
 	if SLEEP.exists():
-		if read(SLEEP / 'enable_deep') == 'Y' and 'deep' in read('/sys/power/mem_sleep'):
+		if backend_loaded() and 'deep' in read('/sys/power/mem_sleep'):
 			unforce_grp4()
+			log('backend up (already loaded)')
 			return True
 		log('zrn_sleep_init present but deep sleep not enabled, reloading')
 		run('rmmod', 'zrn_sleep_init', check=False)
@@ -601,6 +639,13 @@ def setup():
 		f'suspend_enter=0x{syms["cpu_suspend"]}', f'resume=0x{syms["cpu_resume"]}',
 		*module_options())
 	if r is None or r.returncode or not SLEEP.exists():
+		# 'File exists': loaded meanwhile (another start, by hand); ours if
+		# its parameters are
+		if r is not None and 'File exists' in (r.stdout or '') and backend_loaded(syms):
+			write('/sys/power/mem_sleep', 's2idle')
+			unforce_grp4()
+			log('backend up (insmod: already loaded, same parameters)')
+			return True
 		log('backend did not load:', r.stdout.strip() if r else '')
 		return False
 	write('/sys/power/mem_sleep', 's2idle')
@@ -1518,9 +1563,8 @@ def cycle(ignore=(), ignore_inhibits=()):
 		if restored:
 			MARK.unlink(missing_ok=True)
 		else:
-			ENABLED.unlink(missing_ok=True)
+			switch_off('recovery', 'Device recovery failed after sleep.')
 			reason = 'failed'
-			tell_shell('notify Power|Sleep switched off|Device recovery failed after sleep.')
 	global last_dozing
 	last_dozing = dozing
 	if last_sleep.get('entered'):
@@ -1633,6 +1677,56 @@ def log_alarm_wake(prefix=''):
 	log(f'{prefix}alarm wake, container {state}')
 
 
+def switch_off(kind, text):
+	"""Sleeping switched off by zrn-sleepd itself: the switch, why (for the
+	shell's Sleep tile), and a notification."""
+	ENABLED.unlink(missing_ok=True)
+	try:
+		OFF_REASON.write_text(f'{kind} {text}\n')
+	except OSError:
+		pass
+	tell_shell(f'notify Power|Sleep switched off|{text}')
+
+
+def set_enabled(on):
+	"""`zrn-sleepd enable | disable`: by hand, so no reason is kept."""
+	STATE.mkdir(parents=True, exist_ok=True)
+	if on:
+		ENABLED.touch()
+		PAUSED.unlink(missing_ok=True)
+	else:
+		ENABLED.unlink(missing_ok=True)
+	OFF_REASON.unlink(missing_ok=True)
+
+
+def take_run_lock(path=None):
+	"""The one `run`: an flock on RUN_LOCK, held while the process lives
+	(the descriptor is kept). None if another daemon holds it."""
+	import fcntl
+	path = Path(path if path is not None else RUN_LOCK)
+	path.parent.mkdir(parents=True, exist_ok=True)
+	fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+	try:
+		fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+	except OSError:
+		os.close(fd)
+		return None
+	os.ftruncate(fd, 0)
+	os.write(fd, f'{os.getpid()}\n'.encode())
+	return fd
+
+
+def lock_holder(path=None):
+	return read(path if path is not None else RUN_LOCK, '?') or '?'
+
+
+USAGE = """usage: zrn-sleepd run                 the daemon (systemd's zrn-sleepd.service)
+       zrn-sleepd once [SECONDS] [--ignore-inhibit NAME]...
+       zrn-sleepd enable | disable | status
+       zrn-sleepd why [--json | --shell [--always] [--wakers]]
+       zrn-sleepd log [N | all]"""
+
+
 def main():
 	# systemctl stop, a reboot: SystemExit unwinds a cycle through its
 	# restores (Wi-Fi bound again, dry_run back on) before the unit's
@@ -1644,9 +1738,8 @@ def main():
 	ensure_watch()
 	if MARK.exists():
 		MARK.unlink()
-		ENABLED.unlink(missing_ok=True)
 		log('the last sleep never came back: sleeping switched off')
-		tell_shell('notify Power|Sleep switched off|The phone did not wake from its last sleep.')
+		switch_off('nowake', 'The phone did not wake from its last sleep.')
 	ready = False
 	off_since = None
 	backoff = 0
@@ -1727,8 +1820,7 @@ def main():
 				if not ready:
 					ready = setup()
 					if not ready:
-						ENABLED.unlink(missing_ok=True)
-						tell_shell('notify Power|Sleep switched off|Its driver did not load.')
+						switch_off('driver', 'Its driver did not load.')
 						continue
 				load_config()
 				t0 = boottime()
@@ -1895,16 +1987,16 @@ def sleep_why():
 
 
 if __name__ == '__main__':
-	cmd = sys.argv[1] if len(sys.argv) > 1 else 'run'
+	cmd = sys.argv[1] if len(sys.argv) > 1 else ''
 	if cmd == 'enable':
-		STATE.mkdir(parents=True, exist_ok=True)
-		ENABLED.touch()
-		PAUSED.unlink(missing_ok=True)
+		set_enabled(True)
 	elif cmd == 'disable':
-		ENABLED.unlink(missing_ok=True)
+		set_enabled(False)
 	elif cmd == 'status':
 		print(read(STATUS) or 'not running')
 		print('enabled' if ENABLED.exists() else 'disabled')
+		if read(OFF_REASON):
+			print('off_reason=' + read(OFF_REASON))
 		if PAUSED.exists():
 			until = dict(w.partition('=')[::2] for w in read(PAUSED).split()).get('until', '')
 			try:
@@ -1928,5 +2020,14 @@ if __name__ == '__main__':
 		show_log(None if arg == 'all' else int(arg))
 	elif cmd == 'once':
 		once(sys.argv[2:])
-	else:
+	elif cmd == 'run':
+		# never two: the second saw the first one's mark as a sleep that
+		# never came back, and switched sleeping off
+		run_lock = take_run_lock()
+		if run_lock is None:
+			sys.exit(f'zrn-sleepd is already running (pid {lock_holder()}); not starting another')
 		main()
+	else:
+		# no argument, or one it does not know: never the daemon by accident
+		print(USAGE, file=sys.stderr)
+		sys.exit(2)
