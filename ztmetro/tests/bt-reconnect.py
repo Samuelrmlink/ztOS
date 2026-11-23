@@ -98,6 +98,7 @@ class FakeIO:
         self.answer = {}           # path -> list of errors to answer Connect() with (None: connected)
         self.props_asked = []
         self.props = {}
+        self.pauses = []           # times the players were paused
 
     def clock(self):
         return self.t
@@ -116,6 +117,9 @@ class FakeIO:
         err = answers.pop(0) if len(answers) > 1 else answers[0]
         # BlueZ answers a page that finds nothing after about 5 s
         self.after(5, lambda: done(err))
+
+    def pause(self):
+        self.pauses.append(self.t)
 
     def device_props(self, p, cb):
         self.props_asked.append(p)
@@ -366,6 +370,72 @@ n = len(calls(io))
 drop(io, d, PODS)
 io.run(600)
 assert len(calls(io)) == n, io.connects
+
+# ---- ROADMAP 8.64: paused as it drops, never played again by anything here
+# 14. playing through the AirPods, put away mid-song: the players pause at once
+#     (before BlueZ's reason, before the sound reaches the speaker), once
+for reason in ("org.bluez.Reason.Remote", "org.bluez.Reason.Timeout", "org.bluez.Reason.Local", None):
+    for first in (True, False):
+        io, d = world()
+        d.audio_text(audiod_state(graph(bt=[PODS], app_to=PODS)))
+        drop(io, d, PODS, reason=reason, signal_first=first)
+        assert io.pauses and io.pauses[0] <= 1000.3, (reason, io.pauses)
+        d.audio_text(audiod_state(graph(bt=[], app_to="speaker")))
+        io.run(600)
+        assert len(io.pauses) == 1, (reason, io.pauses)
+
+# 14b. through ztos-eq too; and the output gone a moment before the link
+io, d = world()
+d.audio_text(audiod_state(graph(bt=[PODS], app_to=PODS, eq=True)))
+d.audio_text(audiod_state(graph(bt=[], app_to="speaker", eq=True)))
+io.run(0.5)
+drop(io, d, PODS)
+assert len(io.pauses) == 1, io.pauses
+
+# 15. nothing to pause: paused already, playing on the speaker, on another
+#     headset, or a device that isn't audio
+for g, mac in ((graph(bt=[PODS], app_to=PODS, app_state="paused"), PODS),
+               (graph(bt=[PODS], app_to="speaker"), PODS),
+               (graph(bt=[PODS, BOOM], app_to=BOOM), PODS),
+               (graph(bt=[PODS], app_to=PODS), CHAM)):
+    io, d = world()
+    d.audio_text(audiod_state(g))
+    drop(io, d, mac)
+    io.run(600)
+    assert io.pauses == [], (mac, io.pauses)
+
+# 16. back, called back or by itself: nothing plays. The only things this daemon
+#     does are Connect() and pause() (FakeIO has nothing else, so a play would
+#     fail here), and its pause commands can't start a player.
+for called_back in (True, False):
+    io, d = world()
+    d.audio_text(audiod_state(graph(bt=[PODS], app_to=PODS)))
+    drop(io, d, PODS, reason="org.bluez.Reason.Remote" if called_back else "org.bluez.Reason.Local")
+    d.audio_text(audiod_state(graph(bt=[], app_to="speaker")))
+    io.run(4 if called_back else 60)
+    assert bool(calls(io, PODS)) == called_back, io.connects
+    back(d, PODS)
+    d.audio_text(audiod_state(graph(bt=[PODS], app_to=PODS, app_state="paused")))
+    io.run(600)
+    assert len(io.pauses) == 1, io.pauses
+    # dropped again, now paused: no second pause, no call back
+    n = len(calls(io))
+    drop(io, d, PODS)
+    io.run(600)
+    assert len(io.pauses) == 1 and len(calls(io)) == n, (io.pauses, io.connects)
+for cmd in r.PAUSE_COMMANDS:
+    assert "pause" == cmd[-1] and not any(w in ("play", "play-pause", "toggle") for w in cmd), cmd
+src = open(os.path.join(ROOT, "rootfs/overlay/usr/local/bin/ztos-bt-reconnect")).read()
+assert "play-pause" not in src and '"play"' not in src
+
+# 17. Android's side: recover.sh's media action takes only "pause", and the sudoers
+#     rule (both copies) allows only that
+rec = open(os.path.join(ROOT, "android/waydroid/recover.sh")).read()
+assert '[[ $# == 2 && $2 == pause ]] || exit 2' in rec and "cmd media_session dispatch" in rec
+for rel in ("packages/ztos-waydroid/sudoers.template", "android/waydroid/install.sh"):
+    rule = open(os.path.join(ROOT, rel)).read()
+    assert "ztos-waydroid-recover media pause," in rule, rel
+    assert "ztos-waydroid-recover media *" not in rule and "ztos-waydroid-recover media play" not in rule, rel
 
 # 13. a state file that can't be read changes nothing
 assert r.bt_outputs("{") is None and r.bt_outputs('{"outputs": 3}') is None

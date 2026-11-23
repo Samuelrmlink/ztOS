@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""ztos-bt-reconnect: reconnects a Bluetooth audio device that dropped while it played.
+"""ztos-bt-reconnect: a Bluetooth audio device that drops while it plays: the players
+pause, and the device is called back.
 
 ztOS doesn't reconnect Bluetooth devices by itself: not at boot, not when
 bluetoothd or WirePlumber starts, not after a disconnect or a suspend
@@ -31,6 +32,15 @@ Once it is back, ztos-audiod moves the sound to it (it takes the audio as any
 Bluetooth output that connects does). Nothing is kept on disk: after a reboot
 nothing is called back.
 
+Paused, not moved (ROADMAP 8.64): Android's "audio becoming noisy". Whenever a
+device drops while it was playing (whatever the reason, the phone's own
+disconnect too), the players are paused at once, before the sound can fall
+through to the speaker: every MPRIS player (playerctl), and Android's media
+session in Waydroid (ztos-waydroid-recover media pause: Spotify and the rest).
+Nothing here ever plays: a device that comes back, called back or by itself,
+finds the players paused. They play again only when someone asks: the play
+button, or the device's own play (AVRCP, an AirPods' tap or ear detection).
+
 It never pairs, trusts, scans or powers anything: its only call is
 Device1.Connect() on that one device, at most one at a time per device, at the
 times in INTERVALS_S.
@@ -40,11 +50,22 @@ import json
 import os
 import re
 import struct
+import subprocess
 import sys
 import time
 
 RUN = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
 AUDIO_STATE = os.path.join(RUN, "ztos-audio-state.json")
+
+# what pauses the players when the device carrying their sound drops: each runs at
+# once, side by side. Pause only, never a toggle: nothing here can start a player.
+PAUSE_COMMANDS = (
+    ("playerctl", "--all-players", "pause"),
+    # Android's media button session (Spotify...); nothing if Android is frozen or down
+    ("sudo", "-n", "/usr/local/libexec/ztos-waydroid-recover", "media", "pause"),
+)
+# tests only: a program run as PROGRAM COMMAND... instead of each command
+PAUSE_WRAPPER = os.environ.get("ZTOS_BT_RECONNECT_TEST_PAUSE")
 
 BUS_NAME = "org.bluez"
 DEVICE_IFACE = "org.bluez.Device1"
@@ -288,7 +309,7 @@ def inotify_names(fd):
 class Daemon:
     """BlueZ's signals and ztos-audiod's file into Policy; Policy's calls out.
     io: connect(path, done(error)), device_props(path, cb(props or None)),
-    after(seconds, fn) -> handle, cancel(handle), read_audio() -> text or None."""
+    after(seconds, fn) -> handle, cancel(handle), pause() (the players)."""
 
     def __init__(self, io, clock=now_s):
         self.io = io
@@ -341,6 +362,10 @@ class Daemon:
                     # speaker before the reason comes
                     at = self.clock()
                     was = self.policy.was_playing(mac, at)
+                    if was:
+                        # now, not after the reason: the sound is on its way to the speaker
+                        log(mac, "dropped while playing: pausing the players")
+                        self.io.pause()
                     self.waiting[mac] = self.io.after(REASON_WAIT_S, lambda: self._judge(mac, at, was))
         self._arm()
 
@@ -456,6 +481,24 @@ def main():
                     done(name)
                     return False
                 GLib.idle_add(later)
+
+        def pause(self):
+            for cmd in PAUSE_COMMANDS:
+                argv = ([PAUSE_WRAPPER] if PAUSE_WRAPPER else []) + list(cmd)
+                try:
+                    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL, close_fds=True)
+                except OSError as e:
+                    log("can't pause (%s): %s" % (cmd[0], e))
+                    continue
+
+                def reaped(pid, status, cmd=cmd, p=p):
+                    p.returncode = 0        # GLib has reaped it: subprocess mustn't wait again
+                    code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else status
+                    # playerctl says 1 when no player is there to pause: that's fine
+                    if code != 0 and not (cmd[0] == "playerctl" and code == 1):
+                        log("pause: %s exited %d" % (" ".join(cmd[-2:]), code))
+                GLib.child_watch_add(GLib.PRIORITY_DEFAULT, p.pid, reaped)
 
         def device_props(self, path, cb):
             try:
