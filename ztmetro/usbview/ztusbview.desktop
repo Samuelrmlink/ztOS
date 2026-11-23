@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=USBView
+Comment=The USB devices on the phone as a tree, and the USB-C port's role
+Exec=ztusbview
+Terminal=false
+Type=Application
+Icon=ztusbview
+Categories=System;
