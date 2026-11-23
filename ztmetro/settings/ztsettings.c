@@ -22,6 +22,7 @@
 #include <strings.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -46,6 +47,7 @@
 
 #include "zrnmetrocore.h"
 #include "zrnboard.h"
+#include "zt-anim.h"	/* the animation speeds, as the shell and every app read them (8.66) */
 #include "zt-clock.h"
 #include "../clock-theme-ids.h"
 #include "../background-apps.h"
@@ -149,7 +151,10 @@ enum action {
 	ACT_TICKLE_SAVER,
 	ACT_DEV_DEMO_TILES,
 	ACT_DEV_SLOW,
-	ACT_DEV_MENU_SPEED,
+	ACT_ANIM_GLOBAL,	/* the master speed: a picker of ZT_ANIM_STEPS */
+	ACT_ANIM_KIND,		/* then one picker for each kind (zt-anim.h) */
+	ACT_ANIM_KIND_LAST = ACT_ANIM_KIND + ZT_ANIM_N - 1,
+	ACT_ANIM_RESET,
 	ACT_DEV_TOUCHES,
 	ACT_DEV_LOCK,
 	ACT_AOD,		/* the always-on display: on or off */
@@ -288,7 +293,8 @@ static struct {
 	char tickle_now[96];	/* what zrnperfd says it is doing */
 	bool sleepd_on;		/* the SoC-sleep helper (zrn-sleepd) is switched on */
 	char sleep_status[160];	/* the live line from `zrn-sleepd status` */
-	bool dev_demo_tiles, dev_slow, dev_touches, dev_lock;
+	bool dev_demo_tiles, dev_touches, dev_lock;
+	struct zt_anim_cfg anim;	/* every kind's speed, the master and slow motion */
 	bool aod, aod_charging;	/* the always-on display ("aod": off, on, charging) */
 	bool clock_24h;		/* "clock_24h": on, or off for 12-hour time (core/zt-clock.h) */
 	bool aod_auto;		/* "aod_auto_brightness": the AOD's level from the room */
@@ -302,7 +308,6 @@ static struct {
 	int lock_awake;		/* "lock_awake": 0 off, 1 on, 2 always (config only) */
 	bool burnin_shift;	/* "burn_in_shift": the shell's burn-in.h */
 	bool about_show_repo;
-	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
 	int haptic_strength;	/* percent */
 	bool force_press;	/* a hard press at the bottom centre is Start */
 	int force_ms;		/* how long it vibrates; 0 not at all */
@@ -351,7 +356,6 @@ static struct {
 	.perf_profile = 1,
 	.perf_deepsleep = true,
 	.wifi_powersave = true,
-	.menu_speed_idx = 1,
 	.tickle = { 2, 1, 3 },
 	.dev_lock = true,
 };
@@ -394,9 +398,6 @@ static const char *timeout_text(char *out, size_t size, int seconds) {
 	return out;
 }
 
-/* The whole UI's animation speed, percent of what was measured on the Lumia */
-static const int menu_speeds[] = { 50, 75, 100, 125, 150, 200 };
-#define N_MENU_SPEEDS 6
 
 static void perf_load(void);
 static void auto_load(void);
@@ -434,6 +435,7 @@ static void config_load(void) {
 	app.burnin_shift = true;
 	app.android_bt_remove_bond = true;
 	look_defaults(&app.look);
+	zt_anim_defaults(&app.anim);
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
@@ -515,13 +517,8 @@ static void config_load(void) {
 			app.brightness = atoi(val);
 		} else if (strcmp(key, "demo_tiles") == 0) {
 			app.dev_demo_tiles = strcmp(val, "on") == 0;
-		} else if (strcmp(key, "slow_motion") == 0) {
-			app.dev_slow = strcmp(val, "on") == 0;
-		} else if (strcmp(key, "menu_speed") == 0) {
-			app.menu_speed_idx = 1;
-			for (int i = 0; i < N_MENU_SPEEDS; i++) {
-				if (menu_speeds[i] == atoi(val)) app.menu_speed_idx = i;
-			}
+		} else if (zt_anim_config_line(&app.anim, key, val)) {
+			/* anim_global, anim_<kind>, slow_motion; an old menu_speed is the master */
 		} else if (strcmp(key, "show_touches") == 0) {
 			app.dev_touches = strcmp(val, "on") == 0;
 		} else if (strcmp(key, "lock") == 0) {
@@ -746,7 +743,7 @@ static void auto_load(void) {
 /* Every key Settings can write, as it would write it now. */
 /* room, not a count (config_n is the count): an exact number fell behind twice
  * as settings were added, and config_save dropped the last keys (the LEDs) */
-enum { N_CONFIG_KEYS = 64 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS + N_LOOK };
+enum { N_CONFIG_KEYS = 64 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS + 2 + ZT_ANIM_N + N_LOOK };
 static struct config_key config_keys[N_CONFIG_KEYS];
 static int config_n;	/* how many config_format filled in: N_CONFIG_KEYS is only the room */
 
@@ -755,6 +752,23 @@ static struct config_key *config_key_named(const char *name) {
 		if (strcmp(config_keys[i].key, name) == 0) return &config_keys[i];
 	}
 	return NULL;
+}
+
+/* A speed as the config says it: "off", or per cent. */
+static const char *anim_value(int percent) {
+	static char buf[4][12];
+	static int at;
+	if (percent <= 0) return "off";
+	char *b = buf[at++ % 4];
+	snprintf(b, sizeof(buf[0]), "%d", percent);
+	return b;
+}
+
+/* anim_<kind>: the key's name, kept (config_keys holds the pointer). */
+static const char *anim_key(int kind) {
+	static char names[ZT_ANIM_N][40];
+	if (!names[kind][0]) snprintf(names[kind], sizeof(names[kind]), "anim_%s", ZT_ANIM_INFO[kind].key);
+	return names[kind];
 }
 
 static void config_format(void) {
@@ -775,10 +789,15 @@ static void config_format(void) {
 	KEY("brightness", "%d", app.brightness);
 	KEY("timeout", "%d", TIMEOUT_SECONDS[app.timeout_idx]);
 	KEY("demo_tiles", "%s", app.dev_demo_tiles ? "on" : "off");
-	KEY("slow_motion", "%s", app.dev_slow ? "on" : "off");
+	KEY("slow_motion", "%s", app.anim.slow ? "on" : "off");
 	KEY("show_touches", "%s", app.dev_touches ? "on" : "off");
 	KEY("lock", "%s", app.dev_lock ? "on" : "off");
-	KEY("menu_speed", "%d", menu_speeds[app.menu_speed_idx]);
+	/* the speeds (zt-anim.h): per cent or off. menu_speed is the master
+	 * again for an older shell or SDK app, which knew only that (off: as
+	 * fast as it went) */
+	KEY("anim_global", "%s", anim_value(app.anim.global));
+	KEY("menu_speed", "%d", app.anim.global <= 0 ? 300 : app.anim.global);
+	for (int k = 0; k < ZT_ANIM_N; k++) KEY(anim_key(k), "%s", anim_value(app.anim.kind[k]));
 	KEY("haptic_strength", "%d", app.haptic_strength);
 	KEY("force_press", "%s", app.force_press ? "on" : "off");
 	KEY("force_press_vibration", "%d", app.force_ms);
@@ -885,6 +904,32 @@ static void config_save(void) {
  * the shell reload everything (tiles, textures) before it drew another frame,
  * and a tapped slider's thumb waited behind that while the screen had already
  * changed. Any other key changed with it still gets the SIGHUP. */
+/* An animation speed changed: the file is written, and the shell reads the
+ * speeds alone again ("anim-reload" on its control pipe) instead of a SIGHUP
+ * and the whole reload for each step. Apps read them at their next turn or
+ * touch; this one has them already. Any other key changed with them still
+ * gets the SIGHUP. */
+static bool anim_key_name(const char *k) {
+	return !strncmp(k, "anim_", 5) || !strcmp(k, "menu_speed") || !strcmp(k, "slow_motion");
+}
+
+static void config_save_anim(void) {
+	config_format();
+	bool only = config_keys_changed(config_keys, config_n) > 0;
+	for (int i = 0; i < config_n; i++) {
+		if (config_keys[i].key && config_key_changed(&config_keys[i]) && !anim_key_name(config_keys[i].key)) {
+			only = false;
+		}
+	}
+	config_no_hup = only;
+	config_save();
+	config_no_hup = false;
+	if (only) {
+		char ctl[256];
+		pipe_tell(runtime_file(ctl, sizeof(ctl), "ztmetro.ctl"), "anim-reload\n");
+	}
+}
+
 static void config_save_brightness(void) {
 	config_format();
 	config_no_hup = config_only_changed(config_keys, config_n, "brightness");
@@ -1008,6 +1053,7 @@ static void wifi_ready(int fd, void *data) {
 	wifi_pipe = NULL;
 	wifi_buf[wifi_len] = 0;
 	wifi_parse(wifi_buf);
+	zmc_trace("wifi data");
 	app.wifi_loading = false;
 	app.wifi_status[0] = 0;
 	if (wifi_joining[0]) {
@@ -2183,8 +2229,6 @@ static double draw_theme(cairo_t *cr) {
 	zmc_text(cr, "bars show what is under them, blurred", FONT_REGULAR, 13.5, MARGIN, y, 0);
 	y += 22;
 	y = zmc_switch(cr, y, "Frosted diffusion", app.frost, ACT_FROST);
-	snprintf(detail, sizeof(detail), "%d %%%s", menu_speeds[app.menu_speed_idx], app.dev_slow ? ", slow motion" : "");
-	y = zmc_entry(cr, y, "animation speeds", detail, ACT_OPEN_PAGE, PAGE_ANIMATION);
 	y += 4;
 	y = zmc_entry(cr, y, "home screen", home_summary(detail, sizeof(detail)), ACT_OPEN_PAGE, PAGE_TILES);
 	y = zmc_entry(cr, y, "app switcher + search", overlays_summary(detail, sizeof(detail)),
@@ -2403,6 +2447,25 @@ static void display_tick(void) {
 	}
 }
 
+/* The animations line on the display page: "Off", "0.75x", "0.75x, 2 off". */
+static void anim_summary(char *out, size_t size) {
+	if (app.anim.global <= 0) {
+		snprintf(out, size, "Off%s", app.anim.slow ? ", slow motion" : "");
+		return;
+	}
+	int off = 0, changed = 0;
+	for (int k = 0; k < ZT_ANIM_N; k++) {
+		off += app.anim.kind[k] <= 0;
+		changed += app.anim.kind[k] > 0 && app.anim.kind[k] != ZT_ANIM_KIND_DEFAULT;
+	}
+	char name[24];
+	snprintf(name, sizeof(name), "%s", zt_anim_step_name(app.anim.global));
+	char *paren = strchr(name, ' ');
+	if (paren) *paren = 0;	/* "0.25x (slowest)": the speed alone */
+	snprintf(out, size, "%s%s%.0d%s%s%.0d%s%s", name, off ? ", " : "", off, off ? " off" : "",
+		changed ? ", " : "", changed, changed ? " changed" : "", app.anim.slow ? ", slow motion" : "");
+}
+
 static double draw_display(cairo_t *cr) {
 	auto_load();
 	double y = zmc_header(cr, "display");
@@ -2437,6 +2500,11 @@ static double draw_display(cairo_t *cr) {
 		snprintf(detail, sizeof(detail), "%s, %s", !app.aod ? "Off" : app.aod_charging ?
 			"Only while charging" : "Always", clock_theme_name(app.aod_theme));
 		y = zmc_entry(cr, y, "always-on display", detail, ACT_OPEN_PAGE, PAGE_AOD);
+	}
+	{
+		char detail[96];
+		anim_summary(detail, sizeof(detail));
+		y = zmc_entry(cr, y, "animations", detail, ACT_OPEN_PAGE, PAGE_ANIMATION);
 	}
 	/* XFCE on a monitor, beside the phone (ztmetro/desktop) */
 	y = zmc_entry(cr, y, "desktop mode", desktop_page_summary(), ACT_OPEN_PAGE, PAGE_DESKTOP);
@@ -2586,6 +2654,7 @@ static void bt_ready(int fd, void *data) {
 	bt_pipe = NULL;
 	bt_buf[bt_len] = 0;
 	bt_parse(bt_buf);
+	zmc_trace("bluetooth data");
 	bt.loading = false;
 	zmc_busy(false);
 	if (bt_busy_mac[0] && bt_busy_running) {
@@ -2810,7 +2879,9 @@ static void bt_tick(void);
 
 static void bt_anim_tick(void) {
 	uint32_t now = zmc_now_ms();
-	double k = 1.0 - exp(-(double)(now - bt_anim_last) / BT_SLIDE_TAU_MS);
+	/* (at Settings' pages' speed; off: there at once) */
+	double tau = zmc_anim_ms(ZT_ANIM_SETTINGS_PAGES, (int)BT_SLIDE_TAU_MS);
+	double k = tau > 0 ? 1.0 - exp(-(double)(now - bt_anim_last) / tau) : 1.0;
 	bt_anim_last = now;
 	bool moving = false;
 	for (int i = 0; i < bt.n; i++) {
@@ -3912,14 +3983,38 @@ static double draw_perf(cairo_t *cr) {
 	return y + 20;
 }
 
-/* The shell's motion (Start, the lock screen, the action centre) and each app's
- * opening. Pages turning inside an app keep their own time. */
+/* Every animation of the shell and the Metro apps, by kind (core/zt-anim.h,
+ * ANIMATIONS.md): a speed from 0.25x to 3x, or Off, and a master over them.
+ * A change is in the shell at once (config_save_anim) and in each app at its
+ * next turn or touch. */
+static double anim_grey_line(cairo_t *cr, double y, const char *text) {
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	y += zmc_text(cr, text, FONT_REGULAR, 12.5, MARGIN, y - 6, zmc.width - 2 * MARGIN) + 10;
+	zmc_fg(cr);
+	return y;
+}
+
 static double draw_animation(cairo_t *cr) {
-	double y = zmc_header(cr, "animation speeds");
-	static const char *const speeds[] = { "50 % (slow)", "75 %", "100 % (as on a Lumia)", "125 %",
-		"150 %", "200 % (fast)" };
-	y = picker(cr, y, "Animation speed", speeds, N_MENU_SPEEDS, app.menu_speed_idx, ACT_DEV_MENU_SPEED);
-	y = zmc_switch(cr, y, "Slow motion (5x)", app.dev_slow, ACT_DEV_SLOW);
+	double y = zmc_header(cr, "animations");
+	y = picker(cr, y, "All animations", ZT_ANIM_STEP_NAMES, ZT_ANIM_N_STEPS,
+		zt_anim_step_index(app.anim.global), ACT_ANIM_GLOBAL);
+	y = anim_grey_line(cr, y, app.anim.global <= 0 ?
+		"Off: everything is there at once, with no motion at all." :
+		"Each kind below runs at its own speed times this one. 0.75x is ztOS's usual pace.");
+	for (int g = 0; g < ZT_ANIM_G_N; g++) {
+		zmc_fg(cr);
+		zmc_text(cr, ZT_ANIM_GROUPS[g], FONT_SEMILIGHT, 24, MARGIN, y + 6, 0);
+		y += 46;
+		for (int k = 0; k < ZT_ANIM_N; k++) {
+			if (ZT_ANIM_INFO[k].group != g) continue;
+			y = picker(cr, y, ZT_ANIM_INFO[k].name, ZT_ANIM_STEP_NAMES, ZT_ANIM_N_STEPS,
+				zt_anim_step_index(app.anim.kind[k]), ACT_ANIM_KIND + k);
+			y = anim_grey_line(cr, y, ZT_ANIM_INFO[k].detail);
+		}
+	}
+	y += 6;
+	y = zmc_entry(cr, y, "reset to defaults", "Every kind at 1x, all animations at 0.75x", ACT_ANIM_RESET, 0);
+	y = zmc_switch(cr, y, "Slow motion (5x, for checking motion)", app.anim.slow, ACT_DEV_SLOW);
 	return y + 20;
 }
 
@@ -4229,11 +4324,12 @@ static bool is_picker(int action) {
 	case ACT_PERF_PROFILE: case ACT_IB_MODE: case ACT_IB_ENGINE:
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
-	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
+	case ACT_ANIM_GLOBAL: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
 	case ACT_AOD_MODE: case ACT_LOCK_TIMEOUT: case ACT_AOD_IMAGE_STRENGTH:
 		return true;
 	}
 	return (action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST) ||
+		(action >= ACT_ANIM_KIND && action <= ACT_ANIM_KIND_LAST) ||
 		(action >= ACT_APP_SCALE_SLOT && action <= ACT_APP_SCALE_LAST);
 }
 
@@ -4288,6 +4384,13 @@ static void activate(int action, int arg) {
 		if (i < app_scale_count && arg >= 0 && arg < APP_SCALE_N) {
 			app_scale[i].choice = arg;
 			app_scale_save();
+		}
+		return;
+	}
+	if (action >= ACT_ANIM_KIND && action <= ACT_ANIM_KIND_LAST) {
+		if (arg >= 0 && arg < ZT_ANIM_N_STEPS) {
+			app.anim.kind[action - ACT_ANIM_KIND] = ZT_ANIM_STEPS[arg];
+			config_save_anim();
 		}
 		return;
 	}
@@ -4727,13 +4830,23 @@ static void activate(int action, int arg) {
 		app.dev_demo_tiles = !app.dev_demo_tiles;
 		config_save();
 		break;
-	case ACT_DEV_MENU_SPEED:
-		app.menu_speed_idx = arg;
-		config_save();
+	case ACT_ANIM_GLOBAL:
+		if (arg >= 0 && arg < ZT_ANIM_N_STEPS) {
+			app.anim.global = ZT_ANIM_STEPS[arg];
+			app.anim.global_set = true;
+			config_save_anim();
+		}
 		break;
+	case ACT_ANIM_RESET: {
+		bool slow = app.anim.slow;
+		zt_anim_defaults(&app.anim);
+		app.anim.slow = slow;	/* (a developer's switch: not a speed) */
+		config_save_anim();
+		break;
+	}
 	case ACT_DEV_SLOW:
-		app.dev_slow = !app.dev_slow;
-		config_save();
+		app.anim.slow = !app.anim.slow;
+		config_save_anim();
 		break;
 	case ACT_DEV_TOUCHES:
 		app.dev_touches = !app.dev_touches;
@@ -5203,6 +5316,11 @@ static void sleep_tick(void) {
 	zmc_redraw();	/* the sleep status line is live while the page is open */
 }
 
+/* Opened straight to this page from the shell (ztsettings --deep-link PAGE, a
+ * quick tile held): Back here leaves Settings instead of going up its tree.
+ * -1 for the ordinary way in. */
+static int deep_page = -1;
+
 static bool back(void) {
 	if (open_picker) {	/* back closes an open picker first, as on the phone */
 		open_picker = 0;
@@ -5236,6 +5354,9 @@ static bool back(void) {
 		zmc_redraw();
 		return true;
 	}
+	if (zmc.page == deep_page) {
+		return false;	/* opened straight here from the shell (a quick tile): back leaves, the way it came */
+	}
 	if (zmc.page == PAGE_WIFI_JOIN) {
 		wifi_typing = false;
 		wifi_password[0] = 0;
@@ -5256,7 +5377,7 @@ static void pods_open_bluetooth(void) {
 	zmc_go(PAGE_BLUETOOTH, -1);
 }
 
-/* The page someone asked for from outside (see instance_tell), once nothing is turning. */
+/* The page someone asked for from outside (see instance_claim), once nothing is turning. */
 static int outside_page = -1;
 
 static void go_to_outside_page(void) {
@@ -5270,10 +5391,17 @@ static void go_to_outside_page(void) {
 	bt_animating = false;
 	zmc_keyboard(false);
 	page_prepare(page);
+	/* asked for from outside (a quick tile held, search, another app): the
+	 * Settings link's speed, not the pages' (Settings > animations) */
+	zmc_next_anim = ZT_ANIM_SETTINGS_LINK;
 	zmc_go(page, 1);
+	zmc_next_anim = -1;	/* (zmc_go may not have turned: the page was in front) */
 }
 
+static bool wifi_early, bt_early;	/* early_load's, below */
+
 static void arrived(int page) {
+	zmc_trace("arrived");
 	if (getenv("ZTSETTINGS_TRACE_PAGES")) {
 		/* a script walking the tree can see where it is without looking */
 		for (int i = 0; i < N_PAGE_NAMES; i++) {
@@ -5315,9 +5443,12 @@ static void arrived(int page) {
 		bt.status[0] = 0;
 		bt_menu = -1;
 		bt_discoverable = true;
-		bt.n = 0;	/* a fresh list: only an open page holds its rows */
-		/* the real state first: the switch must not read Off through a scan */
-		bt_refresh(NULL);
+		if (!bt_early) {
+			bt.n = 0;	/* a fresh list: only an open page holds its rows */
+			/* the real state first: the switch must not read Off through a scan */
+			bt_refresh(NULL);
+		}
+		bt_early = false;	/* (asked before the first frame: early_load) */
 		bt_request("bluetoothctl pairable on >/dev/null 2>&1; bluetoothctl discoverable on >/dev/null 2>&1; "
 			"bluetoothctl --timeout 8 scan on >/dev/null 2>&1");
 		zmc_every(15000, bt_tick);
@@ -5326,7 +5457,8 @@ static void arrived(int page) {
 		bt_refresh(NULL);
 	}
 	if (page == PAGE_WIFI) {
-		wifi_refresh(NULL);
+		if (!wifi_early) wifi_refresh(NULL);
+		wifi_early = false;	/* (asked before the first frame: early_load) */
 	} else if (page == PAGE_PERF) {
 		perf_load();
 		zmc_every(2000, perf_tick);	/* "Tickle now", while this page is open */
@@ -5379,52 +5511,112 @@ static int page_named(const char *name) {
 /* Settings is one window. `ztsettings wifi` with Settings open, from the shell, from
  * the AirPods app or from a script, turns the open one to that page and brings it
  * to the front: a second one would be a second entry in the task switcher, with a
- * tree of its own. */
+ * tree of its own.
+ *
+ * Which one runs is a lock, taken first thing and held for the life of the
+ * process: a Settings still starting (no window yet, the socket maybe not yet
+ * bound) holds it too, so two launches a moment apart (a quick tile held twice
+ * before the window is up, 8.65) make one window. The one that does not get
+ * the lock hands its request over the socket and leaves.
+ *
+ * The request is a datagram: "" (to the front), "PAGE", or "deep:PAGE" for a
+ * page opened straight from the shell (a quick tile), where Back leaves
+ * Settings instead of going up its tree. */
 static void instance_path(char *out, size_t size) {
 	runtime_file(out, size, "ztsettings.sock");
 }
 
+static int instance_fd = -1;	/* bound once we hold the lock; watched once running */
+
+static void early_load(int page);
+
+/* A request from another launch, or one queued while this one was starting. */
 static void instance_ready(int fd, void *data) {
-	char name[64];
-	ssize_t n = recv(fd, name, sizeof(name) - 1, MSG_DONTWAIT);
-	if (n <= 0) return;
-	name[n] = 0;
-	int page = page_named(name);
-	if (page < 0) return;
-	outside_page = page;
-	if (!zmc.anim_active) go_to_outside_page();	/* else when the page in turn has arrived */
-}
-
-/* Is one running? Then it has been told: its page, and to the front. */
-static bool instance_tell(const char *name) {
-	char path[256], ctl[256];
-	struct sockaddr_un a = { .sun_family = AF_UNIX };
-	instance_path(path, sizeof(path));
-	snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
-	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-	if (fd < 0) return false;
-	bool there = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0;
-	if (there) {
-		if (send(fd, name, strlen(name), MSG_DONTWAIT) < 0) {}
-		pipe_tell(runtime_file(ctl, sizeof(ctl), "ztmetro.ctl"), "launch ztsettings\n");
+	char text[80];
+	ssize_t n = recv(fd, text, sizeof(text) - 1, MSG_DONTWAIT);
+	if (n < 0) return;
+	text[n] = 0;
+	bool deep = strncmp(text, "deep:", 5) == 0;
+	const char *name = deep ? text + 5 : text;
+	int page = name[0] ? page_named(name) : -1;
+	if (name[0] && page < 0) return;
+	/* a plain launch (the Settings tile) is the ordinary way in: Back goes up again */
+	deep_page = deep ? page : -1;
+	if (!zmc.configured) {
+		/* still starting, no window yet: it simply opens on that page */
+		if (page >= 0 && page != zmc.page) {
+			page_prepare(page);
+			zmc.page = page;
+			wifi_early = bt_early = false;	/* (the page it was to open on is not arriving) */
+			early_load(page);
+		}
+		return;	/* (the shell shows it when it maps: it is the launch it waits for) */
 	}
-	close(fd);
-	return there;
+	if (page >= 0) {
+		outside_page = page;
+		if (!zmc.anim_active) go_to_outside_page();	/* else when the page in turn has arrived */
+	}
+	/* to the front. Only once there is a window: with none yet, the shell
+	 * would start another Settings for it (and that one would ask again) */
+	char ctl[256];
+	pipe_tell(runtime_file(ctl, sizeof(ctl), "ztmetro.ctl"), "launch ztsettings\n");
 }
 
-static void instance_listen(void) {
+/* Hand `message` to the Settings that holds the lock. It may be starting and
+ * not yet listening: tried again for a moment. */
+static bool instance_send(const char *message) {
 	char path[256];
 	struct sockaddr_un a = { .sun_family = AF_UNIX };
 	instance_path(path, sizeof(path));
 	snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
-	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-	if (fd < 0) return;
-	unlink(path);	/* (no one answered it: it was left behind) */
-	if (bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+	for (int tries = 0; tries < 60; tries++) {
+		int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+		if (fd < 0) return false;
+		bool sent = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0 &&
+			send(fd, message, strlen(message), MSG_DONTWAIT) >= 0;
 		close(fd);
-		return;
+		if (sent) return true;
+		usleep(50 * 1000);	/* (at most 3 s: it binds within milliseconds of starting) */
 	}
-	zmc_watch_fd(fd, instance_ready, NULL);
+	return false;
+}
+
+/* This launch is Settings: true. Or one is already running or starting: it
+ * has been told `message`, and this one leaves (false). */
+static bool instance_claim(const char *message) {
+	char path[256];
+	int lock = open(runtime_file(path, sizeof(path), "ztsettings.lock"), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	if (lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) != 0) {
+		close(lock);
+		if (!instance_send(message)) fprintf(stderr, "ztsettings: the running Settings did not answer\n");
+		return false;
+	}
+	/* (no lock file at all: run, as before there was one.) Kept open, and so
+	 * held, until we exit; never passed to what we start (O_CLOEXEC) */
+	struct sockaddr_un a = { .sun_family = AF_UNIX };
+	instance_path(path, sizeof(path));
+	snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
+	instance_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (instance_fd < 0) return true;
+	if (connect(instance_fd, (struct sockaddr *)&a, sizeof(a)) == 0) {
+		/* someone listens without the lock: a Settings from before it (open
+		 * across an update). Told the page as it understands it, as before */
+		const char *page = strncmp(message, "deep:", 5) == 0 ? message + 5 : message;
+		if (send(instance_fd, page, strlen(page), MSG_DONTWAIT) < 0) {}
+		pipe_tell(runtime_file(path, sizeof(path), "ztmetro.ctl"), "launch ztsettings\n");
+		return false;
+	}
+	unlink(path);	/* (left by one that is gone: we hold the lock) */
+	if (bind(instance_fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+		close(instance_fd);
+		instance_fd = -1;
+	}
+	return true;
+}
+
+/* Requests that came while starting are read once the main loop runs. */
+static void instance_listen(void) {
+	if (instance_fd >= 0) zmc_watch_fd(instance_fd, instance_ready, NULL);
 }
 
 /* --render PAGE FILE: draw one page into a PNG and leave, touching no display.
@@ -5455,23 +5647,51 @@ static int render_to_file(const char *name, const char *path) {
 	return zmc_render_png(&settings, page, height > 0 ? height : 664, path);
 }
 
+/* What the first page shows from outside starts before there is a window:
+ * NetworkManager and BlueZ answer while the GPU and the page are got ready,
+ * not after the first frame (and never before it: 8.65, nmcli held a deep
+ * link to Wi-Fi 0.25-1.2 s before Settings even connected to the shell).
+ * arrived() then finds the answer on its way, or already in. */
+static void early_load(int page) {
+	if (page == PAGE_WIFI) {
+		wifi_refresh(NULL);
+		wifi_early = true;
+	} else if (page == PAGE_BLUETOOTH) {
+		bt_refresh(NULL);	/* (only reads: the scan waits for the page, arrived()) */
+		bt_early = true;
+	}
+}
+
 int main(int argc, char **argv) {
 	if (argc == 2 && strcmp(argv[1], "--list-pages") == 0) {
 		for (int i = 0; i < N_PAGE_NAMES; i++) puts(PAGE_NAMES[i].name);
 		return 0;
 	}
+	zmc_trace("main");
 	signal(SIGCHLD, SIG_DFL);
 	bool to_file = argc == 4 && strcmp(argv[1], "--render") == 0;
-	if (!to_file && argc <= 2 && (argc < 2 || page_named(argv[1]) >= 0) && instance_tell(argc == 2 ? argv[1] : "")) {
-		return 0;
+	/* --deep-link PAGE: opened straight to PAGE from the shell (a quick tile
+	 * held): Back on it leaves Settings, as it came */
+	bool deep = !to_file && argc == 3 && strcmp(argv[1], "--deep-link") == 0;
+	const char *asked = deep ? argv[2] : !to_file && argc == 2 ? argv[1] : NULL;
+	if (!to_file && (argc > 3 || (argc == 3 && !deep) || (asked && page_named(asked) < 0))) {
+		fprintf(stderr, "usage: ztsettings [[--deep-link] PAGE] [--render PAGE FILE] [--list-pages]\n");
+		return 2;
 	}
+	if (!to_file) {
+		char message[80];
+		snprintf(message, sizeof(message), "%s%s", deep ? "deep:" : "", asked ? asked : "");
+		if (!instance_claim(message)) return 0;	/* told the one already there */
+	}
+	zmc_trace("instance");
 	pods_pages_setup(PAGE_PODS_STATUS, pods_open_bluetooth);
 	config_load();
 	wifi_on_seed();
 	bt_on_seed();
 	ring_preferences(false);
 	atexit(ringtone_stop);
-	if (argc == 4 && strcmp(argv[1], "--render") == 0) {
+	zmc_trace("config");
+	if (to_file) {
 		/* ZT_OPEN_PICKER=ACTION draws that list picker open, for reviews */
 		if (getenv("ZT_OPEN_PICKER")) {
 			open_picker = atoi(getenv("ZT_OPEN_PICKER"));
@@ -5486,14 +5706,13 @@ int main(int argc, char **argv) {
 		}
 		return render_to_file(argv[2], argv[3]);
 	}
-	if (argc > 2 || (argc == 2 && page_named(argv[1]) < 0)) {
-		fprintf(stderr, "usage: ztsettings [PAGE] [--render PAGE FILE] [--list-pages]\n");
-		return 2;
-	}
-	int first = argc == 2 ? page_named(argv[1]) : PAGE_MAIN;
+	int first = asked ? page_named(asked) : PAGE_MAIN;
+	deep_page = deep ? first : -1;
+	zmc_page_anim = ZT_ANIM_SETTINGS_PAGES;	/* its own pages' speed, apart from other apps' */
 	page_prepare(first);	/* (back goes through a page's list) */
-	if (first == PAGE_WIFI) wifi_load();	/* (once running, arrived() asks in the background) */
+	early_load(first);	/* (its answer is read once the main loop runs) */
 	instance_listen();
 	bt_state_watch();
+	zmc_trace("ready to connect");
 	return zmc_run(&settings, first);
 }

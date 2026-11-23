@@ -20,7 +20,7 @@ endif
 
 all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd \
 	coru/ztoscoru notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
-	store/ztstore power/ztpower servicemode/ztservicemode camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
+	store/ztstore power/ztpower servicemode/ztservicemode usbview/ztusbview camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
 	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd \
 	passcoded/zrn-passcoded passcoded/zrn-passcode
 
@@ -43,7 +43,7 @@ ZTENV_CODE = core/zt-environment-v1-protocol.c core/xdg-shell-protocol.c
 desktop/zt-environment-v1-protocol.h: $(ZTENV)
 	wayland-scanner server-header $< $@
 
-ztmetro: ztmetro.c appearance.h wall-blur.h sleep-toggle.h shade-edit.h shade-edit.c lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
+ztmetro: ztmetro.c core/zt-anim.h appearance.h wall-blur.h sleep-toggle.h shade-edit.h shade-edit.c lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -59,7 +59,7 @@ apps/ztapps: apps/ztapps.c
 VIEWPORTER := $(WP)/stable/viewporter/viewporter.xml
 CORE = core/zrnmetrocore.c core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c \
 	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c
-CORE_DEPS = $(CORE) core/zt-clock.h core/zrnboard.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h \
+CORE_DEPS = $(CORE) core/zt-clock.h core/zt-anim.h core/zrnboard.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h \
 	core/zt-environment-v1-client-protocol.h core/xdg-decoration-unstable-v1-client-protocol.h
 APP_BUILD = $(CC) $(CFLAGS) $(WARN) -Icore $(shell pkg-config --cflags $(APP_PKGS)) $(IAL_FLAGS)
 APP_LIBS = $(shell pkg-config --libs $(APP_PKGS)) $(IAL_LIBS) -lm
@@ -160,7 +160,7 @@ passcoded/zrn-passcode: passcoded/zrn-passcode.c passcoded/passcode-proto.h
 
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
 EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
-EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
+EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h sound/eq-drag.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
 settings/ztsettings: settings/ztsettings.c shade-edit.h appearance.h settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h settings/wifi-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c mms/apnconf.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
@@ -169,7 +169,7 @@ devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest
 
 # Devices and Services: what is running, crashed or missing
 # ztSound: the equalizer and effects (the engine, ztos-soundd, ships in rootfs/overlay/usr/local/bin)
-sound/ztsound: sound/ztsound.c sound/sound-pages.c sound/sound-pages.h audio-apps.h audio-state.h audio-sync.h $(CORE_DEPS)
+sound/ztsound: sound/ztsound.c sound/sound-pages.c sound/sound-pages.h sound/eq-drag.h audio-apps.h audio-state.h audio-sync.h $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ sound/ztsound.c sound/sound-pages.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devices/ztdevices: devices/ztdevices.c $(CORE_DEPS)
@@ -186,6 +186,10 @@ osial/ztosial: osial/ztosial.c $(CORE_DEPS)
 # Power Management: battery fuel gauge, sleep diagnostics, wake history
 power/ztpower: power/ztpower.c power/battery-health.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ power/ztpower.c $(CORE) $(APP_LIBS)
+
+# USBView: the USB tree from sysfs, read only (usbview/usb-tree.h)
+usbview/ztusbview: usbview/ztusbview.c usbview/usb-tree.h usbview/usb-ids.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ usbview/ztusbview.c $(CORE) $(APP_LIBS)
 
 # ServiceMode: the modem's field test and menus, to look at (modemd/servicemode.h)
 servicemode/ztservicemode: servicemode/ztservicemode.c $(CORE_DEPS)
@@ -442,6 +446,9 @@ install: check-arch
 	install -Dm644 ntfy/ztntfy.desktop /usr/local/share/applications/ztntfy.desktop
 	install -Dm644 ntfy/ztntfy.svg /usr/local/share/icons/hicolor/scalable/apps/ztntfy.svg
 	install -Dm755 power/ztpower /usr/local/bin/ztpower
+	install -Dm755 usbview/ztusbview /usr/local/bin/ztusbview
+	install -Dm644 usbview/ztusbview.desktop /usr/local/share/applications/ztusbview.desktop
+	install -Dm644 usbview/ztusbview.svg /usr/local/share/icons/hicolor/scalable/apps/ztusbview.svg
 	install -Dm755 servicemode/ztservicemode /usr/local/bin/ztservicemode
 	install -Dm644 servicemode/ztservicemode.desktop /usr/local/share/applications/ztservicemode.desktop
 	install -Dm644 servicemode/ztservicemode.svg /usr/local/share/icons/hicolor/scalable/apps/ztservicemode.svg
@@ -510,7 +517,7 @@ install: check-arch
 	install -Dm644 coru/ztoscoru.service /etc/systemd/system/ztoscoru.service
 
 clean:
-	rm -f servicemode/ztservicemode ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd coru/ztoscoru passcoded/zrn-passcoded passcoded/zrn-passcode notifyd/ztnotifyd splash/ztos-splash \
+	rm -f servicemode/ztservicemode usbview/ztusbview ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd coru/ztoscoru passcoded/zrn-passcoded passcoded/zrn-passcode notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h \
 		acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
@@ -563,6 +570,13 @@ check-bt-pair-sheet: xdg-shell-protocol.h
 check-modem-sim:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c mms/mmspdu.c
 	/tmp/ztmetro-modem-sim-test
+
+# USBView's reading of sysfs, on a fake tree (no USB, no root)
+.PHONY: check-usbview
+check-usbview:
+	$(CC) -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-format-truncation -g \
+		-o /tmp/ztmetro-usbview-test usbview/tests/test-usbtree.c
+	/tmp/ztmetro-usbview-test usbview/tests/expected.txt
 
 # ServiceMode (modemd/servicemode.h): what reaches the CP, which keys pass; no modem
 .PHONY: check-servicemode
@@ -617,6 +631,11 @@ check-wifi-list:
 check-clock:
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-clock-test tests/zt-clock.c
 	/tmp/ztmetro-clock-test
+
+.PHONY: check-anim-speed
+check-anim-speed:
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-anim-speed-test tests/anim-speed.c
+	/tmp/ztmetro-anim-speed-test
 
 .PHONY: check-settings-config
 check-settings-config:
@@ -720,6 +739,15 @@ check-volume-streams:
 .PHONY: check-audiod-live
 check-audiod-live:
 	python3 tests/audiod_live.py
+
+# the equalizer's bands as vertical sliders, one band per gesture, and its
+# engine ztos-soundd: outputs, target, limiter, graph (8.67)
+.PHONY: check-eq-drag check-soundd
+check-eq-drag:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-eq-drag-test tests/eq-drag.c -lm
+	/tmp/ztmetro-eq-drag-test
+check-soundd:
+	python3 ../audio/tests/soundd-test.py
 
 .PHONY: check-audio-apps
 check-audio-apps:

@@ -64,6 +64,7 @@ PRESETS = {
     "Classical": [4, 3, 2, 1, -1, -1, 0, 2, 3, 4],
 }
 PROFILES = ("speaker", "headphones", "bluetooth")
+RECENT_MAX = 8      # outputs chosen before, newest first: where the sound goes back to
 SPATIAL = ("off", "surround51", "surround71", "atmos3d")
 
 
@@ -82,7 +83,7 @@ def default_config():
     cfg = {"version": 1, "enabled": True, "output": "auto", "auto_headroom": True,
            "crossfade": False, "crossfade_seconds": 6.0,
            "profiles": {p: default_profile() for p in PROFILES},
-           "presets": {}, "device_profiles": {}}
+           "presets": {}, "device_profiles": {}, "recent": []}
     cfg["profiles"]["speaker"]["surround"] = False
     cfg["profiles"]["headphones"]["crossfeed"] = False
     return cfg
@@ -99,6 +100,8 @@ def merge(base, new):
         for k in ("presets", "device_profiles"):
             if k in base and isinstance(new.get(k), dict):
                 out[k] = new[k]
+        if "recent" in base and isinstance(new.get("recent"), list):
+            out["recent"] = [n for n in new["recent"] if isinstance(n, str)][:RECENT_MAX]
         return out
     if isinstance(base, list):
         if not isinstance(new, list):
@@ -306,9 +309,14 @@ class Graph:
         return "sL:Out", "sR:Out"
 
 
-def controls(cfg, profile, wet):
+def controls(cfg, profile, wet, protected=False):
     """Every control port of the graph for these settings: {"node:Port": float}.
-    wet is 0..1, the bypass mixer (0 is the exact dry path)."""
+    wet is 0..1, the bypass mixer (0 is the exact dry path). protected: the
+    output is itself a filter chain (the speaker's ztos-speaker: float in, its
+    own volume, then its own limiter). There this chain's limiter stands aside:
+    ztos-audiod gives a ring or alarm stream a gain above 1 on the speaker,
+    which only comes down at ztos-speaker's volume, after this chain, and a
+    limiter here would squash it (ROADMAP 8.67)."""
     p = cfg["profiles"][profile]
     c = {}
     pre = p["preamp"]
@@ -354,6 +362,7 @@ def controls(cfg, profile, wet):
     c["cL:Gain 1"] = c["cR:Gain 1"] = 1.0 / (1.0 + g2)
     c["cL:Gain 2"] = c["cR:Gain 2"] = g2 / (1.0 + g2)
     # limiter: -1 dBFS ceiling, never lifts the level
+    c["lim:Bypass"] = 1.0 if protected else 0.0
     c["lim:Threshold (G)"] = lin(-1.0)
     c["lim:Gain boost"] = 0.0
     c["lim:Automatic level regulation"] = 0.0
@@ -459,6 +468,54 @@ def classify(sink, devices):
     return "speaker"
 
 
+def read_sinks(dump):
+    """The real outputs in a pw-dump: [props + "id" + "chain"], without our own
+    chain and without a device hidden behind a fixed filter chain (the ABOX sink
+    behind ztos-speaker: its crossover and limiter are the speaker's protection,
+    and ztos-audiod holds it at 100 %, 8.61). "chain": the sink is itself a
+    filter chain's input. The same rule as ztos-audiod's read_graph."""
+    hidden = set()
+    nodes = [o for o in dump if o.get("type", "").endswith(":Node")]
+    for o in nodes:
+        pr = (o.get("info") or {}).get("props") or {}
+        if pr.get("node.link-group") and pr.get("target.object") \
+                and pr.get("media.class") == "Stream/Output/Audio" \
+                and not pr.get("node.name", "").startswith(SINK):
+            hidden.add(str(pr["target.object"]))
+    sinks = []
+    for o in nodes:
+        pr = (o.get("info") or {}).get("props") or {}
+        name = pr.get("node.name", "")
+        if pr.get("media.class") != "Audio/Sink" or name.startswith(SINK):
+            continue
+        if name in hidden or str(pr.get("object.serial")) in hidden:
+            continue
+        pr = dict(pr)
+        pr["id"] = o["id"]
+        pr["chain"] = bool(pr.get("node.link-group"))
+        sinks.append(pr)
+    return sinks
+
+
+def choose_target(outputs, want, recent):
+    """The output the chain plays into: the one asked for if it is there, else
+    the newest of those chosen before that is there (as WirePlumber goes back to
+    the output used before when one goes), else the highest priority."""
+    names = [o["name"] for o in outputs]
+    if want != "auto" and want in names:
+        return want
+    for n in recent:
+        if n in names:
+            return n
+    if outputs:
+        return max(outputs, key=lambda o: o["priority"])["name"]
+    return None
+
+
+def remember(recent, name):
+    return ([name] + [n for n in recent if n != name])[:RECENT_MAX]
+
+
 class Daemon:
     def __init__(self):
         self.cfg = default_config()
@@ -468,6 +525,7 @@ class Daemon:
         self.node_id = None
         self.graph_key = None
         self.target = None
+        self.target_chain = False
         self.target_desc = ""
         self.outputs = []
         self.active = "speaker"
@@ -531,34 +589,20 @@ class Daemon:
                 for r in o.get("info", {}).get("params", {}).get("Route", []):
                     if r.get("direction") == "Output":
                         routes[o["id"]] = (r.get("name") or "") + " " + (r.get("description") or "")
-        sinks = []
-        for o in d:
-            if not o.get("type", "").endswith(":Node"):
-                continue
-            pr = o.get("info", {}).get("props", {})
-            if pr.get("media.class") != "Audio/Sink" or pr.get("node.name", "").startswith(SINK):
-                continue
-            pr = dict(pr)
-            pr["id"] = o["id"]
-            sinks.append(pr)
+        sinks = read_sinks(d)
         self.outputs = []
         for s in sinks:
             name = s["node.name"]
             prof = self.cfg["device_profiles"].get(name) or classify(s, routes)
             self.outputs.append({"name": name, "desc": s.get("node.description", name),
                                  "priority": s.get("priority.session", 0), "profile": prof,
-                                 "pinned": name in self.cfg["device_profiles"]})
-        want = self.cfg["output"]
-        names = [o["name"] for o in self.outputs]
-        if want != "auto" and want in names:
-            target = want
-        elif self.outputs:
-            target = max(self.outputs, key=lambda o: o["priority"])["name"]
-        else:
-            target = None
+                                 "pinned": name in self.cfg["device_profiles"],
+                                 "chain": s["chain"]})
+        target = choose_target(self.outputs, self.cfg["output"], self.cfg["recent"])
         for o in self.outputs:
             o["current"] = o["name"] == target
         prof = next((o["profile"] for o in self.outputs if o["name"] == target), "speaker")
+        self.target_chain = next((o["chain"] for o in self.outputs if o["name"] == target), False)
         desc = next((o["desc"] for o in self.outputs if o["name"] == target), "")
         changed = target != self.target or prof != self.active
         self.target_desc = desc
@@ -606,7 +650,7 @@ class Daemon:
         self.stop_chain()
         mode = self.cfg["profiles"][self.active]["spatial"]
         graph = Graph(mode)
-        ctl = controls(self.cfg, self.active, self.wet)
+        ctl = controls(self.cfg, self.active, self.wet, self.target_chain)
         with open(CONF + ".new", "w") as f:
             f.write(conf_text(graph, ctl, self.target, "ztOS Sound"))
         os.replace(CONF + ".new", CONF)
@@ -683,7 +727,7 @@ class Daemon:
     def flush_params(self):
         if self.node_id is None:
             return
-        want = controls(self.cfg, self.active, self.wet)
+        want = controls(self.cfg, self.active, self.wet, self.target_chain)
         diff = {k: v for k, v in want.items() if k not in self.applied or abs(self.applied[k] - v) > 1e-9}
         # a mixer whose gain moves may not be sent half way: both gains in one call
         self.push(diff)
@@ -732,6 +776,8 @@ class Daemon:
             self.wet_goal = 1.0 if self.cfg["enabled"] else 0.0
         elif key == "output":
             self.cfg["output"] = value
+            if value != "auto":
+                self.cfg["recent"] = remember(self.cfg["recent"], value)
             self.eval_at = time.time() + 0.05
         elif key == "crossfade":
             self.cfg["crossfade"] = value in ("1", "true", "on")
@@ -826,7 +872,9 @@ class Daemon:
             fds = [self.sock]
             if self.sub:
                 fds.append(self.sub.stdout)
-            timeout = 1.0
+            # nothing to do: sleep until a datagram or a PipeWire event (the
+            # chain going away is a sink removed), not once a second
+            timeout = 1.0 if self.chain is None else 30.0
             if self.dirty_params or abs(self.wet - self.wet_goal) > 1e-9:
                 timeout = 0.02
             for t in (self.save_at, self.state_at, self.eval_at):
@@ -894,6 +942,7 @@ class Daemon:
             if any(o["name"] == cur for o in self.outputs):
                 log("default moved to %s: now the chain's output" % cur)
                 self.cfg["output"] = cur
+                self.cfg["recent"] = remember(self.cfg["recent"], cur)
                 self.touch_save()
                 self.target = None
             # only the default: streams that follow it come along, and an app
@@ -925,7 +974,7 @@ def main():
         if len(sys.argv) > 3:
             d.cfg["profiles"][prof]["spatial"] = sys.argv[3]
         g = Graph(d.cfg["profiles"][prof]["spatial"])
-        sys.stdout.write(conf_text(g, controls(d.cfg, prof, 1.0), "TARGET", "ztOS Sound"))
+        sys.stdout.write(conf_text(g, controls(d.cfg, prof, 1.0, True), "TARGET", "ztOS Sound"))
         return
     Daemon().run()
 

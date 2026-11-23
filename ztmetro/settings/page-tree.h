@@ -104,7 +104,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_AOD] = PAGE_DISPLAY,
 	[PAGE_DESKTOP] = PAGE_DISPLAY,
 	[PAGE_WALLS] = PAGE_THEME,	/* customization's background row, for either photo */
-	[PAGE_ANIMATION] = PAGE_THEME,
+	[PAGE_ANIMATION] = PAGE_DISPLAY,
 	[PAGE_NAVIGATION] = PAGE_THEME,
 	[PAGE_OVERLAYS] = PAGE_THEME,
 	[PAGE_BOOST] = PAGE_POWER,
@@ -145,6 +145,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "wallpapers", PAGE_WALLS },
 	{ "animation", PAGE_ANIMATION },
 	{ "home-screen", PAGE_TILES },
+	{ "animations", PAGE_ANIMATION },
 	{ "tiles", PAGE_TILES },	/* its old name (Tiles Shell) */
 	{ "switcher-search", PAGE_OVERLAYS },
 	{ "lock", PAGE_LOCK },

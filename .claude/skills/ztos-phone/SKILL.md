@@ -41,5 +41,6 @@ Back up the binary or config next to the original as `NAME.pre-<branch>`, and sa
 | Battery | `/sys/class/power_supply/max170xx_battery/{capacity,current_now,current_avg}` (mA, negative = discharging) |
 | Charger | `/sys/class/power_supply/max77705-charger/online` |
 | Shell control | `$XDG_RUNTIME_DIR/ztmetro.ctl` (desktop commands: `ztmetro/desktop/README.md`) |
+| Tap and swipe | Through the pipe, so the owner sees a blue dot and trail: `tap X Y`, `down ID X Y` / `move ID X Y` / `up ID`, `key 158\|172 down` then `up` (or `scripts/ztctl.py tap\|swipe`). Points, 360x740. `tile NAME` and `home` show a dot too; `launch CMD` shows nothing, so tap the tile when the owner should see it. |
 | Screenshot | `grim` in the session (`XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0`) |
 | Battery accountant | `ztacct`, `/etc/ztacct/power_profile` |

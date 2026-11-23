@@ -1,0 +1,29 @@
+typec port0 data=host power=source partner=yes
+usb_role host
+controller xhci-hcd.0.auto driver=xhci-hcd
+  device usb1 1d6b:0002 bus=1 dev=1 "Linux 6.12 xhci-hcd" "xHCI Host Controller" speed=480 usb=2.00 bcd=2.00 class=09/00/01 driver=usb power=0mA ports=1 configs=1 ep0=64 root ids="Linux Foundation"/"2.0 root hub" cname="Hub / Unused / Single TT"
+    config 1 active ifaces=1 self powered, remote wakeup 0mA ""
+      interface 0 alt 0 active class=09/00/00 eps=1 driver=hub "" cname="Hub / Unused / Full speed (or root) hub"
+        endpoint 81 in interrupt 4 bytes every 256 ms
+    device 1-1 05e3:0610 bus=1 dev=2 "GenesysLogic" "USB2.1 Hub" speed=480 usb=2.10 bcd=2.10 class=09/00/01 driver=usb power=100mA ports=4 configs=1 ep0=64 ids="Genesys Logic, Inc."/"Hub" cname="Hub / Unused / Single TT"
+      config 1 active ifaces=1 self powered, remote wakeup 0mA ""
+        interface 0 alt 0 active class=09/00/00 eps=1 driver=hub "" cname="Hub / Unused / Full speed (or root) hub"
+          endpoint 81 in interrupt 4 bytes every 256 ms
+      device 1-1.2 05ac:110b bus=1 dev=4 "Apple, Inc." "EarPods" speed=12 usb=1.10 bcd=1.10 class=00/00/00 driver=usb power=100mA ports=0 configs=1 ep0=8 ids="Apple, Inc."/"EarPods" cname="(Defined at Interface level)"
+        config 1 active ifaces=3 bus powered 100mA "Default"
+          interface 0 alt 0 active class=01/01/00 eps=0 driver=snd-usb-audio "" cname="Audio / Control Device"
+          interface 1 alt 0 class=01/02/00 eps=0 driver=- "" cname="Audio / Streaming"
+          interface 1 alt 1 active class=01/02/00 eps=1 driver=snd-usb-audio "" cname="Audio / Streaming"
+            endpoint 01 out isochronous 192 bytes every 1 ms
+          interface 2 alt 0 active class=03/00/00 eps=1 driver=usbhid "EarPods remote" cname="Human Interface Device / No Subclass / None"
+            endpoint 83 in interrupt 3 bytes every 10 ms
+      device 1-1.10 1234:abcd bus=1 dev=5 "" "" speed=480 usb=2.00 bcd=2.00 class=ff/00/00 driver=usb power=500mA ports=0 configs=1 ep0=64 cname="Vendor Specific Class / Vendor Specific Subclass"
+        config 1 active ifaces=1 bus powered 500mA ""
+          interface 0 alt 0 active class=ff/00/00 eps=2 driver=- "" cname="Vendor Specific Class / Vendor Specific Subclass"
+            endpoint 81 in bulk 512 bytes
+            endpoint 02 out bulk 512 bytes
+  device usb2 1d6b:0003 bus=2 dev=1 "Linux 6.12 xhci-hcd" "xHCI Host Controller" speed=5000 usb=3.00 bcd=3.00 class=09/00/01 driver=usb power=0mA ports=1 configs=1 ep0=9 root ids="Linux Foundation"/"3.0 root hub" cname="Hub / Unused / Single TT"
+    config 1 active ifaces=1 self powered, remote wakeup 0mA ""
+      interface 0 alt 0 active class=09/00/00 eps=1 driver=hub "" cname="Hub / Unused / Full speed (or root) hub"
+        endpoint 81 in interrupt 4 bytes every 256 ms
+gadget 10c00000.dwc3 state=not attached speed=UNKNOWN max=super-speed function=-
