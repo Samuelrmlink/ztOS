@@ -61,6 +61,15 @@ settings() {
             # the ring stream first: leaving vibrate unmutes notifications at 1
             cmd media_session volume --stream 2 --set "$1" || exit
             cmd media_session volume --stream 5 --set 0 || exit
+            # media at full: ztOS sets the loudness (the panel, the keys,
+            # ztos-audiod). Android at 5 of 15 left Spotify at -33 dB, so it
+            # sounded muted (8.54). Every output Android keeps a level for.
+            for k in volume_music volume_music_speaker volume_music_bt_a2dp \
+                     volume_music_ble_headset volume_music_headset \
+                     volume_music_usb_headset volume_music_remote_submix; do
+                settings put system "$k" 15
+            done
+            cmd media_session volume --stream 3 --set 15 || exit
             settings put system sound_effects_enabled 0
             settings put system lockscreen_sounds_enabled 0
             settings put system dtmf_tone 0
