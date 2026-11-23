@@ -20,7 +20,7 @@ endif
 
 all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd \
 	coru/ztoscoru notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
-	store/ztstore power/ztpower servicemode/ztservicemode camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
+	store/ztstore power/ztpower servicemode/ztservicemode usbview/ztusbview camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
 	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd \
 	passcoded/zrn-passcoded passcoded/zrn-passcode
 
@@ -199,6 +199,10 @@ osial/ztosial: osial/ztosial.c $(CORE_DEPS)
 # Power Management: battery fuel gauge, sleep diagnostics, wake history
 power/ztpower: power/ztpower.c power/battery-health.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ power/ztpower.c $(CORE) $(APP_LIBS)
+
+# USBView: the USB tree from sysfs, read only (usbview/usb-tree.h)
+usbview/ztusbview: usbview/ztusbview.c usbview/usb-tree.h usbview/usb-ids.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ usbview/ztusbview.c $(CORE) $(APP_LIBS)
 
 # ServiceMode: the modem's field test and menus, to look at (modemd/servicemode.h)
 servicemode/ztservicemode: servicemode/ztservicemode.c $(CORE_DEPS)
@@ -455,6 +459,9 @@ install: check-arch
 	install -Dm644 ntfy/ztntfy.desktop /usr/local/share/applications/ztntfy.desktop
 	install -Dm644 ntfy/ztntfy.svg /usr/local/share/icons/hicolor/scalable/apps/ztntfy.svg
 	install -Dm755 power/ztpower /usr/local/bin/ztpower
+	install -Dm755 usbview/ztusbview /usr/local/bin/ztusbview
+	install -Dm644 usbview/ztusbview.desktop /usr/local/share/applications/ztusbview.desktop
+	install -Dm644 usbview/ztusbview.svg /usr/local/share/icons/hicolor/scalable/apps/ztusbview.svg
 	install -Dm755 servicemode/ztservicemode /usr/local/bin/ztservicemode
 	install -Dm644 servicemode/ztservicemode.desktop /usr/local/share/applications/ztservicemode.desktop
 	install -Dm644 servicemode/ztservicemode.svg /usr/local/share/icons/hicolor/scalable/apps/ztservicemode.svg
@@ -523,7 +530,7 @@ install: check-arch
 	install -Dm644 coru/ztoscoru.service /etc/systemd/system/ztoscoru.service
 
 clean:
-	rm -f servicemode/ztservicemode ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd coru/ztoscoru passcoded/zrn-passcoded passcoded/zrn-passcode notifyd/ztnotifyd splash/ztos-splash \
+	rm -f servicemode/ztservicemode usbview/ztusbview ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd coru/ztoscoru passcoded/zrn-passcoded passcoded/zrn-passcode notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h \
 		acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
@@ -576,6 +583,13 @@ check-bt-pair-sheet: xdg-shell-protocol.h
 check-modem-sim:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c mms/mmspdu.c
 	/tmp/ztmetro-modem-sim-test
+
+# USBView's reading of sysfs, on a fake tree (no USB, no root)
+.PHONY: check-usbview
+check-usbview:
+	$(CC) -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-format-truncation -g \
+		-o /tmp/ztmetro-usbview-test usbview/tests/test-usbtree.c
+	/tmp/ztmetro-usbview-test usbview/tests/expected.txt
 
 # ServiceMode (modemd/servicemode.h): what reaches the CP, which keys pass; no modem
 .PHONY: check-servicemode
