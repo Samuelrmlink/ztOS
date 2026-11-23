@@ -287,6 +287,7 @@ step "adding ztOS's files"
 cp -a "$SRC/os/overlay/." "$R/"
 cp -a "$SRC/rootfs/overlay/." "$R/"         # every phone's: USB link, session, memory and fs recovery
 ch systemctl --global enable ztos-audiod.service
+ch systemctl --global enable ztos-soundd.service   # the equalizer (8.67: never enabled, so never heard)
 ch systemctl --global enable ztos-bt-agent.service
 ch systemctl --global enable ztos-bt-reconnect.service
 ch systemctl --global enable ztos-podsd.service
