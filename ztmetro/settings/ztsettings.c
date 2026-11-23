@@ -23,6 +23,7 @@
 #include <strings.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -1054,6 +1055,7 @@ static void wifi_ready(int fd, void *data) {
 	wifi_pipe = NULL;
 	wifi_buf[wifi_len] = 0;
 	wifi_parse(wifi_buf);
+	zmc_trace("wifi data");
 	app.wifi_loading = false;
 	app.wifi_status[0] = 0;
 	if (wifi_joining[0]) {
@@ -2556,6 +2558,7 @@ static void bt_ready(int fd, void *data) {
 	bt_pipe = NULL;
 	bt_buf[bt_len] = 0;
 	bt_parse(bt_buf);
+	zmc_trace("bluetooth data");
 	bt.loading = false;
 	zmc_busy(false);
 	if (bt_busy_mac[0] && bt_busy_running) {
@@ -5223,6 +5226,11 @@ static void sleep_tick(void) {
 	zmc_redraw();	/* the sleep status line is live while the page is open */
 }
 
+/* Opened straight to this page from the shell (ztsettings --deep-link PAGE, a
+ * quick tile held): Back here leaves Settings instead of going up its tree.
+ * -1 for the ordinary way in. */
+static int deep_page = -1;
+
 static bool back(void) {
 	if (open_picker) {	/* back closes an open picker first, as on the phone */
 		open_picker = 0;
@@ -5256,6 +5264,9 @@ static bool back(void) {
 		zmc_redraw();
 		return true;
 	}
+	if (zmc.page == deep_page) {
+		return false;	/* opened straight here from the shell (a quick tile): back leaves, the way it came */
+	}
 	if (zmc.page == PAGE_WIFI_JOIN) {
 		wifi_typing = false;
 		wifi_password[0] = 0;
@@ -5276,7 +5287,7 @@ static void pods_open_bluetooth(void) {
 	zmc_go(PAGE_BLUETOOTH, -1);
 }
 
-/* The page someone asked for from outside (see instance_tell), once nothing is turning. */
+/* The page someone asked for from outside (see instance_claim), once nothing is turning. */
 static int outside_page = -1;
 
 static void go_to_outside_page(void) {
@@ -5297,7 +5308,10 @@ static void go_to_outside_page(void) {
 	zmc_next_anim = -1;	/* (zmc_go may not have turned: the page was in front) */
 }
 
+static bool wifi_early, bt_early;	/* early_load's, below */
+
 static void arrived(int page) {
+	zmc_trace("arrived");
 	if (getenv("ZTSETTINGS_TRACE_PAGES")) {
 		/* a script walking the tree can see where it is without looking */
 		for (int i = 0; i < N_PAGE_NAMES; i++) {
@@ -5339,9 +5353,12 @@ static void arrived(int page) {
 		bt.status[0] = 0;
 		bt_menu = -1;
 		bt_discoverable = true;
-		bt.n = 0;	/* a fresh list: only an open page holds its rows */
-		/* the real state first: the switch must not read Off through a scan */
-		bt_refresh(NULL);
+		if (!bt_early) {
+			bt.n = 0;	/* a fresh list: only an open page holds its rows */
+			/* the real state first: the switch must not read Off through a scan */
+			bt_refresh(NULL);
+		}
+		bt_early = false;	/* (asked before the first frame: early_load) */
 		bt_request("bluetoothctl pairable on >/dev/null 2>&1; bluetoothctl discoverable on >/dev/null 2>&1; "
 			"bluetoothctl --timeout 8 scan on >/dev/null 2>&1");
 		zmc_every(15000, bt_tick);
@@ -5350,7 +5367,8 @@ static void arrived(int page) {
 		bt_refresh(NULL);
 	}
 	if (page == PAGE_WIFI) {
-		wifi_refresh(NULL);
+		if (!wifi_early) wifi_refresh(NULL);
+		wifi_early = false;	/* (asked before the first frame: early_load) */
 	} else if (page == PAGE_PERF) {
 		perf_load();
 		zmc_every(2000, perf_tick);	/* "Tickle now", while this page is open */
@@ -5403,52 +5421,112 @@ static int page_named(const char *name) {
 /* Settings is one window. `ztsettings wifi` with Settings open, from the shell, from
  * the AirPods app or from a script, turns the open one to that page and brings it
  * to the front: a second one would be a second entry in the task switcher, with a
- * tree of its own. */
+ * tree of its own.
+ *
+ * Which one runs is a lock, taken first thing and held for the life of the
+ * process: a Settings still starting (no window yet, the socket maybe not yet
+ * bound) holds it too, so two launches a moment apart (a quick tile held twice
+ * before the window is up, 8.65) make one window. The one that does not get
+ * the lock hands its request over the socket and leaves.
+ *
+ * The request is a datagram: "" (to the front), "PAGE", or "deep:PAGE" for a
+ * page opened straight from the shell (a quick tile), where Back leaves
+ * Settings instead of going up its tree. */
 static void instance_path(char *out, size_t size) {
 	runtime_file(out, size, "ztsettings.sock");
 }
 
+static int instance_fd = -1;	/* bound once we hold the lock; watched once running */
+
+static void early_load(int page);
+
+/* A request from another launch, or one queued while this one was starting. */
 static void instance_ready(int fd, void *data) {
-	char name[64];
-	ssize_t n = recv(fd, name, sizeof(name) - 1, MSG_DONTWAIT);
-	if (n <= 0) return;
-	name[n] = 0;
-	int page = page_named(name);
-	if (page < 0) return;
-	outside_page = page;
-	if (!zmc.anim_active) go_to_outside_page();	/* else when the page in turn has arrived */
-}
-
-/* Is one running? Then it has been told: its page, and to the front. */
-static bool instance_tell(const char *name) {
-	char path[256], ctl[256];
-	struct sockaddr_un a = { .sun_family = AF_UNIX };
-	instance_path(path, sizeof(path));
-	snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
-	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-	if (fd < 0) return false;
-	bool there = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0;
-	if (there) {
-		if (send(fd, name, strlen(name), MSG_DONTWAIT) < 0) {}
-		pipe_tell(runtime_file(ctl, sizeof(ctl), "ztmetro.ctl"), "launch ztsettings\n");
+	char text[80];
+	ssize_t n = recv(fd, text, sizeof(text) - 1, MSG_DONTWAIT);
+	if (n < 0) return;
+	text[n] = 0;
+	bool deep = strncmp(text, "deep:", 5) == 0;
+	const char *name = deep ? text + 5 : text;
+	int page = name[0] ? page_named(name) : -1;
+	if (name[0] && page < 0) return;
+	/* a plain launch (the Settings tile) is the ordinary way in: Back goes up again */
+	deep_page = deep ? page : -1;
+	if (!zmc.configured) {
+		/* still starting, no window yet: it simply opens on that page */
+		if (page >= 0 && page != zmc.page) {
+			page_prepare(page);
+			zmc.page = page;
+			wifi_early = bt_early = false;	/* (the page it was to open on is not arriving) */
+			early_load(page);
+		}
+		return;	/* (the shell shows it when it maps: it is the launch it waits for) */
 	}
-	close(fd);
-	return there;
+	if (page >= 0) {
+		outside_page = page;
+		if (!zmc.anim_active) go_to_outside_page();	/* else when the page in turn has arrived */
+	}
+	/* to the front. Only once there is a window: with none yet, the shell
+	 * would start another Settings for it (and that one would ask again) */
+	char ctl[256];
+	pipe_tell(runtime_file(ctl, sizeof(ctl), "ztmetro.ctl"), "launch ztsettings\n");
 }
 
-static void instance_listen(void) {
+/* Hand `message` to the Settings that holds the lock. It may be starting and
+ * not yet listening: tried again for a moment. */
+static bool instance_send(const char *message) {
 	char path[256];
 	struct sockaddr_un a = { .sun_family = AF_UNIX };
 	instance_path(path, sizeof(path));
 	snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
-	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-	if (fd < 0) return;
-	unlink(path);	/* (no one answered it: it was left behind) */
-	if (bind(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+	for (int tries = 0; tries < 60; tries++) {
+		int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+		if (fd < 0) return false;
+		bool sent = connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0 &&
+			send(fd, message, strlen(message), MSG_DONTWAIT) >= 0;
 		close(fd);
-		return;
+		if (sent) return true;
+		usleep(50 * 1000);	/* (at most 3 s: it binds within milliseconds of starting) */
 	}
-	zmc_watch_fd(fd, instance_ready, NULL);
+	return false;
+}
+
+/* This launch is Settings: true. Or one is already running or starting: it
+ * has been told `message`, and this one leaves (false). */
+static bool instance_claim(const char *message) {
+	char path[256];
+	int lock = open(runtime_file(path, sizeof(path), "ztsettings.lock"), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	if (lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) != 0) {
+		close(lock);
+		if (!instance_send(message)) fprintf(stderr, "ztsettings: the running Settings did not answer\n");
+		return false;
+	}
+	/* (no lock file at all: run, as before there was one.) Kept open, and so
+	 * held, until we exit; never passed to what we start (O_CLOEXEC) */
+	struct sockaddr_un a = { .sun_family = AF_UNIX };
+	instance_path(path, sizeof(path));
+	snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
+	instance_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (instance_fd < 0) return true;
+	if (connect(instance_fd, (struct sockaddr *)&a, sizeof(a)) == 0) {
+		/* someone listens without the lock: a Settings from before it (open
+		 * across an update). Told the page as it understands it, as before */
+		const char *page = strncmp(message, "deep:", 5) == 0 ? message + 5 : message;
+		if (send(instance_fd, page, strlen(page), MSG_DONTWAIT) < 0) {}
+		pipe_tell(runtime_file(path, sizeof(path), "ztmetro.ctl"), "launch ztsettings\n");
+		return false;
+	}
+	unlink(path);	/* (left by one that is gone: we hold the lock) */
+	if (bind(instance_fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+		close(instance_fd);
+		instance_fd = -1;
+	}
+	return true;
+}
+
+/* Requests that came while starting are read once the main loop runs. */
+static void instance_listen(void) {
+	if (instance_fd >= 0) zmc_watch_fd(instance_fd, instance_ready, NULL);
 }
 
 /* --render PAGE FILE: draw one page into a PNG and leave, touching no display.
@@ -5479,23 +5557,51 @@ static int render_to_file(const char *name, const char *path) {
 	return zmc_render_png(&settings, page, height > 0 ? height : 664, path);
 }
 
+/* What the first page shows from outside starts before there is a window:
+ * NetworkManager and BlueZ answer while the GPU and the page are got ready,
+ * not after the first frame (and never before it: 8.65, nmcli held a deep
+ * link to Wi-Fi 0.25-1.2 s before Settings even connected to the shell).
+ * arrived() then finds the answer on its way, or already in. */
+static void early_load(int page) {
+	if (page == PAGE_WIFI) {
+		wifi_refresh(NULL);
+		wifi_early = true;
+	} else if (page == PAGE_BLUETOOTH) {
+		bt_refresh(NULL);	/* (only reads: the scan waits for the page, arrived()) */
+		bt_early = true;
+	}
+}
+
 int main(int argc, char **argv) {
 	if (argc == 2 && strcmp(argv[1], "--list-pages") == 0) {
 		for (int i = 0; i < N_PAGE_NAMES; i++) puts(PAGE_NAMES[i].name);
 		return 0;
 	}
+	zmc_trace("main");
 	signal(SIGCHLD, SIG_DFL);
 	bool to_file = argc == 4 && strcmp(argv[1], "--render") == 0;
-	if (!to_file && argc <= 2 && (argc < 2 || page_named(argv[1]) >= 0) && instance_tell(argc == 2 ? argv[1] : "")) {
-		return 0;
+	/* --deep-link PAGE: opened straight to PAGE from the shell (a quick tile
+	 * held): Back on it leaves Settings, as it came */
+	bool deep = !to_file && argc == 3 && strcmp(argv[1], "--deep-link") == 0;
+	const char *asked = deep ? argv[2] : !to_file && argc == 2 ? argv[1] : NULL;
+	if (!to_file && (argc > 3 || (argc == 3 && !deep) || (asked && page_named(asked) < 0))) {
+		fprintf(stderr, "usage: ztsettings [[--deep-link] PAGE] [--render PAGE FILE] [--list-pages]\n");
+		return 2;
 	}
+	if (!to_file) {
+		char message[80];
+		snprintf(message, sizeof(message), "%s%s", deep ? "deep:" : "", asked ? asked : "");
+		if (!instance_claim(message)) return 0;	/* told the one already there */
+	}
+	zmc_trace("instance");
 	pods_pages_setup(PAGE_PODS_STATUS, pods_open_bluetooth);
 	config_load();
 	wifi_on_seed();
 	bt_on_seed();
 	ring_preferences(false);
 	atexit(ringtone_stop);
-	if (argc == 4 && strcmp(argv[1], "--render") == 0) {
+	zmc_trace("config");
+	if (to_file) {
 		/* ZT_OPEN_PICKER=ACTION draws that list picker open, for reviews */
 		if (getenv("ZT_OPEN_PICKER")) {
 			open_picker = atoi(getenv("ZT_OPEN_PICKER"));
@@ -5511,15 +5617,13 @@ int main(int argc, char **argv) {
 		}
 		return render_to_file(argv[2], argv[3]);
 	}
-	if (argc > 2 || (argc == 2 && page_named(argv[1]) < 0)) {
-		fprintf(stderr, "usage: ztsettings [PAGE] [--render PAGE FILE] [--list-pages]\n");
-		return 2;
-	}
-	int first = argc == 2 ? page_named(argv[1]) : PAGE_MAIN;
+	int first = asked ? page_named(asked) : PAGE_MAIN;
+	deep_page = deep ? first : -1;
 	zmc_page_anim = ZT_ANIM_SETTINGS_PAGES;	/* its own pages' speed, apart from other apps' */
 	page_prepare(first);	/* (back goes through a page's list) */
-	if (first == PAGE_WIFI) wifi_load();	/* (once running, arrived() asks in the background) */
+	early_load(first);	/* (its answer is read once the main loop runs) */
 	instance_listen();
 	bt_state_watch();
+	zmc_trace("ready to connect");
 	return zmc_run(&settings, first);
 }

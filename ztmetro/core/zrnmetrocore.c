@@ -226,7 +226,6 @@ static void fling_step(void);
 static double page_y(double y);
 static void slider_set(double x, bool done);
 static void slider_tapped(double x);
-static void zmc_trace(const char *what);
 static int slider_live = -1;		/* percent while dragging, -1 otherwise */
 static void draw_slider_live(double s);
 static void zmc_activate(struct zmc_hit *hit);
@@ -5806,13 +5805,19 @@ int zmc_render_png(const struct zmc_app *app, int page, int height, const char *
 	return status == CAIRO_STATUS_SUCCESS ? 0 : 1;
 }
 
-/* ZMC_TRACE=1: how long start-up takes, step by step, on stderr */
-static void zmc_trace(const char *what) {
+/* ZMC_TRACE=1: how long start-up takes, step by step, on stderr. The first
+ * line gives the monotonic clock (the shell's now_ms) and the shell's
+ * ZTMETRO_ENTER_MS, so a launch can be timed from the tap. */
+void zmc_trace(const char *what) {
 	static struct timespec t0;
 	static int on = -1;
 	if (on < 0) {
 		on = getenv("ZMC_TRACE") != NULL;
 		clock_gettime(CLOCK_MONOTONIC, &t0);
+		if (on) {
+			const char *enter = getenv("ZTMETRO_ENTER_MS");
+			fprintf(stderr, "trace t0 %u ms monotonic, enter at %s\n", zmc_now_ms(), enter ? enter : "-");
+		}
 	}
 	if (on) {
 		struct timespec t;
