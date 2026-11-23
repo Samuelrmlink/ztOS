@@ -26,7 +26,9 @@
  *	unwatch NAME
  *	call STATE [ROUTE]	from the modem daemon: the call's state (idle,
  *				incoming, dialing, ringing, active) and where its
- *				sound goes (earpiece, speaker, bluetooth, off)
+ *				sound goes (earpiece, speaker, bluetooth, off);
+ *				"call on|off" (upstream's shell) is ignored
+ *	proxtest near | far | off	test only: a made-up proximity reading
  *	orient on | off		from the shell: follow the phone's orientation
  *				(auto-rotation on, not locked, screen on)
  *	orient_axes +x+y+z	which raw accelerometer axes are the screen's
@@ -708,7 +710,12 @@ static void record(struct sensor *s, const uint8_t *d) {
 
 static void frame(const uint8_t *f, int len) {
 	static int count;
-	if (count++ % 16 == 0) {
+	static uint64_t time_asked;
+	/* every 16 frames, as before, but not more often than every 3 s: the
+	 * accelerometer streaming for orientation would otherwise make it more
+	 * than one a second (from upstream) */
+	if (count++ % 16 == 0 && (!time_asked || now_ns() - time_asked >= 3000000000ULL)) {
+		time_asked = now_ns();
 		hub_time();
 	}
 	time_t now = time(NULL);
@@ -901,7 +908,21 @@ static void command(char *line, bool persist) {
 	} else if (strcmp(what, "call") == 0) {
 		char route[16] = "";
 		sscanf(line, "%*15s %*15s %15s", route);
-		call_update(value, route);
+		if (strcmp(value, "on") == 0 || strcmp(value, "off") == 0) {
+			/* upstream's shell form ("call on|off"): the modem daemon's
+			 * state and route decide here */
+		} else {
+			call_update(value, route);
+		}
+	} else if (strcmp(what, "proxtest") == 0) {
+		/* test only (from upstream): a made-up reading in place of the hub's,
+		 * held and told as a real one; "off" forgets it */
+		if (strcmp(value, "near") == 0 || strcmp(value, "far") == 0) {
+			prox_reading(value[0] == 'n');
+		} else {
+			prox_seen = -1;
+			prox_decide();
+		}
 	} else if (strcmp(what, "watch") == 0 || strcmp(what, "unwatch") == 0) {
 		for (int i = 1; i < N_SENSORS; i++) {
 			if (strcmp(value, sensors[i].name) == 0) {

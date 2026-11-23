@@ -48,6 +48,9 @@ enum page {
 	PAGE_AOD,	/* the always-on display: shown when, its theme, its brightness */
 	PAGE_DESKTOP,	/* desktop mode: XFCE on a monitor (ztmetro/desktop/desktop-page.c) */
 	PAGE_ANDROID,	/* Android apps (Waydroid): what they may do on the phone */
+	PAGE_PASSCODE,	/* the lock screen's passcode (zrn-passcoded): passcodepage.h */
+	PAGE_PASSCODE_ENTRY,	/* typing one: new, confirm, current */
+	PAGE_PASSCODE_KEY,	/* the recovery key, shown once */
 	/* Sound's pages (sound/sound-pages.h), in its order: two pivots of two tabs */
 	PAGE_SOUND_EQ, PAGE_SOUND_FX, PAGE_SOUND_OUT, PAGE_SOUND_APPS,
 	/* AirPods' (pods/pods-pages.h), in its order: four tabs */
@@ -95,6 +98,9 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_ACCENTS] = PAGE_THEME,
 	[PAGE_TILES] = PAGE_THEME,
 	[PAGE_LOCK] = PAGE_THEME,
+	[PAGE_PASSCODE] = PAGE_LOCK,
+	[PAGE_PASSCODE_ENTRY] = PAGE_PASSCODE,
+	[PAGE_PASSCODE_KEY] = PAGE_PASSCODE,
 	[PAGE_AOD] = PAGE_DISPLAY,
 	[PAGE_DESKTOP] = PAGE_DISPLAY,
 	[PAGE_WALLS] = PAGE_TILES,	/* or Lock Screen: see page_parent */
@@ -141,6 +147,9 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "style", PAGE_STYLE },
 	{ "tiles", PAGE_TILES },
 	{ "lock", PAGE_LOCK },
+	{ "passcode", PAGE_PASSCODE },
+	{ "passcode-entry", PAGE_PASSCODE_ENTRY },
+	{ "passcode-key", PAGE_PASSCODE_KEY },
 	{ "navigation", PAGE_NAVIGATION },
 	{ "quick", PAGE_QUICK },
 	{ "display", PAGE_DISPLAY },

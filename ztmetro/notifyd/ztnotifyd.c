@@ -39,7 +39,10 @@
  * Everything goes to the shell as lines down its control pipe
  * ($XDG_RUNTIME_DIR/ztmetro.ctl): "notekey KEY|FLAGS|PERCENT|WHO|APP|TITLE|TEXT"
  * and "noteclose KEY" (see note-logic.h: a program's notifications change in
- * place by their id), "notify APP|TITLE|TEXT" for push, "media
+ * place by their id); one that offers a "default" action (and is no piece of
+ * work with a bar) goes as "notifyx ID|ICON|APP|TITLE|TEXT" ("notifyxq" without
+ * alerting), which opens it when tapped (ztnotifyd --invoke ID), and
+ * "notifyclose ID" takes it away; "notify APP|TITLE|TEXT" for push, "media
  * STATE|TITLE|ARTIST|PLAYER". Its own state is in $XDG_RUNTIME_DIR/ztnotifyd.status.
  */
 #define _GNU_SOURCE
@@ -126,7 +129,17 @@ static int method_notify(sd_bus_message *m, void *userdata, sd_bus_error *error)
 	bool quiet = false, progress = false, has_value = false;
 	int done = 0;
 	const char *entry = NULL, *sync = NULL;
-	if (sd_bus_message_skip(m, "as") >= 0 && sd_bus_message_enter_container(m, 'a', "{sv}") > 0) {
+	/* An app offering "default" wants to hear of a tap */
+	bool has_default = false;
+	char **actions = NULL;
+	if (sd_bus_message_read_strv(m, &actions) >= 0 && actions) {
+		for (char **a = actions; a[0] && a[1]; a += 2)
+			has_default = has_default || !strcmp(a[0], "default");
+		for (char **a = actions; *a; a++)
+			free(*a);
+		free(actions);
+	}
+	if (sd_bus_message_enter_container(m, 'a', "{sv}") > 0) {
 		while (sd_bus_message_enter_container(m, 'e', "sv") > 0) {
 			const char *key = NULL, *type = NULL;
 			int on = 0;
@@ -186,12 +199,23 @@ static int method_notify(sd_bus_message *m, void *userdata, sd_bus_error *error)
 	} else {
 		snprintf(key, sizeof(key), "bus:%u", id);
 	}
-	/* (not each percent of a download in the log) */
+	/* (the app's name only: a title can be a person's; and not each percent
+	 * of a download in the log) */
 	if (percent == -1)
-		fprintf(stderr, "ztnotifyd: %s: %s\n", a, s);
-	shell_tell("notekey %s|%s|%d|%s|%s|%s|%s", key, quiet ? "q" : "-", percent, who, a,
-		s[0] ? s : b, s[0] ? b : "");
+		fprintf(stderr, "ztnotifyd: a notification from %s\n", a);
+	if (has_default && percent == -1 && !(sync && sync[0]))
+		/* tapped, it opens what it is of (method_invoke) */
+		shell_tell("%s %u|%s|%s|%s|%s", quiet ? "notifyxq" : "notifyx", id, who, a, s[0] ? s : b, s[0] ? b : "");
+	else
+		shell_tell("notekey %s|%s|%d|%s|%s|%s|%s", key, quiet ? "q" : "-", percent, who, a,
+			s[0] ? s : b, s[0] ? b : "");
 	return sd_bus_reply_method_return(m, "u", id);
+}
+
+static void emit_closed(uint32_t id, uint32_t reason)
+{
+	sd_bus_emit_signal(bus, "/org/freedesktop/Notifications", "org.freedesktop.Notifications",
+		"NotificationClosed", "uu", id, reason);
 }
 
 /* The sender takes it back. (One replacing by name, not id, isn't found by this.) */
@@ -202,14 +226,27 @@ static int method_close(sd_bus_message *m, void *userdata, sd_bus_error *error)
 	if (r < 0)
 		return r;
 	shell_tell("noteclose bus:%u", id);
+	shell_tell("notifyclose %u", id);	/* (one that went as notifyx) */
+	emit_closed(id, 3);	/* closed by a call to CloseNotification */
+	return sd_bus_reply_method_return(m, "");
+}
+
+/* The shell's tap on a notification that offered "default" (ztnotifyd --invoke) */
+static int method_invoke(sd_bus_message *m, void *userdata, sd_bus_error *error)
+{
+	uint32_t id = 0;
+	int r = sd_bus_message_read(m, "u", &id);
+	if (r < 0)
+		return r;
 	sd_bus_emit_signal(bus, "/org/freedesktop/Notifications", "org.freedesktop.Notifications",
-		"NotificationClosed", "uu", id, (uint32_t)3);
+		"ActionInvoked", "us", id, "default");
+	emit_closed(id, 2);	/* dismissed by the user */
 	return sd_bus_reply_method_return(m, "");
 }
 
 static int method_capabilities(sd_bus_message *m, void *userdata, sd_bus_error *error)
 {
-	return sd_bus_reply_method_return(m, "as", 1, "body");
+	return sd_bus_reply_method_return(m, "as", 2, "body", "actions");
 }
 
 static int method_information(sd_bus_message *m, void *userdata, sd_bus_error *error)
@@ -225,6 +262,12 @@ static const sd_bus_vtable notifications_vtable[] = {
 	SD_BUS_METHOD("GetServerInformation", "", "ssss", method_information, SD_BUS_VTABLE_UNPRIVILEGED),
 	SD_BUS_SIGNAL("NotificationClosed", "uu", 0),
 	SD_BUS_SIGNAL("ActionInvoked", "us", 0),
+	SD_BUS_VTABLE_END
+};
+
+static const sd_bus_vtable ztos_vtable[] = {
+	SD_BUS_VTABLE_START(0),
+	SD_BUS_METHOD("Invoke", "u", "", method_invoke, SD_BUS_VTABLE_UNPRIVILEGED),
 	SD_BUS_VTABLE_END
 };
 
@@ -659,8 +702,19 @@ static void on_usr1(int sig)
 
 /* ---- the loop --------------------------------------------------------------- */
 
-int main(void)
+int main(int argc, char **argv)
 {
+	if (argc == 3 && !strcmp(argv[1], "--invoke")) {
+		/* one tap, from the shell: it must not block a frame on the bus */
+		sd_bus *caller = NULL;
+		int called = sd_bus_open_user(&caller);
+		if (called >= 0)
+			called = sd_bus_call_method(caller, "org.freedesktop.Notifications",
+				"/org/freedesktop/Notifications", "org.ztos.Notifications1", "Invoke",
+				NULL, NULL, "u", (uint32_t)strtoul(argv[2], NULL, 10));
+		sd_bus_flush_close_unref(caller);
+		return called < 0;
+	}
 	runtime_dir = getenv("XDG_RUNTIME_DIR");
 	if (!runtime_dir) {
 		fprintf(stderr, "ztnotifyd: no XDG_RUNTIME_DIR\n");
@@ -680,6 +734,9 @@ int main(void)
 	} else {
 		r = sd_bus_add_object_vtable(bus, NULL, "/org/freedesktop/Notifications",
 			"org.freedesktop.Notifications", notifications_vtable, NULL);
+		if (r >= 0)
+			r = sd_bus_add_object_vtable(bus, NULL, "/org/freedesktop/Notifications",
+				"org.ztos.Notifications1", ztos_vtable, NULL);
 		if (r >= 0)
 			r = sd_bus_request_name(bus, "org.freedesktop.Notifications",
 				SD_BUS_NAME_REPLACE_EXISTING | SD_BUS_NAME_ALLOW_REPLACEMENT);
