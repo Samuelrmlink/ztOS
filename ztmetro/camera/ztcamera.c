@@ -1538,7 +1538,9 @@ static void aperture_toggle(void) {
 
 static void facing_toggle(void) {
 	static bool ir_parked;	/* IR has no picture yet: the test scene shows, the next tap is rear */
-	if (src.kind == SRC_RAW || ir_parked) {
+	/* also from the test scene when a camera failed to start: the other may work */
+	bool raw_dev = src.kind == SRC_SCENE && !replay_path && !device_path && access(RAW_DEV, F_OK) == 0;
+	if (src.kind == SRC_RAW || ir_parked || raw_dev) {
 		/* rear, front, IR, each from the one before */
 		raw.cam = ir_parked ? RAW_REAR : raw.cam == RAW_REAR ? RAW_FRONT : RAW_IR;
 		ui.front = raw.cam == RAW_FRONT;
