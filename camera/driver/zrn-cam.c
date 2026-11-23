@@ -752,9 +752,13 @@ static void read_id(const struct camera *c)
 #define AP_IDLE		511
 #define AF_FIRST	120
 #define AF_TEST		200
-#define MOVES_PER_LOAD	10
+#define MOVES_PER_LOAD	10	/* the bucket's size */
+#define AP_REFILL_S	60	/* one move back a minute */
+#define AP_GAP_MS	1500	/* the least time between two moves */
 
 static int moves_left = MOVES_PER_LOAD;
+static ktime_t ap_last, ap_refill;
+static bool ap_stopped;
 static struct i2c_client *ap_cl, *af_cl;
 static struct platform_device *act_pdev;
 static u32 act_saved_pud;
@@ -900,12 +904,39 @@ static int ap_move(int pos, const char *name)
 	int a6, h, l, ret, close_ret;
 	s64 hold;
 
+	/*
+	 * A bucket of MOVES_PER_LOAD moves, one back every AP_REFILL_S, and never two
+	 * within AP_GAP_MS: the app's automatic aperture moves on light changes, which
+	 * the old fixed ten per load would have used up in an afternoon. A pulse that
+	 * ran long still stops every later move until the module is loaded again.
+	 */
+	if (ap_stopped) {
+		note("aperture: stopped after a long pulse");
+		return -EPERM;
+	}
+	if (ap_last) {
+		ktime_t now = ktime_get();
+		s64 back = ktime_ms_delta(now, ap_refill) / (AP_REFILL_S * 1000);
+
+		if (ktime_ms_delta(now, ap_last) < AP_GAP_MS)
+			return -EBUSY;
+		if (moves_left + back >= MOVES_PER_LOAD) {
+			moves_left = MOVES_PER_LOAD;
+			ap_refill = now;
+		} else {
+			moves_left += back;
+			ap_refill = ktime_add_ms(ap_refill, back * AP_REFILL_S * 1000);
+		}
+	} else {
+		ap_refill = ktime_get();
+	}
 	if (moves_left <= 0) {
-		note("aperture: no moves left in this load");
+		note("aperture: no moves left for now");
 		return -EPERM;
 	}
 	moves_left--;
-	t0 = ktime_get();
+	ap_last = ktime_get();
+	t0 = ap_last;
 	ret = act_write(ap_cl, 0xa6, 0x7b);
 	if (!ret)
 		ret = ap_position(pos);
@@ -932,6 +963,7 @@ static int ap_move(int pos, const char *name)
 		return close_ret;
 	if (hold > AP_HOLD_LIMIT_US) {
 		note("aperture: pulse over the limit, stopping");
+		ap_stopped = true;
 		return -ETIMEDOUT;
 	}
 	if ((a6 & 0xff) != 0x7b)
