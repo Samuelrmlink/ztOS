@@ -21346,6 +21346,38 @@ static void ctl_finger_move(struct zt_server *server, int id, double x, double y
 }
 
 static void anim_reload(struct zt_server *server);
+/* A command that stands in for a touch (key, tile, home) shows a tap's circle
+ * where a finger would have pressed. Agents drive the phone with these too;
+ * the dots and trails used to show only for down/move/up/tap. ("launch" and
+ * "focus" are left out: apps send those on a real finger's tap.) */
+static void ctl_mark(struct zt_server *server, double x, double y) {
+	x = fmax(4.0, fmin(x, server->width - 4.0));
+	y = fmax(4.0, fmin(y, server->height - 4.0));
+	ctl_finger_down(server, -2, x, y);
+	ctl_finger_up(server, -2);
+}
+
+static void ctl_mark_key(struct zt_server *server, unsigned code) {
+	double nav_y = server->height - (NAV_H > 0 ? NAV_H / 2.0 : 24.0);
+	switch (code) {
+	case KEY_BACK: ctl_mark(server, server->width / 6.0, nav_y); break;
+	case KEY_HOMEPAGE: ctl_mark(server, server->width / 2.0, nav_y); break;
+	/* the S9's own keys, at the edge beside them */
+	case KEY_POWER: ctl_mark(server, server->width, server->height * 0.30); break;
+	case KEY_VOLUMEUP: ctl_mark(server, 0, server->height * 0.22); break;
+	case KEY_VOLUMEDOWN: ctl_mark(server, 0, server->height * 0.30); break;
+	}
+}
+
+static void ctl_mark_tile(struct zt_server *server, const struct tile *t) {
+	double cx = t->x + t->w / 2.0, cy = t->y + t->h / 2.0;
+	if (start_land(server)) {
+		ctl_mark(server, cx + land_start_x(server) - server->scroll, cy + area_y(server));
+	} else {
+		ctl_mark(server, cx, cy + STATUS_H - server->scroll);
+	}
+}
+
 static void ctl_command(struct zt_server *server, char *line) {
 	int id;
 	double x, y;
@@ -21370,6 +21402,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 		touch_begin(server, 1999, x, y, t);
 		touch_end(server, 1999, t + 30, false);
 	} else if (sscanf(line, "key %u %7s", &code, how) == 2) {
+		if (!strcmp(how, "down")) ctl_mark_key(server, code);
 		ctl_key(server, code, how);
 	} else if (strncmp(line, "desktop", 7) == 0 && (line[7] == ' ' || line[7] == 0)) {
 		desk_ctl(server, line + 7);	/* desktop mode: see desk_ctl */
@@ -21536,6 +21569,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 			if (!strcmp(server->tiles[i].command, line + 5) ||
 			    !strcmp(server->tiles[i].label, line + 5) ||
 			    (icon[0] == '@' && !strcmp(icon + 1, line + 5))) {
+				if (!server->shown && !server->locked) ctl_mark_tile(server, &server->tiles[i]);
 				launch_tile(server, i);
 				break;
 			}
@@ -21564,6 +21598,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 			}
 		}
 	} else if (strcmp(line, "home") == 0) {
+		ctl_mark_key(server, KEY_HOMEPAGE);
 		if (server->shown) show_toplevel(server, NULL);
 		home_reset(server);
 	} else if (strncmp(line, "style ", 6) == 0) {
@@ -23176,6 +23211,10 @@ static bool plane_pick(struct zt_server *server, struct zt_toplevel *app, const 
 	/* screencopy copies the GPU's buffer, and the plane isn't in it: the app
 	 * would be a hole in the picture (ztmirror, ztctl.py shot) */
 	if (server->screencopy && !wl_list_empty(&server->screencopy->frames)) PLANE_NO("a screen capture is waiting");
+	/* (the control pipe's circles and trails are drawn over the page) */
+	for (int i = 0; i < CTL_FINGERS; i++) {
+		if (server->ctl_fingers[i].used) PLANE_NO("control pipe input shown");
+	}
 	/* (the plane cannot turn: a turned page is the GPU's) */
 	if (server->orient != 0 || !server->frame_ident) PLANE_NO("turned");
 	if (!app_covers || !app || !app->mapped) PLANE_NO("no app at rest in front");
