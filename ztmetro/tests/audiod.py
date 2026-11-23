@@ -83,6 +83,26 @@ outs = a.output_entries(dict(g["sinks"], **{BT: dict(g["sinks"][BT], address="00
                         "ztos-speaker", {BT})
 assert [(o["name"], o["playing"], o.get("address")) for o in outs] == \
     [(BT, True, "00:0D:44:EB:50:54"), ("ztos-speaker", False, None)], outs
+assert all("detail" not in o for o in outs), outs   # neither goes to a screen
+
+# the names the volume panel shows (8.53): clean, and a screen's output marked
+assert a.clean_name("RM_2685\x1b[0m") == "RM_2685"
+assert a.clean_name("\x1b[1;34mUE\x1b[0m  MINI\tBOOM\n") == "UE MINI BOOM"
+assert a.clean_name("A\x1b]0;title\x07B") == "A B"
+assert a.clean_name("Samuel’s AirPods Pro") == "Samuel’s AirPods Pro"
+assert a.clean_name(None) == "" and a.clean_name(" \x07 ") == ""
+gn = a.read_graph([node(80, {"media.class": "Audio/Sink", "node.name": "bluez_output.40_DA.1",
+                             "node.description": "Samuel’s\x1b[0m AirPods Pro", "api.bluez5.address": "40:DA"}),
+                   node(81, {"media.class": "Audio/Sink", "node.name": "alsa_output.platform-dp.hdmi-stereo",
+                             "node.description": "Dock"}),
+                   node(82, {"media.class": "Audio/Sink", "node.name": "odd", "node.description": "\x1b[0m"})])
+assert gn["sinks"]["bluez_output.40_DA.1"]["desc"] == "Samuel’s AirPods Pro"
+assert gn["sinks"]["odd"]["desc"] == "odd"          # nothing left of it: the node's name, as before
+on = a.output_entries(gn["sinks"], "bluez_output.40_DA.1", set())
+assert [(o["name"], o.get("detail")) for o in on] == [
+    ("alsa_output.platform-dp.hdmi-stereo", "hdmi"), ("bluez_output.40_DA.1", None), ("odd", None)], on
+assert not a.is_hdmi({"node.name": "ztos-speaker", "node.description": "Speaker"})
+assert a.is_hdmi({"node.name": "x"}, "hdmi-output-0 HDMI / DisplayPort")
 
 # WirePlumber's keys, and its state file
 KEY = "Output/Audio:application.name:Music"

@@ -51,7 +51,7 @@ STATE: $XDG_RUNTIME_DIR/ztos-audio-state.json, replaced whole on any change:
     {"version": 1,
      "active": {"name", "desc", "kind", "percent", "mute"} or null,
      "outputs": [{"name", "desc", "kind", "percent", "mute", "current", "playing",
-                  "address" (Bluetooth only)}],
+                  "address" (Bluetooth only), "detail" (only "hdmi" yet)}],
      "apps": [{"key", "name", "running", "streams": [node ids], "percent", "mute",
                "output": "default" or OUTPUT,
                "output_desc": its name for people, known even while it's away,
@@ -62,7 +62,10 @@ Also "streams": {"ring": {"percent", "playing"}, "alarm": {"percent", "playing"}
 "boost": bool}: the two levels of ztmetro/volume-streams.h and how many sounds play
 at each, and whether the output is turned up for one just now.
 
-kind is speaker, headphones or bluetooth. playing: an app's stream is running
+kind is speaker, headphones or bluetooth. detail "hdmi": it goes to a screen
+(the dock's HDMI or DisplayPort); absent otherwise. desc is the name for people
+(a Bluetooth device's own, as BlueZ has it), with no escapes or control
+characters. playing: an app's stream is running
 (not paused) to that output now, through ztos-eq if it goes there. An app's percent is null if nothing
 is known yet. An app with a pending change shows the pending values.
 
@@ -74,6 +77,7 @@ Also kept up to date, for the shell's banner:
 """
 import json
 import os
+import re
 import select
 import shlex
 import signal
@@ -173,6 +177,26 @@ def read_stream_state(path=WP_STREAMS):
             return parse_stream_state(f.read())
     except OSError:
         return {}
+
+
+# a terminal's escape sequences (CSI, OSC, and the two-byte kind), then any
+# control character left: a name read through bluetoothctl once carried ESC[0m
+_ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])|[\x00-\x1f\x7f-\x9f]")
+
+
+def clean_name(text):
+    """A name for people, as it is drawn: no escapes or control characters, and
+    its spaces as one."""
+    return " ".join(_ESCAPES.sub(" ", text or "").split())
+
+
+def is_hdmi(props, route=""):
+    """Sound going to a screen (the dock's HDMI, DisplayPort): "detail": "hdmi"."""
+    words = " ".join(str(props.get(k, "")) for k in (
+        "node.name", "node.description", "device.profile.name", "device.profile.description",
+        "alsa.card_name", "alsa.long_card_name", "api.alsa.pcm.id")) + " " + route
+    words = words.lower()
+    return "hdmi" in words or "displayport" in words
 
 
 def percent_of_gain(gain):
@@ -335,10 +359,12 @@ def read_graph(dump):
             if name.startswith(EQ_SINK) or name in hidden:
                 continue
             vols = _props_of(info).get("channelVolumes") or []
+            route = routes.get(p.get("device.id"), "")
             g["sinks"][name] = {
                 "id": o["id"], "serial": p.get("object.serial"), "name": name,
-                "desc": p.get("node.description") or p.get("node.nick") or name,
-                "kind": classify(p, routes.get(p.get("device.id"), "")),
+                "desc": clean_name(p.get("node.description")) or clean_name(p.get("node.nick")) or name,
+                "kind": classify(p, route),
+                "hdmi": is_hdmi(p, route),
                 "usb": "usb" in name.lower() or p.get("device.bus") == "usb",
                 "address": p.get("api.bluez5.address"),
                 "percent": percent_of_gain(vols[0]) if vols else None,
@@ -516,6 +542,8 @@ def output_entries(sinks, cur, playing):
              "mute": s["mute"], "current": s["name"] == cur, "playing": s["name"] in playing}
         if s["kind"] == "bluetooth" and s.get("address"):
             o["address"] = s["address"]
+        if s.get("hdmi"):
+            o["detail"] = "hdmi"
         outputs.append(o)
     outputs.sort(key=lambda o: o["name"])
     return outputs
