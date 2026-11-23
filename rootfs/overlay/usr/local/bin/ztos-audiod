@@ -50,7 +50,8 @@ STATE: $XDG_RUNTIME_DIR/ztos-audio-state.json, replaced whole on any change:
 
     {"version": 1,
      "active": {"name", "desc", "kind", "percent", "mute"} or null,
-     "outputs": [{"name", "desc", "kind", "percent", "mute", "current"}],
+     "outputs": [{"name", "desc", "kind", "percent", "mute", "current", "playing",
+                  "address" (Bluetooth only)}],
      "apps": [{"key", "name", "running", "streams": [node ids], "percent", "mute",
                "output": "default" or OUTPUT,
                "output_desc": its name for people, known even while it's away,
@@ -61,7 +62,8 @@ Also "streams": {"ring": {"percent", "playing"}, "alarm": {"percent", "playing"}
 "boost": bool}: the two levels of ztmetro/volume-streams.h and how many sounds play
 at each, and whether the output is turned up for one just now.
 
-kind is speaker, headphones or bluetooth. An app's percent is null if nothing
+kind is speaker, headphones or bluetooth. playing: an app's stream is running
+(not paused) to that output now, through ztos-eq if it goes there. An app's percent is null if nothing
 is known yet. An app with a pending change shows the pending values.
 
 Also kept up to date, for the shell's banner:
@@ -338,6 +340,7 @@ def read_graph(dump):
                 "desc": p.get("node.description") or p.get("node.nick") or name,
                 "kind": classify(p, routes.get(p.get("device.id"), "")),
                 "usb": "usb" in name.lower() or p.get("device.bus") == "usb",
+                "address": p.get("api.bluez5.address"),
                 "percent": percent_of_gain(vols[0]) if vols else None,
                 "mute": bool(_props_of(info).get("mute", False)),
             }
@@ -495,6 +498,27 @@ def playing_on(stream_id, links, sink_ids, chains):
         if n in chains:
             cur.extend(chains[n])
     return None
+
+
+def playing_outputs(streams, on):
+    """The outputs an app is playing to now: a stream of its that is running
+    (not paused or corked), linked to that output. Not just linked: an app that
+    is paused keeps its link. ztos-bt-reconnect reads this ("playing")."""
+    return {on.get(s["id"]) for s in streams if s.get("state") == "running" and on.get(s["id"])}
+
+
+def output_entries(sinks, cur, playing):
+    """The state file's "outputs". A Bluetooth output also says its device's
+    address, so the device it belongs to is known when it has gone."""
+    outputs = []
+    for s in sinks.values():
+        o = {"name": s["name"], "desc": s["desc"], "kind": s["kind"], "percent": s["percent"],
+             "mute": s["mute"], "current": s["name"] == cur, "playing": s["name"] in playing}
+        if s["kind"] == "bluetooth" and s.get("address"):
+            o["address"] = s["address"]
+        outputs.append(o)
+    outputs.sort(key=lambda o: o["name"])
+    return outputs
 
 
 def build_apps(streams, stored, intents, sinks, on, names=None, output_descs=None):
@@ -863,12 +887,10 @@ class Daemon:
 
     def publish(self, g):
         cur = real_output(g["default"], g["sinks"], self.sound_state() if g["default"] == EQ_SINK else None)
-        outputs = [{"name": s["name"], "desc": s["desc"], "kind": s["kind"], "percent": s["percent"],
-                    "mute": s["mute"], "current": s["name"] == cur} for s in g["sinks"].values()]
-        outputs.sort(key=lambda o: o["name"])
-        active = next((o for o in outputs if o["current"]), None)
         sink_ids = {s["id"]: s["name"] for s in g["sinks"].values()}
         on = {s["id"]: playing_on(s["id"], g["links"], sink_ids, g["chains"]) for s in g["streams"]}
+        outputs = output_entries(g["sinks"], cur, playing_outputs(g["streams"], on))
+        active = next((o for o in outputs if o["current"]), None)
         changed = remember_names(self.names, build_apps(g["streams"], {}, {}, g["sinks"], on))
         for s in g["sinks"].values():
             if self.output_descs.get(s["name"]) != s["desc"]:

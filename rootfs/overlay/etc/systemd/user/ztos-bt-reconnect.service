@@ -1,0 +1,13 @@
+[Unit]
+Description=ztOS Bluetooth: call back an audio device that dropped while playing
+After=dbus.socket ztos-audiod.service
+
+[Service]
+ExecStart=/usr/local/bin/ztos-bt-reconnect
+Restart=always
+RestartSec=5
+# listening, not computing: the efficiency cores are enough
+CPUAffinity=0-3
+
+[Install]
+WantedBy=default.target
