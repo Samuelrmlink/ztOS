@@ -34,6 +34,8 @@
 #include <ztos-ial.h>
 #endif
 #include "background-apps.h"
+#include "appearance.h"
+#include "wall-blur.h"
 #include "demoloop/stop-key.h"
 #include "power/power-key.h"
 #include "audio-sync.h"
@@ -804,6 +806,19 @@ struct zt_server {
 	char start_wall_path[256], lock_wall_path[256];
 	struct zt_layer wall_layer;
 	double wall_h;			/* points: the start photo's height */
+	/* how the tiles, the photo behind them, the switcher and Hyperscan look
+	 * (appearance.h, ROADMAP 8.70): from the config, and live from Settings
+	 * (`look KEY VALUE`). Start's photo blurred for them on the CPU, once per
+	 * photo and strength (wall-blur.h): nothing of it is blurred per frame */
+	struct zt_look look;
+	cairo_surface_t *wall_small;	/* the photo, WALL_BLUR_W pixels across: what is blurred */
+	struct zt_layer wall_frost;	/* blurred for the tiles' windows (tile_frost) */
+	struct zt_layer wall_soft;	/* blurred for behind the tiles (background_blur) */
+	struct zt_layer wall_over[2];	/* for the switcher's and Hyperscan's backdrops (*_photo) */
+	int wall_frost_r, wall_soft_r;	/* the radii they hold (wall-blur.h pixels); 0 none */
+	int wall_over_r[2];
+	struct frost_strip over_bd;	/* what the switcher or Hyperscan covers, blurred (over_backdrop) */
+	uint32_t over_gen;		/* one more each time either opens: blurred again */
 	cairo_surface_t *lock_wall;
 	bool locked;
 	bool call_over_lock;	/* only the phone call, or a ringing alarm, may cover the lock */
@@ -4862,6 +4877,7 @@ static void load_config(struct zt_server *server) {
 	}
 	server->n_quick = 8;
 	server->frost_off = false;	/* `frost = 0`: plain bars, no blur work */
+	look_defaults(&server->look);	/* every key: the look from before 8.70 */
 	server->quad_reveal = 1.0f;
 	/* screen rotation: off until the sensor's axes are confirmed on the phone */
 	server->rotation_enabled = false;
@@ -4905,6 +4921,8 @@ static void load_config(struct zt_server *server) {
 			server->nav_center_icon = n < 0 ? 0 : n > 4 ? 4 : n;
 		} else if (strcmp(key, "accent") == 0) {
 			server->accent = parse_color(server, value);
+		} else if (look_parse(&server->look, key, value)) {
+			/* the tiles', background's, switcher's and search's look (appearance.h) */
 		} else if (strcmp(key, "frost") == 0) {
 			/* the frosted diffusion of the bars, system-wide; live on SIGHUP */
 			server->frost_off = strcmp(value, "0") == 0 || strcmp(value, "off") == 0;
@@ -5685,6 +5703,95 @@ static void lock_wall_ink(struct zt_server *server) {
 
 /* Read the two photos again (at start, on SIGHUP, when the screen size is
  * known). */
+/* ---- Start's photo blurred (appearance.h, wall-blur.h) ------------------------ */
+
+/* The photo, decoded at the screen's size, kept small for its blurs */
+static void wall_small_make(struct zt_server *server, cairo_surface_t *img) {
+	if (server->wall_small) {
+		cairo_surface_destroy(server->wall_small);
+		server->wall_small = NULL;
+	}
+	int iw = cairo_image_surface_get_width(img), ih = cairo_image_surface_get_height(img);
+	if (iw <= 0 || ih <= 0) {
+		return;
+	}
+	int sw = iw < WALL_BLUR_W ? iw : WALL_BLUR_W, sh = (int)lround((double)ih * sw / iw);
+	cairo_surface_t *small = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, sw, sh > 0 ? sh : 1);
+	cairo_t *cr = cairo_create(small);
+	cairo_scale(cr, (double)sw / iw, (double)sw / iw);
+	cairo_set_source_surface(cr, img, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	server->wall_small = small;
+}
+
+static void layer_drop(struct zt_server *server, struct zt_layer *layer) {
+	if (layer->tex && gl_begin(server)) {
+		glDeleteTextures(1, &layer->tex);
+		gl_end(server);
+	}
+	memset(layer, 0, sizeof(*layer));
+}
+
+/* One blur of the small photo into `layer`, the photo's size in points (its
+ * pixels fewer: wall_under and wall_back scale by pw / w). Only when the radius
+ * is not the one it holds. The texture's padding gets the edge's pixels, so
+ * its filtering never reaches past the photo. */
+static void wall_blur_layer(struct zt_server *server, struct zt_layer *layer, int *held, int r,
+		const char *name) {
+	if (r == *held && (r == 0 || layer->tex)) {
+		return;
+	}
+	*held = 0;
+	if (r <= 0 || !server->wall_small || server->wall_h <= 0) {
+		layer_drop(server, layer);
+		return;
+	}
+	double t0 = ftrace_clock();
+	int sw = cairo_image_surface_get_width(server->wall_small), sh = cairo_image_surface_get_height(server->wall_small);
+	struct zt_buffer *buffer = calloc(1, sizeof(*buffer));
+	if (!buffer) {
+		return;
+	}
+	buffer->pw = sw;
+	buffer->ph = sh;
+	buffer->t0 = t0;
+	buffer->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (sw + 63) / 64 * 64, (sh + 63) / 64 * 64);
+	cairo_t *cr = cairo_create(buffer->surface);
+	cairo_pattern_t *p = cairo_pattern_create_for_surface(server->wall_small);
+	cairo_pattern_set_extend(p, CAIRO_EXTEND_PAD);
+	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+	cairo_set_source(cr, p);
+	cairo_paint(cr);
+	cairo_pattern_destroy(p);
+	cairo_surface_flush(buffer->surface);
+	wall_blur((uint32_t *)cairo_image_surface_get_data(buffer->surface),
+		cairo_image_surface_get_width(buffer->surface), cairo_image_surface_get_height(buffer->surface),
+		cairo_image_surface_get_stride(buffer->surface) / 4, r);
+	cairo_surface_mark_dirty(buffer->surface);
+	g_dump_name = name;
+	zt_buffer_show(server, layer, buffer, cr, server->width, server->wall_h);
+	*held = r;
+	wlr_log(WLR_DEBUG, "wall blur: %s, radius %d, %dx%d, %.1f ms", name, r, sw, sh, (ftrace_clock() - t0) * 1000.0);
+}
+
+/* The blurs the look asks for, and no others; `again`: the photo is new */
+static void walls_blur(struct zt_server *server, bool again) {
+	if (again) {
+		server->wall_frost_r = server->wall_soft_r = server->wall_over_r[0] = server->wall_over_r[1] = -1;
+	}
+	const struct zt_look *l = &server->look;
+	wall_blur_layer(server, &server->wall_frost, &server->wall_frost_r,
+		look_blur_radius(l->v[LOOK_TILE_FROST]), "start-wallpaper-frost");
+	wall_blur_layer(server, &server->wall_soft, &server->wall_soft_r,
+		l->v[LOOK_BG_SHOW] ? look_blur_radius(l->v[LOOK_BG_BLUR]) : 0, "start-wallpaper-soft");
+	wall_blur_layer(server, &server->wall_over[0], &server->wall_over_r[0],
+		l->v[LOOK_SWITCHER_PHOTO] ? look_blur_radius(l->v[LOOK_SWITCHER_FROST]) : 0, "start-wallpaper-switcher");
+	wall_blur_layer(server, &server->wall_over[1], &server->wall_over_r[1],
+		l->v[LOOK_SEARCH_PHOTO] ? look_blur_radius(l->v[LOOK_SEARCH_FROST]) : 0, "start-wallpaper-search");
+}
+
 static void walls_load(struct zt_server *server) {
 	if (server->width == 0) {
 		return;
@@ -5706,6 +5813,7 @@ static void walls_load(struct zt_server *server) {
 		cairo_surface_t *img = image_cover(server->start_wall_path,
 			(int)ceil(server->width * server->scale), (int)ceil(h * server->scale));
 		if (img) {
+			wall_small_make(server, img);
 			cairo_t *cr;
 			struct zt_buffer *buffer = zt_buffer_create(server, server->width, h, &cr);
 			cairo_scale(cr, 1.0 / server->scale, 1.0 / server->scale);
@@ -5717,6 +5825,7 @@ static void walls_load(struct zt_server *server) {
 			server->wall_h = h;
 		}
 	}
+	walls_blur(server, true);
 }
 
 /* Start's photo for landscape: the view's height tall, and WALL_TALL of
@@ -5764,6 +5873,11 @@ static void wall_under(struct zt_server *server, const float model[16], double t
 		return;
 	}
 	struct zt_layer *w = &server->wall_layer;
+	double s = server->scale;
+	if (server->look.v[LOOK_TILE_FROST] > 0 && server->wall_frost.tex && server->wall_frost.w > 0) {
+		w = &server->wall_frost;	/* frosted: the blurred photo, fewer pixels a point */
+		s = w->pw / w->w;
+	}
 	if (server->wall_h <= 0 || !w->tex || !w->tw || !w->th) {
 		return;
 	}
@@ -5779,12 +5893,52 @@ static void wall_under(struct zt_server *server, const float model[16], double t
 	double py = STATUS_H + ty - server->scroll + margin + travel;
 	double max = server->wall_h - th;
 	py = py < 0 ? 0 : py > max ? max : py;
-	double s = server->scale;
 	server->uv_off[0] = (float)(tx * s / w->tw);
 	server->uv_off[1] = (float)(py * s / w->th);
 	quad(server, GL_TEXTURE_2D, w->tex, model, alpha, true, true,
 		(float)(tw * s / w->tw), (float)(th * s / w->th));
 	server->uv_off[0] = server->uv_off[1] = 0;
+}
+
+/* Start's photo behind the tiles (background_show), over the view through
+ * `model`: the part of it the screen is over, at the same parallax as the
+ * tiles' windows onto it (wall_under), so a frosted tile is glass over the
+ * same picture. Blurred by background_blur, dimmed by background_brightness
+ * (in the tint: no quad more). Upright only: turned, the theme's background,
+ * as before. */
+/* The part of Start's photo (`blurred` when it is made, else the sharp one)
+ * under the screen's rect (x, y, w, h), points, at Start's parallax, drawn
+ * through `model`, dimmed to `k` in the tint. */
+static void wall_photo_rect(struct zt_server *server, const float model[16], float alpha,
+		struct zt_layer *blurred, float k, double x, double y, double w, double h) {
+	struct zt_layer *l = &server->wall_layer;
+	double s = server->scale;
+	if (blurred && blurred->tex && blurred->w > 0) {
+		l = blurred;
+		s = l->pw / l->w;
+	}
+	if (server->wall_h <= 0 || !l->tex || !l->tw || !l->th) {
+		return;
+	}
+	double margin = server->height * WALL_MARGIN;
+	double travel = server->scroll * WALL_PARALLAX, most = server->wall_h - server->height - margin;
+	travel = travel < 0 ? 0 : travel > most ? (most > 0 ? most : 0) : travel;
+	double py = margin + travel, max = server->wall_h - server->height;
+	py = py < 0 ? 0 : py > max ? (max > 0 ? max : 0) : py;
+	float tint[3];
+	memcpy(tint, server->tint, sizeof(tint));
+	for (int i = 0; i < 3; i++) server->tint[i] *= k;
+	server->uv_off[0] = (float)(x * s / l->tw);
+	server->uv_off[1] = (float)((py + y) * s / l->th);
+	quad(server, GL_TEXTURE_2D, l->tex, model, alpha, true, true,
+		(float)(w * s / l->tw), (float)(h * s / l->th));
+	server->uv_off[0] = server->uv_off[1] = 0;
+	memcpy(server->tint, tint, sizeof(tint));
+}
+
+static void wall_back(struct zt_server *server, const float model[16], float alpha) {
+	wall_photo_rect(server, model, alpha, server->look.v[LOOK_BG_BLUR] > 0 ? &server->wall_soft : NULL,
+		look_f(&server->look, LOOK_BG_BRIGHTNESS), 0, 0, server->width, server->height);
 }
 
 static double text_width(const char *text, const char *font, double size);
@@ -12260,6 +12414,7 @@ static void switcher_open(struct zt_server *server) {
 		zt_buffer_show(server, &server->card_title[i], buffer, cr, w, 24);
 	}
 	server->switcher = true;
+	server->over_gen++;	/* what it covers is blurred again (over_backdrop) */
 	server->drop_card = -1;
 	server->drop = 0;
 	server->switch_moving = false;
@@ -13634,9 +13789,10 @@ struct hyper_hit {
 #define HYPER_BEST_H	68
 
 static const struct { const char *page, *title, *words; } HYPER_SETTINGS[] = {
-	{ "theme", "customization", "accent colour color personalize" },
+	{ "theme", "customization", "accent colour color personalize columns background wallpaper" },
 	{ "animation", "animation speeds", "motion slow fast" },
-	{ "tiles", "Tiles Shell", "start screen columns home" },
+	{ "home-screen", "home screen", "start tiles opacity transparency frost blur brightness background" },
+	{ "switcher-search", "app switcher + search", "recents task opacity transparency frost blur brightness" },
 	{ "lock", "Lock Screen", "wake locked" },
 	{ "wallpapers", "background photo", "wallpaper picture start" },
 	{ "navigation", "navigation bar", "centre center icon logo" },
@@ -13850,8 +14006,10 @@ static void draw_hyper(struct zt_server *server) {
 	 * its greys a darker grey in light */
 	bool light = shell_light(server);
 	double ink = light ? 0 : 1, grey = light ? 0.40 : 0.6;
-	cairo_set_source_rgb(cr, 1 - ink, 1 - ink, 1 - ink);
-	cairo_paint(cr);
+	if (server->look.v[LOOK_SEARCH_OPACITY] >= 100) {
+		cairo_set_source_rgb(cr, 1 - ink, 1 - ink, 1 - ink);
+		cairo_paint(cr);
+	}	/* (else clear: over_backdrop is under it, search_opacity) */
 	/* the ring, and the name */
 	set_rgb(cr, server->accent);
 	cairo_set_line_width(cr, 3);
@@ -13968,6 +14126,7 @@ static void hyper_open(struct zt_server *server) {
 		hyper_files_read(server, dir, 0);
 	}
 	draw_hyper(server);
+	server->over_gen++;	/* what it covers is blurred again (over_backdrop) */
 	server->hyper_t = 0;
 	animate(server, &server->hyper_t, 1.0f, 250, 0, false);
 	server->osk_terminal = false;
@@ -20950,6 +21109,20 @@ static void ctl_command(struct zt_server *server, char *line) {
 		mkdir("/tmp/ztrec", 0755);
 		server->record_until = now_ms() + (uint32_t)id;
 		wlr_log(WLR_INFO, "recording frames for %d ms into /tmp/ztrec", id);
+	} else if (strncmp(line, "look ", 5) == 0) {
+		/* look KEY VALUE: an appearance slider in Settings, live (appearance.h);
+		 * the file is written when it is let go, without a SIGHUP */
+		int k = look_line(&server->look, line + 5);
+		if (k == LOOK_TILE_FROST || k == LOOK_BG_BLUR || k == LOOK_BG_SHOW || k == LOOK_SWITCHER_PHOTO ||
+				k == LOOK_SEARCH_PHOTO || k == LOOK_SWITCHER_FROST || k == LOOK_SEARCH_FROST) {
+			walls_blur(server, false);	/* (a few ms on the small photo) */
+		}
+		if (k == LOOK_SEARCH_OPACITY && server->hyper) {
+			draw_hyper(server);	/* its panel is painted clear below 100 % */
+		}
+		if (k >= 0) {
+			damage(server);
+		}
 	} else if (sscanf(line, "brightness-fine %d", &id) == 1) {
 		/* the settings slider under a finger: tenths of a percent */
 		server->shade_brightness = id < 20 ? 2 : id > 1000 ? 100 : (id + 5) / 10;
@@ -23139,13 +23312,13 @@ static uint32_t call_backdrop_sig(struct zt_server *server) {
 	return h ? h : 1;
 }
 
-/* The call's backdrop over the whole screen: the frame as it is now (the
- * lock, or Start) copied out, brought down to a quarter and blurred, when
- * `fresh`; else the blur kept from last time. Then drawn under the key
- * colour as a veil, with grain. False: there is no blur to show. */
-static bool call_backdrop_draw(struct zt_server *server, struct wlr_output *output, GLuint fbo, bool fresh, float alpha) {
+/* The frame as it is now copied out of `fbo` into `s`, brought down to a
+ * quarter and blurred into s->tex[0], when `fresh` (or it holds nothing yet);
+ * else the blur kept from last time. The call's backdrop's, and the app
+ * switcher's and Hyperscan's (over_backdrop). False: there is no blur. */
+static bool screen_blur(struct zt_server *server, struct wlr_output *output, GLuint fbo,
+		struct frost_strip *s, bool fresh) {
 	static const GLfloat corners[8] = { 0, 0, 1, 0, 0, 1, 1, 1 };
-	struct frost_strip *s = &server->call_bd;
 	int h = output->height / 4 * 4;
 	if (h < 4 || !frost_strip_alloc(server, s, output->width, h, fbo)) {
 		return false;
@@ -23201,7 +23374,19 @@ static bool call_backdrop_draw(struct zt_server *server, struct wlr_output *outp
 		frame_quads += 5;
 		frame_px += (double)s->qw * s->qh * 5;
 		s->valid = true;
-		wlr_log(WLR_DEBUG, "call backdrop: blurred again");
+		wlr_log(WLR_DEBUG, "screen blur: made again");
+	}
+	return true;
+}
+
+/* The call's backdrop over the whole screen: the frame as it is now (the
+ * lock, or Start) blurred (screen_blur), drawn under the key colour as a
+ * veil, with grain. False: there is no blur to show. */
+static bool call_backdrop_draw(struct zt_server *server, struct wlr_output *output, GLuint fbo, bool fresh, float alpha) {
+	static const GLfloat corners[8] = { 0, 0, 1, 0, 0, 1, 1, 1 };
+	struct frost_strip *s = &server->call_bd;
+	if (!screen_blur(server, output, fbo, s, fresh)) {
+		return false;
 	}
 	float m[16], mvp[16];
 	mat_identity(m);
@@ -23238,6 +23423,81 @@ static bool call_backdrop_draw(struct zt_server *server, struct wlr_output *outp
 	frame_quads++;
 	frame_px += (double)output->width * output->height;
 	return true;
+}
+
+/* The app switcher's or Hyperscan's backdrop (appearance.h), over the rect
+ * (x, y, w, h) in points, `t` of the way in: what it covers blurred by its
+ * frost (screen_blur, once each time it opens), or with *_photo Start's photo
+ * blurred by it (on the CPU, once: wall_over), dimmed to its brightness, and
+ * the theme's background over that at its opacity. At full opacity (the
+ * default) only the background, as before: nothing is blurred. */
+enum { OVER_SWITCHER, OVER_SEARCH };
+static void over_backdrop(struct zt_server *server, struct wlr_output *output, GLuint fbo, int which,
+		float x, float y, float w, float h, float t) {
+	static const GLfloat corners[8] = { 0, 0, 1, 0, 0, 1, 1, 1 };
+	const struct zt_look *l = &server->look;
+	float o = look_f(l, which == OVER_SEARCH ? LOOK_SEARCH_OPACITY : LOOK_SWITCHER_OPACITY);
+	float f = look_f(l, which == OVER_SEARCH ? LOOK_SEARCH_FROST : LOOK_SWITCHER_FROST);
+	float k = look_f(l, which == OVER_SEARCH ? LOOK_SEARCH_BRIGHTNESS : LOOK_SWITCHER_BRIGHTNESS);
+	float m[16];
+	mat_identity(m);
+	mat_translate(m, x, y);
+	mat_scale(m, w, h);
+	bool photo = l->v[which == OVER_SEARCH ? LOOK_SEARCH_PHOTO : LOOK_SWITCHER_PHOTO] && server->wall_h > 0 &&
+		server->orient % 180 == 0;
+	if (o < 0.999f && t > 0.003f && photo) {
+		/* Start's photo, its blur made already, its brightness in the tint */
+		wall_photo_rect(server, m, t, f > 0.003f ? &server->wall_over[which == OVER_SEARCH] : NULL, k,
+			x, y, w, h);
+	} else if (o < 0.999f && t > 0.003f) {
+		struct frost_strip *s = &server->over_bd;
+		uint32_t sig = 2166136261u;
+		uint32_t parts[6] = { (uint32_t)which, server->over_gen, (uint32_t)server->width,
+			(uint32_t)server->height, (uint32_t)server->theme, (uint32_t)server->orient };
+		frost_mix(&sig, parts, sizeof(parts));
+		if (f > 0.003f && server->prog_backdrop && server->grain_tex && !server->frost_failed &&
+				screen_blur(server, output, fbo, s, !s->valid || s->sig != sig)) {
+			s->sig = sig;
+			/* the blur over the rect it is under, at `f` over the sharp */
+			float mvp[16];
+			quad_mvp(server, m, mvp);
+			GLuint p = server->prog_backdrop;
+			uint32_t bg = shell_bg_color(server);
+			float u = (float)s->w / (4.0f * s->qw), sx = server->scale / (float)s->w, sy = server->scale / (float)s->h;
+			glUseProgram(p);
+			glUniformMatrix4fv(glGetUniformLocation(p, "mvp"), 1, GL_FALSE, mvp);
+			glUniform4f(glGetUniformLocation(p, "uv_rect"), x * sx * u,
+				y * sy, w * sx * u, h * sy);
+			glUniform1f(glGetUniformLocation(p, "flip"), 0.0f);
+			glUniform3f(glGetUniformLocation(p, "bg"), ((bg >> 16) & 0xff) / 255.0f * server->tint[0],
+				((bg >> 8) & 0xff) / 255.0f * server->tint[1], (bg & 0xff) / 255.0f * server->tint[2]);
+			glUniform1f(glGetUniformLocation(p, "veil"), 0.0f);
+			glUniform1f(glGetUniformLocation(p, "grain_amt"), FROST_GRAIN);
+			glUniform1f(glGetUniformLocation(p, "grain_px"), fmaxf(1.0f, roundf(server->scale)));
+			glUniform1f(glGetUniformLocation(p, "alpha"), f * t);
+			glUniform1i(glGetUniformLocation(p, "tex"), 0);
+			glUniform1i(glGetUniformLocation(p, "grain"), 1);
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_2D, server->grain_tex);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, s->tex[0]);
+			glBindBuffer(GL_ARRAY_BUFFER, 0);
+			glEnableVertexAttribArray(0);
+			glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, corners);
+			glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+			glDisableVertexAttribArray(0);
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_2D, 0);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, 0);
+			frame_quads++;
+			frame_px += (double)w * h * server->scale * server->scale;
+		}
+		if (k < 0.999f) {
+			quad(server, GL_TEXTURE_2D, server->black_tex, m, (1.0f - k) * t, false, false, 1.0f, 1.0f);
+		}
+	}
+	quad(server, GL_TEXTURE_2D, shell_bg_tex(server), m, o * t, false, false, 1.0f, 1.0f);
 }
 
 /* the opaque part: the theme's background at 1 - diffuse */
@@ -25250,6 +25510,21 @@ static void render_frame(struct zt_server *server) {
 		if (start_land(server)) {
 			/* the cover-flow's black stage, under it all on its side */
 			cf_stage_draw(server, page_dx);
+		} else if (server->look.v[LOOK_BG_SHOW] && server->wall_h > 0) {
+			/* Start's photo behind the tiles (appearance.h): it goes with
+			 * Start, across to the list and away with a launch */
+			float bm[16], ba = 1.0f - server->start_t;
+			mat_identity(bm);
+			mat_translate(bm, page_dx, 0);
+			mat_scale(bm, (float)view_w(server), (float)view_h(server));
+			if (diffuse > 0.0f) {
+				/* (its brightness, blur and parallax in what the bars' blur is of) */
+				float key[3] = { ba * look_f(&server->look, LOOK_BG_BRIGHTNESS), (float)server->wall_soft_r,
+					(float)server->scroll };
+				frost_note(server, &scan, bm, key[0], server->wall_layer.tex, 0.0f, false);
+				for (int k = 0; k < 2; k++) frost_mix(&scan.sig[k], key, sizeof(key));
+			}
+			wall_back(server, bm, ba);
 		}
 		/* landscape beside the cover-flow: the tiles keep to their side
 		 * (not while turning: a band is then no upright rectangle) */
@@ -25287,6 +25562,11 @@ static void render_frame(struct zt_server *server) {
 			}
 			draw_order[n - 1] = server->edit;
 		}
+		/* the tiles' opacity over what is behind them, and their brightness
+		 * (in the tint: no quad more); both 1 by default (appearance.h) */
+		float tile_op = look_f(&server->look, LOOK_TILE_OPACITY), tile_tint[3];
+		memcpy(tile_tint, server->tint, sizeof(tile_tint));
+		for (int k = 0; k < 3; k++) server->tint[k] *= look_f(&server->look, LOOK_TILE_BRIGHTNESS);
 		quad_batch_begin(server);
 		for (int d = 0; d < n; d++) {
 			int i = draw_order[d];
@@ -25307,7 +25587,7 @@ static void render_frame(struct zt_server *server) {
 			if (y > view_h(server) || y + t->h < 0 || x > view_w(server) || x + t->w < 0) {
 				continue;
 			}
-			float m[16], grow = 1.0f, dim = 1.0f;
+			float m[16], grow = 1.0f, dim = tile_op;
 			float alpha = turn_place(server, m, x, y, (float)t->w, (float)t->h, (float)t->w, turn,
 				t->jit_travel, hinge_right);
 			if (server->edit_t > 0.001f) {
@@ -25316,7 +25596,7 @@ static void render_frame(struct zt_server *server) {
 					grow = 1.0f + 0.06f * server->edit_t;
 				} else {
 					grow = 1.0f - 0.08f * server->edit_t;
-					dim = 1.0f - 0.45f * server->edit_t;
+					dim = tile_op * (1.0f - 0.45f * server->edit_t);
 				}
 			}
 			mat_rotate_x(m, t->tilt_x);			/* lean, about the tile's centre */
@@ -25336,7 +25616,8 @@ static void render_frame(struct zt_server *server) {
 			mat_scale(m, (float)t->w, (float)t->h);
 			/* (a tile wholly behind the cover-flow is cut away: it reaches no bar) */
 			if (diffuse > 0.0f && !(tiles_clip && x + (float)t->w <= (float)land_start_x(server) + page_dx)) {
-				frost_note(server, &scan, m, alpha * dim, face->tex, 0.0f, face == &t->back_layer &&
+				/* (the brightness folded into what is noted: the bars' blur changes with it) */
+				frost_note(server, &scan, m, alpha * dim * server->tint[0], face->tex, 0.0f, face == &t->back_layer &&
 					(t->sweep_w[0] > 0 || t->sweep_w[1] > 0 || t->sweep_w[2] > 0));
 			}
 			wall_under(server, m, t->x, t->y, t->w, t->h, alpha * dim);
@@ -25347,6 +25628,7 @@ static void render_frame(struct zt_server *server) {
 			}
 		}
 		quad_batch_end(server);
+		memcpy(server->tint, tile_tint, sizeof(tile_tint));
 		if (server->edit_t > 0.3f && server->edit >= 0 && server->edit < n && server->badge_unpin.tex) {
 			/* its two buttons, on its right-hand corners */
 			struct tile *t = &server->tiles[server->edit];
@@ -25579,10 +25861,8 @@ static void render_frame(struct zt_server *server) {
 	} else if (server->switch_t > 0.001f && server->n_cards > 0) {
 		/* the switcher: the theme's background (black in dark) over whatever
 		 * was there, and the apps as cards */
-		float t = server->switch_t, m[16];
-		mat_identity(m);
-		mat_scale(m, view_w(server), view_h(server));
-		quad(server, GL_TEXTURE_2D, shell_bg_tex(server), m, t, false, false, 1.0f, 1.0f);
+		float t = server->switch_t;
+		over_backdrop(server, output, fbo, OVER_SWITCHER, 0, 0, view_w(server), view_h(server), t);
 		for (int i = 0; i < server->n_cards; i++) {
 			struct zt_toplevel *card = server->cards[i];
 			if (!card->mapped || !card->commit_ms) {
@@ -25627,6 +25907,12 @@ static void render_frame(struct zt_server *server) {
 	}
 	draw_loading(server);
 
+	if (server->hyper_t > 0.003f && server->hyper_layer.tex && server->look.v[LOOK_SEARCH_OPACITY] < 100) {
+		/* its panel is clear: the backdrop under it (search_opacity) */
+		over_backdrop(server, output, fbo, OVER_SEARCH, (float)area_x(server),
+			(float)area_y(server) + (1.0f - server->hyper_t) * 40.0f, (float)area_w(server),
+			(float)area_h(server), server->hyper_t);
+	}
 	if (server->hyper_t > 0.003f && server->hyper_layer.tex) {
 		/* Hyperscan, rising into place and fading in */
 		layer_draw(server, &server->hyper_layer, area_x(server),
