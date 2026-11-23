@@ -36,6 +36,17 @@ static inline int config_keys_changed(const struct config_key *keys, int n) {
 	return changed;
 }
 
+/* True when `name` is the one key to write: nothing else has changed. */
+static inline bool config_only_changed(const struct config_key *keys, int n, const char *name) {
+	bool it = false;
+	for (int i = 0; i < n; i++) {
+		if (!keys[i].key || !config_key_changed(&keys[i])) continue;
+		if (strcmp(keys[i].key, name) != 0) return false;
+		it = true;
+	}
+	return it;
+}
+
 /* The key a line sets, into `out`; false if it sets none. */
 static inline bool config_line_key(const char *line, char *out, size_t size) {
 	const char *eq = strchr(line, '=');

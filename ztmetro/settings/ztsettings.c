@@ -856,6 +856,9 @@ static void config_brightness_chosen(void) {
 	if (k) k->force = true;
 }
 
+/* config_save_brightness: the shell has the level already, so no SIGHUP */
+static bool config_no_hup;
+
 static void config_save(void) {
 	config_format();
 	zmc.accent = ACCENTS[app.accent].color;
@@ -876,7 +879,19 @@ static void config_save(void) {
 	if (rename(tmp, path) != 0) return;
 	config_keys_written(config_keys, config_n);
 
-	if (system("pkill -HUP -x ztmetro 2>/dev/null") != 0) {}
+	if (!config_no_hup && system("pkill -HUP -x ztmetro 2>/dev/null") != 0) {}
+}
+
+/* The brightness slider let go: the shell was told the level live (its
+ * control pipe), so the file is only for the next start. A SIGHUP for it made
+ * the shell reload everything (tiles, textures) before it drew another frame,
+ * and a tapped slider's thumb waited behind that while the screen had already
+ * changed. Any other key changed with it still gets the SIGHUP. */
+static void config_save_brightness(void) {
+	config_format();
+	config_no_hup = config_only_changed(config_keys, config_n, "brightness");
+	config_save();
+	config_no_hup = false;
 }
 
 static char *nm_field(char **cursor) {
@@ -2272,9 +2287,18 @@ static int brightness_now(void) {
 	return a[0] && max > 0 ? (level * 100 + max / 2) / max : -1;
 }
 
+/* When a hand last set the slider. The shell publishes the level only once
+ * its ramp has landed (about half a second), so until then the file still
+ * says the old one; following it would pull the thumb back and then forward. */
+static uint32_t brightness_hand_ms;
+#define BRIGHTNESS_HAND_HOLD_MS	1500
+
 /* While the display page is open the slider follows the screen, except
- * under the finger. */
+ * under the finger and just after it. */
 static void display_tick(void) {
+	if (brightness_hand_ms && zmc_now_ms() - brightness_hand_ms < BRIGHTNESS_HAND_HOLD_MS) {
+		return;
+	}
 	int now = brightness_now();
 	if (zmc.page == PAGE_DISPLAY && !zmc.sliding && now > 0 && now != app.brightness) {
 		app.brightness = now < 1 ? 1 : now;
@@ -4920,9 +4944,10 @@ static void slide(int action, int value, bool done) {
 			saved = zmc_now_ms();
 			brightness_tell(zmc.slider_permille < 20 ? 20 : zmc.slider_permille);
 		}
+		brightness_hand_ms = zmc_now_ms() | 1;
 		if (done) {
 			config_brightness_chosen();
-			config_save();
+			config_save_brightness();
 		}
 		break;
 	case ACT_FORCE_MS:
