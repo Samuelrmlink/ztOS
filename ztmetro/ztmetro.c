@@ -21281,6 +21281,7 @@ static void touch_down(struct wl_listener *listener, void *data) {
 	struct wlr_touch_down_event *event = data;
 	double ux, uy;
 	rot_touch(server->rot.applied, event->x, event->y, &ux, &uy);	/* the glass is portrait */
+	if (server->ftrace) fprintf(server->ftrace, "tin d %.2f %u\n", ftrace_clock(), event->time_msec);	/* input: heard, made */
 	touch_begin(server, event->touch_id, ux * server->width, uy * server->height, event->time_msec);
 }
 
@@ -21290,12 +21291,14 @@ static void touch_motion(struct wl_listener *listener, void *data) {
 	struct wlr_touch_motion_event *event = data;
 	double ux, uy;
 	rot_touch(server->rot.applied, event->x, event->y, &ux, &uy);
+	if (server->ftrace) fprintf(server->ftrace, "tin m %.2f %u\n", ftrace_clock(), event->time_msec);	/* input: heard, made */
 	touch_update(server, event->touch_id, ux * server->width, uy * server->height, event->time_msec);
 }
 
 static void touch_up(struct wl_listener *listener, void *data) {
 	struct zt_touch_device *device = wl_container_of(listener, device, up);
 	struct wlr_touch_up_event *event = data;
+	if (device->server->ftrace) fprintf(device->server->ftrace, "tin u %.2f %u\n", ftrace_clock(), event->time_msec);
 	touch_end(device->server, event->touch_id, event->time_msec, false);
 }
 
