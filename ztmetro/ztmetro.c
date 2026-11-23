@@ -46,6 +46,7 @@
 #include "note-logic.h"
 #include "desktop/desktop.h"
 #include "lock-awake.h"
+#include "sleep-toggle.h"
 #include "rotation.h"
 #include <dirent.h>
 #include <errno.h>
@@ -882,6 +883,8 @@ struct zt_server {
 	bool shade_airplane;
 	bool shade_location;		/* the location switch is on (ztos-gnss-gate's state) */
 	bool loc_known, loc_active;	/* the gate runs; the GNSS engine is on */
+	struct sleep_tile sleep_tile;	/* zrn-sleepd's switch, for the Sleep tile (sleep-toggle.h) */
+	uint32_t sleep_tile_ms;		/* the tile's last tap: sudo gets 2 s to follow */
 	uint32_t loc_tile_ms;		/* the tile's last tap: the gate gets 2 s to follow */
 	bool shade_notifs_cleared;
 	int shade_brightness;
@@ -2811,7 +2814,7 @@ static char *trim(char *s) {
  * actions puts one in each of the eight places; `quick` in the config). */
 enum quick {
 	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_ROTATION, Q_FLASHLIGHT, Q_LOCATION,
-	Q_BRIGHTNESS, Q_SETTINGS, Q_VIBRATE, Q_AUDIO, Q_NONE, Q_COUNT,
+	Q_BRIGHTNESS, Q_SETTINGS, Q_VIBRATE, Q_AUDIO, Q_SLEEP, Q_NONE, Q_COUNT,
 };
 static const struct { const char *id, *icon, *label; } QUICK[Q_COUNT] = {
 	{ "wifi", "wifi", "WI-FI" }, { "data", "", "MOBILE DATA" },
@@ -2819,7 +2822,9 @@ static const struct { const char *id, *icon, *label; } QUICK[Q_COUNT] = {
 	{ "rotation", "rotation", "ROTATION LOCK" }, { "flashlight", "flashlight", "FLASHLIGHT" },
 	{ "location", "location", "LOCATION" }, { "brightness", "brightness", "BRIGHTNESS" },
 	{ "settings", "gear", "ALL SETTINGS" }, { "vibrate", "", "VIBRATION" },
-	{ "audio", "", "" }, { "none", "", "" },	/* the audio tile's come from audio-state.h */
+	{ "audio", "", "" },	/* the audio tile's come from audio-state.h */
+	{ "sleep", "", "SLEEP" },	/* zrn-sleepd on or off (sleep-toggle.h, 8.47) */
+	{ "none", "", "" },
 };
 static const int QUICK_DEFAULT[8] = {
 	Q_WIFI, Q_DATA, Q_BLUETOOTH, Q_AIRPLANE, Q_AUDIO, Q_FLASHLIGHT, Q_BRIGHTNESS, Q_SETTINGS,
@@ -7030,6 +7035,37 @@ static bool loc_state_read(struct zt_server *server) {
 	return changed;
 }
 
+/* zrn-sleepd's switch (sleep-toggle.h); true if the tile changed. Just tapped,
+ * the tile shows what was asked until zrn-sleepd's files follow. */
+static bool sleep_state_read(struct zt_server *server) {
+	struct sleep_tile now;
+	sleep_tile_read(&now, SLEEP_STATE_DIR, SLEEP_RUN_DIR);
+	if (server->sleep_tile_ms && now_ms() - server->sleep_tile_ms < 2000) {
+		return false;
+	}
+	server->sleep_tile_ms = 0;
+	bool changed = !sleep_tile_same(&now, &server->sleep_tile);
+	server->sleep_tile = now;
+	return changed;
+}
+
+static void run_detached(const char *program, const char *a1, const char *a2, const char *a3);
+
+/* The Sleep tile tapped: zrn-sleepd enable or disable, through the sudo rule
+ * for those two commands (sudoers.d/zrn-sleep-toggle). */
+static bool sleep_switch(struct zt_server *server) {
+	if (server->sleep_tile.mode == SLEEP_MISSING) {
+		return false;
+	}
+	bool on = !sleep_tile_on(&server->sleep_tile);
+	run_detached("sudo", "-n", SLEEP_CMD, on ? "enable" : "disable");
+	server->sleep_tile.mode = on ? SLEEP_ON : SLEEP_OFF;
+	server->sleep_tile.kind[0] = 0;
+	server->sleep_tile_ms = now_ms() ? now_ms() : 1;
+	wlr_log(WLR_INFO, "sleep tile: %s", on ? "enable" : "disable");
+	return true;
+}
+
 static int net_tick(void *data) {
 	struct zt_server *server = data;
 	if (!server->screen_on || server->width == 0) {
@@ -7076,7 +7112,7 @@ static int net_tick(void *data) {
 	if (pods_bar_read(&server->pods_bar)) {
 		redraw = true;
 	}
-	if (bt_state_read(server) | loc_state_read(server)) {
+	if (bt_state_read(server) | loc_state_read(server) | sleep_state_read(server)) {
 		redraw = true;
 		if (server->shade_open || server->shade_h > 0.1f) {
 			draw_shade(server);	/* its tile follows */
@@ -7284,19 +7320,24 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 	 * flashlight without zrn-flash: shown, faint, and not pretending to switch */
 	bool missing = (q == Q_ROTATION && !server->rot.enabled) || (q == Q_LOCATION && !server->loc_known) ||
 		(q == Q_FLASHLIGHT && access(TORCH_PATH, W_OK) != 0) ||
-		(q == Q_BLUETOOTH && access("/sys/class/bluetooth/hci0", F_OK) != 0);
+		(q == Q_BLUETOOTH && access("/sys/class/bluetooth/hci0", F_OK) != 0) ||
+		(q == Q_SLEEP && server->sleep_tile.mode == SLEEP_MISSING);
 	bool on = q == Q_WIFI ? server->shade_wifi : q == Q_AIRPLANE ? server->shade_airplane :
 		q == Q_DATA ? server->cell_data_on : q == Q_VIBRATE ? server->haptics_enabled :
 		q == Q_FLASHLIGHT ? server->shade_torch : q == Q_BLUETOOTH ? server->shade_bt :
-		q == Q_ROTATION ? server->rot.locked : q == Q_LOCATION ? server->shade_location : q == Q_BRIGHTNESS;
+		q == Q_ROTATION ? server->rot.locked : q == Q_LOCATION ? server->shade_location :
+		q == Q_SLEEP ? sleep_tile_on(&server->sleep_tile) : q == Q_BRIGHTNESS;
 	const struct audio_output *audio = q == Q_AUDIO ? audio_active_output(server) : NULL;
 	if (q == Q_AUDIO) {
 		on = audio != NULL;
 		missing = !audio;
 	}
-	/* on: the accent colour; off: a dark grey block */
+	/* on: the accent colour; off: a dark grey block; sleep switched off by
+	 * zrn-sleepd itself (it did not wake, say): a dark red one */
 	if (on) {
 		set_rgb(cr, server->accent);
+	} else if (q == Q_SLEEP && server->sleep_tile.mode == SLEEP_OFF_ITSELF) {
+		cairo_set_source_rgb(cr, 0.47, 0.07, 0.07);
 	} else {
 		cairo_set_source_rgb(cr, 0.122, 0.122, 0.122);
 	}
@@ -7325,6 +7366,19 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 		}
 	} else if (q == Q_AUDIO) {
 		draw_icon(cr, audio ? audio_type_of(audio)->icon : "speaker", 8 + 9, 8 + 9, 18);
+	} else if (q == Q_SLEEP) {
+		/* a crescent moon: a disc, less a disc cut from its upper right */
+		cairo_save(cr);
+		cairo_push_group(cr);
+		cairo_new_path(cr);
+		cairo_arc(cr, 8 + 9, 8 + 9, 8, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_set_operator(cr, CAIRO_OPERATOR_DEST_OUT);
+		cairo_arc(cr, 8 + 13, 8 + 5.5, 7, 0, 2 * M_PI);
+		cairo_fill(cr);
+		cairo_pop_group_to_source(cr);
+		cairo_paint(cr);
+		cairo_restore(cr);
 	} else {
 		draw_icon(cr, QUICK[q].icon, 8 + 9, 8 + 9, 18);
 	}
@@ -7335,6 +7389,13 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 		draw_text(cr, type, FONT_SEMIBOLD, 7.6, 7, h - 26, w - 10, 0, false);
 		draw_text(cr, audio ? audio->desc : server->audio_state_ok && audio_daemon_alive() ? "No output" : "Unavailable",
 			FONT_REGULAR, 8, 7, h - 15, w - 10, 0, false);
+		return;
+	}
+	if (q == Q_SLEEP && sleep_tile_note(&server->sleep_tile)) {
+		/* "SLEEP OFF", and below it why (or "Paused") */
+		draw_text(cr, sleep_tile_on(&server->sleep_tile) ? "SLEEP" : "SLEEP OFF", FONT_SEMIBOLD, 7.6,
+			7, h - 26, w - 10, 0, false);
+		draw_text(cr, sleep_tile_note(&server->sleep_tile), FONT_REGULAR, 8, 7, h - 15, w - 10, 0, false);
 		return;
 	}
 	char label[32];
@@ -9321,6 +9382,15 @@ static void shade_activate(struct zt_server *server, int index) {
 		server->rot.locked = !server->rot.locked;
 		config_keep_text("rotation_lock", server->rot.locked ? "on" : "off");
 		state_file_write(server);
+		draw_shade(server);
+		damage(server);
+		break;
+	case 100 + Q_SLEEP:
+		/* zrn-sleepd's own switch (8.47): agent mode and back */
+		if (!sleep_switch(server)) {
+			break;	/* no zrn-sleepd: the tile is drawn faint */
+		}
+		hap(server, HAP_TAP, HG_SYSTEM);
 		draw_shade(server);
 		damage(server);
 		break;

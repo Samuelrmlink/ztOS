@@ -206,10 +206,10 @@ static const struct { const char *key, *title, *about; } HAPTIC_GROUPS[] = {
 
 /* The quick actions there are, as the shell names them in `quick`. */
 static const char *const QUICK_IDS[] = { "wifi", "data", "bluetooth", "airplane", "rotation",
-	"flashlight", "location", "brightness", "settings", "vibrate", "audio", "none" };
+	"flashlight", "location", "brightness", "settings", "vibrate", "audio", "sleep", "none" };
 static const char *const QUICK_NAMES[] = { "Wi-Fi", "Mobile data", "Bluetooth", "Airplane mode",
-	"Rotation lock", "Flashlight", "Location", "Brightness", "All settings", "Vibration", "Audio", "(empty)" };
-#define N_QUICK 12
+	"Rotation lock", "Flashlight", "Location", "Brightness", "All settings", "Vibration", "Audio", "Sleep", "(empty)" };
+#define N_QUICK 13
 
 struct network {
 	char ssid[64];
