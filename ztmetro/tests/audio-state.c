@@ -260,8 +260,64 @@ static void test_slider(void) {
 	assert(st.out[1].percent == 70);
 }
 
+/* The name beside the Media slider (8.53). */
+static void test_title(void) {
+	char t[128];
+	struct audio_state st;
+	assert(parse(REAL, &st));
+	audio_output_title(&st.out[0], t, sizeof(t));
+	assert(!strcmp(t, "UE MINI BOOM"));
+	audio_output_title(&st.out[1], t, sizeof(t));
+	assert(!strcmp(t, "Phone speaker"));
+
+	/* as the phone writes it: a curly apostrophe, through \u */
+	static const char PODS[] = "{\"version\": 1, \"outputs\": [{\"name\": \"bluez_output.40_DA_5C_62_CA_1B.1\", "
+		"\"desc\": \"Samuel\\u2019s AirPods Pro\", \"kind\": \"bluetooth\", \"percent\": 41, \"mute\": false, "
+		"\"current\": true, \"playing\": false, \"address\": \"40:DA:5C:62:CA:1B\"}, "
+		"{\"name\": \"alsa_output.jack\", \"desc\": \"Built-in Audio Headphones\", \"kind\": \"headphones\", "
+		"\"percent\": 30, \"mute\": false, \"current\": false}, "
+		"{\"name\": \"alsa_output.dp\", \"desc\": \"HDMI / DisplayPort\", \"kind\": \"speaker\", \"detail\": \"hdmi\", "
+		"\"percent\": 30, \"mute\": false, \"current\": false}]}";
+	assert(parse(PODS, &st) && st.n == 3);
+	audio_output_title(&st.out[0], t, sizeof(t));
+	assert(!strcmp(t, "Samuel\xe2\x80\x99s AirPods Pro"));
+	audio_output_title(&st.out[1], t, sizeof(t));
+	assert(!strcmp(t, "Wired headphones"));
+	audio_output_title(&st.out[2], t, sizeof(t));
+	assert(!strcmp(t, "Dock / HDMI"));
+
+	/* escapes and stray spaces in a name: no gaps left (\u001b becomes a space) */
+	static const char ODD[] = "{\"version\": 1, \"outputs\": [{\"name\": \"bluez_output.1\", "
+		"\"desc\": \"  RM\\u001b 2685\\t\\n \", \"kind\": \"bluetooth\", \"current\": true}, "
+		"{\"name\": \"bluez_output.2\", \"desc\": \"bluez_output.2\", \"kind\": \"bluetooth\"}, "
+		"{\"name\": \"bluez_output.3\", \"kind\": \"bluetooth\"}, "
+		"{\"name\": \"x\", \"desc\": \"   \", \"kind\": \"tv\"}]}";
+	assert(parse(ODD, &st) && st.n == 4);
+	audio_output_title(&st.out[0], t, sizeof(t));
+	assert(!strcmp(t, "RM 2685"));
+	audio_output_title(&st.out[1], t, sizeof(t));	/* only the node's name: not a name for people */
+	assert(!strcmp(t, "Bluetooth device"));
+	audio_output_title(&st.out[2], t, sizeof(t));
+	assert(!strcmp(t, "Bluetooth device"));
+	audio_output_title(&st.out[3], t, sizeof(t));
+	assert(!strcmp(t, "Audio output"));
+
+	/* too small a buffer: cut on a character's edge, never inside one */
+	assert(parse(PODS, &st));
+	char small[8];
+	audio_output_title(&st.out[0], small, sizeof(small));	/* "Samuel" then 3 bytes of U+2019 */
+	assert(!strcmp(small, "Samuel"));
+	char fits[11];
+	audio_output_title(&st.out[0], fits, sizeof(fits));
+	assert(!strcmp(fits, "Samuel\xe2\x80\x99s"));
+	char one[1];
+	audio_output_title(&st.out[0], one, sizeof(one));
+	assert(one[0] == 0 || !strcmp(one, ""));
+}
+
 int main(void) {
 	test_real();
+	test_title();
 	test_truncated();
 	test_flipped();
 	test_malformed();
