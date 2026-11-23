@@ -80,6 +80,8 @@ class Chip(threading.Thread):
             self.tx([0x40, 0x00, 0x03, 0x00, 0x10, 0x01])
         elif p[0] == 0x20 and p[1] == 0x01:
             self.tx(bytes.fromhex("400114000" "20e020003010203022e04ff10000e45004b02"))
+        elif p[0] == 0x2F and p[1] == 0x28:
+            self.tx([0x4F, 0x28, 0x01, 0x00])
         elif p[0] == 0x20 and p[1] == 0x02:
             self.tx([0x40, 0x02, 0x02, 0x00, 0x00])
         elif p[0] == 0x21 and p[1] == 0x00:
@@ -194,7 +196,7 @@ def main():
     uid_sp = " ".join(f"{x:02x}" for x in FAKE_UID)
     tmpf = tempfile.mktemp(suffix=".txt")
     os.environ["ZTNFC_CLASSIC_FILE"] = tmpf
-    for card, want in (("ntag", ["NTAG213", "data area 144 bytes", "URI",
+    for card, want in (("ntag", ["FW_CFG accepted", "NTAG213", "data area 144 bytes", "URI",
                                  "atqa=0044", "sak=00", "field off"]),
                        ("desfire", ["DESFire GetVersion: HW vendor 04", "ats_len=6",
                                     "not an EMV card", "frame 3 UID/batch redacted"]),

@@ -509,6 +509,13 @@ def scan(dev, seconds, identify=False):
         if not r or r[3] != 0:
             log("CORE_INIT failed")
             return 1
+        # FW_CFG, owner-approved exact bytes (clock type 0, speed 0x12, req 0)
+        nci.send([0x2F, 0x28, 0x03, 0x00, 0x12, 0x00])
+        r = nci.rsp((0x0F, 0x28))
+        if r is None or bytes(r) != bytes([0x4F, 0x28, 0x01, 0x00]):
+            log(f"FW_CFG reply not 4f 28 01 00 ({'none' if r is None else hx(r)}): stop")
+            return 1
+        log("FW_CFG accepted")
         nci.send([0x20, 0x02, 0x08, 0x02, 0x00, 0x02, 0xF4, 0x01, 0x08, 0x01, 0x01])
         r = nci.rsp((0, 2))
         if not r or r[3] != 0:

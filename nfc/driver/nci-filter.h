@@ -26,7 +26,10 @@
  *     READ (30, block).
  *     Refused: WRITE (A0/A2), value ops (C0/C1/C2 decr/incr/restore,
  *       B0 transfer), HALT (50 00), and the Gen1a magic frames (40/43).
- * Never: NFCEE (GID 2), proprietary (GID 0xF), listen modes, any write.
+ *   NCI_PROP_FW_CFG: exactly 2F 28 03 00 12 00 (clock type 0, speed 0x12,
+ *     req 0 - the stock value for this board; owner-approved 2026-11-22).
+ *     No other byte, length or 0x2F opcode (rfreg 26/22/27 stay refused).
+ * Never: NFCEE (GID 2), other proprietary (GID 0xF), listen modes, writes.
  */
 #ifndef ZRN_NCI_FILTER_H
 #define ZRN_NCI_FILTER_H
@@ -140,6 +143,14 @@ static inline const char *zrn_nci_check(const unsigned char *p, unsigned int len
 		}
 	default:
 		return "only commands and data may be sent";
+	}
+
+	/* the one approved proprietary packet: FW_CFG with the board's values */
+	if ((p[0] & 0x0f) == 0x0f) {
+		if (p[0] == 0x2f && p[1] == 0x28 && plen == 3 &&
+		    q[0] == 0x00 && q[1] == 0x12 && q[2] == 0x00)
+			return 0;
+		return "proprietary command not allowed";
 	}
 
 	/* control commands: GID p[0] & 0x0f, OID p[1] & 0x3f */

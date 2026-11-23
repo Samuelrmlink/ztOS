@@ -90,6 +90,8 @@ static DECLARE_WAIT_QUEUE_HEAD(rxq);
 static u8 active_proto;			/* from RF_INTF_ACTIVATED_NTF */
 static bool chip_on, rf_running;
 static struct delayed_work rf_watchdog;
+static struct delayed_work clk_probe;	/* logs CLK_REQ transitions */
+static int last_clkreq = -1;
 
 /* ---------- chip I/O ---------- */
 
@@ -171,6 +173,20 @@ static void rf_watchdog_fn(struct work_struct *w)
 	mutex_unlock(&dev_lock);
 }
 
+static void clk_probe_fn(struct work_struct *w)
+{
+	int v;
+
+	if (!chip_on)
+		return;
+	v = gpiod_get_value(g_clkreq);
+	if (v != last_clkreq) {
+		pr_info("zrn-nfc: CLK_REQ -> %d\n", v);
+		last_clkreq = v;
+	}
+	schedule_delayed_work(&clk_probe, msecs_to_jiffies(100));
+}
+
 /* ---------- clock ---------- */
 
 static int clk_on(void)
@@ -213,6 +229,7 @@ static void session_end(void)
 	 * watchdog that runs late finds the chip already off */
 	cancel_delayed_work(&rf_watchdog);
 	chip_off();
+	cancel_delayed_work(&clk_probe);
 	if (irq_num >= 0) {
 		free_irq(irq_num, NULL);
 		irq_num = -1;
@@ -270,6 +287,8 @@ static int nfc_open(struct inode *ino, struct file *f)
 	irq_num = gpiod_to_irq(g_irq);
 	pr_info("zrn-nfc: session open: CLK_REQ=%d IRQ=%d\n",
 		gpiod_get_value(g_clkreq), gpiod_get_value(g_irq));
+	last_clkreq = -1;
+	schedule_delayed_work(&clk_probe, 0);
 	in_use = true;
 	mutex_unlock(&dev_lock);
 	return 0;
@@ -327,6 +346,9 @@ static ssize_t nfc_write(struct file *f, const char __user *ubuf, size_t len, lo
 	}
 	if (ret)
 		goto out;
+	if (pkt[0] == 0x2f && pkt[1] == 0x28)
+		pr_info("zrn-nfc: FW_CFG sent %*ph (CLK_REQ=%d)\n", (int)len, pkt,
+			gpiod_get_value(g_clkreq));
 	if (zrn_nci_is_discover(pkt)) {
 		rf_running = true;
 		mod_delayed_work(system_wq, &rf_watchdog, msecs_to_jiffies(RF_MAX_MS));
@@ -402,6 +424,7 @@ static int __init zrn_nfc_init(void)
 	int ret;
 
 	INIT_DELAYED_WORK(&rf_watchdog, rf_watchdog_fn);
+	INIT_DELAYED_WORK(&clk_probe, clk_probe_fn);
 	clkout = ioremap(CLKOUT1_PHYS, 4);
 	if (!clkout)
 		return -ENOMEM;
@@ -441,6 +464,7 @@ static void __exit zrn_nfc_exit(void)
 {
 	misc_deregister(&nfc_misc);	/* no open file can remain: module refcount */
 	cancel_delayed_work_sync(&rf_watchdog);
+	cancel_delayed_work_sync(&clk_probe);
 	put_gpios();
 	platform_device_unregister(ctl_pdev);
 	gpiod_remove_lookup_table(&ctl_gpios);
