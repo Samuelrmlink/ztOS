@@ -1103,6 +1103,11 @@ is the prime suspect for the dead RF front-end (CLK_REQ never rose in any run).
 
 ### What the HAL builds (from source / disassembly)
 
+> **Correction (2026-11-22, see "FW_CFG reply decoded" below):** the value
+> compared to `0x70` is **not** the firmware major. It is the bootloader
+> *product code* (`nfc_hal_info+144`), and S3NRN82 is product `0x82`. So stock
+> sends the **1-byte** form `2F 28 01 12` on this chip, not `2F 28 03 00 12 00`.
+
 - The packet starts `2F 28` (`strh #0x282f` → little-endian `2f 28`): GID 0x0F
   proprietary, OID 0x28 = `NCI_PROP_FW_CFG`.
 - The payload length and fields depend on the chip's firmware major
@@ -1235,6 +1240,182 @@ The HAL's own evidence leans towards "this chip does not take FW_CFG":
    is where flash writes happen. It would tell us whether stock sends FW_CFG
    on this chip, and in which form.
 3. **Skip FW_CFG** and go to the rfreg stream (approved, on hold).
+
+## FW_CFG reply decoded (host-side analysis, 2026-11-22; no device access)
+
+This is static analysis of the same HAL copy (`nfc_nci_sec.so`, md5
+`e3f3ebb0…`, disassembled with the aarch64 toolchain's `objdump`) plus
+Samsung's kernel driver. It **supersedes "Reading the reply" and "Options"
+above.** The short version is that our packet had the wrong length for this
+chip. The chip said so, and stock sends a 4-byte packet.
+
+### 1. `4F 28 02 01 00` = rejected: "Command Length Error"
+
+The FW_CFG response parser is in `nfc_hal_fw_sm` (from disassembly):
+
+- `0x1fa2c`: `(pkt[0] & ~0x10) == 0x4F` (the PBF bit is masked).
+- `0x1fa3c`: `(pkt[1] & 0x3F) == 0x28`.
+- `0x1fa4c`: `w4 = pkt[3]`, which is the **first payload byte**. The payload
+  length byte, `pkt[2]`, is never checked.
+- `0x1fa50`–`0x1fa6c`: a jump table at `.rodata 0xbc0e` switches on that byte:
+
+| `pkt[3]` | Target | HAL log string | Meaning |
+|---|---|---|---|
+| 0x00 | `0x1fa70` | `RF clock setup success!!` | accepted |
+| **0x01** | `0x20048` | **`Command Length Error!`** | **rejected: wrong payload length** |
+| 0x02 | `0x20064` | `Clock Mismatch!` | for product ≥ 0x70, stock power-cycles and resends FW_CFG (`0x20194`–`0x20208`, then `0x20448`) |
+| 0x03 | `0x20090` | `Please, Check the Clock Value. Current Clock Val : %d` | `%d` = `pkt[4]` (`0x20098`), so a second payload byte is normal |
+| 0x04, >0x05 | `0x200c0` | `Failed to config FW, status: %d` | — |
+| 0x05 | `0x200e0` | `This version of bootloader does not support FW_CFG!!` and `you should check your RF clock source by yourself` | — |
+
+Our payload was `01 00`, so the first byte is **0x01 = Command Length
+Error**. The second byte is only a detail byte (the HAL reads it only for
+status 3). This is the mainline reading (first byte = status) with a
+Samsung-specific status code. It is **not** "accepted with a leading info
+byte". Confidence: **high**, because this is the HAL's own parser for exactly
+this response.
+
+### 2. Stock *does* send FW_CFG on this chip, in the 1-byte form `2F 28 01 12`
+
+The argument that `hal_nci_send_prop_fw_cfg(u8)` compares to 0x70 is
+`nfc_hal_info+144`. It is **not** the firmware version from
+`CORE_RESET`/`CORE_INIT`.
+
+- **Where +144 comes from.** In `nfc_hal_open_sm` (`0x1d0d8`–`0x1d124` and
+  `0x1d6e0`–`0x1d774`), the HAL fills `+144` from the bootloader-info record
+  `*p_bl`. A helper at `0x1e128` sets that record's first word from the
+  4 bootloader version bytes. The HAL logs it as `bl->product 0x%03X!!: %s`.
+- **The product table.** It is at `.data.rel.ro 0x28050`: pairs of
+  {product code, name}, decoded from the raw RELR addends:
+
+  | Code | Name |
+  |---|---|
+  | 0x30 | S3FRNR3 |
+  | 0x50 | S3FWRN5 |
+  | 0x60 | S3FWRN5P |
+  | 0x70 | S3FWRN7 |
+  | 0x74 | S3NRN74 |
+  | 0x80 | S3FWRN8 |
+  | 0x81 | S3FWRN81 |
+  | **0x82** | **S3NRN82** |
+  | 0x84 | S3FWRN84 |
+  | 0x85 | S3NSEN4 |
+  | 0x86 | RN4V |
+  | 0x87 | SN4V |
+
+  0x10 is the "unknown / F/W Direct Mode" value (`0x1d1ac`, string
+  `F/W Direct Mode!`).
+- **Who sends FW_CFG.** In `nfc_hal_open_sm`, at `0x1d9e0`–`0x1da10`: after the
+  bootinfo read, the HAL calls `device_set_mode(1)` (NCI mode). Then, **if
+  product > 0x6f**, it sends FW_CFG (state 0x21, flag bit 5) **before**
+  `CORE_RESET`; otherwise it sends `CORE_RESET` directly. On a
+  `CORE_INIT` timeout, `nci_init_timeout` (`0x17d90`) power-cycles and sends
+  FW_CFG again (`Try send clk config!`).
+- **Which form.** In `hal_nci_send_prop_fw_cfg` (`0x17a28`), `cmp w20, #0x70`
+  is at `0x17a60`. If the product is **≥ 0x70**:
+  - payload length = 1 (`0x17a94`/`0x17aac`);
+  - payload = `FW_CFG_CLK_SPEED`, read via `get_clock_info` and then
+    `get_config_int` (`0x17a9c`, `0x17b28`), into byte 3;
+  - the packet is sent as `len + 3` = 4 bytes (`0x17c4c`–`0x17c5c`).
+
+  The 3-byte `CLK_TYPE, CLK_SPEED, CLK_REQ` form (`0x17ad4`…) is only for
+  products < 0x70: S3FWRN5/5P and older. That matches mainline `s3fwrn5`,
+  whose `struct nci_prop_fw_cfg_cmd` is the 3-byte form.
+
+So on this board stock sends **`2F 28 01 12`** (`FW_CFG_CLK_SPEED=0x12` from
+`libnfc-sec-vendor.conf`). An S3NRN82 firmware that expects one byte and gets
+three answers "length error", which is exactly what we saw. The earlier
+"major 0x45 < 0x70" reading was a misidentification of the argument.
+
+Confidence:
+
+- **High** that the gate is the bootloader product code, not the firmware
+  major, and that S3NRN82 = 0x82 maps to the 1-byte form.
+- **Medium-high** that *this* chip's bootloader classifies as 0x82. We cannot
+  read the bootinfo without bootloader mode, which is not approved. But the
+  vendor firmware and rfreg files are `s3nrn82`, every S3NRN8x code is
+  ≥ 0x80, and the chip's own "Command Length Error" fits.
+
+### 3. How stock gets the clock running
+
+Stock does not skip FW_CFG, so there is no separate clock bring-up. The
+clock path is:
+
+- **Kernel (`sec_nfc.c`).** Source: LineageOS
+  `android_kernel_samsung_universal9810`, lineage-17.1,
+  `drivers/nfc/sec_nfc.c`.
+  - Probe, lines 942–955: with `sec-nfc,nfc_ap_clk` set, it gets
+    `clk_get(dev, "oscclk_nfc")` (= CLKOUT1, PMU `0x14060A0C`, see stage 2a).
+    It also registers a rising- and falling-edge IRQ on `clk_req-gpio`
+    (gpa2-6), then disables that IRQ.
+  - `sec_nfc_set_mode()`, lines 502–545. On entering FIRMWARE or BOOTLOADER
+    mode it:
+    1. sets VEN on after `SEC_NFC_VEN_WAIT_TIME`, which is 150 ms on this
+       build (`sec_nfc.h` line 37);
+    2. calls `sec_nfc_clk_ctl_enable()` (lines 469–482). That only *arms*
+       the CLK_REQ IRQ: `clk_state = false`, then `enable_irq`.
+  - `sec_nfc_clk_irq_thread()`, lines 442–467: the clock follows CLK_REQ.
+    On a rising edge it calls `clk_prepare_enable(oscclk_nfc)`; on a falling
+    edge, `clk_disable_unprepare`.
+  - The AP never turns the clock on unasked. **The chip has to raise
+    CLK_REQ, and it is FW_CFG that tells it which clock it has.**
+- **PMIC.** No PMIC clock is involved. The S2MPS18 only supplies LDO38
+  (`VDD_NFC_1P8`). The reference is the SoC's CLKOUT1 pad (TCXO, SEL=0),
+  as found in stage 2a.
+- **Consequence for us.** CLK_REQ stayed 0 in every run, and the only FW_CFG
+  we sent was rejected. So the chip has never been told its clock in any of
+  our sessions. That fits "field on, nothing detected" better than missing
+  RF registers. The rfreg block is versioned and was very likely written by
+  stock already, so it stays on hold.
+
+Confidence: **high** for the kernel mechanism, which is direct source.
+**Medium** that a correct FW_CFG alone restores card detection. It is the
+best-supported hypothesis, but it is untested.
+
+### 4. Recommended next on-device step (for owner approval; not run)
+
+This is the same NCI reader session as before, with one changed proprietary
+packet, sent in stock's order. There is no bootloader mode, no firmware
+write, no rfreg and no SE.
+
+1. Open path as now: LDO38 on, 1 s settle, VEN on, 150 ms. **Ungate CLKOUT1
+   before VEN on** (the already-approved `0x14060A0C` = 0, restored to 1 at
+   close), rather than just before `RF_DISCOVER`.
+   - Stock has the clock available as soon as the chip raises CLK_REQ.
+   - Status `0x02 Clock Mismatch` suggests the chip checks the clock it
+     measures, so a gated pad could fail FW_CFG.
+   - Log the CLK_REQ level before and after the FW_CFG reply.
+2. **First NCI packet**, before `CORE_RESET`, as stock does in
+   `nfc_hal_open_sm`:
+
+   ```
+   TX 2F 28 01 12          NCI_PROP_FW_CFG, payload length 1, CLK_SPEED = 0x12
+   expect 4F 28 01 00      (or 4F 28 02 00 xx: the HAL accepts any length, status = first payload byte)
+   ```
+
+   Continue only if the first payload byte is `0x00`. On anything else,
+   stop, power off and report. If the reply is `02` (Clock Mismatch), stock
+   would power-cycle and retry; we stop instead.
+3. Then the unchanged approved sequence:
+   - `CORE_RESET` `20 00 01 00`, expecting `40 00 03 00 10 01`;
+   - `CORE_INIT` `20 01 00`;
+   - `CORE_SET_CONFIG`;
+   - the ISO-DEP-only `RF_DISCOVER_MAP`;
+   - `RF_DISCOVER` A/B/F/V;
+   - a 20 s identify-only poll with the Chameleon.
+4. Restore as usual: field off, VEN off, CLKOUT1 gated (1), LDO38 off (0x2c).
+
+Code impact (not made here):
+
+- `nci-filter.h` should swap its single allowed 0x2F packet from
+  `2F 28 03 00 12 00` to exactly `2F 28 01 12`, with `plen == 1`.
+- ztnfc should send it before `CORE_RESET`, and accept `4F 28` with a first
+  payload byte of `0x00`.
+- Nothing else 0x2F becomes allowed.
+
+Risk: the same class as the approved packet, namely the board's stock value
+in stock's form, sent on every stock open. It is volatile per the HAL flow:
+stock resends it on every open and after every `CORE_INIT` timeout.
 
 ## Biggest unknowns
 
