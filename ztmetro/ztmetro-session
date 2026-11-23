@@ -12,17 +12,13 @@ if systemctl --user -q is-active ztos-waydroid-session.service 2>/dev/null; then
 	(i=0; while [ ! -S "$XDG_RUNTIME_DIR/wayland-0" ] && [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done
 	 sleep 2; systemctl --user try-restart ztos-waydroid-session.service) >/dev/null 2>&1 &
 fi
-# ztRetrofit's style for the whole session, from the config: the shell and
-# every app started in it read ZTRF_SHELL_STYLE, so the two never meet.
-style=$(sed -n 's/^[[:space:]]*style[[:space:]]*=[[:space:]]*\([A-Za-z0-9]*\).*/\1/p' \
-	"${XDG_CONFIG_HOME:-$HOME/.config}/ztmetro/config" 2>/dev/null | tail -n 1)
-case "$style" in dotmatrix|1) style=dotmatrix ;; *) style=metro ;; esac
-export ZTRF_SHELL_STYLE=$style
 # Optional variables for the shell, one VAR=value per line (e.g. ZTMETRO_PERFLOG=1
 # while measuring); absent normally.
 envf=${XDG_CONFIG_HOME:-$HOME/.config}/ztmetro/env
 [ -f "$envf" ] && { set -a; . "$envf"; set +a; }
-systemctl --user set-environment ZTRF_SHELL_STYLE=$style >/dev/null 2>&1 || true
+# (the DotMatrix style is gone: a variable left from an older session goes too)
+unset ZTRF_SHELL_STYLE
+systemctl --user unset-environment ZTRF_SHELL_STYLE >/dev/null 2>&1 || true
 # Not exec'd: when the shell ends, how it ended goes to the end of its log
 # (a signal shows as 128 + its number, e.g. 139 for SIGSEGV, 134 for SIGABRT).
 # greetd sees the session end when this script does, as before.

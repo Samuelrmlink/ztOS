@@ -51,7 +51,7 @@ The PIN length is known **before** the owner types, so the dots can be drawn as 
 The success branch is:
 
 ```c
-if (dm_swiped || (!retro_on(server) && !cancelled && p->py - p->py0 < -server->height / 5.0)) {
+if (!cancelled && p->py - p->py0 < -server->height / 5.0) {
 	server->locked = false;
 	...
 ```
@@ -81,7 +81,6 @@ if (... the same swipe test ...) {
   4. a 3×4 pad, the same as in Settings (`settings/passcodepage.h`, `pc_key`): flat filled keys (fg at alpha 0.14), digits in Semilight 30 pt, keys 62 pt tall with 6 pt gaps, and `delete` and `ok` on the bottom row. A pressed key turns the accent colour on press, not on release. Each press plays `ui_sound(UIS_KEY)` and the `HAP_TAP` haptic.
   5. Below the pad, a text button: **`emergency call`**. It is always present, and works even while a wait is running.
 - **Draw it on the GPU,** like the other lock layers (`layer_draw`): one `pc_layer` drawn once per change, with no per-frame CPU raster ([[ztosmobile-gpu-everything]]).
-- **Under DotMatrix** (`retro_on`), the pad is dots: dot-frame keys, as `zmc_button` draws them. The two styles never mix.
 - **Auto submit:** when `strlen(pc_typed) == pc_length`, send `verify` without waiting for `ok`.
 - **Back key or swipe down:** the pad closes and the lock drops back. Wipe the typed digits.
 

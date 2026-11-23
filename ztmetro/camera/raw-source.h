@@ -54,7 +54,7 @@ static struct {
 	unsigned out_tex, fbo;
 	int out_w, out_h;
 	int prog, u_size, u_unpack, u_first, u_gain, u_ccm, u_black, u_shade;
-	int disp, d_pitch, d_step;
+	int disp, d_step;
 	/* the loops */
 	float gain[3];
 	float ccm[9];
@@ -426,22 +426,15 @@ static bool raw_gl(void) {
 		" v=mix(v*12.92,1.055*pow(v,vec3(.41667))-.055,step(.0031308,v));"
 		" v=mix(v,v*v*(3.-2.*v),.35);"		/* the light S curve a phone's tone map gives */
 		" gl_FragColor=vec4(v,1.); }";
-	/* the finished frame on the screen: a light unsharp mask, or DotMatrix's dots */
+	/* the finished frame on the screen: a light unsharp mask */
 	static const char fd[] =
-		"#extension GL_OES_standard_derivatives : enable\n"
 		"precision highp float; varying vec2 uv; uniform sampler2D frame;"
-		"uniform float pitch; uniform vec2 step1;"
-		"void main(){ if(pitch<=0.0){"
+		"uniform vec2 step1;"
+		"void main(){"
 		"  vec3 c=texture2D(frame,uv).rgb;"
 		"  vec3 b=texture2D(frame,uv+vec2(step1.x,0.)).rgb+texture2D(frame,uv-vec2(step1.x,0.)).rgb"
 		"    +texture2D(frame,uv+vec2(0.,step1.y)).rgb+texture2D(frame,uv-vec2(0.,step1.y)).rgb;"
-		"  gl_FragColor=vec4(clamp(c+(c-b*.25)*.5,0.,1.),1.); return; }"
-		/* DotMatrix: a lattice of dots, each as bright as what is under it */
-		" vec2 cell=floor(gl_FragCoord.xy/pitch); vec2 mid=(cell+0.5)*pitch;"
-		" float r=length(gl_FragCoord.xy-mid)/(pitch*0.5);"
-		" vec2 p=uv+(mid-gl_FragCoord.xy)*vec2(dFdx(uv.x)+dFdy(uv.x),dFdx(uv.y)+dFdy(uv.y));"
-		" vec3 c=texture2D(frame,p).rgb; float y=dot(c,vec3(0.3,0.59,0.11));"
-		" gl_FragColor=vec4(vec3(y*(1.0-smoothstep(0.55,0.8,r))),1.0); }";
+		"  gl_FragColor=vec4(clamp(c+(c-b*.25)*.5,0.,1.),1.); }";
 	GLuint p = raw_program(vs, fs), d = raw_program(vs, fd);
 	if (!p || !d) {
 		raw.prog = -1;
@@ -456,7 +449,6 @@ static bool raw_gl(void) {
 	raw.u_black = glGetUniformLocation(p, "black");
 	raw.u_shade = glGetUniformLocation(p, "shade");
 	raw.disp = d;
-	raw.d_pitch = glGetUniformLocation(d, "pitch");
 	raw.d_step = glGetUniformLocation(d, "step1");
 	return true;
 }
@@ -651,7 +643,6 @@ static void raw_draw(void) {
 		-1, -1, bottom, v1,
 		 1, -1, bottom, v0,
 	};
-	glUniform1f(raw.d_pitch, zmc.style == ZMC_STYLE_DOTMATRIX ? (float)(zmg_dot_pitch * zmc.scale) : 0.0f);
 	glUniform2f(raw.d_step, 1.0f / raw.info.w, 1.0f / raw.info.h);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), q);

@@ -228,9 +228,8 @@ static cairo_surface_t *surface_oriented(cairo_surface_t *src, int o) {
 	return out;
 }
 
-/* A part of src (sx, sy, sw, sh) to tw x th, by plain bilinear. Not Cairo: under
- * DotMatrix its painting goes through the style's wrappers, which are not this
- * thread's to use. */
+/* A part of src (sx, sy, sw, sh) to tw x th, by plain bilinear, off the main
+ * thread. */
 static cairo_surface_t *surface_resampled(cairo_surface_t *src, double sx, double sy, double sw, double sh, int tw, int th) {
 	cairo_surface_t *out = surface_new(tw, th);
 	if (!out) return NULL;
@@ -1100,10 +1099,6 @@ static void paint_cell(cairo_t *cr, struct photo *p, double x, double y, double 
 	cairo_rectangle(cr, x, y, size, size);
 	cairo_fill(cr);
 	if (!in_render || !p || p->slot < 0 || !slots[p->slot].cpu) return;
-	if (zmc.style == ZMC_STYLE_DOTMATRIX) {
-		zmc_picture(cr, slots[p->slot].cpu, x, y, size);
-		return;
-	}
 	cairo_save(cr);
 	cairo_translate(cr, x, y);
 	cairo_rectangle(cr, 0, 0, size, size);

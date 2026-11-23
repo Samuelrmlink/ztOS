@@ -16,7 +16,6 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <ctype.h>
-#include "../retro/dm-chrome.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,7 +81,6 @@ enum action {
 	ACT_BACK,
 	ACT_ACCENT,
 	ACT_ACCENT_OPEN,	/* the theme page's box: the picker swivels in over it */
-	ACT_PALETTE,	/* the DotMatrix style's palette, as the accent is Metro's */
 	ACT_WALL,		/* arg: 0 none, else the photo walls[arg - 1] */
 	ACT_WALL_OPEN,		/* arg: WALL_TARGET_, whose photo to choose */
 	ACT_WALL_CAT,		/* arg: the category to open (a folder of photos) */
@@ -93,8 +91,6 @@ enum action {
 	ACT_BT_MENU,		/* an item of a held device's menu */
 	ACT_BT_MENU_CLOSE,
 	ACT_COLUMNS,
-	ACT_STYLE,		/* arg: the shell's style to apply, 0 Metro, 1 DotMatrix */
-	ACT_STYLE_APPLY,
 	ACT_SCALE_APPLY,
 	ACT_THEME,		/* arg: Metro's theme, 0 dark, 1 light */
 	ACT_FROST,		/* the frosted diffusion switch, toggled */
@@ -239,12 +235,9 @@ static const struct { const char *name; unsigned color; } ACCENTS[] = {
 static struct {
 	/* Settings state */
 	int accent;
-	int palette;		/* dotmatrix_palette */
 	char start_wall[256], lock_wall[256];	/* the photos, or "" */
 	int wall_target;			/* WALL_TARGET_: whose photo the picker chooses */
 	int columns;
-	int style;				/* ztRetrofit's look: 0 Metro, 1 DotMatrix */
-	int style_pending;			/* the one chosen, until it is applied */
 	int scale_pending;			/* the same for the display's scale */
 	int theme;				/* Metro theme: 0 dark (ZMC_THEME_DARK), 1 light */
 	int frost;				/* config `frost`: the frosted diffusion of the shell's and the apps' bars, 1 on */
@@ -450,9 +443,6 @@ static void config_load(void) {
 			app.fs_bars_idx = n <= 2 ? 0 : n <= 3 ? 1 : n <= 5 ? 2 : 3;
 		} else if (strcmp(key, "nav_center_icon") == 0) {
 			int n = atoi(val); app.nav_icon_idx = n < 0 ? 0 : n > 4 ? 4 : n;
-		} else if (strcmp(key, "dotmatrix_palette") == 0) {
-			int n = isdigit((unsigned char)val[0]) ? atoi(val) : dm_palette_index(val);
-			app.palette = n < 0 || n >= DM_PALETTES ? 0 : n;
 		} else if (strcmp(key, "accent") == 0) {
 			for (int i = 0; i < N_ACCENTS; i++) {
 				if (strcmp(ACCENTS[i].name, val) == 0) {
@@ -475,8 +465,6 @@ static void config_load(void) {
             app.media_vol = atoi(val) < 0 ? 0 : atoi(val) > 100 ? 100 : atoi(val);
         } else if (strcmp(key, "columns") == 0) {
 			app.columns = atoi(val);
-		} else if (strcmp(key, "style") == 0) {
-			app.style = strcmp(val, "dotmatrix") == 0 || strcmp(val, "1") == 0;
 		} else if (strcmp(key, "theme") == 0) {
 			app.theme = strcmp(val, "light") == 0 || strcmp(val, "1") == 0;
 		} else if (strcmp(key, "frost") == 0) {
@@ -599,7 +587,6 @@ static void config_load(void) {
 	perf_load();
 	auto_load();
 	config_remember_loaded();
-	app.style_pending = app.style;
 	app.scale_pending = app.scale_idx;
 }
 
@@ -820,8 +807,6 @@ static void config_format(void) {
 	KEY("lock_wallpaper", "%s", app.lock_wall);
 	KEY("nav_center_icon", "%d", app.nav_icon_idx);
 	KEY("display_size", "%s", sizes[app.scale_idx]);
-	KEY("style", "%s", app.style ? "dotmatrix" : "metro");
-	KEY("dotmatrix_palette", "%s", dm_palette_names[app.palette]);
 	KEY("theme", "%s", app.theme ? "light" : "dark");
 	KEY("frost", "%d", app.frost ? 1 : 0);
 	static const int fs_bars_secs[] = { 2, 3, 5, 10 };
@@ -1701,8 +1686,7 @@ static int wall_cols(void) {
 
 /* the grid's cells and photos, on the GPU over the page: each swivels in by
  * itself, staggered, when the category opens and out when it leaves, then the
- * page turns back. A cell is a grey quad; its photo fades in over it when made.
- * DotMatrix has no turn: each cell fades, as dots do not take perspective. */
+ * page turns back. A cell is a grey quad; its photo fades in over it when made. */
 static cairo_surface_t *wall_grey;
 
 static void wall_overlay(int page) {
@@ -1719,7 +1703,7 @@ static void wall_overlay(int page) {
 	const char *current = app.wall_target == WALL_TARGET_LOCK ? app.lock_wall : app.start_wall;
 	unsigned col = ACCENTS[app.accent].color;
 	double ar = ((col >> 16) & 255) / 255.0, ag = ((col >> 8) & 255) / 255.0, ab = (col & 255) / 255.0;
-	bool leaving = wall_leave_at != 0, dots = zmc.style == ZMC_STYLE_DOTMATRIX;
+	bool leaving = wall_leave_at != 0;
 	uint32_t t0 = leaving ? wall_leave_at : wall_open_at;
 	if ((int32_t)(now - t0) < 0) return;	/* the page is still turning */
 	for (int i = 1; i <= cat_count[c]; i++) {
@@ -1731,10 +1715,6 @@ static void wall_overlay(int page) {
 		if (own >= run && leaving) continue;	/* gone */
 		double e = zb_swivel_ease(own / run, !leaving);
 		double deg = leaving ? ZB_SWIVEL_OUT_DEG * e : ZB_SWIVEL_IN_DEG * (1 - e), alpha = 1;
-		if (dots) {
-			alpha = leaving ? 1 - e : e;
-			deg = 0;
-		}
 		if (alpha > 0) wall_card(wall_grey, 1, x, y, tw, th, deg, alpha, -1);
 		/* the photo, over its cell, from when it arrived */
 		if (wall_state[k] != 2 || (int32_t)(now - wall_arrive[k]) < 0) continue;
@@ -1865,36 +1845,7 @@ static double draw_wall_row(cairo_t *cr, double y, const char *title, const char
 /* The accent picker, as the phone's: four swatches a row, each row a strip
  * that the page change turns in on its own, 33 ms after the one above
  * (TurnstileFeatherList in UIXMobile; the core's ROW_STAGGER_MS). */
-/* The DotMatrix style's palettes in the accent picker's place: each its two
- * colours as dots, its name under them. */
-static double draw_palettes(cairo_t *cr) {
-	double y = zmc_header(cr, "palettes");
-	double gap = 10, side = (zmc.width - 2 * MARGIN - 2 * gap) / 3;
-	for (int i = 0; i < DM_PALETTES; i++) {
-		double x = MARGIN + (i % 3) * (side + gap), sy = y + (i / 3) * (side + 34 + gap);
-		dm_map_raw++;	/* its own colours, not the palette in use */
-		zmc_set_rgb(cr, dm_palettes[i][0]);
-		cairo_rectangle(cr, x, sy, side, side * 0.66);
-		cairo_fill(cr);
-		zmc_set_rgb(cr, dm_palettes[i][1]);
-		cairo_rectangle(cr, x, sy + side * 0.72, side, side * 0.28);
-		cairo_fill(cr);
-		dm_map_raw--;
-		cairo_set_source_rgb(cr, i == app.palette ? 1 : 0.6, i == app.palette ? 1 : 0.6, i == app.palette ? 1 : 0.6);
-		zmc_text(cr, dm_palette_names[i], FONT_REGULAR, 14, x, sy + side + 6, 0);
-		if (i == app.palette) {
-			cairo_set_source_rgb(cr, 1, 1, 1);
-			cairo_set_line_width(cr, 3);
-			cairo_rectangle(cr, x - 4, sy - 4, side + 8, side + 30);
-			cairo_stroke(cr);
-		}
-		zmc_add_hit(x, sy, side, side + 30, ACT_PALETTE, i);
-	}
-	return y + 2 * (side + 34 + gap) + 20;
-}
-
 static double draw_accents(cairo_t *cr) {
-	if (zmc.style == ZMC_STYLE_DOTMATRIX) return draw_palettes(cr);
 	double y = zmc_header(cr, "accents");
 	double gap = 10, side = (zmc.width - 2 * MARGIN - 3 * gap) / 4;
 	int rows = (N_ACCENTS + 3) / 4;
@@ -1947,38 +1898,22 @@ static void accent_cell(cairo_t *cr, int i, double w, double h) {
 	}
 }
 
-static void palette_cell(cairo_t *cr, int i, double w, double h) {
-	dm_map_raw++;	/* its own colours, not the palette in use */
-	zmc_set_rgb(cr, dm_palettes[i][0]);
-	cairo_rectangle(cr, 4, 4, w - 8, w * 0.62);
-	cairo_fill(cr);
-	zmc_set_rgb(cr, dm_palettes[i][1]);
-	cairo_rectangle(cr, 4, 4 + w * 0.68, w - 8, w * 0.26);
-	cairo_fill(cr);
-	dm_map_raw--;
-	double k = i == app.palette ? 1 : 0.6;
-	cairo_set_source_rgb(cr, k, k, k);
-	zmc_text(cr, dm_palette_names[i], FONT_REGULAR, 14, 4, w + 4, 0);
-}
-
 /* the box, lit: the accent behind what it says */
 static void accent_box(cairo_t *cr, double w, double h) {
-	bool dots = zmc.style == ZMC_STYLE_DOTMATRIX;
 	zmc_accent(cr);
 	cairo_rectangle(cr, 0, 0, w, h);
 	cairo_fill(cr);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, dots ? dm_palette_names[app.palette] : ACCENTS[app.accent].name, FONT_REGULAR, 16, 42, 10, 0);
+	zmc_text(cr, ACCENTS[app.accent].name, FONT_REGULAR, 16, 42, 10, 0);
 }
 
 static void accent_board_open(void) {
-	bool dots = zmc.style == ZMC_STYLE_DOTMATRIX;
-	double gap = dots ? 10 : 9, cols = dots ? 3 : 4;
+	double gap = 9, cols = 4;
 	double side = (zmc.width - 2 * MARGIN - (cols - 1) * gap) / cols;
-	struct zmc_board b = { .count = dots ? DM_PALETTES : N_ACCENTS, .cols = (int)cols,
-		.x0 = MARGIN, .top = 46, .cell_w = side, .cell_h = dots ? side + 30 : side, .gap = gap,
-		.draw_cell = dots ? palette_cell : accent_cell, .action = dots ? ACT_PALETTE : ACT_ACCENT,
-		.label = dots ? "PALETTES" : "ACCENTS", .picker = true, .draw_box = accent_box,
+	struct zmc_board b = { .count = N_ACCENTS, .cols = (int)cols,
+		.x0 = MARGIN, .top = 46, .cell_w = side, .cell_h = side, .gap = gap,
+		.draw_cell = accent_cell, .action = ACT_ACCENT,
+		.label = "ACCENTS", .picker = true, .draw_box = accent_box,
 		.box_x = MARGIN, .box_y = accent_box_y - zmc.scroll, .box_w = zmc.width - 2 * MARGIN, .box_h = 42,
 		.closed = accent_closed };
 	zmc_board_open(&b);
@@ -1999,35 +1934,11 @@ static double restart_warning(cairo_t *cr, double y, bool differs, int action) {
 	return y + 59;
 }
 
-/* ztRetrofit's styles: the same shell, the same apps, another look. The two
- * never share a screen, so nothing happens until it is applied. */
-static double draw_style(cairo_t *cr) {
-	double y = zmc_header(cr, "shell style");
-	static const char *const styles[] = { "Metro", "DotMatrix" };
-	double gap = 8;
-	for (int k = 0; k < 2; k++) {
-		double btn_w = (zmc.width - 2 * MARGIN - gap) / 2.0;
-		double bx = MARGIN + k * (btn_w + gap);
-		if (app.style_pending == k) {
-			zmc_set_rgb(cr, ACCENTS[app.accent].color);
-		} else {
-			cairo_set_source_rgb(cr, 0.18, 0.18, 0.18);
-		}
-		cairo_rectangle(cr, bx, y, btn_w, 36);
-		cairo_fill(cr);
-		cairo_set_source_rgb(cr, 1, 1, 1);
-		zmc_text(cr, styles[k], FONT_REGULAR, 13, bx + 10, y + 9, 0);
-		zmc_add_hit(bx, y, btn_w, 36, ACT_STYLE, k);
-	}
-	y += 56;
-	return restart_warning(cr, y, app.style_pending != app.style, ACT_STYLE_APPLY) + 20;
-}
-
 static double draw_theme(cairo_t *cr) {
 	double y = zmc_header(cr, "customization");
 	char detail[128];
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, zmc.style == ZMC_STYLE_DOTMATRIX ? "Palette" : "Accent colour", FONT_REGULAR, 13.5, MARGIN, y, 0);
+	zmc_text(cr, "Accent colour", FONT_REGULAR, 13.5, MARGIN, y, 0);
 	/* Windows Phone's list picker, collapsed: the box shows the choice and
 	 * opens the full-screen picker (UIXMobile!ListPicker in full mode) */
 	y += 20;
@@ -2036,31 +1947,23 @@ static double draw_theme(cairo_t *cr) {
 	cairo_set_line_width(cr, 2);
 	cairo_rectangle(cr, MARGIN + 1, y + 1, zmc.width - 2 * MARGIN - 2, 40);
 	cairo_stroke(cr);
-	if (zmc.style == ZMC_STYLE_DOTMATRIX) dm_map_raw++;
-	zmc_set_rgb(cr, zmc.style == ZMC_STYLE_DOTMATRIX ? dm_palettes[app.palette][0] : ACCENTS[app.accent].color);
+	zmc_set_rgb(cr, ACCENTS[app.accent].color);
 	cairo_rectangle(cr, MARGIN + 10, y + 10, 22, 22);
 	cairo_fill(cr);
-	if (zmc.style == ZMC_STYLE_DOTMATRIX) dm_map_raw--;
 	zmc_fg(cr);
-	zmc_text(cr, zmc.style == ZMC_STYLE_DOTMATRIX ? dm_palette_names[app.palette] : ACCENTS[app.accent].name, FONT_REGULAR, 16, MARGIN + 42, y + 10, 0);
+	zmc_text(cr, ACCENTS[app.accent].name, FONT_REGULAR, 16, MARGIN + 42, y + 10, 0);
 	zmc_add_hit(0, y - 4, zmc.width, 50, ACT_ACCENT_OPEN, 0);
 	y += 62;
 	/* Metro's light or dark theme (the SDK's Z_THEME_DARK / Z_THEME_LIGHT):
-	 * the background and the text swap, the accent stays. DotMatrix has its own
-	 * palette and ignores this, so the row is shown only under Metro. */
-	if (zmc.style != ZMC_STYLE_DOTMATRIX) {
-		y = zmc_switch(cr, y, "Light mode", app.theme == ZMC_THEME_LIGHT, ACT_THEME);
-		/* the blur behind the shell's bars and the apps' (zrn-frosted-diffusion); off saves the GPU work */
-		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-		zmc_text(cr, "bars show what is under them, blurred", FONT_REGULAR, 13.5, MARGIN, y, 0);
-		y += 22;
-		y = zmc_switch(cr, y, "Frosted diffusion", app.frost, ACT_FROST);
-	}
+	 * the background and the text swap, the accent stays */
+	y = zmc_switch(cr, y, "Light mode", app.theme == ZMC_THEME_LIGHT, ACT_THEME);
+	/* the blur behind the shell's bars and the apps' (zrn-frosted-diffusion); off saves the GPU work */
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "bars show what is under them, blurred", FONT_REGULAR, 13.5, MARGIN, y, 0);
+	y += 22;
+	y = zmc_switch(cr, y, "Frosted diffusion", app.frost, ACT_FROST);
 	snprintf(detail, sizeof(detail), "%d %%%s", menu_speeds[app.menu_speed_idx], app.dev_slow ? ", slow motion" : "");
 	y = zmc_entry(cr, y, "animation speeds", detail, ACT_OPEN_PAGE, PAGE_ANIMATION);
-	y += 4;
-	static const char *const styles[] = { "Metro", "DotMatrix" };
-	y = zmc_entry(cr, y, "shell style", styles[app.style], ACT_OPEN_PAGE, PAGE_STYLE);
 	y += 4;
 	snprintf(detail, sizeof(detail), "%d columns", app.columns);
 	y = zmc_entry(cr, y, "tiles shell", detail, ACT_OPEN_PAGE, PAGE_TILES);
@@ -4008,11 +3911,7 @@ static double draw_main(cairo_t *cr) {
 	connections_line(detail, sizeof(detail));
 	y = zmc_entry(cr, y, "connections", detail, ACT_OPEN_PAGE, PAGE_CONNECTIONS);
 
-	if (app.style) {
-		snprintf(detail, sizeof(detail), "Palette: %s, DotMatrix", dm_palette_names[app.palette]);
-	} else {
-		snprintf(detail, sizeof(detail), "Accent: %s, Metro", ACCENTS[app.accent].name);
-	}
+	snprintf(detail, sizeof(detail), "Accent: %s", ACCENTS[app.accent].name);
 	y = zmc_entry(cr, y, "customization", detail, ACT_OPEN_PAGE, PAGE_THEME);
 
 	/* the screen's real level: the config's is only where it last started,
@@ -4077,7 +3976,6 @@ static double render_page_content(cairo_t *cr, int p) {
 		return devtest_render(cr, p);
 	case PAGE_APP_SCALE: return draw_app_scale(cr);
 	case PAGE_THEME: return draw_theme(cr);
-	case PAGE_STYLE: return draw_style(cr);
 	case PAGE_TILES: return draw_tiles(cr);
 	case PAGE_LOCK: return draw_lock(cr);
 	case PAGE_AOD: return draw_aod(cr);
@@ -4155,20 +4053,11 @@ static void accent_apply(void) {
 	board_unsaved = true;
 }
 
-static void palette_apply(void) {
-	app.palette = board_choice;
-	board_unsaved = true;
-	config_save();
-	zmc_config_style();
-	board_unsaved = false;
-}
-
 static bool rendering_to_file;
 
 /* What a page needs before it can be drawn, however it came to be opened. */
 static void page_prepare(int page) {
 	if (page == PAGE_INSTALLED_APPS || page == PAGE_APP_DETAIL || page == PAGE_APP_SCALE) installed_load();
-	if (page == PAGE_STYLE) app.style_pending = app.style;	/* what was left unapplied is forgotten */
 	if (page == PAGE_APP_SCALE) app_scale_load();
 	if (page_is_sound(page)) sound_pages_setup(PAGE_SOUND_EQ, true, rendering_to_file, page);
 	if (page_is_pods(page)) pods_show(NULL);
@@ -4311,21 +4200,6 @@ static void activate(int action, int arg) {
 		wall_kick();
 		zmc_go(PAGE_WALLS, 1);
 		break;
-	case ACT_PALETTE:
-		if (zmc_board_up()) {
-			board_choice = arg;
-			zmc_board_choose(palette_apply);
-			break;
-		}
-		app.palette = arg;
-		config_save();
-		zmc_config_style();	/* this app's dots in it at once */
-		if (zmc.page == PAGE_ACCENTS) {
-			zmc_go(PAGE_THEME, -1);
-		} else {
-			zmc_redraw();
-		}
-		break;
 	case ACT_ACCENT_OPEN:
 		accent_board_open();
 		break;
@@ -4368,15 +4242,6 @@ static void activate(int action, int arg) {
 	case ACT_COLUMNS:
 		app.columns = arg;
 		config_save();
-		break;
-	case ACT_STYLE:
-		app.style_pending = arg;
-		break;
-	case ACT_STYLE_APPLY:
-		if (app.style_pending != app.style) {
-			app.style = app.style_pending;
-			config_save();	/* the shell reads it on SIGHUP and starts the session again in it */
-		}
 		break;
 	case ACT_THEME:
 		app.theme = !app.theme;	/* toggle dark <-> light */
@@ -5392,7 +5257,6 @@ int main(int argc, char **argv) {
 		if (getenv("ZT_WALL_LOCK")) app.wall_target = WALL_TARGET_LOCK;
 		/* a choice not yet applied, for reviews */
 		if (getenv("ZT_PENDING")) {
-			app.style_pending = !app.style;
 			app.scale_pending = app.scale_idx == 0 ? 1 : 0;
 		}
 		return render_to_file(argv[2], argv[3]);

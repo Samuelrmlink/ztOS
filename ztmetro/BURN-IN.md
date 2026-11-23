@@ -72,7 +72,7 @@ screen timeout default (60 s) is stock's 30 s doubled.
   frame (20 small uploads an hour, no extra frame, no extra wakeup).
 - Settings > display > **Shift the bars against burn-in** (`burn_in_shift`,
   on by default).
-- Not in the DotMatrix style (its dot grid would tear) and not in the AOD.
+- Not in the AOD.
 - `ztmetro --render DIR` writes `burnin-status-N`, `burnin-nav-N`,
   `burnin-lock-N` for each place. `make check-burn-in` tests the schedule.
 

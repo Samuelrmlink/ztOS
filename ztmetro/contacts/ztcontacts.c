@@ -788,7 +788,6 @@ int main(int argc, char **argv) {
 		}
 		if (!strcmp(name, "jump")) {
 			zmc.accent = zmc_config_accent();
-			zmc_config_style();
 			zmc_letter_board(letter_has_person, ACT_LETTER);	/* over the list */
 		}
 		return zmc_render_png(&people, page, 664, argv[3]);

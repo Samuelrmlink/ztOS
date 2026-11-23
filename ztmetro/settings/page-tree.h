@@ -40,7 +40,6 @@ enum page {
 	PAGE_POWER,	/* battery + performance: power, then hardware */
 	PAGE_SYSTEM,	/* date + region, keyboard, developer, about */
 	PAGE_ANIMATION,	/* animation speeds */
-	PAGE_STYLE,	/* the shell's style: chosen, then applied with a warning */
 	PAGE_TILES,	/* Tiles Shell: the start screen's columns and background */
 	PAGE_LOCK,	/* Lock Screen: its photo, and whether waking shows it */
 	PAGE_APP_SCALE,	/* app scaling: a size for each app */
@@ -105,7 +104,6 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_DESKTOP] = PAGE_DISPLAY,
 	[PAGE_WALLS] = PAGE_TILES,	/* or Lock Screen: see page_parent */
 	[PAGE_ANIMATION] = PAGE_THEME,
-	[PAGE_STYLE] = PAGE_THEME,
 	[PAGE_NAVIGATION] = PAGE_THEME,
 	[PAGE_BOOST] = PAGE_POWER,
 	[PAGE_SOUND_EQ] = PAGE_AUDIO,
@@ -144,7 +142,6 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "accents", PAGE_ACCENTS },
 	{ "wallpapers", PAGE_WALLS },
 	{ "animation", PAGE_ANIMATION },
-	{ "style", PAGE_STYLE },
 	{ "tiles", PAGE_TILES },
 	{ "lock", PAGE_LOCK },
 	{ "passcode", PAGE_PASSCODE },

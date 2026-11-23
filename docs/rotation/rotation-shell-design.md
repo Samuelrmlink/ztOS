@@ -7,7 +7,7 @@ and 2 as built". The earlier status: stage 0a is implemented in
 switcher, loading/compiling, Hyperscan, volume banner, toast and dialog. Start,
 the app list, the letter board, the row menu and tile editing are NOT converted:
 they move to stage 2 with the landscape layout. Shade, peek, bars, frost, lock,
-splash, boot logo, sensor-hub fail, call over lock and DotMatrix stay on the
+splash, boot logo, sensor-hub fail and call over lock stay on the
 glass by design (the shade becomes a side sheet at stage 6). Not built yet. This file holds the study
 (A), the design (B), the staged plan (C) and the decisions on the open questions
 (D), updated with the coordinator's decisions.
@@ -412,7 +412,7 @@ side. A launch given up (Start back) still cuts.
     turned, so the bars beside them keep their own touches.
   - **Dialog, Hyperscan, keypop, toast and volume** were already in the view
     frame (stage 0).
-  - **Gating:** lock, call, DotMatrix and boot keep the screen upright. After
+  - **Gating:** lock, call and boot keep the screen upright. After
     unlock the screen turns once Start has landed.
   - The default of `rotation` in the code stays 0.
 
@@ -524,7 +524,7 @@ Where the code differs from, or pins down, the design below:
   - Target: `orient N` (test override) if set; else the sensor's value, but
     only with `rotation = 1` and ROTATION LOCK off; else 0.
   - Forced to 0: screen off, locked or the lock still showing, splash, boot
-    logo not done, sensor-hub fail screen, DotMatrix, call over lock, and an
+    logo not done, sensor-hub fail screen, call over lock, and an
     app shown, leaving or being launched, or the switcher (stage 2 keeps apps
     and the switcher upright).
   - Deferred (it turns once these are over): any finger down; the shade or
@@ -678,7 +678,7 @@ Where the code differs from, or pins down, the design below:
   volume banner (`y < banner_h`); toast (`y < TOAST_H`); call over lock; lock;
   switcher; open shade; shade pull (`y <= STATUS_H + 12`); nav
   (`y >= height - NAV_H`, `index = x/(width/3)`); keyboard; Hyperscan;
-  DotMatrix; Start; close edge (`x <= EDGE`); client.
+  Start; close edge (`x <= EDGE`); client.
 - `drag_axis`: within 20 degrees of horizontal is across (page change), anything
   else is along (scroll).
 - In `touch_update`, `ROLE_START` axis 1 moves the page
@@ -768,8 +768,8 @@ The shell composes every pixel itself, so it rotates in its own projection.
 ### B2. Orientation state
 - `orient_sensor`: what the daemon last said, mapped (see Decisions).
 - `orient_target`: the sensor value after policy. Policy forces 0 when the phone
-  is locked, the screen is off or the splash is up, rotation lock is on, the
-  style is DotMatrix, a call is on screen, or the app in front is portrait-only
+  is locked, the screen is off or the splash is up, rotation lock is on, a
+  call is on screen, or the app in front is portrait-only
   (an iPhone keeps a portrait-only app's whole UI portrait).
 - Defer any change while a finger is down on the content; apply it on lift.
 - `orient`: what the layout and app sizes are currently for.
@@ -914,13 +914,12 @@ are cancelled (`wlr_seat_touch_notify_cancel`), and `plane_pick` returns false
 | Toast, volume banner, dialog | View frame, at the view top between the insets |
 | Hyperscan | View frame, re-baked at 672 wide |
 | Loading | View frame |
-| DotMatrix | No rotation |
 
 ### B10. Input mapping
 - Converted once in `touch_down`/`touch_motion`. `touch_point` keeps view
   `x0,y0,x,y` and physical `px0,py0,px,py`.
 - Physical: the shade pull and the open shade, nav buttons, the lock,
-  DotMatrix, the sensor-hub-fail buttons, `show_touches`. View: dialog, banners,
+  the sensor-hub-fail buttons, `show_touches`. View: dialog, banners,
   keyboard, Start, switcher/cover-flow, list, Hyperscan, clients, close edge.
 - At 90 degrees the close edge is next to the status bar. In landscape the
   shade slop drops from +12 to +4 and the close edge starts at the content edge.
@@ -959,7 +958,7 @@ converted. Built on the phone; keep a rollback binary.
   the allowlist, landscape keyboard.
 - **Stage 5: cover-flow and split.**
 - **Stage 6: overlays and gating.** Shade side sheet, toast, volume, dialog,
-  Hyperscan, keypop; peek off; lock/call/DotMatrix gating; default on.
+  Hyperscan, keypop; peek off; lock/call gating; default on.
 - **Stage 7: Waydroid in landscape** (investigation first).
 
 Risky: 0b (wide edit), 3 (hub stability, now mostly on the daemon side), 4

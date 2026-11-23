@@ -33,7 +33,7 @@ struct rot_ctx {
 	bool screen_on, aod;
 	bool locked;		/* the lock screen is up, or on its way */
 	bool call_screen;	/* a call's or an alarm's screen over the lock */
-	bool special;		/* splash, sensor hub failure, DotMatrix: portrait screens */
+	bool special;		/* splash, sensor hub failure: portrait screens */
 	bool app_opts_out;	/* the app in front turns itself, or must not be turned */
 };
 

@@ -35,8 +35,7 @@
 #define ZMC_TILT_IN_MS	90
 #define ZMC_TILT_OUT_MS	200
 #define ZMC_MARGIN	16	/* left edge of everything: 20 px on a 450 px wide reference */
-enum { ZMC_STYLE_METRO, ZMC_STYLE_DOTMATRIX };
-enum { ZMC_THEME_DARK, ZMC_THEME_LIGHT };	/* Metro's light/dark; DotMatrix ignores it */
+enum { ZMC_THEME_DARK, ZMC_THEME_LIGHT };	/* Metro's light/dark */
 #define ZMC_HEADER_H	104	/* the title stays; the list moves under it (portrait) */
 #define ZMC_HEADER_H_LANDSCAPE	64	/* the same in landscape, with a smaller title; zmc_header_h() */
 #define ZMC_ACT_BACK	(-1)	/* the title: up a page */
@@ -154,12 +153,7 @@ struct zmc_state {
 	bool env_known;		/* the shell has said which */
 	char env_output[32];	/* the output it is shown on */
 	uint32_t accent;	/* 0xRRGGBB */
-	/* the shell's style (ztRetrofit): the same widgets with another face.
-	 * ZMC_STYLE_DOTMATRIX draws switches, sliders, buttons, the loading dots
-	 * and page titles as dots, in the palette chosen on its home screen */
-	int style;
-	int theme;		/* ZMC_THEME_*: Metro light or dark (DotMatrix has its own palette) */
-	uint32_t dm_main, dm_accent;
+	int theme;		/* ZMC_THEME_*: Metro light or dark */
 
 	int page;
 	double scroll, content_h;
@@ -390,9 +384,7 @@ double zmc_text(cairo_t *cr, const char *s, const char *font, double size, doubl
 void zmc_text_line(cairo_t *cr, const char *s, const char *font, double size, double x, double y, double width);
 void zmc_add_hit(double x, double y, double w, double h, int action, int arg);
 void zmc_set_rgb(cairo_t *cr, uint32_t color);
-/* A picture (a person's photo) cut to a square at x, y, `size` points across.
- * Under DotMatrix it is dots on the page's lattice, each as bright as what is
- * under it, in the palette's main colour: never a photograph among the dots. */
+/* A picture (a person's photo) cut to a square at x, y, `size` points across. */
 void zmc_picture(cairo_t *cr, cairo_surface_t *picture, double x, double y, double size);
 void zmc_accent(cairo_t *cr);
 
@@ -441,10 +433,9 @@ void zmc_list_lock(bool lock);
 void zmc_haptic(const char *kind);
 uint32_t zmc_now_ms(void);
 void zmc_read_file(const char *path, char *out, size_t size);	/* first line, or "" */
-uint32_t zmc_config_accent(void);
-void zmc_config_style(void);	/* style and palette from the same file; DotMatrix also sets the accent */	/* the accent in ~/.config/ztmetro/config */
+uint32_t zmc_config_accent(void);	/* the accent in ~/.config/ztmetro/config */
 /* Metro's light/dark theme, from the same config (key "theme = light|dark",
- * default dark) and the ZTRF_SHELL_THEME session env. DotMatrix ignores it. */
+ * default dark) and the ZTRF_SHELL_THEME session env. */
 void zmc_config_theme(void);
 /* The page background and the foreground/text for the current Metro theme,
  * as 0xRRGGBB. Dark: bg black, fg white (today's look); Light: bg white, fg

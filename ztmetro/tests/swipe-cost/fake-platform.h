@@ -66,13 +66,6 @@ void glUniform4f(GLint a, GLfloat b, GLfloat c, GLfloat d, GLfloat e) {}
 void glUseProgram(GLuint a) {}
 void glVertexAttribPointer(GLuint a, GLint b, GLenum c, GLboolean d, GLsizei e, const void *f) {}
 void glViewport(GLint a, GLint b, GLsizei c, GLsizei d) {}
-/* (retro/dotmatrix.c's, which a Metro page never reaches) */
-void glGenBuffers(GLsizei a, GLuint *b) {}
-void glBufferData(GLenum a, GLsizeiptr b, const void *c, GLenum d) {}
-void glBufferSubData(GLenum a, GLintptr b, GLsizeiptr c, const void *d) {}
-void glDeleteBuffers(GLsizei a, const GLuint *b) {}
-GLint glGetAttribLocation(GLuint a, const GLchar *b) { return 0; }
-void glUniform3f(GLint a, GLfloat b, GLfloat c, GLfloat d) {}
 void glUniform3fv(GLint a, GLsizei b, const GLfloat *c) {}
 void glDisableVertexAttribArray(GLuint a) {}
 

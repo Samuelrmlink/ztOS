@@ -51,8 +51,6 @@
 
 extern "C" {
 #include "zrnmetrocore.h"
-extern double dm_wrap_origin_y;
-extern int dm_wrap_raw;
 }
 #include "qr.h"
 
@@ -73,7 +71,7 @@ enum Action { ACT_OPEN = 1, ACT_PAIR_QR, ACT_PAIR_PHONE, ACT_PHONE_BOX, ACT_CANC
 
 /* The app's own colour, WhatsApp's teal green: its brighter brand green is too
  * pale under the white text of a bubble. A choice on the account page gives the
- * system's accent instead. DotMatrix keeps its palette either way. */
+ * system's accent instead. */
 constexpr uint32_t WA_GREEN = 0x00a884;
 
 /* ---- what is shown ------------------------------------------------------- */
@@ -144,8 +142,6 @@ std::string image_note;
 
 /* ---- text ---------------------------------------------------------------- */
 
-bool dots() { return zmc.style == ZMC_STYLE_DOTMATRIX; }
-
 PangoContext *text_context() {
 	static PangoContext *context;
 	if (!context) {
@@ -175,7 +171,7 @@ cairo_t *measure_cr() {
 	return cr;
 }
 
-double dm_text_height(const char *text, double size, double width) {
+double measured_text_height(const char *text, double size, double width) {
 	cairo_t *cr = measure_cr();
 	cairo_save(cr);
 	cairo_set_source_rgba(cr, 0, 0, 0, 0);
@@ -257,7 +253,7 @@ void measure(Msg &m) {
 	if (m.measured) return;
 	m.measured = true;
 	if (m.system) {
-		m.text_h = dots() ? dm_text_height(m.text.c_str(), 12.5, zmc.width - 2 * MARGIN) : 18;
+		m.text_h = 18;
 		m.bw = zmc.width - 2 * MARGIN;
 		m.bh = m.text_h;
 		return;
@@ -268,26 +264,20 @@ void measure(Msg &m) {
 		double aspect = m.media_w > 0 && m.media_h > 0 ? double(m.media_h) / m.media_w : 0.75;
 		m.pic_w = THUMB_W;
 		m.pic_h = std::clamp(THUMB_W * aspect, 90.0, 300.0);
-		if (dots()) m.pic_h = m.pic_w;	/* zmc_picture's square of dots */
 		w = m.pic_w + 2 * PAD;
 	}
 	if (!m.sender_name.empty() && !m.from_me && open_group) m.name_h = 18;
 	if (!m.text.empty()) {
-		if (dots()) {
-			double one = m.text.find('\n') == std::string::npos ? zmc_text_width(m.text.c_str(), FONT_REGULAR, TEXT_SIZE) + 2 * PAD + 2 : most;
-			w = m.is_image ? w : std::min(one, most);
-		} else {
-			if (!m.is_image && m.text.size() < 200 && m.text.find('\n') == std::string::npos) {
-				PangoLayout *l = pango_layout_new(text_context());
-				pango_layout_set_font_description(l, text_font());
-				pango_layout_set_text(l, m.text.c_str(), -1);
-				int pw, ph;
-				pango_layout_get_pixel_size(l, &pw, &ph);
-				g_object_unref(l);
-				w = std::min(pw + 2 * PAD + 2, most);
-			} else if (!m.is_image) {
-				w = most;
-			}
+		if (!m.is_image && m.text.size() < 200 && m.text.find('\n') == std::string::npos) {
+			PangoLayout *l = pango_layout_new(text_context());
+			pango_layout_set_font_description(l, text_font());
+			pango_layout_set_text(l, m.text.c_str(), -1);
+			int pw, ph;
+			pango_layout_get_pixel_size(l, &pw, &ph);
+			g_object_unref(l);
+			w = std::min(pw + 2 * PAD + 2, most);
+		} else if (!m.is_image) {
+			w = most;
 		}
 	}
 	w = std::max(w, zmc_text_width(stamp_of(m).c_str(), FONT_REGULAR, STAMP_SIZE) + 2 * PAD + 2);
@@ -296,13 +286,9 @@ void measure(Msg &m) {
 	m.bw = std::ceil(w);
 	double inner = m.bw - 2 * PAD;
 	if (!m.text.empty()) {
-		if (dots()) {
-			m.text_h = dm_text_height(m.text.c_str(), TEXT_SIZE, inner);
-		} else {
-			int pw, ph;
-			pango_layout_get_pixel_size(layout_of(&m, inner), &pw, &ph);
-			m.text_h = ph;
-		}
+		int pw, ph;
+		pango_layout_get_pixel_size(layout_of(&m, inner), &pw, &ph);
+		m.text_h = ph;
 	}
 	m.bh = std::ceil(2 * PAD + 17 + m.name_h + (m.is_image ? m.pic_h + (m.text.empty() ? 0 : 6) : 0) + m.text_h);
 }
@@ -327,15 +313,6 @@ void place() {
 		day = d;
 		measure(m);
 		double head = m.new_day ? 32 : 0, nudge = 0;
-		/* Under DotMatrix a line of dots lying on the seam of two strips is half in
-		 * each and lit in neither: keep a bubble's top and bottom off the seams. */
-		if (dots() && !m.system) {
-			auto near_seam = [](double at) {
-				double r = std::fmod(at, ROW_H);
-				return r < 5 || r > ROW_H - 5;
-			};
-			while (nudge < 12 && (near_seam(y + nudge + head + 8) || near_seam(y + nudge + head + 8 + m.bh))) nudge += 2;
-		}
 		m.y = y;
 		m.nudge = nudge;
 		m.total = nudge + m.bh + head + (m.system ? 14 : m.from_me ? 26 : 18);
@@ -354,7 +331,6 @@ void place() {
 void list_changed() { list_rev += 32; }	/* page + rev: no two lists share a texture */
 
 void accent_apply() {
-	if (dots()) return;
 	zmc.accent = follow_system_accent ? zmc_config_accent() : WA_GREEN;
 }
 
@@ -433,15 +409,14 @@ void draw_message(cairo_t *cr, Msg &m) {
 	}
 	if (m.system) {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-		if (dots()) zmc_text(cr, m.text.c_str(), FONT_REGULAR, 12.5, MARGIN, y, m.bw);
-		else zmc_text_line(cr, m.text.c_str(), FONT_REGULAR, 12.5, MARGIN, y, m.bw);
+		zmc_text_line(cr, m.text.c_str(), FONT_REGULAR, 12.5, MARGIN, y, m.bw);
 		cairo_new_path(cr);
 		return;
 	}
 	bool in = !m.from_me;
 	double x = in ? MARGIN : zmc.width - MARGIN - m.bw, w = m.bw, h = m.bh;
-	if (in || dots()) {
-		if (in) zmc_accent(cr); else cairo_set_source_rgb(cr, 1, 1, 1);
+	if (in) {
+		zmc_accent(cr);
 	} else {
 		zmc_set_rgb(cr, (zmc.accent & 0xfefefe) >> 1);
 	}
@@ -459,12 +434,7 @@ void draw_message(cairo_t *cr, Msg &m) {
 	cairo_close_path(cr);
 	cairo_fill(cr);
 	cairo_rectangle(cr, x, y + 8, w, h);
-	if (dots()) {
-		cairo_set_line_width(cr, 1);
-		cairo_stroke(cr);	/* filled dots would drown the text */
-	} else {
-		cairo_fill(cr);
-	}
+	cairo_fill(cr);
 	cairo_new_path(cr);
 	double at = y + 8 + PAD, inner = w - 2 * PAD;
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -475,9 +445,7 @@ void draw_message(cairo_t *cr, Msg &m) {
 	}
 	if (m.is_image) {
 		cairo_surface_t *t = thumb_of(m);
-		if (t && dots()) {
-			zmc_picture(cr, t, x + PAD, at, m.pic_w);
-		} else if (t) {
+		if (t) {
 			cairo_save(cr);
 			cairo_rectangle(cr, x + PAD, at, m.pic_w, m.pic_h);
 			cairo_clip(cr);
@@ -490,7 +458,7 @@ void draw_message(cairo_t *cr, Msg &m) {
 		} else {
 			cairo_set_source_rgb(cr, 0.25, 0.25, 0.25);
 			cairo_rectangle(cr, x + PAD, at, m.pic_w, m.pic_h);
-			if (dots()) { cairo_set_line_width(cr, 1); cairo_stroke(cr); } else cairo_fill(cr);
+			cairo_fill(cr);
 			cairo_new_path(cr);
 			cairo_set_source_rgb(cr, 1, 1, 1);
 			zmc_text_centred(cr, "photo", FONT_REGULAR, 14, x + PAD + m.pic_w / 2, at + m.pic_h / 2 - 9);
@@ -500,19 +468,14 @@ void draw_message(cairo_t *cr, Msg &m) {
 		cairo_set_source_rgb(cr, 1, 1, 1);
 	}
 	if (!m.text.empty()) {
-		if (dots()) {
-			zmc_text(cr, m.text.c_str(), FONT_REGULAR, TEXT_SIZE, x + PAD, at, inner);
-		} else {
-			cairo_move_to(cr, x + PAD, at);
-			pango_cairo_show_layout(cr, layout_of(&m, inner));
-		}
+		cairo_move_to(cr, x + PAD, at);
+		pango_cairo_show_layout(cr, layout_of(&m, inner));
 		cairo_new_path(cr);
 		at += m.text_h;
 	}
 	std::string stamp = stamp_of(m);
 	double sw = zmc_text_width(stamp.c_str(), FONT_REGULAR, STAMP_SIZE);
-	if (m.status == "failed" && dots()) zmc_accent(cr);
-	else if (m.status == "failed") cairo_set_source_rgb(cr, 1, 1, 1);
+	if (m.status == "failed") cairo_set_source_rgb(cr, 1, 1, 1);
 	else cairo_set_source_rgb(cr, 0.82, 0.82, 0.82);
 	zmc_text(cr, stamp.c_str(), FONT_REGULAR, STAMP_SIZE, in ? x + PAD : x + w - PAD - sw, at + 3, 0);
 	cairo_new_path(cr);
@@ -618,7 +581,7 @@ void draw_chat(cairo_t *cr, const Chat &c) {
 		double bx = zmc.width - MARGIN - count_w;
 		zmc_accent(cr);
 		cairo_rectangle(cr, bx, y + 31, count_w, 20);
-		if (dots()) { cairo_set_line_width(cr, 1); cairo_stroke(cr); } else cairo_fill(cr);
+		cairo_fill(cr);
 		cairo_new_path(cr);
 		cairo_set_source_rgb(cr, 1, 1, 1);
 		zmc_text_centred(cr, n.c_str(), FONT_SEMIBOLD, 13, bx + count_w / 2, y + 32);
@@ -1329,7 +1292,7 @@ double centred_note(cairo_t *cr, const std::string &s, double y) {
 }
 
 /* Modules on whole device pixels, no anti-aliasing, a white quiet zone: dark and
- * light must scan, so under DotMatrix too this is the one thing not in dots. */
+ * light must scan. */
 void draw_qr(cairo_t *cr, const qr::Code &code, double y, double side) {
 	if (code.n == 0) return;
 	double dx = 1, dy = 1;
@@ -1339,7 +1302,6 @@ void draw_qr(cairo_t *cr, const qr::Code &code, double y, double side) {
 	int px = std::max(1, int(side * scale) / (code.n + 2 * quiet));
 	double module = px / scale, total = module * (code.n + 2 * quiet), x0 = std::floor((zmc.width - total) / 2 * scale) / scale;
 	y = std::floor(y * scale) / scale;
-	dm_wrap_raw++;
 	cairo_save(cr);
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -1350,7 +1312,6 @@ void draw_qr(cairo_t *cr, const qr::Code &code, double y, double side) {
 		if (code.at(c, r)) cairo_rectangle(cr, x0 + (c + quiet) * module, y + (r + quiet) * module, module, module);
 	cairo_fill(cr);
 	cairo_restore(cr);
-	dm_wrap_raw--;
 }
 
 double draw_link(cairo_t *cr) {
@@ -1472,7 +1433,7 @@ double draw_chat(cairo_t *cr) {
 double draw_account(cairo_t *cr) {
 	double y = zmc_header(cr, "account");
 	y = zmc_field(cr, y, "connection", connection.c_str());
-	if (!dots()) y = zmc_switch(cr, y, "system accent", follow_system_accent, ACT_ACCENT);
+	y = zmc_switch(cr, y, "system accent", follow_system_accent, ACT_ACCENT);
 	if (!self_jid.empty()) y = zmc_field(cr, y, "signed in", "yes");
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	if (logout_ask) {
@@ -1491,17 +1452,13 @@ double draw_image(cairo_t *cr) {
 	if (full_image) {
 		double iw = cairo_image_surface_get_width(full_image), ih = cairo_image_surface_get_height(full_image);
 		double room = zmc.height - y - MARGIN, k = std::min(zmc.width / iw, room / ih);
-		if (dots()) {
-			zmc_picture(cr, full_image, 0, y, zmc.width);
-		} else {
-			cairo_save(cr);
-			cairo_translate(cr, (zmc.width - iw * k) / 2, y + (room - ih * k) / 2);
-			cairo_scale(cr, k, k);
-			cairo_set_source_surface(cr, full_image, 0, 0);
-			cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
-			cairo_paint(cr);
-			cairo_restore(cr);
-		}
+		cairo_save(cr);
+		cairo_translate(cr, (zmc.width - iw * k) / 2, y + (room - ih * k) / 2);
+		cairo_scale(cr, k, k);
+		cairo_set_source_surface(cr, full_image, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+		cairo_paint(cr);
+		cairo_restore(cr);
 	} else {
 		centred_note(cr, image_note, y);
 	}
@@ -1525,21 +1482,16 @@ double draw_status_view(cairo_t *cr) {
 	cairo_new_path(cr);
 	double room = zmc.height - y - MARGIN, w = zmc.width - 2 * MARGIN;
 	if (it.kind == "image" && full_image) {
-		if (dots()) {
-			zmc_picture(cr, full_image, MARGIN, y, w);
-			y += w + 12;
-		} else {
-			double iw = cairo_image_surface_get_width(full_image), ih = cairo_image_surface_get_height(full_image);
-			double k = std::min(w / iw, (room - 80) / ih);
-			cairo_save(cr);
-			cairo_translate(cr, (zmc.width - iw * k) / 2, y);
-			cairo_scale(cr, k, k);
-			cairo_set_source_surface(cr, full_image, 0, 0);
-			cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
-			cairo_paint(cr);
-			cairo_restore(cr);
-			y += ih * k + 12;
-		}
+		double iw = cairo_image_surface_get_width(full_image), ih = cairo_image_surface_get_height(full_image);
+		double k = std::min(w / iw, (room - 80) / ih);
+		cairo_save(cr);
+		cairo_translate(cr, (zmc.width - iw * k) / 2, y);
+		cairo_scale(cr, k, k);
+		cairo_set_source_surface(cr, full_image, 0, 0);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+		cairo_paint(cr);
+		cairo_restore(cr);
+		y += ih * k + 12;
 	} else if (it.kind == "image" || it.kind == "video") {
 		y = centred_note(cr, it.kind == "video" ? "Video updates can only be seen on your phone." : image_note, y);
 	}
@@ -1677,33 +1629,26 @@ const char *box_shown() {
 
 void box_measure() {
 	zmc_list_lock(true);
-	double h = dm_text_height(box_shown(), BOX_FONT, zmc.width - 2 * MARGIN - 20) + 22;
+	double h = measured_text_height(box_shown(), BOX_FONT, zmc.width - 2 * MARGIN - 20) + 22;
 	zmc_list_lock(false);
 	box_h = draft.empty() ? 44 : std::clamp(h, 44.0, BOX_MAX);
 }
 
 void draw_compose(cairo_t *cr) {
 	const double box_w = zmc.width - 2 * MARGIN, y = 0;
-	bool d = dots();
 	cairo_set_source_rgb(cr, 0, 0, 0);
 	cairo_rectangle(cr, 0, 0, zmc.width, box_h + 94);
 	cairo_fill(cr);
 	cairo_rectangle(cr, MARGIN, y + 8, box_w, box_h);
-	if (d) {
-		cairo_set_source_rgb(cr, 1, 1, 1);
-		cairo_set_line_width(cr, 1);
-		cairo_stroke(cr);
-	} else {
-		double g = focus == 0 ? 1 : 0.82;
-		cairo_set_source_rgb(cr, g, g, g);
-		cairo_fill(cr);
-	}
+	double g = focus == 0 ? 1 : 0.82;
+	cairo_set_source_rgb(cr, g, g, g);
+	cairo_fill(cr);
 	cairo_new_path(cr);
 	bool have = !draft.empty() || focus == 0;
-	double ink = d ? (have ? 1 : 0.6) : (have ? 0 : 0.35);
+	double ink = have ? 0 : 0.35;
 	cairo_set_source_rgb(cr, ink, ink, ink);
 	if (have) {
-		double inner = box_w - 20, whole = dm_text_height(box_shown(), BOX_FONT, inner);
+		double inner = box_w - 20, whole = measured_text_height(box_shown(), BOX_FONT, inner);
 		cairo_save(cr);
 		cairo_rectangle(cr, MARGIN, y + 8, box_w, box_h);
 		cairo_clip(cr);
@@ -2265,9 +2210,7 @@ void sample_fill(int n) {
 		cairo_pattern_add_color_stop_rgb(g, 0, 0.9, 0.5, 0.2);
 		cairo_pattern_add_color_stop_rgb(g, 1, 0.2, 0.3, 0.7);
 		cairo_set_source(pc, g);
-		dm_wrap_raw++;
 		cairo_paint(pc);
-		dm_wrap_raw--;
 		cairo_pattern_destroy(g);
 		cairo_destroy(pc);
 		pictures["c1"] = pic;
@@ -2314,7 +2257,6 @@ double seconds() {
 
 /* What a frame in a scroll cannot avoid: painting a strip as the core does. */
 int bench(int n, const char *png) {
-	zmc_config_style();
 	zmc.width = 360;
 	zmc.height = 740;
 	zmc.scale = 4;
@@ -2347,9 +2289,7 @@ int bench(int n, const char *png) {
 			cairo_set_source_rgb(cr, 0, 0, 0);
 			cairo_paint(cr);
 			cairo_scale(cr, zmc.scale, zmc.scale);
-			dm_wrap_origin_y = r * ROW_H * zmc.scale;
 			draw_strip(cr, r);
-			dm_wrap_origin_y = 0;
 			cairo_destroy(cr);
 			cairo_surface_flush(s);
 			if (pass == 1) took.push_back((seconds() - a) * 1e3);
@@ -2370,15 +2310,11 @@ int bench(int n, const char *png) {
 			cairo_set_source_rgb(cr, 0, 0, 0);
 			cairo_paint(cr);
 			cairo_scale(cr, zmc.scale, zmc.scale);
-			dm_wrap_origin_y = (from + i) * ROW_H * zmc.scale;
 			draw_strip(cr, from + i);
-			dm_wrap_origin_y = 0;
 			cairo_destroy(cr);
 			cairo_surface_flush(s);
-			dm_wrap_raw++;
 			cairo_set_source_surface(ac, s, 0, i * h);
 			cairo_paint(ac);
-			dm_wrap_raw--;
 		}
 		cairo_destroy(ac);
 		cairo_surface_write_to_png(all, png);
@@ -2472,7 +2408,6 @@ int selftest() {
 
 int render_page(const char *name, const char *file) {
 	sample = true;
-	zmc_config_style();
 	zmc.height = 740;
 	open_group = !strcmp(name, "chat");
 	sample_fill(80);

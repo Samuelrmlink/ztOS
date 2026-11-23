@@ -104,7 +104,6 @@ static void text_at(cairo_t *cr, const char *s, const char *font, double size, d
 	zmc_set_rgb(cr, color);
 	zmc_text_line(cr, s, font, size, X(x_px), Y(base_px) - 1.079 * size, max_px > 0 ? X(max_px) : zmc.width);
 }
-static bool dots(void) { return zmc.style == ZMC_STYLE_DOTMATRIX; }
 static uint32_t accent(void) {
 	static int forced = -1;
 	if (forced == -1) {
@@ -392,7 +391,6 @@ static void note_glyph(cairo_t *cr, double x, double y, double size) {
 	cairo_set_source_rgb(cr, 0.14, 0.14, 0.14);
 	cairo_rectangle(cr, x, y, size, size);
 	cairo_fill(cr);
-	if (dots()) return;	/* no glyph font among the dots: the plain square */
 	zmc_set_rgb(cr, GREY);
 	zmc_text_centred(cr, "\xEE\xB1\x8F", "Segoe MDL2 Assets", size * 0.5, x + size / 2, y + size * 0.2);
 }
@@ -557,7 +555,7 @@ static bool is_fav(void) { return st.has_track && tracks_find(&favs, st.track.ur
 /* Everything is drawn with y from the top of the panel; 0..215 px is the bar. */
 static bool bar_only;	/* the shut bar alone: no menu and no queue to draw */
 static void bar_paint(cairo_t *cr, int page) {
-	zmc_set_rgb(cr, dots() ? 0 : PANEL);
+	zmc_set_rgb(cr, PANEL);
 	cairo_rectangle(cr, 0, 0, zmc.width, X(PANEL_PX) + 8);
 	cairo_fill(cr);
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -597,7 +595,7 @@ static void bar_paint(cairo_t *cr, int page) {
 			int idx = queue_order[i];
 			if (idx < 0 || idx >= queue_t.n) continue;
 			const struct track *t = &queue_t.v[idx];
-			zmc_set_rgb(cr, dots() ? 0 : PANEL);
+			zmc_set_rgb(cr, PANEL);
 			cairo_rectangle(cr, 0, y, zmc.width, X(ROW_PX));
 			cairo_fill(cr);
 			thumb(cr, t->art, X(56), y, X(172), 172);
@@ -714,8 +712,8 @@ static void fmt_time(char *o, size_t n, double sec) {
 	int s = (int)(sec < 0 ? 0 : sec);
 	snprintf(o, n, "%d:%02d", s / 60, s % 60);
 }
-static double track_y(void) { return plain_layout || dots() ? Y(1938) : Y(1937); }
-static double controls_y(void) { return plain_layout || dots() ? Y(2254) : Y(2264); }
+static double track_y(void) { return plain_layout ? Y(1938) : Y(1937); }
+static double controls_y(void) { return plain_layout ? Y(2254) : Y(2264); }
 
 static void now_overlay(void) {
 	atlas_build();
@@ -723,18 +721,8 @@ static void now_overlay(void) {
 	f = f < 0 ? 0 : f > 1 ? 1 : f;
 	double x0 = X(56), w = X(1328), y = track_y(), hx = x0 + w * f;
 	uint32_t a = accent();
-	if (dots()) {
-		double pitch = 5;
-		int n = (int)(w / pitch), lit = (int)lround(f * (n - 1));
-		for (int i = 0; i < n; i++) {
-			uint32_t c = i <= lit ? zmc.dm_main : 0x303030;
-			if (i == lit) c = zmc.dm_accent;
-			zmc_gpu_rect(x0 + i * pitch + 1, y, 3, 3, ((c >> 16) & 255) / 255.0, ((c >> 8) & 255) / 255.0, (c & 255) / 255.0);
-		}
-	} else {
-		zmc_gpu_rect(x0, y, w * f, X(14), ((a >> 16) & 255) / 255.0, ((a >> 8) & 255) / 255.0, (a & 255) / 255.0);
-		zmc_gpu_rect(hx - X(28), y - X(27), X(32), X(68), 1, 1, 1);
-	}
+	zmc_gpu_rect(x0, y, w * f, X(14), ((a >> 16) & 255) / 255.0, ((a >> 8) & 255) / 255.0, (a & 255) / 255.0);
+	zmc_gpu_rect(hx - X(28), y - X(27), X(32), X(68), 1, 1, 1);
 	char t[16];
 	fmt_time(t, sizeof(t), position());
 	double ty = track_y() - X(127) - 2;
@@ -1049,7 +1037,7 @@ static void page_controls(cairo_t *cr) {
 }
 static void paint_shot_now(cairo_t *cr);
 static double page_now(cairo_t *cr) {
-	bool plain = plain_layout || dots();
+	bool plain = plain_layout;
 	const char *title = st.has_track ? st.track.title : "Nothing playing";
 	const char *artist = st.has_track ? st.track.artist : "";
 	const char *from = st.has_track && st.track.album[0] ? st.track.album : "default playlist";
@@ -1109,13 +1097,9 @@ static double page_now(cairo_t *cr) {
 	else if (st.bits && st.rate) snprintf(fmt, sizeof(fmt), "%s %d bit %g kHz", st.codec, st.bits, st.rate / 1000.0);
 	if (fmt[0]) text_at(cr, fmt, FONT_REGULAR, 12.2, 56, 2062, 1328, GREY);
 	/* the track under the moving parts */
-	if (dots()) {
-		/* (its dots are the overlay's) */
-	} else {
-		zmc_set_rgb(cr, GREY);
-		cairo_rectangle(cr, X(56), track_y(), X(1328), X(14));
-		cairo_fill(cr);
-	}
+	zmc_set_rgb(cr, GREY);
+	cairo_rectangle(cr, X(56), track_y(), X(1328), X(14));
+	cairo_fill(cr);
 	page_controls(cr);
 	if (shot) paint_shot_now(cr);
 	bar_in_page(cr, P_NOW);
@@ -1470,7 +1454,7 @@ static void activate(int action, int arg) {
 	case A_PREV: eng_cmd("{\"cmd\":\"previous\"}"); break;
 	case A_NEXT: eng_cmd("{\"cmd\":\"next\"}"); break;
 	case A_ART:
-		if (!dots()) { plain_layout = !plain_layout; lib_save(); zmc_redraw(); }
+		plain_layout = !plain_layout; lib_save(); zmc_redraw();
 		break;
 	case A_SEARCH_BOX: case A_NAME_BOX: box_focus = true; zmc_keyboard(true); break;
 	case A_RESULT:

@@ -2,9 +2,7 @@
 
 Live content for an app's Start tile (a "signal"), without a notification. The
 tile turns over now and then (a Windows Phone Flip tile) to show it; its front
-carries a count, a badge and a thin bar. Under DotMatrix there are no tiles, so
-the same signal shows as a short text at the end of the app's row in the app
-list, and as a dot on its dock icon.
+carries a count, a badge and a thin bar.
 
 ## Which tile
 
@@ -59,9 +57,8 @@ but not through a restart of the shell: the sender sends again.
 * **Power Management** (`ztpower`): the shell itself. The battery's draw in
   watts (`value`), charging or on battery (`title`), charge, volts, mA, the
   charge rate in %/h and time to full or left, the battery's temperature.
-  Read from `/sys/class/power_supply` every 2 s *only* while the tile (or, under
-  DotMatrix, the home) is on the screen and the screen is on, and once when the
-  kernel reports a supply change.
+  Read from `/sys/class/power_supply` every 2 s *only* while the tile is on the
+  screen and the screen is on, and once when the kernel reports a supply change.
 * **Linux media players** (`ztnotifyd`): every MPRIS player is a signal keyed by
   its name (`spotify`, `firefox`, an ATL app by its package). Sent when a player
   changes, not on a timer. Album art: a `file://` address is used as it is, a

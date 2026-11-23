@@ -42,8 +42,5 @@ void zmg_row_draw(unsigned texture, double u0, double v0, double u1, double v1,
 void zmg_row_free(unsigned texture);
 void zmg_report(const char *app_id);
 void zmg_fini(void);
-/* below 1: what zmg_surface and zmg_dmabuf_draw draw shows through that share
- * of a lattice of dots zmg_dot_pitch points apart (the DotMatrix style) */
-extern float zmg_reveal, zmg_dot_pitch;
 
 #endif

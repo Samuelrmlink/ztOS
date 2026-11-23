@@ -1,6 +1,6 @@
 --- a/initramfs/init
 +++ b/initramfs/init
-@@ -33,6 +33,75 @@
+@@ -33,6 +33,74 @@
  	sed -n "s/.*\b$1=\([^ ]*\).*/\1/p" /proc/cmdline
  }
  
@@ -59,7 +59,6 @@
 +	val() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p" "$cfg" 2>/dev/null | tail -n 1; }
 +	theme=dark
 +	case "$(val theme)" in light|1) theme=light ;; esac
-+	case "$(val style)" in dotmatrix|1) theme=dark ;; esac
 +	splash_wait
 +	shown=$(cat /run/zboot.splash 2>/dev/null)
 +	case "$(val scale)/$(val display_size)" in
@@ -76,7 +75,7 @@
  log "===== zboot on $(uname -r), $(cat /proc/device-tree/model 2>/dev/null) ====="
  log "cpus online: $(cat /sys/devices/system/cpu/online)  mem: $(awk '/MemTotal/{printf "%d MB", $2/1024}' /proc/meminfo)"
  
-@@ -122,6 +191,7 @@
+@@ -122,6 +190,7 @@
  
  rescue() {
  	log "rescue shell: $*"
@@ -84,7 +83,7 @@
  	touch /run/zboot.hold 2>/dev/null
  	usb_up
  	cp "$LOG" /run/zboot.rescue 2>/dev/null
-@@ -153,6 +223,7 @@
+@@ -153,6 +222,7 @@
  	umount /newroot
  	rescue "no /sbin/init on ZR_ARCH"
  }
@@ -92,7 +91,7 @@
  
  # The gadget goes with the initramfs: the root system builds its own.
  if [ -d /sys/kernel/config/usb_gadget/zboot ]; then
-@@ -175,4 +246,5 @@
+@@ -175,4 +245,5 @@
  exec switch_root /newroot /sbin/init
  
  echo "zboot| switch_root failed" > /dev/kmsg

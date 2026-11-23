@@ -29,7 +29,6 @@
 #include "viewporter-client-protocol.h"
 #include "zt-environment-v1-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
-#include "../retro/dm-chrome.h"
 #include "zrnmetrocore.h"
 #include "zmc-gesture.h"
 #include "zrnboard.h"
@@ -260,52 +259,11 @@ uint32_t zmc_config_accent(void) {
 	return color;
 }
 
-static bool dotmatrix(void) {
-	return zmc.style == ZMC_STYLE_DOTMATRIX;
-}
-
-void zmc_config_style(void) {
-	char path[512], line[256], value[32];
-	snprintf(path, sizeof(path), "%s/.config/ztmetro/config", getenv("HOME") ? getenv("HOME") : "");
-	FILE *f = fopen(path, "r");
-	int palette = 0;
-	zmc.style = ZMC_STYLE_METRO;
-	while (f && fgets(line, sizeof(line), f)) {
-		if (sscanf(line, " style = %31s", value) == 1) {
-			zmc.style = strcmp(value, "dotmatrix") == 0 ? ZMC_STYLE_DOTMATRIX : ZMC_STYLE_METRO;
-		} else if (sscanf(line, " dotmatrix_palette = %31s", value) == 1) {
-			palette = isdigit((unsigned char)value[0]) ? atoi(value) : dm_palette_index(value);
-		}
-	}
-	if (f) {
-		fclose(f);
-	}
-	/* the session's style, which the shell was started in, over the file's:
-	 * after the file changes the session restarts, and until then an app
-	 * keeps the style everything else around it has */
-	const char *session = getenv("ZTRF_SHELL_STYLE");
-	if (session) {
-		zmc.style = strcmp(session, "dotmatrix") == 0 ? ZMC_STYLE_DOTMATRIX : ZMC_STYLE_METRO;
-	}
-	if (palette < 0 || palette >= DM_PALETTES) palette = 0;
-	zmc.dm_main = dm_palettes[palette][0];
-	zmc.dm_accent = dm_palettes[palette][1];
-	if (zmc.style == ZMC_STYLE_DOTMATRIX) {
-		zmc.accent = zmc.dm_accent;
-	}
-	/* what the app fills and strokes comes out as dots in the style */
-	dm_wrap_active = dotmatrix;
-	dm_wrap_main = zmc.dm_main;
-	dm_wrap_accent = zmc.dm_accent;
-	dm_wrap_pitch = 2.3;
-}
-
 /*
  * Metro's light or dark theme, modelled on the SDK's Z_THEME_DARK/Z_THEME_LIGHT
  * (zrnui theme.ini [dark]/[light]): the background and the text swap, the accent
- * stays. Read from the same config file and session env as the style; the
- * session value wins so a running app keeps the theme the shell started in.
- * DotMatrix draws from its own palette and ignores the theme.
+ * stays. Read from the config file and the session env; the session value
+ * wins so a running app keeps the theme the shell started in.
  */
 void zmc_config_theme(void) {
 	char path[512], line[256], value[32];
@@ -352,16 +310,11 @@ static void zmg_rect_theme(double x, double y, double w, double h, bool ink) {
 }
 
 /* The theme's background or ink, with an alpha, for what the core draws over
- * a page (a menu, a picker's box). DotMatrix keeps the black and white it
- * always had: it draws from its own palette. */
+ * a page (a menu, a picker's box). */
 static void zmc_theme_rgba(cairo_t *cr, bool ink, double alpha) {
-	uint32_t c = dotmatrix() ? (ink ? 0xffffff : 0x000000) : ink ? zmc_fg_color() : zmc_bg_color();
+	uint32_t c = ink ? zmc_fg_color() : zmc_bg_color();
 	cairo_set_source_rgba(cr, ((c >> 16) & 0xff) / 255.0, ((c >> 8) & 0xff) / 255.0, (c & 0xff) / 255.0, alpha);
 }
-
-
-/* the dim of an unlit-but-there dot, as on the home screen */
-#define DM_DIM_ALPHA	0.42
 
 void zmc_accent(cairo_t *cr) {
 	zmc_set_rgb(cr, zmc.accent);
@@ -371,22 +324,7 @@ void zmc_accent(cairo_t *cr) {
  * The loading dots: five of them cross the top of the page one behind the
  * other, quick at the edges and slow through the middle, then a pause.
  */
-/* DotMatrix: a dim row of dots across the top and a lit run sweeping it */
-static double busy_head(void) {
-	return ((now_ms() - zmc.busy_since) % 1400) / 1400.0;
-}
-
 static void draw_dots(cairo_t *cr) {
-	if (dotmatrix()) {
-		double pitch = 6, head = busy_head() * (zmc.width + 8 * pitch);
-		for (double x = pitch / 2; x < zmc.width; x += pitch) {
-			double back = head - x;
-			bool lit = back >= 0 && back < 6 * pitch;
-			dm_cairo_dot(cr, x, 4.5, 4, back < pitch && lit ? zmc.dm_accent : zmc.dm_main,
-				lit ? 1.0 - back / (6 * pitch) * 0.7 : 0.18, lit ? 0.6 : 0);
-		}
-		return;
-	}
 	uint32_t t = (now_ms() - zmc.busy_since) % 2600;
 	zmc_accent(cr);
 	for (int i = 0; i < 5; i++) {
@@ -414,31 +352,6 @@ void zmc_picture(cairo_t *cr, cairo_surface_t *picture, double x, double y, doub
 	int side = w < h ? w : h;
 	if (side <= 0) return;
 	double ox = (w - side) / 2.0, oy = (h - side) / 2.0;
-	if (dotmatrix()) {
-		/* (the grid of the shapes around it: dm-wrap.c's) */
-		double pitch = dm_wrap_pitch;
-		cairo_surface_flush(picture);
-		const unsigned char *data = cairo_image_surface_get_data(picture);
-		int stride = cairo_image_surface_get_stride(picture);
-		int cells = (int)floor(size / pitch);
-		double k = (double)side / (cells > 0 ? cells : 1);
-		double r = ((zmc.dm_main >> 16) & 255) / 255.0, g = ((zmc.dm_main >> 8) & 255) / 255.0, b = (zmc.dm_main & 255) / 255.0;
-		dm_wrap_raw++;
-		for (int row = 0; row < cells; row++) {
-			const uint32_t *line = (const uint32_t *)(data + (size_t)(oy + (row + 0.5) * k) * stride);
-			for (int col = 0; col < cells; col++) {
-				uint32_t px = line[(int)(ox + (col + 0.5) * k)];
-				double lum = (0.3 * ((px >> 16) & 255) + 0.59 * ((px >> 8) & 255) + 0.11 * (px & 255)) / 255.0;
-				lum = 0.12 + 0.88 * lum;
-				cairo_set_source_rgb(cr, r * lum, g * lum, b * lum);
-				cairo_new_sub_path(cr);
-				cairo_arc(cr, x + (col + 0.5) * pitch, y + (row + 0.5) * pitch, pitch * 0.36, 0, 2 * M_PI);
-				cairo_fill(cr);
-			}
-		}
-		dm_wrap_raw--;
-		return;
-	}
 	cairo_save(cr);
 	cairo_rectangle(cr, x, y, size, size);
 	cairo_clip(cr);
@@ -451,9 +364,6 @@ void zmc_picture(cairo_t *cr, cairo_surface_t *picture, double x, double y, doub
 }
 
 void zmc_set_rgb(cairo_t *cr, uint32_t color) {
-	if (dotmatrix() && !dm_map_raw) {
-		color = dm_palette_colour(color, zmc.dm_main, zmc.dm_accent);	/* the palette's two */
-	}
 	cairo_set_source_rgb(cr, ((color >> 16) & 0xff) / 255.0,
 		((color >> 8) & 0xff) / 255.0, (color & 0xff) / 255.0);
 }
@@ -510,9 +420,6 @@ static PangoFontDescription *font_at(const char *font, double size) {
 
 double zmc_text(cairo_t *cr, const char *s, const char *font, double size,
 		double x, double y, double wrap_width) {
-	if (dotmatrix()) {
-		return dm_type(cr, s, size, x, y, 0, 0, false, wrap_width);
-	}
 	PangoLayout *layout = steady_layout(cr);
 	pango_layout_set_font_description(layout, font_at(font, size));
 	pango_layout_set_text(layout, s, -1);
@@ -530,10 +437,6 @@ double zmc_text(cairo_t *cr, const char *s, const char *font, double size,
 
 /* One line of it, with an ellipsis where it would not fit in the width. */
 void zmc_text_line(cairo_t *cr, const char *s, const char *font, double size, double x, double y, double width) {
-	if (dotmatrix()) {
-		dm_type(cr, s, size, x, y, width, 0, false, 0);
-		return;
-	}
 	PangoLayout *layout = steady_layout(cr);
 	pango_layout_set_font_description(layout, font_at(font, size));
 	pango_layout_set_text(layout, s, -1);
@@ -575,9 +478,6 @@ static double title_size(void) {
 
 /* How wide a pivot title is, set in the title face. */
 static int pivot_title_width(cairo_t *cr, const char *text) {
-	if (dotmatrix()) {
-		return (int)ceil(dm_type_width(text, title_size()));
-	}
 	PangoLayout *layout = steady_layout(cr);
 	PangoFontDescription *desc = pango_font_description_from_string(FONT_SEMILIGHT);
 	pango_font_description_set_absolute_size(desc, title_size() * PANGO_SCALE);
@@ -646,18 +546,6 @@ double zmc_pivot_wheel(cairo_t *cr, const struct zmc_tab *tabs, int count, int p
 
 double zmc_header(cairo_t *cr, const char *title) {
 	double hit_h = HEADER_H - 14;
-	if (dotmatrix()) {
-		/* the app's name small and dim, the page's title in the dot font */
-		dm_cairo_text(cr, zmc.app->caps, MARGIN, landscape ? 4 : 12, 2.2, zmc.dm_main, DM_DIM_ALPHA, 0);
-		double pitch = landscape ? 3.2 : 5;
-		cairo_save(cr);
-		cairo_rectangle(cr, 0, 0, zmc.width, HEADER_H);
-		cairo_clip(cr);
-		dm_cairo_text(cr, title, MARGIN, landscape ? 24 : 38, pitch, zmc.dm_main, 1, 0.7);
-		cairo_restore(cr);
-		zmc_add_hit(0, 0, zmc.width, hit_h, ZMC_ACT_BACK, 0);
-		return HEADER_H + 4;
-	}
 	zmc_fg(cr);
 	zmc_text(cr, zmc.app->caps, FONT_SEMIBOLD, 11.5, MARGIN, CAPS_Y, 0);
 	zmc_text(cr, title, FONT_SEMILIGHT, title_size(), TITLE_X, TITLE_Y, 0);
@@ -674,7 +562,7 @@ double zmc_header(cairo_t *cr, const char *title) {
  * page (a turn, a tab) is right and this costs nothing at rest. Only while it moves
  * it is drawn again, from a small picture of its own, over the header on the GPU.
  * A pivot's title runs off the edge on purpose, into the next tab's. Without the
- * GPU, or under DotMatrix's fixed dots, it stays as drawn.
+ * GPU it stays as drawn.
  */
 static struct {
 	char text[128];		/* the title of the page in front, if it does not fit */
@@ -693,7 +581,7 @@ static double marquee_overflow(double width) {
 
 /* (from the drawing of the page in front, which may be on the page turn's thread) */
 static void marquee_title(const char *title) {
-	if (dotmatrix() || strcmp(mq.text, title) == 0) {
+	if (strcmp(mq.text, title) == 0) {
 		return;
 	}
 	snprintf(mq.text, sizeof(mq.text), "%s", title);
@@ -787,23 +675,6 @@ double zmc_entry(cairo_t *cr, double y, const char *title, const char *detail,
 }
 
 void zmc_toggle(cairo_t *cr, double x, double y, bool on) {
-	if (dotmatrix()) {
-		/* 11 x 5 dots: a rounded frame, and a 3 x 3 knob that sits right when on */
-		double pitch = 54.0 / 11, ox = x + pitch / 2, oy = y + 24.0 / 2 - 2 * pitch;
-		for (int r = 0; r < 5; r++) {
-			for (int c = 0; c < 11; c++) {
-				bool edge = r == 0 || r == 4 || c == 0 || c == 10, corner = (r == 0 || r == 4) && (c == 0 || c == 10);
-				bool knob = r >= 1 && r <= 3 && (on ? c >= 7 && c <= 9 : c >= 1 && c <= 3);
-				if (corner || (!edge && !knob)) {
-					continue;
-				}
-				uint32_t col = knob && on ? zmc.dm_accent : zmc.dm_main;
-				double a = knob ? 1 : on ? 1 : DM_DIM_ALPHA;
-				dm_cairo_dot(cr, ox + c * pitch, oy + r * pitch, pitch, col, a, knob && on ? 0.7 : 0);
-			}
-		}
-		return;
-	}
 	zmc_fg(cr);
 	cairo_set_line_width(cr, 2);
 	cairo_rectangle(cr, x + 1, y + 1, 52, 22);
@@ -840,19 +711,6 @@ void zmc_slider(cairo_t *cr, double x, double y, double w, int percent, const ch
 	zmc_text(cr, pct_str, FONT_SEMIBOLD, 14, x + w - 42, y, 0);
 
 	double track_y = y + 24;
-	if (dotmatrix()) {
-		/* a row of dots, lit to the value, with a three-dot knob */
-		double pitch = 5;
-		int n = (int)(w / pitch), lit = (int)lround(percent / 100.0 * (n - 1));
-		for (int i = 0; i < n; i++) {
-			bool on = i <= lit;
-			dm_cairo_dot(cr, x + pitch / 2 + i * pitch, track_y + 2, pitch, zmc.dm_main, on ? 1 : DM_DIM_ALPHA, 0);
-		}
-		for (int k = -1; k <= 1; k++) {
-			dm_cairo_dot(cr, x + pitch / 2 + lit * pitch, track_y + 2 + k * pitch, pitch, zmc.dm_accent, 1, 0.7);
-		}
-		return;
-	}
 	cairo_set_source_rgb(cr, 0.22, 0.22, 0.22);
 	cairo_rectangle(cr, x, track_y, w, 4);
 	cairo_fill(cr);
@@ -1192,9 +1050,7 @@ static void vl_paint_row(cairo_surface_t *target, const struct zmc_list *l, doub
 	zmc_bg(cr);
 	cairo_paint(cr);
 	cairo_scale(cr, scale, scale);
-	dm_wrap_origin_y = (top + row * l->row_h) * scale;
 	l->draw_row(cr, row);
-	dm_wrap_origin_y = 0;
 	cairo_destroy(cr);
 	cairo_surface_flush(target);
 }
@@ -1541,23 +1397,6 @@ static void turned_strip_motion(cairo_t *cr, cairo_surface_t *source, double y0,
 		double degrees, double alpha, double dx, double depth) {
 	if (alpha <= 0.01) {
 		return;
-	}
-	if (dotmatrix() && (fabs(degrees) >= 0.05 || alpha < 1)) {
-		/* no turn in this style: the row lights up, or goes out, dot by dot,
-		 * on the turn's clock */
-		double reveal = alpha * (1 - fmin(1, fabs(degrees) / TURN_IN_DEG));
-		if (reveal <= 0.001) return;
-		degrees = 0;
-		if (!cr) {
-			zmg_reveal = (float)reveal;
-			double w = zmc.width;
-			struct zmg_vertex q[4] = { {dx,y0,depth}, {dx+w,y0,depth}, {dx,y1,depth}, {dx+w,y1,depth} };
-			zmg_surface(source, source == zmc.cache ? cache_gen : 0,
-				0, y0 * ANIM_SCALE, w * ANIM_SCALE, y1 * ANIM_SCALE, q, 1);
-			zmg_reveal = 1;
-			return;
-		}
-		alpha = reveal;		/* (no dots without the GPU: a fade) */
 	}
 	if (!cr) {
 		double a = degrees * M_PI / 180.0, w = zmc.width;
@@ -1963,11 +1802,11 @@ static double press_geometry(double w, double h, double *rx, double *ry) {
 /* What lies behind the thing pressed, to clear its place with as it sinks. In
  * light, the page's own colour just outside its top left corner, so that a tile
  * on a surface of its own (the call screen's dark) leaves no frame of the
- * theme's white round it; in dark and DotMatrix the background, as it always
- * was. x, y: the corner in the cache, points. */
+ * theme's white round it; in dark the background, as it always was.
+ * x, y: the corner in the cache, points. */
 static uint32_t press_behind(double x, double y) {
 	uint32_t c = zmc_bg_color();
-	if (zmc.theme != ZMC_THEME_LIGHT || dotmatrix() || !zmc.cache) {
+	if (zmc.theme != ZMC_THEME_LIGHT || !zmc.cache) {
 		return c;
 	}
 	int cw = cairo_image_surface_get_width(zmc.cache), ch = cairo_image_surface_get_height(zmc.cache);
@@ -2138,10 +1977,8 @@ static cairo_surface_t *pivot_snapshot(int page, double scroll, int scale, struc
 		double top = HEADER_H + (scroll < 0 ? -scroll : 0);
 		cairo_rectangle(cr, 0, top, zmc.width, zmc.height - top);
 		cairo_clip(cr);
-		dm_wrap_origin_y = scroll * scale;
 		cairo_translate(cr, 0, -scroll);
 		zmc.app->render(cr, page);
-		dm_wrap_origin_y = 0;
 		cairo_restore(cr);
 		cairo_rectangle(cr, 0, 0, zmc.width, HEADER_H);
 		cairo_clip(cr);
@@ -2718,17 +2555,7 @@ static void present_gpu(uint32_t ms) {
 	if (!zmc.anim_active) {
 		board_draw();
 	}
-	if (zmc.busy && !zmc.anim_active && dotmatrix()) {
-		double pitch = 6, head = busy_head() * (zmc.width + 8 * pitch);
-		for (double x = pitch / 2; x < zmc.width; x += pitch) {
-			double back = head - x;
-			bool lit = back >= 0 && back < 6 * pitch;
-			uint32_t c = back < pitch && lit ? zmc.dm_accent : zmc.dm_main;
-			double k = lit ? 1.0 - back / (6 * pitch) * 0.7 : 0.18;
-			zmg_rect(x - 1.4, 3.1, 2.8, 2.8, ((c >> 16) & 255) / 255.0f * k, ((c >> 8) & 255) / 255.0f * k,
-				(c & 255) / 255.0f * k);
-		}
-	} else if (zmc.busy && !zmc.anim_active) {
+	if (zmc.busy && !zmc.anim_active) {
 		uint32_t t = (now_ms() - zmc.busy_since) % 2600;
 		float r = ((zmc.accent >> 16) & 255) / 255.0f;
 		float g = ((zmc.accent >> 8) & 255) / 255.0f, b = (zmc.accent & 255) / 255.0f;
@@ -4239,12 +4066,8 @@ static void digits_ensure(int scale) {
 	cairo_t *cr = cairo_create(digits);
 	cairo_scale(cr, scale, scale);
 	/* in the ink zmc_slider writes the percentage in: white on black was
-	 * invisible on a light page (DotMatrix keeps its white) */
-	if (dotmatrix()) {
-		cairo_set_source_rgb(cr, 1, 1, 1);
-	} else {
-		zmc_fg(cr);
-	}
+	 * invisible on a light page */
+	zmc_fg(cr);
 	for (int i = 0; i < 11; i++) {
 		char glyph[2] = { i < 10 ? (char)('0' + i) : '%', 0 };
 		digit_w[i] = zmc_text_width(glyph, FONT_SEMIBOLD, DIGIT_SIZE);
@@ -4390,21 +4213,14 @@ double zmc_textbox(cairo_t *cr, double y, const char *caption, const char *value
 	zmc_text(cr, caption, FONT_REGULAR, 13, MARGIN, y, 0);
 	y += 22;
 	/* the box: white with black text while it is being typed into */
-	if (dotmatrix()) {
-		/* lit dots on a dim box: black type on lit dots cannot be read */
-		cairo_set_source_rgb(cr, focused ? 0.3 : 0.16, focused ? 0.3 : 0.16, focused ? 0.3 : 0.16);
-	} else if (focused) {
+	if (focused) {
 		cairo_set_source_rgb(cr, 1, 1, 1);
 	} else {
 		cairo_set_source_rgb(cr, 0.78, 0.78, 0.78);
 	}
 	cairo_rectangle(cr, MARGIN, y, w, h);
 	cairo_fill(cr);
-	if (dotmatrix()) {
-		cairo_set_source_rgb(cr, 1, 1, 1);
-	} else {
-		cairo_set_source_rgb(cr, 0, 0, 0);
-	}
+	cairo_set_source_rgb(cr, 0, 0, 0);
 	char shown[160];
 	snprintf(shown, sizeof(shown), "%s%s", value, focused ? "|" : "");
 	zmc_text(cr, shown, FONT_REGULAR, 17, MARGIN + 8, y + 8, 0);
@@ -4598,9 +4414,6 @@ static void landscape_check(void) {
 }
 
 double zmc_text_width(const char *s, const char *font, double size) {
-	if (dotmatrix()) {
-		return dm_type_width(s, size);
-	}
 	cairo_surface_t *scratch = cairo_image_surface_create(CAIRO_FORMAT_A8, 1, 1);
 	cairo_t *cr = cairo_create(scratch);
 	PangoLayout *layout = pango_cairo_create_layout(cr);
@@ -4621,21 +4434,7 @@ void zmc_text_centred(cairo_t *cr, const char *s, const char *font, double size,
 	zmc_text(cr, s, font, size, cx - zmc_text_width(s, font, size) / 2, y, 0);
 }
 
-struct wifi_args { double x, y, size; int bars; };
-static void wifi_shape(cairo_t *cr, void *data) {
-	const struct wifi_args *a = data;
-	int saved = zmc.style;
-	zmc.style = ZMC_STYLE_METRO;	/* the shape itself, to be dotted */
-	zmc_wifi_glyph(cr, a->x, a->y, a->size, a->bars);
-	zmc.style = saved;
-}
-
 void zmc_wifi_glyph(cairo_t *cr, double x, double y, double size, int bars) {
-	if (dotmatrix()) {
-		struct wifi_args a = { x, y, size, bars };
-		dm_dotify(cr, x, y, size, size, size / 7, wifi_shape, &a);
-		return;
-	}
 	/* a quarter fan standing on its point at the bottom middle */
 	double cx = x + size / 2, cy = y + size * 0.86, r = size * 0.78;
 	double red, green, blue, alpha;
@@ -5026,9 +4825,9 @@ void zmc_board_open(const struct zmc_board *board) {
 		cairo_surface_flush(bd.label);
 	}
 	/* the scrim, and the "old page gone" of a picker: the theme's background
-	 * (black in dark and DotMatrix, white in light), made again if the theme
+	 * (black in dark, white in light), made again if the theme
 	 * has changed since */
-	uint32_t scrim = 0xff000000u | (dotmatrix() ? 0 : zmc_bg_color());
+	uint32_t scrim = 0xff000000u | zmc_bg_color();
 	if (bd.black && *(uint32_t *)cairo_image_surface_get_data(bd.black) != scrim) {
 		zmg_forget(bd.black);
 		cairo_surface_destroy(bd.black);
@@ -5174,9 +4973,6 @@ static void board_scrim(double alpha) {
 	if (alpha <= 0.001 || !bd.black) {
 		return;
 	}
-	if (dotmatrix() && !bd.b.picker) {
-		alpha *= 0.97 / ZB_SCRIM;	/* dots are open: what is behind would read through them */
-	}
 	double c[4][3] = { { 0, 0, 0 }, { zmc.width, 0, 0 }, { 0, zmc.height, 0 }, { zmc.width, zmc.height, 0 } };
 	zmc_gpu_quad(bd.black, 1, c, alpha);
 }
@@ -5185,8 +4981,7 @@ static double board_run_ms(double turn_ms) {
 	return zb_delay(bd.b.count - 1) + turn_ms;
 }
 
-/* One tile, `ms` after the first one's start, turning about its own middle or
- * (DotMatrix: dots have no perspective) lighting up or going out dot by dot. */
+/* One tile, `ms` after the first one's start, turning about its own middle. */
 static void board_tile(int i, double ms, bool in) {
 	const double pitch = bd.b.cell_h + bd.b.gap, w = bd.b.cell_w, h = bd.b.cell_h;
 	double own = ms - zb_delay(i);
@@ -5208,19 +5003,6 @@ static void board_tile(int i, double ms, bool in) {
 		return;	/* its turn has not come, or it has gone */
 	}
 	double t = fmax(0, own / run);
-	if (dotmatrix()) {
-		double e = zb_swivel_ease(t, in), reveal = in ? e : 1 - e;
-		if (reveal <= 0.001) return;
-		/* dots are open: nothing behind may read through them */
-		double back[4][3] = { { x, y, 0 }, { x + w, y, 0 }, { x, y + h, 0 }, { x + w, y + h, 0 } };
-		zmc_gpu_quad(bd.black, 1, back, reveal);
-		struct zmg_vertex q[4] = { { (float)x, (float)y, 0 }, { (float)(x + w), (float)y, 0 },
-			{ (float)x, (float)(y + h), 0 }, { (float)(x + w), (float)(y + h), 0 } };
-		zmg_reveal = (float)reveal;
-		zmg_surface(bd.atlas, bd.revision, x * s, sy * s, (x + w) * s, (sy + h) * s, q, 1);
-		zmg_reveal = 1;
-		return;
-	}
 	double c[4][3];
 	double alpha = zt_corners(&A, t, x, y, w, h, c);
 	zmc_gpu_quad_region(bd.atlas, bd.revision, x * s, sy * s, w * s, h * s, c, alpha);
@@ -5318,18 +5100,14 @@ static void board_paint(cairo_t *cr) {
 		return;
 	}
 	cairo_save(cr);
-	zmc_theme_rgba(cr, false, bd.b.picker ? 1 : dotmatrix() ? 0.97 : ZB_SCRIM);
-	dm_wrap_raw++;
+	zmc_theme_rgba(cr, false, bd.b.picker ? 1 : ZB_SCRIM);
 	cairo_paint(cr);
-	dm_wrap_raw--;
 	cairo_set_source_surface(cr, bd.atlas, 0, bd.b.top * board_scale());
-	dm_wrap_raw++;
 	cairo_paint(cr);
 	if (bd.label) {
 		cairo_set_source_surface(cr, bd.label, 0, (bd.b.top - bd.label_h) * board_scale());
 		cairo_paint(cr);
 	}
-	dm_wrap_raw--;
 	cairo_restore(cr);
 }
 
@@ -5446,29 +5224,6 @@ double zmc_button(cairo_t *cr, double x, double y, double w, const char *label, 
 		zmc.pressed.button;
 	cairo_save(cr);
 	cairo_new_path(cr);
-	if (dotmatrix()) {
-		/* a frame of dots with its corners dropped; pressed, it lights up */
-		double pitch = 5;
-		int nc = (int)(w / pitch), nr = (int)(h / pitch);
-		double ox = x + (w - (nc - 1) * pitch) / 2, oy = y + (h - (nr - 1) * pitch) / 2;
-		uint32_t col = down ? zmc.dm_accent : zmc.dm_main;
-		for (int r = 0; r < nr; r++) {
-			for (int c = 0; c < nc; c++) {
-				bool edge = r == 0 || r == nr - 1 || c == 0 || c == nc - 1;
-				bool corner = (r == 0 || r == nr - 1) && (c == 0 || c == nc - 1);
-				if (edge && !corner) {
-					dm_cairo_dot(cr, ox + c * pitch, oy + r * pitch, pitch, col, down ? 1 : 0.8, down ? 0.6 : 0);
-				}
-			}
-		}
-		zmc_set_rgb(cr, down ? zmc.dm_accent : zmc.dm_main);
-		zmc_text_centred(cr, label, FONT_SEMIBOLD, 14.5, x + w / 2, y + 10);
-		cairo_restore(cr);
-		if (zmc.n_hits < MAX_HITS) {
-			zmc.hits[zmc.n_hits++] = (struct zmc_hit){ x, y, w, h, action, arg, false, true };
-		}
-		return y + h + 12;
-	}
 	zmc_fg(cr);
 	if (down) {
 		cairo_rectangle(cr, x, y, w, h);
@@ -5487,33 +5242,9 @@ double zmc_button(cairo_t *cr, double x, double y, double w, const char *label, 
 	return y + h + 12;
 }
 
-struct round_args { double cx, y; const char *glyph; };
-static void round_shape(cairo_t *cr, void *data) {
-	const struct round_args *a = data;
-	const double d = 44;
-	cairo_set_line_width(cr, 2.6);
-	cairo_new_path(cr);
-	cairo_arc(cr, a->cx, a->y + d / 2, d / 2 - 1.3, 0, 2 * M_PI);
-	cairo_stroke(cr);
-	cairo_save(cr);
-	cairo_translate(cr, a->cx, a->y + d / 2);
-	round_glyph(cr, a->glyph);
-	cairo_restore(cr);
-}
-
 void zmc_round_button(cairo_t *cr, double cx, double y, const char *glyph, const char *label,
 		int action, int arg) {
 	const double d = 44;
-	if (dotmatrix()) {
-		/* the ring and its glyph as dots */
-		struct round_args a = { cx, y, glyph };
-		dm_dotify(cr, cx - d / 2 - 2, y - 2, d + 4, d + 4, 2.4, round_shape, &a);
-		if (label && label[0]) {
-			zmc_text_centred(cr, label, FONT_REGULAR, 11.5, cx, y + d + 3);
-		}
-		zmc_add_hit(cx - 34, y - 4, 68, d + (label && label[0] ? 26 : 8), action, arg);
-		return;
-	}
 	cairo_save(cr);
 	cairo_set_line_width(cr, 2.2);
 	cairo_new_path(cr);	/* (text leaves a current point: the ring would be joined to it) */
@@ -5646,7 +5377,7 @@ double zmc_picker(cairo_t *cr, double y, const char *caption, const char *const 
 		if (i == selected) {
 			/* closed, in the ink (on the page); open, the accent */
 			double r, g, b;
-			uint32_t f = dotmatrix() ? 0xffffff : zmc_fg_color();
+			uint32_t f = zmc_fg_color();
 			double fr = ((f >> 16) & 0xff) / 255.0, fg = ((f >> 8) & 0xff) / 255.0, fb = (f & 0xff) / 255.0;
 			zmc_accent(cr);
 			cairo_pattern_get_rgba(cairo_get_source(cr), &r, &g, &b, NULL);
@@ -5703,7 +5434,6 @@ int zmc_render_png(const struct zmc_app *app, int page, int height, const char *
 	zmc.app = app;
 	zmc.height = height;
 	zmc.accent = zmc_config_accent();
-	zmc_config_style();
 	zmc_config_theme();
 	/* (ZMC_RENDER_SCROLL: how a list looks scrolled, for looking at it) */
 	const char *scroll = getenv("ZMC_RENDER_SCROLL");
@@ -5747,7 +5477,6 @@ int zmc_run(const struct zmc_app *app, int first_page) {
 	zmc.app = app;
 	zmc.page = first_page;
 	zmc.accent = zmc_config_accent();
-	zmc_config_style();
 	zmc_config_theme();
 	/* Pixels per point: the shell's scale, rounded up, as it asks of every
 	 * surface. 4 was the S9 (1440 px) for every phone: the J5 (720 px, 1.67)
