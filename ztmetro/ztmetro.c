@@ -5193,6 +5193,7 @@ static void load_config(struct zt_server *server) {
 		}
 	}
 	fclose(f);
+	look_finish(&server->look);	/* (8.70's first cut: background_show) */
 	if (!quick_audio_done) {
 		quick_add_audio(server);
 	}
@@ -5916,7 +5917,7 @@ static void walls_blur(struct zt_server *server, bool again) {
 	wall_blur_layer(server, &server->wall_frost, &server->wall_frost_r,
 		look_blur_radius(l->v[LOOK_TILE_FROST]), "start-wallpaper-frost");
 	wall_blur_layer(server, &server->wall_soft, &server->wall_soft_r,
-		l->v[LOOK_BG_SHOW] ? look_blur_radius(l->v[LOOK_BG_BLUR]) : 0, "start-wallpaper-soft");
+		l->v[LOOK_BG_PHOTO] > 0 ? look_blur_radius(l->v[LOOK_BG_BLUR]) : 0, "start-wallpaper-soft");
 	wall_blur_layer(server, &server->wall_over[0], &server->wall_over_r[0],
 		l->v[LOOK_SWITCHER_PHOTO] ? look_blur_radius(l->v[LOOK_SWITCHER_FROST]) : 0, "start-wallpaper-switcher");
 	wall_blur_layer(server, &server->wall_over[1], &server->wall_over_r[1],
@@ -6031,7 +6032,7 @@ static void wall_under(struct zt_server *server, const float model[16], double t
 	server->uv_off[0] = server->uv_off[1] = 0;
 }
 
-/* Start's photo behind the tiles (background_show), over the view through
+/* Start's photo behind the tiles (background_photo), over the view through
  * `model`: the part of it the screen is over, at the same parallax as the
  * tiles' windows onto it (wall_under), so a frosted tile is glass over the
  * same picture. Blurred by background_blur, dimmed by background_brightness
@@ -21376,7 +21377,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 		/* look KEY VALUE: an appearance slider in Settings, live (appearance.h);
 		 * the file is written when it is let go, without a SIGHUP */
 		int k = look_line(&server->look, line + 5);
-		if (k == LOOK_TILE_FROST || k == LOOK_BG_BLUR || k == LOOK_BG_SHOW || k == LOOK_SWITCHER_PHOTO ||
+		if (k == LOOK_TILE_FROST || k == LOOK_BG_BLUR || k == LOOK_BG_PHOTO || k == LOOK_SWITCHER_PHOTO ||
 				k == LOOK_SEARCH_PHOTO || k == LOOK_SWITCHER_FROST || k == LOOK_SEARCH_FROST) {
 			walls_blur(server, false);	/* (a few ms on the small photo) */
 		}
@@ -25754,8 +25755,12 @@ static void render_frame(struct zt_server *server) {
 	bool lf_saved_ident = false, lf_recede = false;
 	/* Start and the app list beside it, unless they have swung away completely */
 	float bd_start_t = server->start_t;
-	if (bd_start) {
-		server->start_t = 0.0f;	/* (Start at rest, for the call's backdrop) */
+	/* the switcher see-through (switcher_opacity): Start under its cards,
+	 * from an app too, where Start has swung away */
+	bool sw_start = server->switch_t > 0.001f && server->look.v[LOOK_SWITCHER_OPACITY] < 100 &&
+		!start_land(server) && !server->locked;
+	if (bd_start || sw_start) {
+		server->start_t = 0.0f;	/* (Start at rest, for the call's backdrop or the switcher's) */
 	}
 	if (server->start_t < 0.999f && !app_covers) {
 		/* (Start and the list are laid out in the view frame) */
@@ -25779,10 +25784,12 @@ static void render_frame(struct zt_server *server) {
 		if (start_land(server)) {
 			/* the cover-flow's black stage, under it all on its side */
 			cf_stage_draw(server, page_dx);
-		} else if (server->look.v[LOOK_BG_SHOW] && server->wall_h > 0) {
-			/* Start's photo behind the tiles (appearance.h): it goes with
-			 * Start, across to the list and away with a launch */
-			float bm[16], ba = 1.0f - server->start_t;
+		} else if (server->look.v[LOOK_BG_PHOTO] > 0 && server->wall_h > 0) {
+			/* Start's photo behind and between the tiles (appearance.h), as
+			 * much of it as background_photo says over the theme's
+			 * background: it goes with Start, across to the list and away
+			 * with a launch */
+			float bm[16], ba = (1.0f - server->start_t) * look_f(&server->look, LOOK_BG_PHOTO);
 			mat_identity(bm);
 			mat_translate(bm, page_dx, 0);
 			mat_scale(bm, (float)view_w(server), (float)view_h(server));
@@ -25831,9 +25838,10 @@ static void render_frame(struct zt_server *server) {
 			}
 			draw_order[n - 1] = server->edit;
 		}
-		/* the tiles' opacity over what is behind them, and their brightness
-		 * (in the tint: no quad more); both 1 by default (appearance.h) */
-		float tile_op = look_f(&server->look, LOOK_TILE_OPACITY), tile_tint[3];
+		/* the tiles' brightness (in the tint: no quad more), and with a photo
+		 * their fill over their window onto it (appearance.h): 1 and 0 by
+		 * default, the look from before */
+		float tile_fill = server->wall_h > 0 ? look_f(&server->look, LOOK_TILE_FILL) : 0.0f, tile_tint[3];
 		memcpy(tile_tint, server->tint, sizeof(tile_tint));
 		for (int k = 0; k < 3; k++) server->tint[k] *= look_f(&server->look, LOOK_TILE_BRIGHTNESS);
 		quad_batch_begin(server);
@@ -25856,7 +25864,7 @@ static void render_frame(struct zt_server *server) {
 			if (y > view_h(server) || y + t->h < 0 || x > view_w(server) || x + t->w < 0) {
 				continue;
 			}
-			float m[16], grow = 1.0f, dim = tile_op;
+			float m[16], grow = 1.0f, dim = 1.0f;
 			float alpha = turn_place(server, m, x, y, (float)t->w, (float)t->h, (float)t->w, turn,
 				t->jit_travel, hinge_right);
 			if (server->edit_t > 0.001f) {
@@ -25865,7 +25873,7 @@ static void render_frame(struct zt_server *server) {
 					grow = 1.0f + 0.06f * server->edit_t;
 				} else {
 					grow = 1.0f - 0.08f * server->edit_t;
-					dim = tile_op * (1.0f - 0.45f * server->edit_t);
+					dim = 1.0f - 0.45f * server->edit_t;
 				}
 			}
 			mat_rotate_x(m, t->tilt_x);			/* lean, about the tile's centre */
@@ -25886,10 +25894,20 @@ static void render_frame(struct zt_server *server) {
 			/* (a tile wholly behind the cover-flow is cut away: it reaches no bar) */
 			if (diffuse > 0.0f && !(tiles_clip && x + (float)t->w <= (float)land_start_x(server) + page_dx)) {
 				/* (the brightness folded into what is noted: the bars' blur changes with it) */
-				frost_note(server, &scan, m, alpha * dim * server->tint[0], face->tex, 0.0f, face == &t->back_layer &&
+				frost_note(server, &scan, m, alpha * dim * server->tint[0] * (1.0f + tile_fill), face->tex, 0.0f, face == &t->back_layer &&
 					(t->sweep_w[0] > 0 || t->sweep_w[1] > 0 || t->sweep_w[2] > 0));
 			}
 			wall_under(server, m, t->x, t->y, t->w, t->h, alpha * dim);
+			if (tile_fill > 0.003f && server->white_tex) {
+				/* its own colour over the window: see-through to solid */
+				float under[3];
+				memcpy(under, server->tint, sizeof(under));
+				server->tint[0] *= ((t->color >> 16) & 0xff) / 255.0f;
+				server->tint[1] *= ((t->color >> 8) & 0xff) / 255.0f;
+				server->tint[2] *= (t->color & 0xff) / 255.0f;
+				quad(server, GL_TEXTURE_2D, server->white_tex, m, alpha * dim * tile_fill, false, false, 1.0f, 1.0f);
+				memcpy(server->tint, under, sizeof(under));
+			}
 			quad(server, GL_TEXTURE_2D, face->tex, m, alpha * dim, true, false,
 				(float)face->pw / face->tw, (float)face->ph / face->th);
 			if (face == &t->back_layer) {

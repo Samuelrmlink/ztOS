@@ -28,10 +28,11 @@ int main(void) {
 	struct zt_look l;
 	look_defaults(&l);
 
-	/* the defaults are the look from before: opaque tiles, sharp, full
-	 * brightness; no photo behind them; opaque switcher and search */
-	assert(l.v[LOOK_TILE_OPACITY] == 100 && l.v[LOOK_TILE_FROST] == 0 && l.v[LOOK_TILE_BRIGHTNESS] == 100);
-	assert(l.v[LOOK_BG_SHOW] == 0);
+	/* the defaults are the look from before: see-through tiles over their
+	 * window onto the photo, sharp, full brightness; none of the photo
+	 * between them; opaque switcher and search */
+	assert(l.v[LOOK_TILE_FILL] == 0 && l.v[LOOK_TILE_FROST] == 0 && l.v[LOOK_TILE_BRIGHTNESS] == 100);
+	assert(l.v[LOOK_BG_PHOTO] == 0 && l.v[LOOK_BG_BRIGHTNESS] == 100 && l.v[LOOK_BG_BLUR] == 0);
 	assert(l.v[LOOK_SWITCHER_OPACITY] == 100 && l.v[LOOK_SEARCH_OPACITY] == 100);
 	assert(l.v[LOOK_SWITCHER_BRIGHTNESS] == 100 && l.v[LOOK_SEARCH_BRIGHTNESS] == 100);
 	assert(l.v[LOOK_SWITCHER_PHOTO] == 0 && l.v[LOOK_SEARCH_PHOTO] == 0);
@@ -39,48 +40,76 @@ int main(void) {
 		assert(LOOK_DEFS[k].def >= LOOK_DEFS[k].min && LOOK_DEFS[k].def <= LOOK_DEFS[k].max);
 		assert(look_index(LOOK_DEFS[k].key) == k);
 	}
+	assert(!look_finish(&l));	/* nothing to move on */
 
 	/* the file: numbers, a percent sign, on/off; out of range clamped; a bad
 	 * value leaves it as it was; unknown keys are not ours */
-	assert(look_parse(&l, "tile_opacity", "70"));
-	assert(l.v[LOOK_TILE_OPACITY] == 70);
+	assert(look_parse(&l, "tile_fill", "70"));
+	assert(l.v[LOOK_TILE_FILL] == 70);
 	assert(look_parse(&l, "tile_frost", "35%"));
 	assert(l.v[LOOK_TILE_FROST] == 35);
-	assert(look_parse(&l, "tile_opacity", "0"));
-	assert(l.v[LOOK_TILE_OPACITY] == 10);		/* tiles never vanish */
+	assert(look_parse(&l, "tile_fill", "-3"));
+	assert(l.v[LOOK_TILE_FILL] == 0);
 	assert(look_parse(&l, "tile_brightness", "250"));
 	assert(l.v[LOOK_TILE_BRIGHTNESS] == 100);
 	assert(look_parse(&l, "search_opacity", "-5"));
 	assert(l.v[LOOK_SEARCH_OPACITY] == 20);		/* its text stays readable */
-	assert(look_parse(&l, "background_show", "on"));
-	assert(l.v[LOOK_BG_SHOW] == 1);
-	assert(look_parse(&l, "background_show", "maybe"));
-	assert(l.v[LOOK_BG_SHOW] == 1);
-	assert(look_parse(&l, "background_show", "0"));
-	assert(l.v[LOOK_BG_SHOW] == 0);
+	assert(look_parse(&l, "background_photo", "45"));
+	assert(l.v[LOOK_BG_PHOTO] == 45);
 	assert(look_parse(&l, "switcher_frost", "lots"));
 	assert(l.v[LOOK_SWITCHER_FROST] == 100);
+	assert(look_parse(&l, "switcher_photo", "maybe"));
+	assert(l.v[LOOK_SWITCHER_PHOTO] == 0);
 	assert(!look_parse(&l, "tiles_opacity", "50"));
 	assert(!look_parse(&l, "accent", "lime"));
+	/* the first cut's keys are taken (and ignored, but for the migration) */
+	assert(look_parse(&l, "tile_opacity", "40"));
+	assert(l.v[LOOK_TILE_FILL] == 0);
 
 	char text[16];
 	look_format(&l, LOOK_TILE_FROST, text, sizeof(text));
 	assert(!strcmp(text, "35"));
-	look_format(&l, LOOK_BG_SHOW, text, sizeof(text));
+	look_format(&l, LOOK_SEARCH_PHOTO, text, sizeof(text));
 	assert(!strcmp(text, "off"));
+
+	/* the first cut's background_show on: the whole photo at the brightness
+	 * it had then (60), unless the file says otherwise */
+	{
+		struct zt_look m;
+		look_defaults(&m);
+		assert(look_parse(&m, "background_show", "on"));
+		assert(look_finish(&m));
+		assert(m.v[LOOK_BG_PHOTO] == 100 && m.v[LOOK_BG_BRIGHTNESS] == 60);
+		look_defaults(&m);
+		look_parse(&m, "background_show", "on");
+		look_parse(&m, "background_brightness", "80");
+		assert(look_finish(&m));
+		assert(m.v[LOOK_BG_PHOTO] == 100 && m.v[LOOK_BG_BRIGHTNESS] == 80);
+		look_defaults(&m);
+		look_parse(&m, "background_show", "on");
+		look_parse(&m, "background_photo", "30");
+		assert(!look_finish(&m));		/* the new key wins */
+		assert(m.v[LOOK_BG_PHOTO] == 30);
+		look_defaults(&m);
+		look_parse(&m, "background_show", "off");
+		assert(!look_finish(&m));
+		assert(m.v[LOOK_BG_PHOTO] == 0);
+	}
 
 	/* the pipe: "look KEY VALUE" (after the word); the index when it changed */
 	assert(look_line(&l, "switcher_opacity 40\n") == LOOK_SWITCHER_OPACITY);
 	assert(l.v[LOOK_SWITCHER_OPACITY] == 40);
 	assert(look_line(&l, "switcher_opacity 40") == -1);	/* the same: nothing to do */
 	assert(look_line(&l, "background_blur 55") == LOOK_BG_BLUR);
-	assert(look_line(&l, "background_show on") == LOOK_BG_SHOW);
+	assert(look_line(&l, "background_photo 80") == LOOK_BG_PHOTO);
+	assert(look_line(&l, "tile_fill 100") == LOOK_TILE_FILL);
 	assert(look_line(&l, "switcher_photo on") == LOOK_SWITCHER_PHOTO);
 	assert(l.v[LOOK_SWITCHER_PHOTO] == 1);
 	assert(look_line(&l, "search_photo 1") == LOOK_SEARCH_PHOTO);
+	assert(look_line(&l, "background_show on") == -1);	/* retired */
 	assert(look_line(&l, "nonsense 5") == -1);
-	assert(look_line(&l, "tile_opacity") == -1);
-	assert(look_line(&l, "tile_opacity x") == -1);
+	assert(look_line(&l, "tile_fill") == -1);
+	assert(look_line(&l, "tile_fill x") == -1);
 	assert(look_line(&l, "") == -1);
 
 	/* the blur's radius: none at 0, at least 2 px once on, 24 at most */
@@ -95,7 +124,7 @@ int main(void) {
 	k[0].key = "accent";
 	snprintf(k[0].value, sizeof(k[0].value), "cobalt");
 	snprintf(k[0].loaded, sizeof(k[0].loaded), "cobalt");
-	k[1].key = "tile_opacity";
+	k[1].key = "tile_fill";
 	snprintf(k[1].value, sizeof(k[1].value), "80");
 	snprintf(k[1].loaded, sizeof(k[1].loaded), "100");
 	k[2].key = "search_frost";
@@ -116,6 +145,7 @@ int main(void) {
 	assert(!config_key_retired("styles"));
 	assert(!config_key_retired("theme"));
 	assert(!config_key_retired("lock_theme"));
+	assert(config_key_retired("background_show") && config_key_retired("tile_opacity"));
 	snprintf(k[1].value, sizeof(k[1].value), "60");
 	assert(!strcmp(merge(
 		"# ztMETRO configuration\n"
@@ -125,17 +155,19 @@ int main(void) {
 		"  dotmatrix_amoled=on\n"
 		"theme = dark\n"
 		"tile_opacity = 100\n"
+		"tile_fill = 0\n"
+		"background_show = on\n"
 		"dotmatrix_dock1 = ztphone\n"
 		"unknown_key = 1\n", k, 3),
 		"# ztMETRO configuration\n"
 		"accent = cobalt\n"
 		"theme = dark\n"
-		"tile_opacity = 60\n"
+		"tile_fill = 60\n"
 		"unknown_key = 1\n"));
 	/* a file from before 8.70 with nothing of this: the new key at the end */
-	assert(!strcmp(merge("accent = cobalt\nstyle = metro\n", k, 3), "accent = cobalt\ntile_opacity = 60\n"));
+	assert(!strcmp(merge("accent = cobalt\nstyle = metro\n", k, 3), "accent = cobalt\ntile_fill = 60\n"));
 	/* no file yet */
-	assert(!strcmp(merge(NULL, k, 3), "tile_opacity = 60\n"));
+	assert(!strcmp(merge(NULL, k, 3), "tile_fill = 60\n"));
 
 	puts("appearance: ok");
 	return 0;

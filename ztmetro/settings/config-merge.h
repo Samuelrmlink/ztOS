@@ -61,9 +61,11 @@ static inline bool config_only_changed_if(const struct config_key *keys, int n, 
 
 /* Keys no version reads or writes any more: their lines go whenever the file
  * is written. `style` and `dotmatrix_*` were the DotMatrix style's (removed in
- * ROADMAP 8.70): whatever they say, the shell is Metro. */
+ * ROADMAP 8.70): whatever they say, the shell is Metro. background_show and
+ * tile_opacity were 8.70's first cut (appearance.h look_finish). */
 static inline bool config_key_retired(const char *name) {
-	return strcmp(name, "style") == 0 || strncmp(name, "dotmatrix_", 10) == 0;
+	return strcmp(name, "style") == 0 || strncmp(name, "dotmatrix_", 10) == 0 ||
+		strcmp(name, "background_show") == 0 || strcmp(name, "tile_opacity") == 0;	/* 8.70's first cut */
 }
 
 /* The key a line sets, into `out`; false if it sets none. */

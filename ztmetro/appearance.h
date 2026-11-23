@@ -6,17 +6,24 @@
  * missing from the file is its default, and every default is the look from
  * before these existed:
  *
- *   tile_opacity 100, tile_frost 0, tile_brightness 100: the tiles as they
- *     were, Start's photo sharp through them (or the accent's colour);
- *   background_show off: the theme's own background behind the tiles, the
- *     photo only in them; background_brightness and background_blur apply
- *     once it is on (the photo behind the tiles, dimmed and blurred);
+ *   background_photo 0: how much of Start's photo shows behind and between
+ *     the tiles, from the theme's background (0, Windows Phone's way: the
+ *     photo only in the tiles) to the whole photo (100); background_brightness
+ *     dims it, background_blur blurs it;
+ *   tile_fill 0: the tile's own accent fill over its window onto the photo,
+ *     from see-through (0, the photo through the tile, as before) to solid
+ *     (100); with no photo a tile is its solid colour whatever this says;
+ *     tile_frost 0 and tile_brightness 100: the photo in them sharp, as before;
  *   switcher_opacity 100, search_opacity 100: the theme's background over
  *     what is behind them, as before; frost and brightness apply once the
  *     opacity is lowered (what shows through, blurred and dimmed);
  *   switcher_photo, search_photo off: with one on, what shows through is
  *     Start's photo instead, blurred by that frost (made once on the CPU,
  *     like the tiles' frost: no blur on the GPU as it opens).
+ *
+ * Retired with the first cut of 8.70 (config_key_retired drops their lines):
+ * background_show (on became background_photo 100 at the brightness it had,
+ * look_finish) and tile_opacity (the whole tile's alpha, never set).
  *
  * Settings tells the shell a slider's value live with `look KEY VALUE` on the
  * control pipe, and writes the file when it is let go without a SIGHUP (the
@@ -31,8 +38,8 @@
 #include <string.h>
 
 enum look_key {
-	LOOK_TILE_OPACITY, LOOK_TILE_FROST, LOOK_TILE_BRIGHTNESS,
-	LOOK_BG_SHOW, LOOK_BG_BRIGHTNESS, LOOK_BG_BLUR,
+	LOOK_TILE_FILL, LOOK_TILE_FROST, LOOK_TILE_BRIGHTNESS,
+	LOOK_BG_PHOTO, LOOK_BG_BRIGHTNESS, LOOK_BG_BLUR,
 	LOOK_SWITCHER_OPACITY, LOOK_SWITCHER_FROST, LOOK_SWITCHER_BRIGHTNESS,
 	LOOK_SEARCH_OPACITY, LOOK_SEARCH_FROST, LOOK_SEARCH_BRIGHTNESS,
 	LOOK_SWITCHER_PHOTO, LOOK_SEARCH_PHOTO,
@@ -44,11 +51,11 @@ static const struct look_def {
 	int def, min, max;
 	bool toggle;		/* on/off in the file, 1/0 here */
 } LOOK_DEFS[N_LOOK] = {
-	[LOOK_TILE_OPACITY] = { "tile_opacity", 100, 10, 100, false },
+	[LOOK_TILE_FILL] = { "tile_fill", 0, 0, 100, false },
 	[LOOK_TILE_FROST] = { "tile_frost", 0, 0, 100, false },
 	[LOOK_TILE_BRIGHTNESS] = { "tile_brightness", 100, 20, 100, false },
-	[LOOK_BG_SHOW] = { "background_show", 0, 0, 1, true },
-	[LOOK_BG_BRIGHTNESS] = { "background_brightness", 60, 0, 100, false },
+	[LOOK_BG_PHOTO] = { "background_photo", 0, 0, 100, false },
+	[LOOK_BG_BRIGHTNESS] = { "background_brightness", 100, 0, 100, false },
 	[LOOK_BG_BLUR] = { "background_blur", 0, 0, 100, false },
 	[LOOK_SWITCHER_OPACITY] = { "switcher_opacity", 100, 0, 100, false },
 	[LOOK_SWITCHER_FROST] = { "switcher_frost", 100, 0, 100, false },
@@ -62,10 +69,16 @@ static const struct look_def {
 
 struct zt_look {
 	int v[N_LOOK];
+	bool seen[N_LOOK];	/* the file had it */
+	int legacy_show;	/* background_show: -1 absent, 0 off, 1 on (look_finish) */
 };
 
 static inline void look_defaults(struct zt_look *l) {
-	for (int k = 0; k < N_LOOK; k++) l->v[k] = LOOK_DEFS[k].def;
+	for (int k = 0; k < N_LOOK; k++) {
+		l->v[k] = LOOK_DEFS[k].def;
+		l->seen[k] = false;
+	}
+	l->legacy_show = -1;
 }
 
 /* The key's place in LOOK_DEFS; -1 if it is not one of these. */
@@ -99,10 +112,28 @@ static inline bool look_value(int k, const char *value, int *out) {
 /* key = value from the file: true when the key is one of these (a bad value
  * is then ignored, the key still taken) */
 static inline bool look_parse(struct zt_look *l, const char *key, const char *value) {
+	if (strcmp(key, "background_show") == 0) {
+		l->legacy_show = !strcmp(value, "on") || !strcmp(value, "1") || !strcmp(value, "true");
+		return true;
+	}
+	if (strcmp(key, "tile_opacity") == 0) return true;	/* retired: the whole tile's alpha */
 	int k = look_index(key);
 	if (k < 0) return false;
 	int v;
-	if (look_value(k, value, &v)) l->v[k] = v;
+	if (look_value(k, value, &v)) {
+		l->v[k] = v;
+		l->seen[k] = true;
+	}
+	return true;
+}
+
+/* After the file: the first cut's background_show on becomes the photo shown
+ * whole, at the brightness it was drawn at (60 then). True when that changed
+ * something, which the file must then be told (Settings writes it). */
+static inline bool look_finish(struct zt_look *l) {
+	if (l->legacy_show != 1 || l->seen[LOOK_BG_PHOTO]) return false;
+	l->v[LOOK_BG_PHOTO] = 100;
+	if (!l->seen[LOOK_BG_BRIGHTNESS]) l->v[LOOK_BG_BRIGHTNESS] = 60;
 	return true;
 }
 

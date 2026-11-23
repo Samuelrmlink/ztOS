@@ -592,7 +592,15 @@ static void config_load(void) {
 	if (buf[0]) app.swappiness = atoi(buf);
 	perf_load();
 	auto_load();
+	bool look_moved = look_finish(&app.look);	/* 8.70's first cut: background_show */
 	config_remember_loaded();
+	if (look_moved) {
+		/* written with the next change, as the retired key's line goes */
+		struct config_key *k = config_key_named("background_photo");
+		if (k) k->force = true;
+		k = config_key_named("background_brightness");
+		if (k) k->force = true;
+	}
 	app.scale_pending = app.scale_idx;
 }
 
@@ -2128,9 +2136,8 @@ static double look_heading(cairo_t *cr, double y, const char *title) {
 
 static const char *home_summary(char *out, size_t size) {
 	const struct zt_look *l = &app.look;
-	snprintf(out, size, "Tiles %d %%%s, %s", l->v[LOOK_TILE_OPACITY],
-		l->v[LOOK_TILE_FROST] ? ", frosted" : "",
-		l->v[LOOK_BG_SHOW] ? "photo behind them" : "photo in them");
+	snprintf(out, size, "Photo %d %%, tile fill %d %%%s", l->v[LOOK_BG_PHOTO], l->v[LOOK_TILE_FILL],
+		l->v[LOOK_TILE_FROST] ? ", frosted" : "");
 	return out;
 }
 
@@ -2144,30 +2151,27 @@ static const char *overlays_summary(char *out, size_t size) {
 	return out;
 }
 
-/* home screen (Tiles Shell until 8.70): how Start's tiles and its photo look */
+/* home screen (Tiles Shell until 8.70): how Start's photo and its tiles look.
+ * Every slider says what it moves: the photo between the tiles, then each
+ * tile's fill over its window onto the photo. */
 static double draw_tiles(cairo_t *cr) {
 	double y = zmc_header(cr, "home screen");
 	bool photo = app.start_wall[0] != 0;
-	y = look_heading(cr, y, "tiles");
-	y = look_slider(cr, y, "Opacity", LOOK_TILE_OPACITY, "How much of what is behind them shows through");
-	y = look_slider(cr, y, "Frost", LOOK_TILE_FROST, photo ? "Start's photo, blurred, through the tiles" :
-		"Blurs Start's photo through the tiles: choose one under background");
-	y = look_slider(cr, y, "Brightness", LOOK_TILE_BRIGHTNESS, NULL);
-	y = look_heading(cr, y + 6, "background");
 	if (!photo) {
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-		y += zmc_text(cr, "Start has no photo: choose one under customization, background.", FONT_REGULAR,
-			13.5, MARGIN, y, zmc.width - 2 * MARGIN) + 14;
+		y += zmc_text(cr, "Start has no photo: choose one under customization, background. Until then the "
+			"tiles are their solid colours.", FONT_REGULAR, 13.5, MARGIN, y, zmc.width - 2 * MARGIN) + 14;
 	}
-	y = zmc_switch(cr, y, "Photo behind the tiles", app.look.v[LOOK_BG_SHOW], LOOK_ACTIONS + LOOK_BG_SHOW);
-	if (app.look.v[LOOK_BG_SHOW]) {
-		y = look_slider(cr, y, "Brightness", LOOK_BG_BRIGHTNESS, "Dims the photo behind the tiles");
-		y = look_slider(cr, y, "Blur", LOOK_BG_BLUR, NULL);
-	} else {
-		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-		y += zmc_text(cr, "Off: the theme's background, the photo only in the tiles (Windows Phone's way)",
-			FONT_REGULAR, 12.5, MARGIN, y - 6, zmc.width - 2 * MARGIN) + 10;
-	}
+	y = look_heading(cr, y, "background photo");
+	y = look_slider(cr, y, "Background photo: visibility", LOOK_BG_PHOTO,
+		"Behind and between the tiles: 0 % the theme's background (Windows Phone's way), 100 % the whole photo");
+	y = look_slider(cr, y, "Background photo: brightness", LOOK_BG_BRIGHTNESS, "Dims the photo between the tiles");
+	y = look_slider(cr, y, "Background photo: blur", LOOK_BG_BLUR, NULL);
+	y = look_heading(cr, y + 6, "tiles");
+	y = look_slider(cr, y, "Tile fill: opacity", LOOK_TILE_FILL,
+		"0 %: see-through, the photo in the tile (Windows Phone's way); 100 %: solid in the tile's colour");
+	y = look_slider(cr, y, "Tile frost", LOOK_TILE_FROST, "Blurs the photo seen through the tiles");
+	y = look_slider(cr, y, "Tile brightness", LOOK_TILE_BRIGHTNESS, NULL);
 	return y + 20;
 }
 
