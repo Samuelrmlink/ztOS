@@ -2120,9 +2120,83 @@ static void anim_stop(struct zt_server *server, float *value) {
 	}
 }
 
-/* Advance every animation to `now`, by clock and never by frame count.
+/* ---- the frame clock: the time a frame is drawn for ------------------------
+ *
+ * An animation's step is its clock's step, so the clock has to step as the
+ * glass does. Read as the frame began (now_ms()), it did not: the frame event
+ * comes 0-4 ms after the flip, as the loop happens to be free, and in whole
+ * milliseconds, so frames 16.67 ms apart on the glass were drawn 15-19 ms
+ * apart in the animations' time (p5-p95 of 757 moving frames, 2026-11-22):
+ * a step a fifth longer or shorter than its neighbours, every few frames, in
+ * every slide and turn. Seen as judder at a steady 60 Hz.
+ *
+ * Now each frame is drawn for the moment it will be shown: the refresh after
+ * the one it can make, on the grid the last flip set (the kernel's flip time,
+ * wlr_output's present event). The work a frame takes (drawing, the GPU,
+ * the commit) is the smoothed work of the frames before. With no flip seen
+ * lately (the first frame after a rest) the guess is now + that work + half
+ * a refresh. ZTMETRO_FRAME_CLOCK=0, or "frameclock off" on the control pipe,
+ * draws by the time the frame begins, as before. */
+static struct {
+	double last_pres;	/* the last flip (ms, CLOCK_MONOTONIC); 0: none yet */
+	double refresh;		/* ms between flips, measured */
+	double work;		/* a frame's start to its commit, smoothed (ms) */
+	double at;		/* the time the frame being drawn is for */
+	bool off;
+} fclock = { .refresh = 1000.0 / 60.0, .work = 8.0 };
+
+/* The time the frame now beginning is drawn for, in ms on CLOCK_MONOTONIC. */
+static double frame_clock_begin(void) {
+	double now = ftrace_clock();
+	double at;
+	if (fclock.off) {
+		at = now;
+	} else if (fclock.last_pres > 0 && now - fclock.last_pres < 20 * fclock.refresh) {
+		/* the first flip after the commit can be made (+1 ms of slack) */
+		double k = ceil((now + fclock.work + 1.0 - fclock.last_pres) / fclock.refresh);
+		at = fclock.last_pres + (k < 1 ? 1 : k) * fclock.refresh;
+	} else {
+		at = now + fclock.work + fclock.refresh / 2;
+	}
+	/* never back: a frame drawn again for the same flip has its time */
+	if (at < fclock.at && fclock.at - at < 2 * fclock.refresh) {
+		at = fclock.at;
+	}
+	fclock.at = at;
+	return at;
+}
+
+/* The frame is committed: what it took, for the next one's guess. */
+static void frame_clock_committed(double start, double end) {
+	double w = end - start;
+	if (w > 0 && w < 4 * fclock.refresh) {
+		fclock.work += (w - fclock.work) / 8;
+	}
+}
+
+/* A flip: the grid's phase, and its period. `when` is the kernel's time for it;
+ * one far older than the moment it is heard of is the time of a vblank
+ * before a rest (the event of the first flip after one carries the last
+ * interrupt's time, up to seconds old: seen 1.3 s and 23 s, 2026-11-22), and
+ * the moment it is heard of is used instead. */
+static void frame_clock_presented(double when, double seen) {
+	if (when <= 0 || seen - when > fclock.refresh) {
+		when = seen;
+	}
+	if (fclock.last_pres > 0) {
+		double d = when - fclock.last_pres;
+		double n = floor(d / fclock.refresh + 0.5);
+		if (n >= 1 && n <= 4 && fabs(d / n - fclock.refresh) < 0.1 * fclock.refresh) {
+			fclock.refresh += (d / n - fclock.refresh) / 32;	/* the panel's own rate */
+		}
+	}
+	fclock.last_pres = when;
+}
+
+/* Advance every animation to `now`, by clock and never by frame count;
+ * `frac` is the part of a millisecond past it (the frame clock's).
  * Returns whether any is still running. */
-static bool anims_step(struct zt_server *server, uint32_t now) {
+static bool anims_step(struct zt_server *server, uint32_t now, float frac) {
 	bool running = false;
 	for (int i = 0; i < MAX_ANIMS; i++) {
 		struct zt_anim *a = &server->anims[i];
@@ -2142,7 +2216,7 @@ static bool anims_step(struct zt_server *server, uint32_t now) {
 					server->anims[j].active = false;
 			}
 		}
-		float t = (float)(now - a->start) / a->duration;
+		float t = ((float)(int32_t)(now - a->start) + frac) / a->duration;
 		if (t >= 1.0f) {
 			*a->value = a->to;
 			a->active = false;
@@ -8678,8 +8752,24 @@ static int status_idle(void *data) {
 	return 0;
 }
 
+/* An app in front sending frames (a scroll, a video): the row's paint (5 ms
+ * of Cairo on an efficiency core, 2026-11-22's trace) waits for the slot
+ * just after one of the shell's frames is committed (render_frame), where
+ * there is most of a refresh to spare. Painted whenever a timer or an event
+ * asked, it landed just before a frame 32 times in ten minutes of use and
+ * was in the gap of 11 of the 95 late flips. */
+static bool st_after_commit;	/* render_frame's slot: paint now */
+static bool app_frames_flowing(struct zt_server *server) {
+	return server->shown && server->rot_phase == ROT_IDLE &&
+		(int32_t)(server->app_live_until - now_ms()) > 0;
+}
+
 static void draw_status(struct zt_server *server) {
 	server->status_gen++;
+	if (!st_after_commit && app_frames_flowing(server) && !server->locked) {
+		server->st_pending = true;	/* (painted after the next frame's commit) */
+		return;
+	}
 	if (((shell_in_motion(server) || shade_pulling(server)) && server->rot_phase == ROT_IDLE) ||
 			server->rot_phase == ROT_TURN) {
 		/* (and while the action centre is pulled: the row and the panel's
@@ -21691,6 +21781,11 @@ static void ctl_command(struct zt_server *server, char *line) {
 		if (server->board_state && id >= 0 && id < ZB_CELLS && server->board_live[id]) board_go(server, id);
 	} else if (!strcmp(line, "boardtest close")) {
 		board_close(server);
+	} else if (!strcmp(line, "frameclock on") || !strcmp(line, "frameclock off")) {
+		/* the frame clock (frame_clock_begin), on or off, to compare */
+		fclock.off = !strcmp(line, "frameclock off");
+		wlr_log(WLR_INFO, "frame clock %s", fclock.off ? "off: frames drawn for when they begin" :
+			"on: frames drawn for when they are shown");
 	} else if (sscanf(line, "frametrace %d", &id) == 1) {
 		if (!server->ftrace) {
 			server->ftrace = fopen("/tmp/zt-frametrace.log", "w");
@@ -22814,7 +22909,13 @@ static void board_frame(struct zt_server *server) {
 		server->board_clock_waits = false;
 		server->board_start = now_ms();
 	}
+	/* (on the frame clock, as the other animations: see frame_clock_begin) */
 	double ms = (uint32_t)(now_ms() - server->board_start);
+	if (fclock.at > 0) {
+		uint32_t at = (uint32_t)(uint64_t)floor(fclock.at);
+		ms = (double)(int32_t)(at - server->board_start) + (fclock.at - floor(fclock.at));
+		if (ms < 0) ms = 0;
+	}
 	bool out = server->board_state == 3;
 	double last = zb_delay(ZB_CELLS - 1);
 	double run = last + (out ? ZB_RB_OUT_MS : ZB_RB_IN_MS);	/* Readerboard's keyframes (zrnboard.h) */
@@ -25643,7 +25744,11 @@ static void render_frame(struct zt_server *server) {
 	}
 	struct wlr_output *output = server->output->wlr_output;
 	uint32_t now = now_ms();
-	bool running = anims_step(server, now);
+	double frame_start = ftrace_clock();
+	/* the animations and the glides at the time this frame will be shown */
+	double frame_at = frame_clock_begin();
+	uint32_t anim_now = (uint32_t)(uint64_t)floor(frame_at);
+	bool running = anims_step(server, anim_now, (float)(frame_at - floor(frame_at)));
 	boot_logo_tick(server, now);
 	running = running || server->boot_logo_stage != 0;
 	rot_step(server);	/* the turn: on its way, finished, or due (see "the turn") */
@@ -25660,7 +25765,7 @@ static void render_frame(struct zt_server *server) {
 	server->alpha_mul = 1.0f;
 	float bar_angle = rot_angle(server);	/* what the bars' glyphs are turned by */
 	touch_resample(server);
-	server->moving = physics_step(server, now);
+	server->moving = physics_step(server, anim_now);
 	/* (before the frame's own drawing: it makes textures of its own) */
 	bool preparing = !server->splash && !server->loading_since && list_prepare(server);
 	/* Start or the list under a finger, gliding, or the two changing places:
@@ -26875,19 +26980,30 @@ static void render_frame(struct zt_server *server) {
 		damage(server);
 	}
 	clock_gettime(CLOCK_MONOTONIC, &t3);
+	frame_clock_committed(frame_start, t3.tv_sec * 1e3 + t3.tv_nsec / 1e6);
+	if (server->st_pending && app_frames_flowing(server) && !shell_in_motion(server) &&
+			!shade_pulling(server)) {
+		/* the status row held while the app sends frames: now, with the
+		 * frame just committed and most of a refresh ahead (draw_status) */
+		st_after_commit = true;
+		draw_status(server);
+		st_after_commit = false;
+		damage(server);
+	}
 	if (server->ftrace) {
 		/* when, then ms drawing, finishing, committing; quads; uploads;
 		 * where Start's scroll stood (points) */
 		/* (and last: whether a next frame is due, something moving: a gap
 		 * after a frame without it is rest, not a stall) */
-		fprintf(server->ftrace, "frame %.1f %.1f %.1f %.1f %d %d %.3f %d\n", t3.tv_sec * 1e3 + t3.tv_nsec / 1e6,
+		/* (and after it: the time the frame was drawn for, the frame clock's) */
+		fprintf(server->ftrace, "frame %.1f %.1f %.1f %.1f %d %d %.3f %d %.2f\n", t3.tv_sec * 1e3 + t3.tv_nsec / 1e6,
 			(t1.tv_sec * 1e3 + t1.tv_nsec / 1e6) - now,
 			(t2.tv_sec - t1.tv_sec) * 1e3 + (t2.tv_nsec - t1.tv_nsec) / 1e6,
 			(t3.tv_sec - t2.tv_sec) * 1e3 + (t3.tv_nsec - t2.tv_nsec) / 1e6, (int)frame_quads, (int)frame_uploads, server->scroll,
 			/* 1: the next frame is asked for (below); 2: not, but a finger
 			 * or a settle is still under way (frames come from input) */
 			running || loading_active(server) ? 1 :
-			shell_in_motion(server) || server->rot_phase != ROT_IDLE ? 2 : 0);
+			shell_in_motion(server) || server->rot_phase != ROT_IDLE ? 2 : 0, frame_at);
 		if ((int32_t)(now - server->ftrace_until) >= 0) {
 			fclose(server->ftrace);
 			server->ftrace = NULL;
@@ -27110,6 +27226,9 @@ static void output_frame(struct wl_listener *listener, void *data) {
 static void output_present(struct wl_listener *listener, void *data) {	/* TRACE-ZWA */
 	struct zt_output *output = wl_container_of(listener, output, present);
 	const struct wlr_output_event_present *e = data;
+	if (e->presented) {
+		frame_clock_presented(e->when.tv_sec ? e->when.tv_sec * 1e3 + e->when.tv_nsec / 1e6 : 0, ftrace_clock());
+	}
 	if (output->server->ftrace && e->presented && e->when.tv_sec)
 		fprintf(output->server->ftrace, "pres %.2f %.2f %u\n", e->when.tv_sec * 1e3 + e->when.tv_nsec / 1e6, ftrace_clock(), e->seq);
 }
@@ -28032,6 +28151,10 @@ int main(int argc, char *argv[]) {
 	 * a CPU swizzle of the whole buffer, 130 ms for a terminal's first frames.
 	 * Linear it is a plain copy, and the GPU barely notices on our few quads. */
 	setenv("PAN_MESA_DEBUG", "noafbc,linear", true);
+	{
+		const char *fc = getenv("ZTMETRO_FRAME_CLOCK");	/* 0: off (frame_clock_begin) */
+		fclock.off = fc && !strcmp(fc, "0");
+	}
 
 	server.wl_display = wl_display_create();
 	server.loop = wl_display_get_event_loop(server.wl_display);
