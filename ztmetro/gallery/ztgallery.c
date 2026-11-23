@@ -27,6 +27,7 @@
  */
 #define _GNU_SOURCE
 #include "zrnmetrocore.h"
+#include "zt-anim.h"
 #include "zrnmetrogpu.h"
 #include "gallery-logic.h"
 
@@ -74,10 +75,11 @@
 #define BAND_ROWS	256	/* a photo's rows to a texture */
 #define UPLOAD_BYTES_PER_FRAME (6 * 1024 * 1024)
 #define PHOTO_GAP	24	/* between two photos, swiping */
-#define OPEN_MS		220
-#define SLIDE_MS	240
-#define ZOOM_MS		200
-#define THUMB_FADE_MS	140
+/* at the speed of an app's pages (Settings > animations, core/zt-anim.h) */
+#define OPEN_MS		zmc_anim_wait(ZT_ANIM_APP_PAGES, 220)
+#define SLIDE_MS	zmc_anim_wait(ZT_ANIM_APP_PAGES, 240)
+#define ZOOM_MS		zmc_anim_wait(ZT_ANIM_APP_PAGES, 200)
+#define THUMB_FADE_MS	zmc_anim_wait(ZT_ANIM_APP_PAGES, 140)
 #define DOUBLE_TAP_MS	280
 #define DOUBLE_TAP_ZOOM	2.5
 #define SLOP_PT		10

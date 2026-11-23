@@ -440,6 +440,17 @@ void zmc_list_lock(bool lock);
  * the ends of a list, so an app only calls it for something of its own. */
 void zmc_haptic(const char *kind);
 uint32_t zmc_now_ms(void);
+/* Animation speeds (core/zt-anim.h, Settings > animations). zmc_page_anim is
+ * the kind this app's pages turn as (ZT_ANIM_APP_PAGES; Settings sets its
+ * own); zmc_next_anim, when not -1, is the next turn's alone (a page asked
+ * for from outside). zmc_anim_ms: a length of a kind's motion as set, 0: off. */
+extern int zmc_page_anim, zmc_next_anim;
+int zmc_anim_ms(int kind, int ms);
+/* the same for something waiting on it (a clock compared against it): 1 when off */
+static inline int zmc_anim_wait(int kind, int ms) {
+	int v = zmc_anim_ms(kind, ms);
+	return v > 0 ? v : 1;
+}
 void zmc_read_file(const char *path, char *out, size_t size);	/* first line, or "" */
 uint32_t zmc_config_accent(void);
 void zmc_config_style(void);	/* style and palette from the same file; DotMatrix also sets the accent */	/* the accent in ~/.config/ztmetro/config */

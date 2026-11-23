@@ -322,24 +322,50 @@ SLOP = 8                    # points a finger moves before it is a drag, not a t
 HOLD_MS = 500
 
 
-def _menu_speed() -> float:
-    """The animation speed set in Settings ("Animation speed", a percent): the
-    whole UI runs at it, the shell and every app. (ZTOS_MENU_SPEED overrides,
-    for trying one out.)"""
-    percent = os.environ.get("ZTOS_MENU_SPEED")
-    if not percent:
-        try:
-            with open(os.path.expanduser("~/.config/ztmetro/config")) as f:
-                for line in f:
-                    key, _, value = line.partition("=")
-                    if key.strip() == "menu_speed":
-                        percent = value.strip()
-        except OSError:
-            pass
+def _speed_value(text):
+    """A speed as the config writes it (ztmetro/core/zt-anim.h): "off", "on",
+    a percent or "1.5x". None if it is none of those."""
+    text = text.strip()
+    if text in ("off", "none"):
+        return 0.0
+    if text in ("on", "normal"):
+        return 100.0
     try:
-        return min(300.0, max(25.0, float(percent)))
-    except (TypeError, ValueError):
-        return 75.0             # the default, as on the phone
+        return float(text[:-1]) * 100.0 if text.endswith(("x", "X")) else float(text)
+    except ValueError:
+        return None
+
+
+def _menu_speed() -> float:
+    """The speed an SDK app's motion runs at, a percent: Settings > animations'
+    master speed ("anim_global"; an older config's "menu_speed") times its
+    "Pages in apps" ("anim_app_pages"). Off is as near instant as the toolkit
+    goes. (ZTOS_MENU_SPEED overrides, for trying one out.)"""
+    percent = os.environ.get("ZTOS_MENU_SPEED")
+    if percent:
+        try:
+            return min(300.0, max(25.0, float(percent)))
+        except ValueError:
+            pass
+    master, old, pages = None, None, 100.0
+    try:
+        with open(os.path.expanduser("~/.config/ztmetro/config")) as f:
+            for line in f:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if key == "anim_global":
+                    master = _speed_value(value)
+                elif key == "menu_speed":
+                    old = _speed_value(value)
+                elif key == "anim_app_pages":
+                    v = _speed_value(value)
+                    pages = pages if v is None else v
+    except OSError:
+        pass
+    master = master if master is not None else old if old else 75.0   # the default, as on the phone
+    if master <= 0 or pages <= 0:
+        return 10000.0          # off
+    return min(900.0, max(6.25, master * pages / 100.0))
 
 
 ANIM_SPEED = _menu_speed() / 100.0      # fraction of the toolkit's full speed:
