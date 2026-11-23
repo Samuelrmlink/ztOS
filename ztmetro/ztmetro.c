@@ -1241,6 +1241,9 @@ struct zt_server {
 	struct zt_toplevel *leaving;	/* still drawn while it swings out */
 	struct wl_event_source *launch_timer;
 	uint32_t launch_ms;		/* when the tile was tapped */
+	/* and how long after it the app is uncovered: Start's tiles leaving and
+	 * the gap after them, or the gap alone with Start not on screen (launch_turn_ms) */
+	uint32_t launch_turn;
 	/* the last finger down in an app: a text field that asks for the
 	 * keyboard soon after it was the user's doing (see text_input_enable) */
 	uint32_t client_tap_ms;
@@ -12063,8 +12066,7 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 			(strncmp(app_id, "zt", 2) == 0 || strncmp(app_id, "zrn", 3) == 0)) {
 		/* Native apps turn their own rows in, on the same clock as Start's
 		 * tiles turning away. The shell only uncovers the client at that time. */
-		uint32_t now = now_ms(), at = server->launch_ms +
-			menu_ms(server, (uint32_t)start_out_ms(server) + TURN_GAP_MS) * (server->slow_motion ? 5 : 1);
+		uint32_t now = now_ms(), at = server->launch_ms + server->launch_turn;
 		if ((int32_t)(at - now) < 0 || at - now > 6000) {
 			at = now;
 		}
@@ -12149,22 +12151,55 @@ static void close_inherited(void) {
 	close_range(3, ~0U, 0);
 }
 
+/* How long after a launch the app is uncovered (and its rows start to turn
+ * in): Start's tiles leaving, then the gap. With Start not on screen (a quick
+ * tile held over an app) there are no tiles to wait for: the gap alone. */
+static uint32_t launch_turn_ms(struct zt_server *server) {
+	bool start_seen = server->start_t < 0.999f;
+	uint32_t turn = start_seen ? (uint32_t)start_out_ms(server) + TURN_GAP_MS : TURN_GAP_MS;
+	return menu_ms(server, turn) * (server->slow_motion ? 5 : 1);
+}
+
+static bool is_settings(const char *command) {
+	return strncmp(command, "ztsettings", 10) == 0 && (!command[10] || command[10] == ' ');
+}
+
+/* A page for the Settings already running or starting ("wifi", "--deep-link
+ * wifi"): a short-lived ztsettings hands it over (ztsettings.c,
+ * instance_claim), and Settings asks for the front itself. */
+static void settings_forward(const char *args) {
+	if (strncmp(args, "--deep-link ", 12) == 0) {
+		run_detached("ztsettings", "--deep-link", args + 12, NULL);
+	} else {
+		run_detached("ztsettings", args, NULL, NULL);
+	}
+}
+
 static void launch_core(struct zt_server *server, const char *command) {
     struct zt_toplevel *existing;
     /* Settings is one window: a page of it turns the one that is open, which then
      * asks for the front ("launch ztsettings"), rather than opening a second one */
-    if (strncmp(command, "ztsettings", 10) == 0 && (!command[10] || command[10] == ' ')) {
+    if (is_settings(command)) {
         wl_list_for_each(existing, &server->toplevels, link) {
             const char *id = existing->xdg_toplevel->app_id;
             if (existing->mapped && id && strcmp(id, "ztsettings") == 0) {
                 if (command[10]) {
-                    run_detached("ztsettings", command + 11, NULL, NULL);
+                    settings_forward(command + 11);
                 } else {
                     server->launch_ms = now_ms();
                     show_toplevel(server, existing);
                 }
                 return;
             }
+        }
+        /* One still starting, its window not up yet (a quick tile held
+         * twice, 8.65): it is told the page and still waited for, rather
+         * than a second one started whatever the page */
+        if (server->pending_pid > 0 && kill(server->pending_pid, 0) == 0 && is_settings(server->pending_command)) {
+            if (command[10]) {
+                settings_forward(command + 11);
+            }
+            return;
         }
     }
     wl_list_for_each(existing, &server->toplevels, link) {
@@ -12204,6 +12239,7 @@ static void launch_core(struct zt_server *server, const char *command) {
 			}
 		}
         if (kill(*started, 0) == 0) {
+            server->launch_turn = launch_turn_ms(server);
             server->launch_ms = server->loading_since = now_ms();
             server->pending_pid = *started;
             server->android_compiling = false;
@@ -12228,8 +12264,8 @@ static void launch_core(struct zt_server *server, const char *command) {
 	}
 	prepare_loading(server);
 	uint32_t launch_at = now_ms();
-	uint32_t enter_at = launch_at +
-		menu_ms(server, (uint32_t)start_out_ms(server) + TURN_GAP_MS) * (server->slow_motion ? 5 : 1);
+	server->launch_turn = launch_turn_ms(server);	/* (before Start is set leaving, below) */
+	uint32_t enter_at = launch_at + server->launch_turn;
 	/* The client has its first row snapshot ready before the shell
 	 * uncovers it. Both sides use this monotonic deadline unchanged.
 	 * (The environment is made here, not in the child: vfork, below.) */
@@ -15755,7 +15791,8 @@ static int long_press_fired(void *data) {
 			p->role = ROLE_NONE;
 			if (q == Q_WIFI || q == Q_BLUETOOTH) {
 				shade_set_open(server, false);
-				launch(server, q == Q_WIFI ? "ztsettings wifi" : "ztsettings bluetooth");
+				/* straight to the page: Back there leaves Settings (8.65) */
+				launch(server, q == Q_WIFI ? "ztsettings --deep-link wifi" : "ztsettings --deep-link bluetooth");
 			} else {
 				level_modal_show(server, q == Q_BRIGHTNESS ? LEVEL_BRIGHT : LEVEL_TORCH);
 			}
