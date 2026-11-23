@@ -49,7 +49,7 @@ sample() {	# label: 60 s settle, then MIN*60-60 readings
 	sleep 60
 	local n=$(( MIN * 60 - 60 )) i
 	for ((i = 0; i < n; i++)); do
-		echo "$1 $(date +%s) $(cat $BAT/current_now) $(cat $BAT/voltage_now) $(cat $BAT/current_avg)" >> "$OUT/samples.txt"
+		echo "$1 $(date +%s) $(cat $BAT/current_now) $(cat $BAT/voltage_now) $(cat $BAT/current_avg) $(cat $CHG/online) $(grep -c '^screen off' $RT/ztmetro.state)" >> "$OUT/samples.txt"
 		[ -e /var/tmp/aodp/tripped ] && { say "watcher tripped"; return 1; }
 		[ "$(cat $BAT/capacity)" -lt 16 ] && { say "battery at 15 %: stopping"; return 1; }
 		sleep 1
@@ -69,13 +69,16 @@ grep -q '^screen off' $RT/ztmetro.state && grep -q '^aod on' $RT/ztmetro.state &
 f0=$(grep '^aod_frames' $RT/ztmetro.state)
 sample today1 || exit 1
 echo "$ENTER1" > $DEV/panel_cmd; sleep 0.02; echo "$ENTER2" > $DEV/panel_cmd; in_lpm=1
-say "HLPM entry sent"
+# read back (DCS 54, get control display: 53's value) to see it took
+echo '54 1' > $DEV/panel_read 2>/dev/null; rd=$(cat $DEV/panel_read 2>/dev/null)
+say "HLPM entry sent; 54 reads ${rd:-nothing} (expect ${MODE[$ROW]#53 })"
 sample hlpm || { leave; exit 1; }
 f1=$(grep '^aod_frames' $RT/ztmetro.state)
 say "frames during: $f0 -> $f1; $(state)"
 leave
+echo '54 1' > $DEV/panel_read 2>/dev/null; say "after the exit 54 reads $(cat $DEV/panel_read 2>/dev/null) (expect 00)"
 sample today2 || exit 1
 say "done; screen on/off for the brightness set"
 ctl 'screen on'; sleep 3; ctl 'screen off'; sleep 2
 say "$(state); dmesg tail:"; dmesg | tail -5 >> "$OUT/stage-a.log"
-awk '{s[$1]+=$3; n[$1]++; v[$1]+=$4} END {for (k in s) printf "%s: %d samples, current %.1f mA, %.0f mW\n", k, n[k], s[k]/n[k]/1000, s[k]/n[k]*v[k]/n[k]/1e9}' "$OUT/samples.txt" | tee -a "$OUT/stage-a.log"
+awk '$6 == 0 && $7 == 1 {s[$1]+=$3; n[$1]++; v[$1]+=$4} END {for (k in s) printf "%s: %d valid samples (off the charger, screen off), current %.1f mA, %.0f mW\n", k, n[k], s[k]/n[k]/1000, s[k]/n[k]*v[k]/n[k]/1e9}' "$OUT/samples.txt" | tee -a "$OUT/stage-a.log"
