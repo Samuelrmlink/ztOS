@@ -60,11 +60,16 @@ int s9p_acpm_pmic_update(u8 reg, u8 val, u8 mask);
  * on the pattern of the other LDOs. Off unless asked for: on that run the iris
  * sensor did not answer, because gpg0-7 (gpio_iris_en) ignored the write.
  */
-static bool iris_allowed;
-module_param(iris_allowed, bool, 0644);
+/*
+ * The iris camera stays refused: its I2C pads gpp4-6/7 and gpio_iris_en
+ * (gpg0-7) are held by the secure world (camera/iris/README.md), and its
+ * main-PMIC LDOs are not in the approved list (REGISTERS.md).
+ */
+static const bool iris_allowed;
 
 enum { PB03, PB02, PMIC_N };
 
+#define BUS_FLASH	97	/* leds/zrn-flash.c: the S2MPB02 on gpp6-0/1 */
 #define BUS_PB03	99
 #define BUS_PB02	100
 #define BUS_SENSOR	101
@@ -196,6 +201,13 @@ static char result[16384];
 static size_t result_len;
 static void __iomem *peri;
 static struct i2c_client *pmic[PMIC_N];
+static struct i2c_client pb02_shared;
+/*
+ * A rail found on at power-up (BUCK2 boots with enable bits 01, for one) is
+ * someone's state, not ours: its enable and voltage registers, 0x100 | value,
+ * are put back at power-off instead of switching it off.
+ */
+static u16 found_en[PMIC_N][0x40], found_v[PMIC_N][0x40];
 static struct i2c_gpio_platform_data i2c_100k = { .udelay = 5 };
 
 static struct gpiod_lookup_table pb03_gpios = {
@@ -240,6 +252,21 @@ static void note(const char *fmt, ...)
 	va_end(args);
 }
 
+/*
+ * S2MPB02 0x13: the second flash channel's control, which drives the iris's IR
+ * LED and may still be armed after a warm reboot from stock. Read and logged at
+ * each camera open; never written here (not approved).
+ */
+#define PB02_FLED2_CTRL	0x13
+
+static void ir_led_note(void)
+{
+	int v = pmic[PB02] ? i2c_smbus_read_byte_data(pmic[PB02], PB02_FLED2_CTRL) : -ENODEV;
+
+	pr_info("zrn-cam: S2MPB02 0x13 (IR LED channel) = %d (0x%02x)\n", v, v & 0xff);
+	note("S2MPB02 13 (IR LED channel) = 0x%02x (%d)", v & 0xff, v);
+}
+
 static int pmic_buses(void)
 {
 	static const struct { int bus; struct gpiod_lookup_table *t; u8 addr; int id; } b[] = {
@@ -255,6 +282,26 @@ static int pmic_buses(void)
 
 		if (pmic[b[i].id])
 			continue;
+		/*
+		 * zrn-flash, loaded at boot for the sensor hub's LDO9, already owns
+		 * the S2MPB02's pins as bus 97 with a client at 0x59. A second bus on
+		 * the same pins cannot get them, and a second client at 0x59 is
+		 * refused, so the chip is reached through that bus by an unregistered
+		 * client. The adapter's lock keeps the two drivers' transfers apart;
+		 * their registers do not overlap (flash, LDO9 there; camera LDOs here).
+		 */
+		if (b[i].id == PB02) {
+			ad = i2c_get_adapter(BUS_FLASH);
+			if (ad && !strcmp(ad->name, "i2c-gpio" __stringify(BUS_FLASH))) {
+				pb02_shared.adapter = ad;	/* the reference is kept */
+				pb02_shared.addr = ADDR_PB02;
+				strscpy(pb02_shared.name, "zrn-cam-pb02", sizeof(pb02_shared.name));
+				pmic[PB02] = &pb02_shared;
+				continue;
+			}
+			if (ad)
+				i2c_put_adapter(ad);
+		}
 		gpiod_add_lookup_table(b[i].t);
 		pd = platform_device_register_data(NULL, "i2c-gpio", b[i].bus, &i2c_100k, sizeof(i2c_100k));
 		if (IS_ERR(pd))
@@ -280,12 +327,16 @@ static int rail_set(const struct rail *r, bool on)
 	if (en < 0)
 		return en;
 	if (on) {
-		if (en & r->en_mask)
-			note("%s: already on (0x%02x) before us", r->name, en);
 		/* the voltage first, with the LDO off, and read back */
 		v = i2c_smbus_read_byte_data(c, r->v_reg);
 		if (v < 0)
 			return v;
+		if (en & r->en_mask) {
+			note("%s: already on (0x%02x, voltage 0x%02x) before us; put back so at off",
+			     r->name, en, v);
+			found_en[r->pmic][r->en_reg & 0x3f] = 0x100 | en;
+			found_v[r->pmic][r->en_reg & 0x3f] = 0x100 | v;
+		}
 		if ((v & r->v_mask) != r->code) {
 			ret = i2c_smbus_write_byte_data(c, r->v_reg, (v & ~r->v_mask) | r->code);
 			if (ret)
@@ -301,6 +352,28 @@ static int rail_set(const struct rail *r, bool on)
 			return en;
 		ret = i2c_smbus_write_byte_data(c, r->en_reg, en | r->en_mask);
 	} else {
+		u16 was = found_en[r->pmic][r->en_reg & 0x3f], wv = found_v[r->pmic][r->en_reg & 0x3f];
+
+		found_en[r->pmic][r->en_reg & 0x3f] = 0;
+		found_v[r->pmic][r->en_reg & 0x3f] = 0;
+
+		/* BUCK2 is switched off at close whatever it was (approved 2026-11-12) */
+		if (r == &ext_1v3)
+			was = 0;
+		if (was) {
+			found_en[r->pmic][r->en_reg & 0x3f] = 0;
+			found_v[r->pmic][r->en_reg & 0x3f] = 0;
+			if ((en & r->en_mask) != (was & r->en_mask)) {
+				ret = i2c_smbus_write_byte_data(c, r->en_reg, (en & ~r->en_mask) | (was & r->en_mask));
+				if (ret)
+					return ret;
+			}
+			v = i2c_smbus_read_byte_data(c, r->v_reg);
+			if (v >= 0 && (v & r->v_mask) != (wv & r->v_mask))
+				ret = i2c_smbus_write_byte_data(c, r->v_reg, (v & ~r->v_mask) | (wv & r->v_mask));
+			note("%s: put back as found (0x%02x, voltage 0x%02x): %d", r->name, was & 0xff, wv & 0xff, ret);
+			return ret;
+		}
 		ret = i2c_smbus_write_byte_data(c, r->en_reg, en & ~r->en_mask);
 	}
 	if (ret)
@@ -523,6 +596,37 @@ static int read16(struct i2c_client *cl, u16 reg, void *buf, int len)
 	return ret == 2 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
+static void __iomem *top_cmu;
+
+/* Read only: what the pads and the PMICs look like with the camera up, when it does not answer */
+static void id_diag(const struct camera *c)
+{
+	char line[200];
+	size_t n = 0;
+	int i;
+
+	note("%s: pads: bus bank CON %08x DAT %08x PUD %08x; gpc1 CON %08x DAT %08x PUD %08x DRV %08x",
+	     c->name, readl(peri + c->i2c_bank + REG_CON), readl(peri + c->i2c_bank + REG_DAT),
+	     readl(peri + c->i2c_bank + REG_PUD), readl(peri + BANK_GPC1 + REG_CON),
+	     readl(peri + BANK_GPC1 + REG_DAT), readl(peri + BANK_GPC1 + REG_PUD),
+	     readl(peri + BANK_GPC1 + REG_DRV));
+	for (i = 0; i <= 9; i++)
+		n += scnprintf(line + n, sizeof(line) - n, " %02x", i2c_smbus_read_byte_data(pmic[PB03], i) & 0xff);
+	note("S2MPB03 00-09:%s", line);
+	n = 0;
+	for (i = 0x22; i <= 0x2d; i++)
+		n += scnprintf(line + n, sizeof(line) - n, " %02x", i2c_smbus_read_byte_data(pmic[PB02], i) & 0xff);
+	note("S2MPB02 22-2d:%s", line);
+	note("%s: reset pin reads %d", c->name, gpiod_get_value_cansleep(reset_gpio));
+	/* CMU_TOP CIS_CLK0/1: mux 0x1018/0x101c, div 0x1814/0x1818, gate 0x2018/0x201c (cmucal-sfr.c) */
+	if (!top_cmu)
+		top_cmu = ioremap(0x1a240000, 0x3000);
+	if (top_cmu)
+		note("CIS_CLK0 mux %08x div %08x gate %08x; CIS_CLK1 mux %08x div %08x gate %08x",
+		     readl(top_cmu + 0x1018), readl(top_cmu + 0x1814), readl(top_cmu + 0x2018),
+		     readl(top_cmu + 0x101c), readl(top_cmu + 0x1818), readl(top_cmu + 0x201c));
+}
+
 static void read_id(const struct camera *c)
 {
 	u8 id[2], rev;
@@ -536,6 +640,7 @@ static void read_id(const struct camera *c)
 	}
 	if (ret) {
 		note("%s: no answer at 0x%02x: %d", c->name, c->addr, ret);
+		id_diag(c);
 		return;
 	}
 	if (read16(sensor, 0x0002, &rev, 1))
@@ -893,8 +998,15 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 		note("PMIC buses: %d", ret);
 		goto done;
 	}
+	ir_led_note();
 	if (!strcmp(cmd, "pmic")) {
 		pmic_dump();
+		if (!top_cmu)
+			top_cmu = ioremap(0x1a240000, 0x3000);
+		if (top_cmu)
+			note("CIS_CLK0 mux %08x div %08x gate %08x; CIS_CLK1 mux %08x div %08x gate %08x",
+			     readl(top_cmu + 0x1018), readl(top_cmu + 0x1814), readl(top_cmu + 0x2018),
+			     readl(top_cmu + 0x101c), readl(top_cmu + 0x1818), readl(top_cmu + 0x201c));
 		goto done;
 	}
 	if (!strncmp(cmd, "dvfs-", 5)) {
@@ -903,9 +1015,9 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 		if (!top_cmu)
 			top_cmu = ioremap(0x1a240000, 0x3000);
 		bus_note("before");
-		/* only the two camera domains of the stock DT */
-		if (sscanf(cmd, "dvfs-%u-%u", &dom, &khz) == 2 && (dom == 5 || dom == 7) &&
-		    khz >= 100000 && khz <= INTCAM_KHZ) {
+		/* only the approved request (REGISTERS.md, J): dvfs_cam at 690000 */
+		if (sscanf(cmd, "dvfs-%u-%u", &dom, &khz) == 2 && dom == 7 &&
+		    (khz == INTCAM_KHZ || khz == CAM_REST_KHZ)) {
 			ret = apm_set(dom, khz);
 			note("APM domain %u at %u kHz: %d", dom, khz, ret);
 			usleep_range(1000, 2000);
@@ -1066,6 +1178,8 @@ static int __init zrn_cam_init(void)
 }
 module_init(zrn_cam_init);
 MODULE_SOFTDEP("pre: i2c-gpio");
+MODULE_ALIAS_MISCDEV(ZRN_CAM_MINOR);
+MODULE_ALIAS("devname:zrn-cam");
 MODULE_IMPORT_NS("DMA_BUF");
 MODULE_DESCRIPTION("Galaxy S9 cameras: power, chip ID, power down");
 MODULE_LICENSE("GPL");
