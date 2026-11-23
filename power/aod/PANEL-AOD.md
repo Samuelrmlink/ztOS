@@ -233,6 +233,14 @@ only to change what the picture says.**
     give the movement. Self-move's bytes are undocumented, and the same
     register family blanked the phone (section 4).
 
+**The pocket check** (`feature/aod-pocket`, ROADMAP 8.44, `POCKET.md`) needs
+nothing new:
+- A covered phone makes `aod_wanted` false. `aod_sync` then calls
+  `aod_panel_leave` (unpark, HLPM exit) and does the ordinary blank (black,
+  display off, sleep in). That is "the panel's LPM display off".
+- While the SoC sleeps nothing reads the sensor, so a pocket is noticed at the
+  next wake: within 10 minutes, or at once on any other wake.
+
 What it should cost: section 5 (measurements).
 
 ## 3. Implementation (stages)
