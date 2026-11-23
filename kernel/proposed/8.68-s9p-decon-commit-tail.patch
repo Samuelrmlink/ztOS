@@ -14,8 +14,16 @@ Proposed, not flashed. Against build/linux-7.1-dp (7.1.0-zboot-wd-dp6).
 Apply: patch -p1 -d <kernel tree> < kernel/proposed/8.68-s9p-decon-commit-tail.patch
 
 --- a/drivers/gpu/drm/s9p/s9p-decon.c	2026-11-22 23:58:42.213778207 -0500
-+++ b/drivers/gpu/drm/s9p/s9p-decon.c	2026-11-22 23:59:03.883044079 -0500
-@@ -1229,10 +1229,22 @@
++++ b/drivers/gpu/drm/s9p/s9p-decon.c	2026-11-23 00:32:13.602874391 -0500
+@@ -45,6 +45,7 @@
+ #include <linux/platform_device.h>
+ 
+ #include <drm/clients/drm_client_setup.h>
++#include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_crtc_helper.h>
+ #include <drm/drm_drv.h>
+@@ -1229,10 +1230,22 @@
  		 * instead would report it one refresh late, every time.
  		 */
  		if (!latched && crtc->state->active &&
@@ -32,15 +40,15 @@ Apply: patch -p1 -d <kernel tree> < kernel/proposed/8.68-s9p-decon-commit-tail.p
 +			 * Taking a reference switches the interrupt on and
 +			 * stamps the count with now, which is the latch.
 +			 */
- 			drm_crtc_send_vblank_event(crtc, crtc->state->event);
++			drm_crtc_send_vblank_event(crtc, crtc->state->event);
 +			drm_crtc_vblank_put(crtc);
 +		} else {
-+			drm_crtc_send_vblank_event(crtc, crtc->state->event);
+ 			drm_crtc_send_vblank_event(crtc, crtc->state->event);
 +		}
  		crtc->state->event = NULL;
  		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
  	}
-@@ -1296,6 +1308,37 @@
+@@ -1296,6 +1309,37 @@
  	.atomic_commit = drm_atomic_helper_commit,
  };
  
@@ -78,7 +86,7 @@ Apply: patch -p1 -d <kernel tree> < kernel/proposed/8.68-s9p-decon-commit-tail.p
  DEFINE_DRM_GEM_FOPS(s9p_fops);
  
  static const struct drm_driver s9p_drm_driver = {
-@@ -1489,6 +1532,7 @@
+@@ -1489,6 +1533,7 @@
  	drm->mode_config.min_height = priv->height;
  	drm->mode_config.max_height = priv->height;
  	drm->mode_config.funcs = &s9p_mode_funcs;
