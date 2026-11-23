@@ -943,6 +943,93 @@ cheap to retest (reposition the card) and needs no new command.
 The reader, the allowlist and the restores all work; the open question is
 purely the analog RF bring-up, which the approvals deliberately fence off.
 
+## Stage 2 run 4 (closed loop with a Chameleon Ultra, 2026-11-22 19:45 CST)
+
+The owner put a Chameleon Ultra (emulator, firmware 2.3.0) flat on the phone's
+back, bridged to the phone over BLE by `cubridge`. Sleep was held off with a
+`/run/zrn-sleepd/inhibit/nfc-test` file (mtime = expiry), removed on every exit
+path. Two identify-only scans, no authentication.
+
+What actually happened (observed):
+
+- **`cubridge` only permits slot 8** (`writable-slots: [8]`); it refused
+  `set-active-slot 4` ("denied"). So the active slot was **8 (MIFARE
+  Ultralight MF0ICU1)** for both scans, and it is **still 8** — I could not set
+  it back to 4. **The coordinator/owner must restore slot 4;** cubridge as
+  configured won't let this agent do it.
+- **Scan 1** hit the intermittent open-path NACK (`CORE_RESET 20 00 01 00` →
+  `-ENXIO`, retry failed). No poll. The 1 s supply settle is not always enough;
+  run 2 (stage 1c) and stage-2 run 2 both answered, so it is marginal, not
+  dead. ztnfc now needs its `CORE_RESET` send wrapped too (it raised instead of
+  logging); the kernel still restored everything.
+- **Scan 2** reached polling with the field on, and in 20 s **detected no
+  card**, but the chip sent a **proprietary notification**:
+
+  ```
+  TX 21 03 09 04 00 01 01 01 02 01 06 01   RF_DISCOVER poll A/B/F/V, accepted
+  NTF 6f 3f 01 80                          proprietary NTF: GID 0x0F, OID 0x3F, data 0x80
+  no card found
+  ```
+
+Everything was restored (LDO38, CLKOUT1, chip off, modules unloaded, gpp5
+released, inhibit removed, lock free).
+
+### Reading of run 4
+
+- **The phone's reader still detects nothing**, now against a live emulator
+  sitting on the coil, not just a passive card. That rules out the card and
+  all-but-rules-out gross positioning: the Chameleon is right on the back.
+- The **proprietary NTF `6F 3F 01 80`** during polling is the Samsung
+  firmware signalling a vendor condition while the field is on. It is not a
+  standard NCI notification; it is most consistent with an RF/front-end state
+  the firmware flags when its RF registers have not been programmed.
+- Together with the passive-card run, this points hard at the **RF analog
+  configuration never being loaded.** The digital/NCI path is fully alive
+  (reset, init, config, map, discover, field on); only detection fails.
+
+## RF-register load proposal (0x2F 26/22/27) — for the owner to decide, not sent
+
+Stock programs the chip's RF/analog front-end at startup by streaming
+`sec_s3nrn82_rfreg.bin` (observed: `/vendor/etc/nfc/`, **3056 bytes**, header
+`c0 9e 00 80 c0 07 4c 00 ...`) through three **proprietary (GID 0x0F) NCI
+commands**, exactly as mainline `s3fwrn5_nci_rf_configure()` does (from source,
+`drivers/nfc/s3fwrn5/nci.c`):
+
+| Step | Command | Bytes | Meaning |
+|---|---|---|---|
+| (opt) FW clock cfg | `NCI_PROP_FW_CFG` | `2F 28 03 <clk_type> <clk_speed> <clk_req>` | clock source/speed. The board's values must come from the HAL config (`FW_CFG_CLK_SPEED=0x12`), **not** mainline's crystal defaults (`01 ff ff`), which are wrong here. |
+| start | `NCI_PROP_START_RFREG` | `2F 26 00` | begin the RF-register update |
+| data ×N | `NCI_PROP_SET_RFREG` | `2F 22 <len> <index> <≤252 bytes>` | the blob in ≤252-byte chunks; 3056 bytes ≈ 13 writes, index 0,1,2… |
+| stop | `NCI_PROP_STOP_RFREG` | `2F 27 02 <checksum16>` | checksum = sum of the blob's 32-bit words, low 16 bits |
+
+**What it changes, and the risk:**
+
+- It **writes the chip's RF register block**. The HAL treats these registers
+  as **versioned** (`Set RF register version`, `hal_vs_rfreg_update`, `Do not
+  need to update RF registers`), i.e. stored and rewritten only when the
+  version differs — the same pattern as the firmware. So `SET_RFREG` is very
+  likely a **non-volatile write**, and `START_RFREG` probably prepares/erases
+  that area.
+- This is **doubly gated** under the phone rules: it is a **0x2F proprietary
+  command** *and* a probable **NVM write**. It must not run without the owner's
+  explicit approval. A failure mid-stream could leave the RF block
+  inconsistent (the firmware likely keeps a version/backup, but that is not
+  confirmed).
+- It does **not** touch the main firmware image, the secure element, MST, or
+  EFS/BOOT. It is confined to the NFC chip's own RF configuration.
+
+**If approved**, the safe shape would be: read back the current RF-register
+version first (a read-only vendor command, if one exists), stream the vendor
+blob unchanged, verify the checksum RSP, then rerun the identify scan to see
+whether detection starts working. I would write the exact byte stream and the
+chunk boundaries for review before any such run, and treat the whole thing as
+one owner-approved NVM operation.
+
+**Cheaper first step (no 0x2F):** the owner can reposition the card/emulator
+over the exact NFC loop and rerun the already-approved identify scan, to rule
+out coupling before touching the RF registers. The digital path is ready; only
+the analog bring-up is in question.
+
 ## Biggest unknowns
 
 1. **Clock.** Is CLKOUT (`oscclk_nfc`) running under ztOS, and does the chip

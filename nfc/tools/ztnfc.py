@@ -490,7 +490,11 @@ def read_classic(nci, info, deadline):
 def scan(dev, seconds, identify=False):
     nci = Nci(dev)
     try:
-        nci.send([0x20, 0x00, 0x01, 0x00])
+        try:
+            nci.send([0x20, 0x00, 0x01, 0x00])
+        except OSError as e:
+            log(f"CORE_RESET not acked ({e.strerror}): chip did not answer on open")
+            return 1
         r = nci.rsp((0, 0))
         if not r or r[3] != 0:
             log("CORE_RESET failed")
@@ -585,7 +589,17 @@ def session(nci, t0, seconds, identify=False):
                 f"protocol {PROTO.get(pr, hex(pr))}, interface "
                 + {0x01: "Frame", 0x02: "ISO-DEP", 0x03: "NFC-DEP"}.get(info["iface"],
                   hex(info["iface"]))))
-            log("identify-only: not authenticating or reading")
+            if pr == 0x02:
+                # approved: a single Type 2 READ of page 0 (length only, no content)
+                r = nci.data([0x30, 0x00], timeout=0.6)
+                if r is not None and len(r) >= 16:
+                    log(f"identify-only: Type 2 READ page 0 OK, {len(r)} bytes "
+                        "(content not shown)")
+                else:
+                    log(f"identify-only: Type 2 READ page 0 "
+                        f"{'no answer' if r is None else 'NAK ' + hx(r)}")
+            else:
+                log("identify-only: not authenticating or reading")
             return 0
         if info["proto"] == 0x02:
             read_t2t(nci)
