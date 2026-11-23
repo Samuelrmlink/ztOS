@@ -61,6 +61,7 @@
 #include "../devtest/devtest-pages.h"
 #include "../desktop/desktop-page.h"
 #include "../power/battery-health.h"
+#include "../usbenergy/usb-energy-ui.h"
 #include "therm-retry.h"
 
 /* A file in the session's runtime directory: $XDG_RUNTIME_DIR, or
@@ -3636,7 +3637,7 @@ static double draw_battery(cairo_t *cr) {
 		snprintf(info, sizeof(info), "3000 mAh Li-Ion");
 	zmc_text(cr, info, FONT_REGULAR, 15, MARGIN, y + 20, 0);
 
-	return y + 60;
+	return ue_ui_section(cr, y + 60);	/* what USB accessories drew (usbenergy/) */
 }
 
 static double draw_cpu(cairo_t *cr) {

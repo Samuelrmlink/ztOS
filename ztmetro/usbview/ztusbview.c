@@ -10,6 +10,8 @@
  * nothing written (no authorize, unbind or power control). The kernel's
  * uevents (netlink) say when something is plugged in or out, a driver binds
  * or the port changes role; the tree is read again then, and never polled.
+ * A device's page also has what it has drawn from the phone, from
+ * ztusbenergyd's record (../usbenergy/).
  *
  * A row's arrow, or a configuration or interface, opens and closes it;
  * anything else opens a page with all of it, as GTK USBView's right pane.
@@ -28,6 +30,7 @@
 
 #include "zrnmetrocore.h"
 #include "usb-ids.h"
+#include "../usbenergy/usb-energy-ui.h"
 
 enum page { PAGE_TREE, PAGE_DETAIL };
 enum action { ACT_TOGGLE = 1, ACT_OPEN };
@@ -541,6 +544,10 @@ static double render_device(cairo_t *cr, double y, const struct usbt_node *n, in
 	}
 	y = field(cr, y, "Driver", v[0] ? v : "None");
 	y = field(cr, y, "Max power (bMaxPower)", n->max_power);
+	/* what it has drawn from the phone, all sessions (ztusbenergyd's record) */
+	char energy[400];
+	if (!n->root_hub && ue_ui_total(n->vid, n->pid, n->serial, n->name, energy, sizeof(energy)))
+		y = field(cr, y, "Energy drawn from the phone", energy);
 	if (n->cls == 9) {
 		snprintf(v, sizeof(v), "%d", n->maxchild);
 		y = field(cr, y, "Ports", v);
