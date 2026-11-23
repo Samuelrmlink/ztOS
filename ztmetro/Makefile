@@ -49,7 +49,7 @@ ZTENV_CODE = core/zt-environment-v1-protocol.c core/xdg-shell-protocol.c
 desktop/zt-environment-v1-protocol.h: $(ZTENV)
 	wayland-scanner server-header $< $@
 
-ztmetro: ztmetro.c sleep-toggle.h lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+ztmetro: ztmetro.c sleep-toggle.h shade-edit.h shade-edit.c lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -730,6 +730,11 @@ check-notify:
 
 # the lock screen's "what keeps it awake": zrn-sleep-why's reply read in (C),
 # and the tool itself on a fake root (ROADMAP 8.30)
+.PHONY: check-shade-edit
+check-shade-edit:
+	$(CC) -std=c11 -g -Wall -Wextra -Werror -o /tmp/ztmetro-shade-edit-test tests/shade-edit.c
+	/tmp/ztmetro-shade-edit-test
+
 .PHONY: check-sleep-toggle
 check-sleep-toggle:
 	$(CC) -std=c11 -g -Wall -Wextra -Werror -o /tmp/ztmetro-sleep-toggle-test tests/sleep-toggle.c

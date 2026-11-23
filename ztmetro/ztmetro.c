@@ -88,6 +88,8 @@
 #include <wlr/backend/multi.h>
 #include <wlr/backend/wayland.h>
 #include <wlr/config.h>
+#include "shade-edit.h"	/* the quick actions edited in the panel (8.49) */
+
 #if WLR_HAS_X11_BACKEND
 #include <wlr/backend/x11.h>
 #endif
@@ -7267,7 +7269,7 @@ static int shade_hit(struct zt_server *server, double x, double y) {
 	}
 	double links = shade_links_y(server);
 	if (y >= links - 8 && y < links + 26) {
-		return x < server->width / 2.0 ? 8 : 9;
+		return shade_edit_links_hit(server, x);	/* 8, 11 EDIT, 9 */
 	}
 	if (y >= SHADE_MAX_H - SHADE_HANDLE - 14) {
 		return 10;
@@ -7307,8 +7309,13 @@ static const struct audio_output *audio_active_output(struct zt_server *server) 
 }
 
 /* One quick action, drawn with its top left corner at the origin. */
+static void shade_quick_draw(struct zt_server *server, cairo_t *cr, int q, double w, double h);
 static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double w, double h) {
-	int q = server->quick[i];
+	shade_quick_draw(server, cr, server->quick[i], w, h);
+}
+
+/* Quick action `q` as a tile (the panel's places, and the editor's tray). */
+static void shade_quick_draw(struct zt_server *server, cairo_t *cr, int q, double w, double h) {
 	if (q == Q_NONE) {
 		cairo_set_source_rgb(cr, 0.07, 0.07, 0.07);
 		cairo_rectangle(cr, 0, 0, w, h);
@@ -7598,6 +7605,7 @@ static void draw_shade(struct zt_server *server) {
 	double settings_w = text_width("ALL SETTINGS", FONT_SEMIBOLD, 10);
 	draw_text(cr, "ALL SETTINGS", FONT_SEMIBOLD, 10, server->width - 14 - settings_w, links, 0, 0, false);
 	draw_icon(cr, "gear", server->width - 14 - settings_w - 12, links + 7, 12);
+	shade_edit_draw_button(server, cr, links);
 
 	/* What has been reported (`notify` on the control pipe), as the phone's
 	 * action centre lists it: under each app's name the notifications from
@@ -7637,6 +7645,9 @@ static void draw_shade(struct zt_server *server) {
 }
 
 static void shade_set_open(struct zt_server *server, bool open) {
+	if (!open) {
+		shade_edit_end(server);	/* closing ends an edit (each change is saved as made) */
+	}
 	animate(server, &server->shade_h, open ? (float)SHADE_MAX_H : 0.0f, SHADE_MS, 0, false);
 	server->shade_open = open;
 }
@@ -9448,6 +9459,9 @@ static void shade_activate(struct zt_server *server, int index) {
 		break;
 	case 10: /* the bar along the bottom */
 		shade_set_open(server, false);
+		break;
+	case 11: /* EDIT: the quick actions arranged here (shade-edit.c) */
+		shade_edit_begin(server);
 		break;
 	default:
 		if (index >= 20 && index - 20 < server->n_notes && !server->note_clearing &&
@@ -11321,6 +11335,11 @@ static int long_press_fired(void *data) {
             draw_osk(server);
             continue;
         }
+		if (p->used && p->role == ROLE_SHADE && server->shade_open && !p->moved && !p->long_pressed &&
+				!shade_edit_active() && p->index >= 0 && p->index < 8 &&
+				now - p->down_ms >= LONG_PRESS_MS - 30 && shade_edit_long_press(server, p)) {
+			continue;	/* held on a tile with no hold of its own: the editor */
+		}
 		if (p->used && p->role == ROLE_SHADE && server->shade_open && !p->moved && !p->long_pressed &&
 				p->index >= 0 && p->index < 8 && now - p->down_ms >= LONG_PRESS_MS - 30 &&
 				quick_holds(server->quick[p->index])) {
@@ -14823,17 +14842,20 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		/* the panel is down: its buttons, or a drag to push it back up */
 		p->role = ROLE_SHADE;
 		double panel_y = y - (server->shade_h - SHADE_MAX_H);
+		if (shade_edit_active()) {
+			shade_edit_down(server, p, x, panel_y);	/* the editor's, all of it */
+			return;
+		}
 		p->index = shade_hit(server, x, panel_y);
 		server->shade_pressed = p->index;
 		p->note_uid = p->index >= 20 && p->index - 20 < server->n_notes ?
 			server->notes[p->index - 20].uid : 0;
 		if (p->index >= 0 && p->index < 8) {
 			shade_tile_press(server, p->index, x, panel_y);
-			if (quick_holds(server->quick[p->index])) {
-				/* held: its modal, or its page of Settings */
-				p->down_ms = now_ms();
-				wl_event_source_timer_update(server->long_press_timer, LONG_PRESS_MS);
-			}
+			/* held: its modal, or its page of Settings; a tile with
+			 * neither, the editor (shade-edit.c) */
+			p->down_ms = now_ms();
+			wl_event_source_timer_update(server->long_press_timer, LONG_PRESS_MS);
 		}
 		p->scroll0 = server->shade_h;
 		/* a drag that starts over the notifications scrolls them (see
@@ -15160,6 +15182,10 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 		}
 		break;
 	case ROLE_SHADE:
+		if (shade_edit_active()) {
+			shade_edit_move(server, p, x, y);
+			break;
+		}
 		if (p->on_list) {
 			/* how fast the finger is going, evened out, for when it lets go */
 			float dt = (float)(int32_t)(time - p->t_last);
@@ -15502,6 +15528,12 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		break;
 	case ROLE_SHADE:
 		wl_event_source_timer_update(server->long_press_timer, 0);
+		if (shade_edit_active()) {
+			shade_edit_up(server, p, cancelled);
+			server->shade_pressed = -1;
+			damage(server);
+			break;
+		}
 		if (p->long_pressed && !p->moved) {
 			/* the held status bar stays a moment after the finger lifts */
 			wl_event_source_timer_update(server->peek_timer, PEEK_STAY_MS);
@@ -18162,6 +18194,7 @@ static void render_frame(struct zt_server *server) {
 				layer->tw ? (float)layer->pw / layer->tw : 1.0f,
 				layer->th ? (float)layer->ph / layer->th : 1.0f);
 		}
+		shade_edit_draw(server);	/* the editor over them, while it is open */
 		/* the bar: the bottom strip of the panel, riding on the edge */
 		zt_scissor(server, 0, px_cover, px_w, px_bar);
 		layer_draw(server, &server->shade_layer, 0, reveal - (float)SHADE_MAX_H, 1.0f);
@@ -19355,6 +19388,7 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 /* desktop mode: the outputs after the panel (uses the helpers above) */
 #include "desktop/desktop.c"
 #include "lock-awake.c"
+#include "shade-edit.c"
 
 int main(int argc, char *argv[]) {
 	wlr_log_init(getenv("ZTMETRO_DEBUG") ? WLR_DEBUG : WLR_INFO, NULL);
