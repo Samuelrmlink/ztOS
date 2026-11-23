@@ -326,3 +326,22 @@ What we do differently:
   plugged back during the HLPM block, which woke the screen.
 - The script now reads register 54 back (HLPM's 53 value) and counts only
   samples taken off the charger with the screen off.
+
+**Run 2, 2026-11-22 18:57-19:11 CST** (`/var/tmp/aodp/a2`):
+- Conditions: off the cable, face up and untouched, battery 51 %, room bright
+  (several hundred lux). The shell's AOD was at its "lit" level; the panel's at
+  HLPM 2 nit.
+- Register 54 read `03` after the entry and `00` after the exit. All 540
+  samples were valid (off the charger, screen off). No display errors; the
+  watcher was quiet. Frames went on latching (36 to 47).
+
+| Block (4 min, 180 samples after a 60 s settle) | Current | Power | sd |
+|---|---|---|---|
+| Today's AOD (before) | -451.1 mA | 1719 mW | 43 mA |
+| HLPM 2 nit, the shell still flipping frames | **-364.7 mA** | **1383 mW** | 52 mA |
+| Today's AOD (after) | -400.9 mA | 1510 mW | 44 mA |
+
+- **The saving is about 60 mA (230 mW)**: 36-86 mA against either neighbour,
+  61 mA against their mean. One run.
+- The SoC stayed awake throughout, about 350-400 mA of the total: that is what
+  stages (b)-(d) remove.
