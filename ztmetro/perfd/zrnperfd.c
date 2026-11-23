@@ -840,6 +840,16 @@ static void motion_hold(void) {
 	if (limited && little_ceiling && want > little_ceiling) {
 		want = little_ceiling;
 	}
+	/* and never over zrn-thermald's ceiling, whatever else: the highest step
+	 * under it (its caps and the charger's temperature rules are not
+	 * zrnperfd's to lift) */
+	if (thermal_cap_khz[0] > 0 && want > thermal_cap_khz[0]) {
+		long fit = table[0];
+		for (int i = 0; i < n; i++)
+			if (table[i] <= thermal_cap_khz[0] && table[i] > fit)
+				fit = table[i];
+		want = fit;
+	}
 	hold_little = want;
 	if (little_ceiling && want > little_ceiling) {
 		snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_max_freq", clusters[0]);
