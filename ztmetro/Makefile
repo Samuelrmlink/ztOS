@@ -541,6 +541,13 @@ check-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
 		-o /tmp/ztmetro-launch-test tests/launch-state.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-launch-test
 
+# An Android app tapped while Android is not ready starts it (tests/waydroid-launch.c)
+.PHONY: check-waydroid-launch
+check-waydroid-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-waydroid-launch-test tests/waydroid-launch.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+	/tmp/ztmetro-waydroid-launch-test
+
 .PHONY: check-auth
 check-auth: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \

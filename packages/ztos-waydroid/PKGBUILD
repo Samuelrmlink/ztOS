@@ -10,7 +10,7 @@
 # without it the package installs, fetches its images and waits.
 pkgname=ztos-waydroid
 pkgver=1.0
-pkgrel=4
+pkgrel=5
 pkgdesc='ztOS: Android apps through Waydroid (optional; LineageOS 20 image fetched at set-up)'
 arch=(aarch64)
 url='https://github.com/ztos/ztos'
@@ -46,6 +46,7 @@ package() {
 	install -Dm755 "$w/network.py" "$pkgdir/usr/local/libexec/ztos-waydroid-network"
 	install -Dm755 "$w/audio-recover.py" "$pkgdir/usr/local/libexec/ztos-waydroid-audio"
 	install -Dm755 "$w/ztos-waydroid-boot" "$pkgdir/usr/local/libexec/ztos-waydroid-boot"
+	install -Dm755 "$w/ztos-waydroid-ready" "$pkgdir/usr/local/libexec/ztos-waydroid-ready"
 	install -Dm755 "$w/ztos-waydroid-images" "$pkgdir/usr/lib/ztos/ztos-waydroid-images"
 
 	# system units, and the container manager's restart drop-in
@@ -55,7 +56,7 @@ package() {
 		"$pkgdir/usr/lib/systemd/system/waydroid-container.service.d/ztos-recovery.conf"
 	# user units (enabled globally by the install script)
 	local u
-	for u in ztos-waydroid-session ztos-waydroid-boot ztos-waydroid-audio-reconnect; do
+	for u in ztos-waydroid-session ztos-waydroid-boot ztos-waydroid-ready ztos-waydroid-audio-reconnect; do
 		install -Dm644 "$w/$u.service" "$pkgdir/usr/lib/systemd/user/$u.service"
 	done
 

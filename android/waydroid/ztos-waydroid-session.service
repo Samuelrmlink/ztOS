@@ -18,6 +18,10 @@ ExecStartPre=-/usr/bin/gdbus wait --session --timeout 60 org.freedesktop.Notific
 # whoever started the session (the boot unit, a push thaw, the launcher).
 ExecStartPre=-/bin/sh -c 'stat -Lc "%%d:%%i:%%z" "%t/$${WAYLAND_DISPLAY:-wayland-0}" > "%t/ztos-waydroid-compositor"'
 ExecStart=/usr/bin/waydroid session start
+# ztMETRO launches Android apps only once Android is marked ready: whoever
+# started this session, the marker is written when Android is up (no-block:
+# nothing here waits for it).
+ExecStartPost=-/usr/bin/systemctl --user --no-block start ztos-waydroid-ready.service
 KillMode=control-group
 TimeoutStopSec=20
 # Deliberately no Install section: start only through ztos-waydroid-launch.

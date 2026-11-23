@@ -12897,14 +12897,25 @@ static void cf_icon_bake(struct zt_server *server, int i) {
  * while a start is under way); one whose start is still to come starts now. */
 #define WD_START_AFTER_MS	4000
 #define WD_GRACE_MS		120000
+#ifndef WD_READY_MARKER	/* (tests/waydroid-launch.c sets its own) */
 #define WD_READY_MARKER		"/run/ztos-waydroid-boot-ready"
+#endif
+#ifndef WD_CONFIG
 #define WD_CONFIG		"/var/lib/waydroid/waydroid.cfg"
+#endif
+#ifndef WD_BOOT_UNIT
 #define WD_BOOT_UNIT		"ztos-waydroid-boot.service"
 #define WD_SESSION_UNIT		"ztos-waydroid-session.service"
+/* Writes the ready marker for any start of the session (the boot, a launch, a
+ * push), with no unit time limit to die by: while it runs, Android is starting */
+#define WD_READY_UNIT		"ztos-waydroid-ready.service"
+#endif
 #define WD_GO_NAME		"ztmetro-android-go"	/* in XDG_RUNTIME_DIR */
 #define WD_MSG_BOOTING		"ztOSARTv1 Android Virtual Runtime is still booting up..."
 #define WD_MSG_DOWN		"ztOSARTv1 Android Virtual Runtime is not running."
 #define WD_MSG_STOPPED		"ztOSARTv1 Android Virtual Runtime has stopped."
+#define WD_MSG_STARTING		"ztOSARTv1 Starting Android..."
+#define WD_LAUNCHING		"ztos-waydroid-launching"	/* in XDG_RUNTIME_DIR: the launcher's PID */
 
 enum { WD_NONE, WD_READY, WD_STARTING, WD_DOWN, WD_FAILED };
 static const char *const WD_NAMES[] = { "not set up", "ready", "starting", "not running", "failed" };
@@ -12964,7 +12975,8 @@ static int wd_eval(struct zt_server *server) {
 	if (g_nested || access(WD_CONFIG, F_OK) != 0) {
 		st = WD_NONE;
 	} else {
-		bool booting = wd_unit_runs(WD_BOOT_UNIT), marker = access(WD_READY_MARKER, F_OK) == 0;
+		bool booting = wd_unit_runs(WD_BOOT_UNIT) || wd_unit_runs(WD_READY_UNIT),
+			marker = access(WD_READY_MARKER, F_OK) == 0;
 		session = wd_unit_runs(WD_SESSION_UNIT);
 		uint32_t now = now_ms();
 		if (session && marker && !booting) {
@@ -13138,13 +13150,39 @@ static void wd_after_boot(struct zt_server *server) {
 /* the banner with the shell's word: one, refreshed, not kept anywhere */
 static void wd_toast(struct zt_server *server, const char *text) {
 	snprintf(g_sys_toast, sizeof(g_sys_toast), "%s", text);
+#ifdef WD_TEST_NO_DRAW
+	return;	/* (tests/waydroid-launch.c: the words, without a screen) */
+#endif
 	draw_toast(server);
 	animate(server, &server->toast_y, 1.0f, 300, 0, false);
 	wl_event_source_timer_update(server->toast_timer, TOAST_MS);
 	damage(server);
 }
 
-/* launch(): an app under Waydroid while it is not ready is not launched */
+/* A launch of an Android app is under way (ztos-waydroid-launch holds its
+ * PID in the marker while it starts Android and the app) */
+static bool wd_launch_running(void) {
+	char path[256];
+	FILE *f = fopen(runtime_file(path, sizeof(path), WD_LAUNCHING), "r");
+	int pid = 0;
+	if (f) {
+		if (fscanf(f, "%d", &pid) != 1) {
+			pid = 0;
+		}
+		fclose(f);
+	}
+	return pid > 1 && kill(pid, 0) == 0;
+}
+
+/* launch(): an app under Waydroid while Android is not ready is launched all
+ * the same, as the way to start it: ztos-waydroid-launch prepares the
+ * container, starts the session, waits for Android (recover ready, which
+ * writes the marker) and then opens the app. The banner says Android is
+ * starting; "has stopped" is said only if that launch fails (it sends
+ * "waydroid-failed" down the control pipe). Refusing the tap instead left
+ * Android down until a reboot whenever the boot unit had not written the
+ * marker (2026-11-22). Only a second tap while a launch is still starting
+ * Android is held back. */
 static bool wd_launch_blocked(struct zt_server *server, const char *command) {
 	if (!wd_command(command) || g_wd_state == WD_NONE) {
 		return false;
@@ -13159,21 +13197,30 @@ static bool wd_launch_blocked(struct zt_server *server, const char *command) {
 	if (st == WD_READY) {
 		return false;
 	}
-	server->tapped = -1;	/* (the tile springs back) */
-	server->tapped_item = -1;
-	if (st == WD_STARTING) {
-		wd_toast(server, WD_MSG_BOOTING);
-		if (g_wd_pending) {
-			wd_start(server, "an Android app was tapped before the start was due");
-		}
-	} else {
-		bool stopped = st == WD_FAILED;
-		wd_toast(server, stopped ? WD_MSG_STOPPED : WD_MSG_DOWN);
-		g_wd_start_ms = 0;	/* (a new start, for this tap) */
-		wd_start(server, stopped ? "it had stopped; an Android app was tapped" : "an Android app was tapped");
+	if (g_wd_pending) {
+		/* (the word the boot unit waits for: it may go on alongside) */
+		wd_start(server, "an Android app was tapped before the start was due");
 	}
-	wlr_log(WLR_INFO, "waydroid: '%s' not launched: %s", command, WD_NAMES[st]);
-	return true;
+	if (wd_launch_running()) {
+		server->tapped = -1;	/* (the tile springs back) */
+		server->tapped_item = -1;
+		wd_toast(server, WD_MSG_BOOTING);
+		wlr_log(WLR_INFO, "waydroid: '%s' not launched: a launch is starting Android (%s)",
+			command, WD_NAMES[st]);
+		return true;
+	}
+	wd_toast(server, WD_MSG_STARTING);
+	wlr_log(WLR_INFO, "waydroid: '%s' launched to start Android (%s)", command, WD_NAMES[st]);
+	return false;
+}
+
+/* ztos-waydroid-launch could not start Android, after its own recovery */
+static void wd_launch_failed(struct zt_server *server) {
+	if (g_wd_state == WD_NONE) {
+		return;
+	}
+	wlr_log(WLR_ERROR, "waydroid: a launch could not start Android");
+	wd_toast(server, WD_MSG_STOPPED);
 }
 
 /* The cards as the apps are now (landscape only; upright nothing is done):
@@ -21546,6 +21593,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 			audio_modal_redraw(server);
 		}
 		media_tick_arm(server);
+	} else if (strcmp(line, "waydroid-failed") == 0) {
+		wd_launch_failed(server);
     } else if (strncmp(line, "android-compile ", 16) == 0) {
         int pid, active;
         if (sscanf(line + 16, "%d %d", &pid, &active) == 2 &&

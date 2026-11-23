@@ -72,9 +72,11 @@ install -Dm644 "$here/ztos-waydroid-audio-reconnect.service" /etc/systemd/user/z
 install -Dm755 "$here/launch.sh" /usr/local/bin/ztos-waydroid-launch
 install -Dm755 "$here/power.sh" /usr/local/bin/ztos-waydroid-power
 install -Dm755 "$here/ztos-waydroid-boot" /usr/local/libexec/ztos-waydroid-boot
+install -Dm755 "$here/ztos-waydroid-ready" /usr/local/libexec/ztos-waydroid-ready
 install -Dm644 "$here/ztos-waydroid-network.service" /etc/systemd/system/ztos-waydroid-network.service
 install -Dm644 "$here/ztos-waydroid-session.service" /etc/systemd/user/ztos-waydroid-session.service
 install -Dm644 "$here/ztos-waydroid-boot.service" /etc/systemd/user/ztos-waydroid-boot.service
+install -Dm644 "$here/ztos-waydroid-ready.service" /etc/systemd/user/ztos-waydroid-ready.service
 mkdir -p /etc/systemd/system/waydroid-container.service.d
 cat > /etc/systemd/system/waydroid-container.service.d/ztos-recovery.conf <<'UNIT'
 [Service]
