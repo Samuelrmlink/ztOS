@@ -345,3 +345,19 @@ What we do differently:
   61 mA against their mean. One run.
 - The SoC stayed awake throughout, about 350-400 mA of the total: that is what
   stages (b)-(d) remove.
+
+### Stage (b): aod1 on the phone (2026-11-22)
+
+- 20:04 CST: `boot-aod1.img` flashed under ztlock and the guarded script (read-back
+  70e7ce48…), rebooted. It came up as #63 with zrn-therm loaded, the float at
+  4240000, a single zrn-sleepd `run`, and the new sysfs files present. The
+  integrated shell's AOD was normal.
+- 20:06 CST: **a reset into TWRP that was not aod1's.** Another session ran
+  `zrn-cam-probe pmic rear`, which oopsed in the out-of-tree `zrn_cam`
+  (`run_write+0x548`, a paging fault after its CIS_CLK dump). Our
+  `kernel.panic_on_oops=1`, set in the same second for the suspend window,
+  made that oops a panic. Found in pstore `dmesg-ramoops-0`.
+- At that point no panel command had been sent and none of the new files had
+  been used.
+- **Lesson:** `panic_on_oops` is system-wide. Set it only while holding ztlock
+  for the whole window, or not at all.
