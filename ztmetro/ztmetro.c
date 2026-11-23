@@ -49,6 +49,7 @@
 #include "desktop/desktop.h"
 #include "lock-awake.h"
 #include "sleep-toggle.h"
+#include "card-dismiss.h"
 #include "rotation.h"
 #include <dirent.h>
 #include <errno.h>
@@ -435,6 +436,7 @@ struct zt_toplevel {
 	struct wlr_xdg_toplevel *xdg_toplevel;
 	bool mapped;
     bool background_hidden;
+	bool dismissed;		/* its card was thrown away (card_close): never a card again */
 	bool introduced;	/* it has been in front before */
 	bool android_runtime;	/* resize Android layouts above the keyboard */
 	bool waydroid_ime;	/* Android IME visibility drives the host keyboard */
@@ -866,6 +868,14 @@ struct zt_server {
 	int n_cards;
 	int drop_card;			/* the one being pulled down to close, or -1 */
 	float drop;
+	/* opened with no app at all: "No recent apps" (ROADMAP 8.75) */
+	bool switch_empty;
+	struct zt_layer switch_empty_label;
+	/* cards thrown away (card-dismiss.h): their cards taken out once the
+	 * throw is over, their processes ended, their packages kept hidden */
+	struct wl_event_source *dismiss_timer;
+	struct dismiss_proc dismiss_procs[DISMISS_PROCS];
+	struct dismiss_recent dismiss_recent[DISMISS_RECENT];
 	int wifi_bars;			/* -1 no link, else 0..3 */
 	/* the modem, as ztoscorenetworkingd reports it (/run/ztoscorenetworking/status) */
 	bool cell_known;		/* there is a report at all */
@@ -12003,7 +12013,7 @@ static void waydroid_power_request(const char *state) {
 
 static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel) {
     bg_reload();
-    if (toplevel) toplevel->background_hidden = false;
+    if (toplevel) toplevel->background_hidden = toplevel->dismissed = false;
 	struct zt_toplevel *t, *previous = server->shown;
 	/* its way in: a Settings page's link, or any app opening (8.66) */
 	int way_in = open_kind(server);
@@ -12575,9 +12585,10 @@ static void switcher_open(struct zt_server *server) {
 	if (server->switcher) {
 		return;
 	}
-	if (start_land(server)) {
+	if (start_land(server) && server->cf_n > 0) {
 		/* landscape: the cover-flow on Start's left is the switcher. The app
-		 * in front goes back to Start, its card in the middle */
+		 * in front goes back to Start, its card in the middle. (With no app
+		 * there is no cover-flow: the empty switcher below says so.) */
 		if (server->shown) {
 			show_toplevel(server, NULL);
 		}
@@ -12593,16 +12604,23 @@ static void switcher_open(struct zt_server *server) {
 		 * a background task Android re-maps behind Start after a force-stop,
 		 * which would otherwise list as a blank card. The container's own
 		 * "Waydroid" UI is not an app either. */
-		const char *tid = t->xdg_toplevel->app_id;
-		if (t->mapped && !t->background_hidden && !t->waydroid_boot && t->commit_ms &&
-				!(tid && !strcmp(tid, "Waydroid")) && server->n_cards < MAX_CARDS) {
+		if (card_listable(t->mapped, t->background_hidden, t->dismissed, t->waydroid_boot,
+				t->commit_ms != 0, t->xdg_toplevel->app_id) && server->n_cards < MAX_CARDS) {
 			server->cards[server->n_cards++] = t;
 		}
 	}
-	if (server->n_cards == 0) {
-		return;	/* nothing is open */
-	}
 	osk_show(server, false);
+	/* Nothing open: the switcher opens all the same, empty, and says so
+	 * (ROADMAP 8.75); it goes as it always does (a tap, any nav button). */
+	server->switch_empty = server->n_cards == 0;
+	if (server->switch_empty) {
+		double ew = area_w(server);
+		cairo_t *cr;
+		struct zt_buffer *buffer = zt_buffer_create(server, ew, 40, &cr);
+		set_rgb(cr, shell_fg_color(server));
+		draw_text(cr, SWITCH_EMPTY_TEXT, FONT_LIGHT, 24, 0, 0, ew, 40, true);
+		zt_buffer_show(server, &server->switch_empty_label, buffer, cr, ew, 40);
+	}
 	double w = area_w(server) * CARD_SCALE;
 	for (int i = 0; i < server->n_cards; i++) {
 		cairo_t *cr;
@@ -12632,7 +12650,7 @@ static void switcher_open(struct zt_server *server) {
 	server->switch_moving = false;
 	snap(server, &server->switch_x, 0.0f);	/* the list has the newest first */
 	animate(server, ZT_ANIM_SWITCHER, &server->switch_t, 1.0f, SWITCH_MS, 0, false);
-	wlr_log(WLR_INFO, "switcher: %d apps", server->n_cards);
+	wlr_log(WLR_INFO, "switcher: %d apps%s", server->n_cards, server->switch_empty ? " (empty)" : "");
 }
 
 /* Card i was tapped: it comes forward and grows back to the whole screen. */
@@ -12675,6 +12693,7 @@ static void switcher_forget(struct zt_server *server, struct zt_toplevel *toplev
 		animate(server, ZT_ANIM_SWITCHER, &server->switch_x, last, 180, 0, false);
 		}
 		if (server->n_cards == 0 && server->switcher) {
+			server->switch_empty = false;	/* (it goes, not "No recent apps") */
 			server->switcher = false;
 			animate(server, ZT_ANIM_SWITCHER, &server->switch_t, 0.0f, SWITCH_MS, 0, false);
 		}
@@ -13342,9 +13361,8 @@ static void cf_rebuild(struct zt_server *server, bool snap_split) {
 	int n = 0;
 	struct zt_toplevel *t;
 	wl_list_for_each(t, &server->toplevels, link) {
-		const char *tid = t->xdg_toplevel->app_id;
-		if (t->mapped && !t->background_hidden && !t->waydroid_boot && t->commit_ms &&
-				!(tid && !strcmp(tid, "Waydroid")) && n < MAX_CARDS) {
+		if (card_listable(t->mapped, t->background_hidden, t->dismissed, t->waydroid_boot,
+				t->commit_ms != 0, t->xdg_toplevel->app_id) && n < MAX_CARDS) {
 			server->cf_cards[n++] = t;
 		}
 	}
@@ -14639,6 +14657,17 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
         server->pending_pid = 0;
     server->android_compiling = false;
     }
+	if (requested) {
+		dismiss_forget(server->dismiss_recent, DISMISS_RECENT, app_id);	/* (opened again on purpose) */
+	} else if (dismiss_was_recent(server->dismiss_recent, DISMISS_RECENT, app_id, now_ms())) {
+		/* its card was thrown away moments ago: Android showing a window of
+		 * it again by itself (a task it kept) does not bring the card back */
+		toplevel->background_hidden = true;
+		toplevel->dismissed = true;
+		wlr_log(WLR_INFO, "dismissed Waydroid app mapped again, kept hidden: %s", app_id);
+		cf_rebuild(server, false);
+		return;
+	}
 	if (app_id && !strncmp(app_id, "waydroid.", 9) && !requested) {
 		const char *shown_id = server->shown ? server->shown->xdg_toplevel->app_id : NULL;
 		if (!shown_id || strncmp(shown_id, "waydroid.", 9)) {
@@ -19285,33 +19314,109 @@ static bool retro_home_shown(struct zt_server *server) {
 		server->switch_t <= 0.001f && server->shade_h < 0.5f && !server->hyper && server->screen_on;
 }
 
+/* Cards thrown away, taken out of the switcher's row (and the cover-flow's)
+ * for good. Their windows may stay mapped for a while (Android takes seconds
+ * to force-stop a package, a hung app never goes): until now the card stayed
+ * in the row, invisible only while it was the last one dragged, so the next
+ * touch on the row brought it back, and a tap on its slot opened it again
+ * (ROADMAP 8.74). Called once the throw is over, and before any new touch
+ * on the switcher. */
+static void switcher_drop_dismissed(struct zt_server *server) {
+	for (int i = server->n_cards - 1; i >= 0; i--) {
+		if (server->cards[i]->dismissed) {
+			switcher_forget(server, server->cards[i]);
+		}
+	}
+	bool cf_stale = false;
+	for (int i = 0; i < server->cf_n; i++) {
+		if (server->cf_cards[i]->dismissed) cf_stale = true;
+	}
+	if (cf_stale) {
+		cf_rebuild(server, false);	/* (it leaves out background_hidden) */
+	}
+}
+
+/* A closed app's process still there: SIGTERM, then SIGKILL
+ * (card-dismiss.h). Never one that another window still showing shares (a
+ * browser's other windows). */
+static bool dismiss_pid_shown(struct zt_server *server, pid_t pid) {
+	struct zt_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		if (t->mapped && !t->dismissed && toplevel_pid(t) == pid) return true;
+	}
+	return false;
+}
+
+static int dismiss_tick(void *data) {
+	struct zt_server *server = data;
+	switcher_drop_dismissed(server);
+	uint32_t now = now_ms();
+	for (int i = 0; i < DISMISS_PROCS; i++) {
+		struct dismiss_proc *d = &server->dismiss_procs[i];
+		if (!d->pid) continue;
+		unsigned long long start = 0;
+		bool alive = dismiss_proc_start("/proc", d->pid, &start) && start == d->start &&
+			!dismiss_pid_shown(server, d->pid);
+		pid_t pid = d->pid;
+		switch (dismiss_step(d, now, alive)) {
+		case DA_TERM:
+			wlr_log(WLR_INFO, "switcher: %d still running %u ms after close: SIGTERM",
+				(int)pid, (unsigned)DISMISS_CLOSE_MS);
+			kill(pid, SIGTERM);
+			break;
+		case DA_KILL:
+			wlr_log(WLR_ERROR, "switcher: %d ignored SIGTERM for %u ms: SIGKILL",
+				(int)pid, (unsigned)DISMISS_TERM_MS);
+			kill(pid, SIGKILL);
+			break;
+		default:
+			break;
+		}
+	}
+	if (dismiss_pending(server->dismiss_procs, DISMISS_PROCS)) {
+		wl_event_source_timer_update(server->dismiss_timer, 250);
+	}
+	return 0;
+}
+
 /* A card thrown off the top (the switcher's, the cover-flow's): its app
  * asked to close, and its process told to end, so that nothing of it is left
  * running. Swipe-up always kills, background app or not: Home keeps a
- * selected app running, this is the gesture that removes it. */
+ * selected app running, this is the gesture that removes it. The card goes
+ * at once (it flies off, and is out of the row when the throw is over), and
+ * stays gone whatever the app does (card-dismiss.h). */
 static void card_close(struct zt_server *server, struct zt_toplevel *gone) {
 	pid_t pid = toplevel_pid(gone);
 	const char *gid = gone->xdg_toplevel->app_id;
+	char pkg[DISMISS_PKG_MAX];
+	enum dismiss_kind kind = dismiss_kind_of(gid, pid, getpid(), pkg, sizeof(pkg));
 	wlr_log(WLR_INFO, "switcher: kill '%s' (%d)", app_name(gone), pid);
-	if (gid && !strncmp(gid, "waydroid.", 9)) {
-		/* Force-stop the Android package. ztos-android close thaws
-		 * the container first, so even a frozen background app is
-		 * really stopped and will not reappear. Hide it at once so
-		 * recents never lists it again before it unmaps; never
-		 * SIGTERM pid here -- it is the shared Waydroid container. */
-		run_detached("ztos-android", "close", gid + 9, NULL);
-		gone->background_hidden = true;
-		if (server->shown == gone) show_toplevel(server, NULL);
+	/* hidden at once, so that recents never lists it again before it unmaps */
+	gone->background_hidden = true;
+	gone->dismissed = true;
+	if (server->shown == gone) show_toplevel(server, NULL);
+	if (kind == DISMISS_ANDROID) {
+		/* Force-stop the Android package: its activities, its services and
+		 * whatever it plays end, and its windows go. ztos-waydroid-recover
+		 * close thaws the container first, so a frozen background app is
+		 * really stopped. Never SIGTERM pid here: it is the shared Waydroid
+		 * container. */
+		dismiss_remember(server->dismiss_recent, DISMISS_RECENT, pkg, now_ms());
+		run_detached("ztos-android", "close", pkg, NULL);
+	} else if (gid && !strncmp(gid, "waydroid.", 9)) {
+		wlr_log(WLR_ERROR, "switcher: '%s' is not a package name; only hidden", gid);
 	} else {
-		/* ATL app or a native ztOS app: its own process. Close the
-		 * window and end it; hide it so recents drops it at once. */
-		gone->background_hidden = true;
-		if (server->shown == gone) show_toplevel(server, NULL);
+		/* ATL app or a native ztOS app: its own process. Asked to close;
+		 * ended if it is still there a moment later (a hung app). */
 		wlr_xdg_toplevel_send_close(gone->xdg_toplevel);
-		if (pid > 1 && pid != getpid()) {
-			kill(pid, SIGTERM);
+		unsigned long long start;
+		if (kind == DISMISS_PROCESS && dismiss_proc_start("/proc", pid, &start)) {
+			dismiss_add(server->dismiss_procs, DISMISS_PROCS, pid, start, now_ms());
 		}
 	}
+	/* out of the row once it has flown off (the throw is 90-240 ms) */
+	wl_event_source_timer_update(server->dismiss_timer,
+		(int)anim_ms(server, ZT_ANIM_SWITCHER, 240) + 40);
 	hap(server, HAP_CLICK, HG_NAV);
 }
 
@@ -19957,6 +20062,9 @@ static void touch_begin(struct zt_server *server, int32_t id, double px, double 
 		return;
 	}
 
+	/* a card just thrown away is out of the row before this touch can find
+	 * it (the throw's timer may not have fired yet) */
+	switcher_drop_dismissed(server);
 	if (server->switcher && py < server->height - NAV_H) {	/* (off the nav bar, on the glass) */
 		p->role = ROLE_SWITCH;
 		p->index = card_at(server, x, y);
@@ -20392,13 +20500,13 @@ static void touch_update(struct zt_server *server, int32_t id, double px, double
 			/* a card can be thrown up and off; anything else moves along the row */
 			p->axis = p->index >= 0 && fabs(y - p->y0) > fabs(x - p->x0) ? 2 : 1;
 		}
-		if (p->axis == 1) {
+		if (p->axis == 1 && server->n_cards > 0) {
 			float pitch = area_w(server) * CARD_SCALE + CARD_GAP;	/* (card_place's) */
 			float to = (float)(p->scroll0 + (x - p->x0) / pitch);
 			float last = (float)(server->n_cards - 1);
 			/* past either end it gives, a third as far as the finger goes */
 			server->switch_x = to < 0 ? to * 0.35f : to > last ? last + (to - last) * 0.35f : to;
-		} else {
+		} else if (p->axis == 2) {
 			server->drop_card = p->index;
 			/* up with the finger; down it only gives a little, unless there
 			 * is a desktop to pull it down to (desktop/DESIGN.md) */
@@ -20748,7 +20856,7 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 			} else {
 				switcher_close(server);
 			}
-		} else if (p->axis == 1) {
+		} else if (p->axis == 1 && server->n_cards > 0) {
 			/* Let go: it carries on at the finger's speed and settles on the
 			 * card it was heading for (a flick goes on to the next, a hard
 			 * one further), drawn back from past an end. */
@@ -26523,7 +26631,7 @@ static void render_frame(struct zt_server *server) {
 
 	if (server->lf_on && start_land(server)) {
 		lf_draw(server, app, &draw);	/* landscape: the launch flip (Windows 8.1's) */
-	} else if (server->switch_t > 0.001f && server->n_cards > 0) {
+	} else if (server->switch_t > 0.001f && (server->n_cards > 0 || server->switch_empty)) {
 		/* the switcher: the theme's background (black in dark) over whatever
 		 * was there, and the apps as cards */
 		float t = server->switch_t, m[16];
@@ -26554,6 +26662,11 @@ static void render_frame(struct zt_server *server) {
 				layer_draw(server, &server->card_title[i], d.x,
 					d.y + d.scale * area_h(server) + 8, t * d.alpha);
 			}
+		}
+		if (server->n_cards == 0 && server->switch_empty && server->switch_empty_label.tex) {
+			/* nothing open: "No recent apps" where the cards would be */
+			layer_draw(server, &server->switch_empty_label, area_x(server),
+				area_y(server) + (area_h(server) - server->switch_empty_label.h) / 2, t);
 		}
 	} else if (bd_behind) {
 		/* the call's backdrop: the app that was in front, at rest, as it
@@ -28357,6 +28470,7 @@ int main(int argc, char *argv[]) {
 	uevent_init(&server);
 	wl_event_loop_add_signal(server.loop, SIGHUP, reload, &server);
 	server.launch_timer = wl_event_loop_add_timer(server.loop, launch_timed_out, &server);
+	server.dismiss_timer = wl_event_loop_add_timer(server.loop, dismiss_tick, &server);
 	server.volume_timer = wl_event_loop_add_timer(server.loop, volume_hide, &server);
 	server.media_tick_timer = wl_event_loop_add_timer(server.loop, media_tick, &server);
 	server.fs_timer = wl_event_loop_add_timer(server.loop, fs_hide, &server);

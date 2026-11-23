@@ -160,10 +160,20 @@ case $1 in
         ztos_as_user WAYLAND_DISPLAY=wayland-0 \
             timeout 60 waydroid app remove "$2"
         ;;
+    # A recents card thrown away (ztMETRO's card_close, ROADMAP 8.74): the
+    # package force-stopped, which is what removing it from Android's own
+    # recents does to an app and more: its activities finish (its windows
+    # go), its services stop, whatever it plays stops (a media app's
+    # foreground service survives a mere task removal). A frozen Android is
+    # thawed first: lxc-attach into a frozen container waits until killed,
+    # and the app was never stopped (ztos-android applies the freeze policy
+    # again after). lxc-attach, not `waydroid shell`: that costs ~2 s, and a
+    # card is often thrown away more than once while it waits. Exit 3: not up.
     close)
         [[ $# == 2 && $2 =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$ ]] || exit 2
-        env XDG_RUNTIME_DIR="$ZTOS_RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="unix:path=$ZTOS_RUNTIME_DIR/bus" WAYLAND_DISPLAY=wayland-0 \
-            timeout 10 waydroid shell -- am force-stop "$2"
+        thaw
+        [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == RUNNING ]] || exit 3
+        android_sh '[ "$(getprop sys.boot_completed)" = 1 ] || exit 3; am force-stop --user 0 "$1"' sh "$2"
         ;;
     recover)
         [[ $# == 1 ]] || exit 2

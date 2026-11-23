@@ -704,9 +704,21 @@ def main():
         atomic_write(data_root()/'applications.json', json.dumps(registry, indent=2)+'\n')
         print('Removed application; saved app data was retained.')
     elif args.command == 'close':
-        metadata = installed().get(registry_key(args.package, 'waydroid'))
-        if metadata:
-            subprocess.run(['sudo', '-n', '/usr/local/libexec/ztos-waydroid-recover', 'close', args.package], check=True)
+        # A recents card thrown away (ztMETRO's card_close): the package is
+        # force-stopped whether or not ztOS installed it (one installed from
+        # Aurora inside Android has a window too). The helper thaws Android
+        # first; Android's freeze policy is applied again afterwards.
+        # No toast either way: nothing was being opened (main's error path
+        # says "Unable to open application"); 3 is Android not running.
+        if not re.fullmatch(r'[a-zA-Z0-9._]+', args.package):
+            print('ztos-android: close: not an Android package name', file=sys.stderr)
+            sys.exit(2)
+        result = subprocess.run(['sudo', '-n', '/usr/local/libexec/ztos-waydroid-recover', 'close', args.package])
+        if shutil.which('ztos-waydroid-power'):
+            subprocess.run(['ztos-waydroid-power', 'sync'], check=False)
+        if result.returncode not in (0, 3):
+            print('ztos-android: close %s: helper exit %d' % (args.package, result.returncode), file=sys.stderr)
+            sys.exit(1)
     elif args.command == 'doctor':
         binary = shutil.which('android-translation-layer')
         if not binary: raise ValueError('android-translation-layer is not installed.')
