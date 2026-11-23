@@ -35,6 +35,22 @@ Both cameras stream in ztcamera on kernels #62-#64. What it took, and what to ke
 - Still open: rear scene judged in light (the phone lay on its back), AE/AF/colour on a real scene,
   closed-app drain off the charger, the DMA bit 12 now seen a few times a minute.
 
+## Parity with Samsung's app (8.78, 2026-11-23)
+
+`PARITY.md` lists stock's features, what is done, and the order for the rest. This pass:
+
+- **Facing switch:** rear and front only. IR was a third stop, so from the front the first tap
+  showed its test scene. The open runs on a thread behind "switching…".
+- **Pipeline:** two GPU passes.
+  - develop: shading, demosaic, WB, CCM, saturation, tone;
+  - finish: bilateral NR plus cored sharpening, by gain.
+- **AWB:** grey-pixel plus white-patch plus grey-world.
+- **Metering:** centre-weighted, or spot after a tap, with EV compensation.
+- **Stills:** 4-frame average (night), or 3-exposure fusion (HDR), merged on the GPU.
+- **Pro dials, flash and aperture:** the Pro dials drive the sensor. Flash is the torch at code 15. The aperture is
+  auto by scene EV or manual, using only the writes in REGISTERS.md K.
+- **Driver:** aperture moves are a bucket of 10 refilled one a minute, at least 1.5 s apart, instead of 10 per load.
+
 ## RAW capture (2026-10-31)
 
 `camera/driver` now takes frames from the rear and front through CSIS with no ISP,
