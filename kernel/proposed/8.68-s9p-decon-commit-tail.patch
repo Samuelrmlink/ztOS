@@ -1,0 +1,88 @@
+s9p-decon: wait for flip_done in the commit tail; fresh flip timestamps (ROADMAP 8.68)
+
+Proposed, not flashed. Against build/linux-7.1-dp (7.1.0-zboot-wd-dp6).
+
+1. drm_atomic_helper_commit_tail's wait_for_vblanks waits for the frame start
+   after the latch that pipe_update has already waited for, and gives up after
+   1 s with a WARN when frame starts stop while the CRTC is active: the AOD or
+   pocket panel-off (boot -2 of 2026-11-22 at 1081 and 1127 s, each ~1 s after
+   "pocket: covered, AOD hidden"), and every commit after a DECON wedge.
+2. A latched flip's event carried the last vblank interrupt's time, seconds old
+   after a rest (ztMETRO saw 1.3 s and 23 s); a vblank reference taken around
+   the send stamps it with now.
+
+Apply: patch -p1 -d <kernel tree> < kernel/proposed/8.68-s9p-decon-commit-tail.patch
+
+--- a/drivers/gpu/drm/s9p/s9p-decon.c	2026-11-22 23:58:42.213778207 -0500
++++ b/drivers/gpu/drm/s9p/s9p-decon.c	2026-11-22 23:59:03.883044079 -0500
+@@ -1229,10 +1229,22 @@
+ 		 * instead would report it one refresh late, every time.
+ 		 */
+ 		if (!latched && crtc->state->active &&
+-		    drm_crtc_vblank_get(crtc) == 0)
++		    drm_crtc_vblank_get(crtc) == 0) {
+ 			drm_crtc_arm_vblank_event(crtc, crtc->state->event);
+-		else
++		} else if (latched && drm_crtc_vblank_get(crtc) == 0) {
++			/*
++			 * The event's time is the last frame start's. With the
++			 * interrupt off (nothing used vblanks for a while) that
++			 * was seconds old -- 1.3 s and 23 s seen by ztMETRO,
++			 * whose frame clock paces animations on these times.
++			 * Taking a reference switches the interrupt on and
++			 * stamps the count with now, which is the latch.
++			 */
+ 			drm_crtc_send_vblank_event(crtc, crtc->state->event);
++			drm_crtc_vblank_put(crtc);
++		} else {
++			drm_crtc_send_vblank_event(crtc, crtc->state->event);
++		}
+ 		crtc->state->event = NULL;
+ 		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
+ 	}
+@@ -1296,6 +1308,37 @@
+ 	.atomic_commit = drm_atomic_helper_commit,
+ };
+ 
++/*
++ * The commit's tail without drm_atomic_helper_wait_for_vblanks().
++ *
++ * s9p_decon_pipe_update() returns only once DECON has latched the new base
++ * address (or after its 50 ms timeout), and sends the flip's event then: by
++ * that time the previous framebuffer is no longer read, which is all the
++ * vblank wait is for. The helper's wait instead waited for the NEXT frame
++ * start, one more refresh, and when frame starts stop with the CRTC still
++ * active (the panel put to sleep for AOD or the pocket, the trigger masked
++ * around panel commands, a wedged DECON) it gave up only after 1 s with a
++ * WARN and a stack dump: "[CRTC:38:crtc-0] vblank wait timed out", 12 in one
++ * boot of 2026-11-22. Waiting for flip_done keeps the ordering the helpers
++ * need (cleanup after the hardware has let go of the old buffer).
++ */
++static void s9p_commit_tail(struct drm_atomic_state *state)
++{
++	struct drm_device *dev = state->dev;
++
++	drm_atomic_helper_commit_modeset_disables(dev, state);
++	drm_atomic_helper_commit_planes(dev, state, 0);
++	drm_atomic_helper_commit_modeset_enables(dev, state);
++	drm_atomic_helper_fake_vblank(state);
++	drm_atomic_helper_commit_hw_done(state);
++	drm_atomic_helper_wait_for_flip_done(dev, state);
++	drm_atomic_helper_cleanup_planes(dev, state);
++}
++
++static const struct drm_mode_config_helper_funcs s9p_mode_helpers = {
++	.atomic_commit_tail = s9p_commit_tail,
++};
++
+ DEFINE_DRM_GEM_FOPS(s9p_fops);
+ 
+ static const struct drm_driver s9p_drm_driver = {
+@@ -1489,6 +1532,7 @@
+ 	drm->mode_config.min_height = priv->height;
+ 	drm->mode_config.max_height = priv->height;
+ 	drm->mode_config.funcs = &s9p_mode_funcs;
++	drm->mode_config.helper_private = &s9p_mode_helpers;
+ 
+ 	ret = drm_connector_init(drm, &priv->connector, &s9p_conn_funcs,
+ 				 DRM_MODE_CONNECTOR_DSI);
