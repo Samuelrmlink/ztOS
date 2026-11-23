@@ -649,7 +649,25 @@ static int read16(struct i2c_client *cl, u16 reg, void *buf, int len)
 	return ret == 2 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
+/*
+ * CMU_TOP: vendor cmucal-sfr.c SFR_BLOCK(CMU, 0x1a240000, 0x8000); every
+ * register read here is below 0x4000 (the CIS Q-channels end at 0x3010).
+ * The 0x3000 mapping before 2026-11-22 ended below them: reading 0x3004
+ * faulted (an unmapped kernel address). Reads go through top_rd(), which
+ * refuses anything outside the mapping.
+ */
+#define TOP_CMU_BASE	0x1a240000
+#define TOP_CMU_SIZE	0x4000
 static void __iomem *top_cmu;
+
+static u32 top_rd(u32 off)
+{
+	if (!top_cmu || off > TOP_CMU_SIZE - 4 || (off & 3)) {
+		WARN_ONCE(1, "zrn-cam: CMU_TOP read 0x%x outside the mapping\n", off);
+		return 0xdeadbeef;
+	}
+	return readl(top_cmu + off);
+}
 
 /* Read only: what the pads and the PMICs look like with the camera up, when it does not answer */
 static void id_diag(const struct camera *c)
@@ -683,15 +701,15 @@ static void id_diag(const struct camera *c)
 	}
 	/* CMU_TOP CIS_CLK0/1: mux 0x1018/0x101c, div 0x1814/0x1818, gate 0x2018/0x201c (cmucal-sfr.c) */
 	if (!top_cmu)
-		top_cmu = ioremap(0x1a240000, 0x3000);
+		top_cmu = ioremap(TOP_CMU_BASE, TOP_CMU_SIZE);
 	if (top_cmu)
 		note("CIS_CLK0 mux %08x div %08x gate %08x; CIS_CLK1 mux %08x div %08x gate %08x",
-		     readl(top_cmu + 0x1018), readl(top_cmu + 0x1814), readl(top_cmu + 0x2018),
-		     readl(top_cmu + 0x101c), readl(top_cmu + 0x1818), readl(top_cmu + 0x201c));
+		     top_rd(0x1018), top_rd(0x1814), top_rd(0x2018),
+		     top_rd(0x101c), top_rd(0x1818), top_rd(0x201c));
 		/* DMYQCH_CON_DFTMUX_TOP_QCH_CIS_CLK0..3: bit 0 enable, 1 clock_req, 2 ignore_force_pm_en */
 		if (top_cmu)
-			note("CIS_CLK0-3 QCH %08x %08x %08x %08x", readl(top_cmu + 0x3004), readl(top_cmu + 0x3008),
-			     readl(top_cmu + 0x300c), readl(top_cmu + 0x3010));
+			note("CIS_CLK0-3 QCH %08x %08x %08x %08x", top_rd(0x3004), top_rd(0x3008),
+			     top_rd(0x300c), top_rd(0x3010));
 }
 
 static void read_id(const struct camera *c)
@@ -1069,22 +1087,22 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 	if (!strcmp(cmd, "pmic")) {
 		pmic_dump();
 		if (!top_cmu)
-			top_cmu = ioremap(0x1a240000, 0x3000);
+			top_cmu = ioremap(TOP_CMU_BASE, TOP_CMU_SIZE);
 		if (top_cmu)
 			note("CIS_CLK0 mux %08x div %08x gate %08x; CIS_CLK1 mux %08x div %08x gate %08x",
-			     readl(top_cmu + 0x1018), readl(top_cmu + 0x1814), readl(top_cmu + 0x2018),
-			     readl(top_cmu + 0x101c), readl(top_cmu + 0x1818), readl(top_cmu + 0x201c));
+			     top_rd(0x1018), top_rd(0x1814), top_rd(0x2018),
+			     top_rd(0x101c), top_rd(0x1818), top_rd(0x201c));
 		/* DMYQCH_CON_DFTMUX_TOP_QCH_CIS_CLK0..3: bit 0 enable, 1 clock_req, 2 ignore_force_pm_en */
 		if (top_cmu)
-			note("CIS_CLK0-3 QCH %08x %08x %08x %08x", readl(top_cmu + 0x3004), readl(top_cmu + 0x3008),
-			     readl(top_cmu + 0x300c), readl(top_cmu + 0x3010));
+			note("CIS_CLK0-3 QCH %08x %08x %08x %08x", top_rd(0x3004), top_rd(0x3008),
+			     top_rd(0x300c), top_rd(0x3010));
 		goto done;
 	}
 	if (!strncmp(cmd, "dvfs-", 5)) {
 		u32 dom = 0, khz = 0;
 
 		if (!top_cmu)
-			top_cmu = ioremap(0x1a240000, 0x3000);
+			top_cmu = ioremap(TOP_CMU_BASE, TOP_CMU_SIZE);
 		bus_note("before");
 		/* only the approved request (REGISTERS.md, J): dvfs_cam at 690000 */
 		if (sscanf(cmd, "dvfs-%u-%u", &dom, &khz) == 2 && dom == 7 &&
@@ -1100,7 +1118,7 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 	}
 	if (!strncmp(cmd, "stream-", 7) || !strncmp(cmd, "fstream-", 8)) {
 		if (!top_cmu)
-			top_cmu = ioremap(0x1a240000, 0x3000);
+			top_cmu = ioremap(TOP_CMU_BASE, TOP_CMU_SIZE);
 		stream = true;
 		st_front = cmd[0] == 'f';
 		st_frame = strstr(cmd, "-frame");

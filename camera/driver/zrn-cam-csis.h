@@ -236,7 +236,7 @@ static int apm_set(u32 domain, u32 khz)
 /* mux select and divider of the ISPPRE bus in CMU_TOP; read only */
 static void bus_note(const char *when)
 {
-	u32 mux = readl(top_cmu + 0x1094), div = readl(top_cmu + 0x1890);
+	u32 mux = top_rd(0x1094), div = top_rd(0x1890);
 
 	note("%s: ISPPRE bus mux 0x%x div 0x%x", when, mux, div);
 }

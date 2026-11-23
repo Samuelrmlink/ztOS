@@ -220,7 +220,7 @@ static int live_start(bool front, bool full)
 	result_len = 0;
 	result[0] = 0;
 	if (!top_cmu)
-		top_cmu = ioremap(0x1a240000, 0x3000);
+		top_cmu = ioremap(TOP_CMU_BASE, TOP_CMU_SIZE);
 	ret = pmic_buses();
 	if (!ret)
 		ir_led_note();
