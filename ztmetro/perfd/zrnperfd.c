@@ -827,7 +827,16 @@ static void motion_hold(void) {
 		return;
 	}
 	long want = nearest(table, n, motion_khz);
-	bool limited = thermal_level > 0 || power_level >= 4;
+	/* Only heat caps it. The power limit's levels 4 and 5 (the GPU at 60 %,
+	 * which on this Mali is its lowest step, 260 MHz; the efficiency cores
+	 * at 1.15 GHz) held through every animation once taken, and with the
+	 * screen on and an app open the phone draws 850-1000 mA at rest, under
+	 * the level's 1000 mA but over its 850 mA release: taken in an app's
+	 * launch, a level stayed for as long as the app did ("1222 mA: power
+	 * limit 5", 2026-11-22). The hold lasts what the motion does (at most
+	 * 3 s and its tail), so its cost is bounded; the limit still caps the
+	 * rungs and everything else. */
+	bool limited = thermal_level > 0;
 	if (limited && little_ceiling && want > little_ceiling) {
 		want = little_ceiling;
 	}
@@ -1017,11 +1026,16 @@ static bool power_update(void) {
 		}
 		ua = ua < 0 ? -ua : ua;		/* on battery every reading is a draw */
 		power_ua = power_ua ? power_ua + (ua - power_ua) / 4 : ua;
+		/* while a finger or the shell's own motion is under way (the touch
+		 * boost's lease), no level past 3 is taken: 4 and 5 slow what draws
+		 * the screen (the GPU, the efficiency cores), and the draw of a
+		 * moving screen is what would take them */
+		int top_level = touch_until ? 3 : POWER_LEVELS;
 		if (power_ua > POWER_LIMIT_UA) {
 			calm_since = 0;
 			if (!above_since) {
 				above_since = now;
-			} else if (now - above_since >= POWER_TAKE_MS && level < POWER_LEVELS) {
+			} else if (now - above_since >= POWER_TAKE_MS && level < top_level) {
 				level++;
 				power_takes++;
 				above_since = now;
@@ -1865,6 +1879,28 @@ int main(void) {
 		fclose(f);
 	}
 	mif_apply();
+	{
+		/* Restarted under a running shell: find it. The shell says "shell
+		 * PID" only as it starts, and without it the GPU's limits and the
+		 * motion hold wait for the next shell restart. */
+		DIR *proc = opendir("/proc");
+		struct dirent *e;
+		while (proc && shell_pid <= 0 && (e = readdir(proc))) {
+			pid_t pid = atoi(e->d_name);
+			char path[64], comm[32] = "";
+			snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+			FILE *c = pid > 0 ? fopen(path, "r") : NULL;
+			if (c) {
+				if (fgets(comm, sizeof(comm), c) && strcmp(comm, "ztmetro\n") == 0) {
+					char line[32];
+					snprintf(line, sizeof(line), "shell %d", pid);
+					command(line, false);
+				}
+				fclose(c);
+			}
+		}
+		if (proc) closedir(proc);
+	}
 	apply();
 	status();
 
@@ -1887,6 +1923,7 @@ int main(void) {
 	long touch_next_try = boost_ms() + 2000;
 	char pending[1024];
 	size_t pending_len = 0;
+	long sampled_at = 0;	/* the last look (see sample_due) */
 	while (!stopping) {
 		struct pollfd fds[6] = { { .fd = ctl, .events = POLLIN }, { .fd = uev, .events = POLLIN },
 			{ .fd = touch, .events = POLLIN }, { .fd = wl, .events = POLLIN } };
@@ -1900,6 +1937,13 @@ int main(void) {
 		int wait = tickle_timeout();
 		if (boost_live() && (wait < 0 || wait > BOOST_SAMPLE_MS)) {
 			wait = BOOST_SAMPLE_MS;
+		}
+		if (boost_live() && sampled_at > 0) {
+			long left = BOOST_SAMPLE_MS - (boost_ms() - sampled_at);	/* the next look is due */
+			left = left < 1 ? 1 : left;
+			if (wait < 0 || wait > left) {
+				wait = (int)left;
+			}
 		}
 		if (touch < 0 && (wait < 0 || wait > 2000)) {
 			wait = 2000;	/* the touchscreen's retry */
@@ -1962,8 +2006,19 @@ int main(void) {
 		if (touch_until && boost_ms() >= touch_until) {
 			touch_release();
 		}
-		static long sampled_at;
-		{
+		/* The look (the load, the clocks, the fuel gauge, the thermal
+		 * sensors, IntelligentBoost's pass and its log row) every
+		 * BOOST_SAMPLE_MS, not at every wake-up. It ran at every one, and a
+		 * finger on the glass wakes this loop with each report of the
+		 * touchscreen: 24 looks a second on average while touching and up
+		 * to 130 (its log, 2026-11-22), each some 8 ms on an efficiency
+		 * core -- four fuel-gauge reads over I2C at ~0.9 ms (up to 5),
+		 * ten sysfs files at ~0.4, /proc -- next to the shell's thread on
+		 * the same cores and the I2C interrupt on cpu0. The owner saw it:
+		 * animations ran smoother driven from the control pipe (no
+		 * touchscreen events here) than under a finger. */
+		bool sample_due = !sampled_at || !screen_on || boost_ms() - sampled_at >= BOOST_SAMPLE_MS - 5;
+		if (sample_due) {
 			static long last_sampled;
 			static enum boost last_rung;
 			if (last_sampled && screen_on)
