@@ -23,6 +23,8 @@ its own approval first.
 | LDO2 | 0x04 | 32 | 1.1 V |
 | LDO7 | 0x09 | 40 | 2.8 V |
 
+- **Approved 2026-11-22:** S2MPB03 0x0B (LDO_SLEW2) set to 0x0e by read-modify-write: bit 1 (dram_dsch2) = 1, bits 7:6 (l5_slew) = 0, bits 5:4 (l6_slew) = 0, bits 3:2 and 0 kept. Stock's probe sets this from the DT. It is lost when the PMIC resets (0xfc at power-on). Written once per module load, before the rear's first power-up, and not undone at close.
+
 **B. S2MPB02, I2C 0x59, through zrn-flash's bus 97 (gpp6-0/1).**
 - Registers: LDOn is at 0x1D+n. Bits 6:0 are the voltage, bit 7 is the enable.
 - Rear:

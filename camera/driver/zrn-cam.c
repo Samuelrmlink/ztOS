@@ -572,9 +572,49 @@ static unsigned int settle_ms, after_reset_ms;
 module_param(settle_ms, uint, 0644);
 module_param(after_reset_ms, uint, 0644);
 
+/*
+ * S2MPB03 LDO_SLEW2 (0x0B) as stock's s2mpb03_pmic_set_ldo_slew() leaves it from
+ * the DT (slew2,dram_dsch2 = 1, l5_slew = 0, l6_slew = 0): bit 1 set, bits 7:4
+ * clear, bits 3:2 and 0 kept; 0xfc at power-on reset becomes 0x0e. Lost when
+ * the PMIC resets, so set once per load before the rear's first power-up.
+ * Approved 2026-11-22 (REGISTERS.md).
+ */
+static bool pb03_slew_done;
+
+static int pb03_slew(void)
+{
+	int v, ret;
+
+	if (pb03_slew_done)
+		return 0;
+	v = i2c_smbus_read_byte_data(pmic[PB03], 0x0b);
+	if (v < 0)
+		return v;
+	if (v != ((v & 0x0d) | 0x02)) {
+		ret = i2c_smbus_write_byte_data(pmic[PB03], 0x0b, (v & 0x0d) | 0x02);
+		if (ret)
+			return ret;
+	}
+	ret = i2c_smbus_read_byte_data(pmic[PB03], 0x0b);
+	note("S2MPB03 0b (LDO slew): 0x%02x -> 0x%02x", v, ret & 0xff);
+	if (ret < 0 || ret != ((v & 0x0d) | 0x02))
+		return -EIO;
+	pb03_slew_done = true;
+	return 0;
+}
+
 static int power_on(const struct camera *c, bool rails_only)
 {
 	unsigned int i;
+
+	if (c == &cameras[0]) {
+		int ret = pb03_slew();
+
+		if (ret) {
+			note("S2MPB03 slew set-up failed: %d; nothing switched", ret);
+			return ret;
+		}
+	}
 
 	for (i = 0; i < c->n_on; i++) {
 		const struct step *s = &c->on[i];
