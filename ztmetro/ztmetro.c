@@ -7504,6 +7504,13 @@ static bool list_prepare(struct zt_server *server) {
 	if (animating(server, &server->lock_y)) {
 		ahead = 0;
 	}
+	/* nor while an app in front sends frames (a scroll, an animation of its
+	 * own): the list is out of sight, and its rows (4.4 ms each) were
+	 * painted in the gap of 66 of 519 late flips of the owner's test
+	 * (2026-11-22); they wait for the app to be still */
+	if (server->shown && (int32_t)(server->app_live_until - now_ms()) > 0) {
+		ahead = 0;
+	}
 	/* nor in the first 250 ms after anything stopped moving: that frame is
 	 * the motion's last one, and two rows painted in it (3-4 ms, and the
 	 * frost made again) made it miss its vblank after every turn (22 ms,
