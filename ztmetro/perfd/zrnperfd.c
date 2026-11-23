@@ -1060,6 +1060,21 @@ static bool power_update(void) {
 	return true;
 }
 
+/* A finger or the shell's motion: levels 4 and 5 (the GPU and the
+ * efficiency cores, what draws the screen) let go for the lease. They come
+ * back a level per 0.75 s after it if the draw is still over the limit.
+ * With the screen on and an app open the phone sits between the release
+ * (850 mA) and the take (1000 mA), so a level once taken stayed: the owner's
+ * test of 2026-11-22 ran at level 5 throughout, 1000-1300 mA, the GPU held
+ * at 260 MHz and the efficiency cores at 1.15 GHz, 41-55 fps in app opens and
+ * closes with stalls of 150-750 ms. True if the level moved. */
+static bool power_ease(void) {
+	if (power_level <= 3) return false;
+	fprintf(stderr, "zrnperfd: power limit %d -> 3 while interacting\n", power_level);
+	power_level = 3;
+	return true;
+}
+
 /* Look at what the app in front and the shell have used since the last look,
  * and step up or down. Returns whether the step changed. */
 static bool boost_sample(void) {
@@ -1689,6 +1704,9 @@ static int command(char *line, bool persist) {
 				long until = boost_ms() + (ms > 3000 ? 3000 : ms);
 				touch_until = until > touch_until ? until : touch_until;
 				motion_hold();
+				if (power_ease()) {
+					return 2;
+				}
 			}
 		}
 		return 0;
@@ -1990,6 +2008,9 @@ int main(void) {
 			 * 120 ms after touch-down, before the page had settled */
 			if (any) {
 				touch_boost();
+				if (screen_on && power_ease()) {
+					changed = 2;
+				}
 			}
 			if (down) {
 				/* input boost: a finger on an app means frames are about to be
