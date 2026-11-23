@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Start Android at desktop login, wait briefly for readiness, then restore idle freeze.
 set -u
-marker=/run/ztos-waydroid-boot-ready
-rm -f "$marker"
+# ztMETRO's ready marker, /run/ztos-waydroid-boot-ready, is written by root, by
+# `ztos-waydroid-recover ready` below: this runs as the user, who cannot write /run.
 # not set up yet (ztos-waydroid-images: no images, or no binder in this kernel),
 # or still being set up (strip and patch, after waydroid init): lazy launch later
 [[ -e /var/lib/waydroid/waydroid.cfg && -e /var/lib/ztos/waydroid-ready ]] || exit 0
@@ -29,7 +29,6 @@ fi
 
 if timeout --signal=TERM --kill-after=2 45 \
 	 sudo -n /usr/local/libexec/ztos-waydroid-recover ready; then
-	install -m644 /dev/null "$marker"
 	if ! ztos-waydroid-power idle; then
 		logger -t ztos-waydroid-boot 'Android ready; idle freeze deferred to normal policy'
 	fi
