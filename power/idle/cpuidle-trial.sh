@@ -15,6 +15,17 @@ set -u
 INH=/run/zrn-sleepd/inhibit/timed-cpuidle
 case "${1:-}" in
 start)
+	# the module must be for this kernel: release in its vermagic, and (no
+	# MODVERSIONS here) the config it was built against: ABI=<hash> from
+	# scripts/module-abi.sh of that config, checked against /proc/config.gz
+	ko=/usr/lib/modules/$(uname -r)/extra/zrn-cpuidle.ko
+	case "$(modinfo -F vermagic $ko)" in "$(uname -r) "*) ;; *) echo "vermagic mismatch: not loading" >&2; exit 1 ;; esac
+	if [ -n "${ABI:-}" ]; then
+		have=$(zcat /proc/config.gz | grep '^CONFIG_' |
+			grep -vE '^CONFIG_(CMDLINE|INITRAMFS_[A-Z0-9_]+|EXTRA_FIRMWARE|EXTRA_FIRMWARE_DIR|PAHOLE_VERSION|RUSTC_VERSION|RUSTC_LLVM_VERSION|RUST_IS_AVAILABLE|BINDGEN_VERSION_TEXT)=' |
+			LC_ALL=C sort | sha256sum | cut -d' ' -f1)
+		[ "$have" = "$ABI" ] || { echo "kernel config ABI $have is not the module's $ABI: not loading" >&2; exit 1; }
+	fi
 	mkdir -p /run/zrn-sleepd/inhibit /var/tmp/aodp
 	touch /var/tmp/aodp/hb
 	systemctl is-active -q aodp-deadman ||
