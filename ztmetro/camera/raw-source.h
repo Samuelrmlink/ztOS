@@ -149,7 +149,71 @@ static void raw_focus_sweep(void) {
 	raw_set_focus(0);
 }
 
-static bool raw_open(enum raw_cam cam) {
+/*
+ * Opening a camera blocks: the driver powers the sensor up, asks the APM for
+ * dvfs_cam and starts the stream inside the write, the rear taking longest. It
+ * runs on a thread so the viewfinder can say "switching" meanwhile; the main
+ * loop collects it with raw_open_poll(). Only the thread touches raw_job's
+ * fd, map and info until state reads JOB_DONE.
+ */
+enum { JOB_IDLE, JOB_RUNNING, JOB_DONE };
+static struct {
+	pthread_t th;
+	int state;		/* __atomic */
+	enum raw_cam cam;
+	int fd, dmabuf, err, tries;
+	void *map;
+	struct zrn_cam_frame info;
+	double started;
+} raw_job = { .fd = -1, .dmabuf = -1 };
+
+static void *raw_open_thread(void *arg) {
+	(void)arg;
+	const char *cmd = raw_job.cam == RAW_FRONT ? "front" : "rear";
+	int fd = open(RAW_DEV, O_RDWR | O_CLOEXEC);
+	raw_job.err = 0;
+	raw_job.map = NULL;
+	raw_job.dmabuf = -1;
+	if (fd < 0 || write(fd, cmd, strlen(cmd)) != (ssize_t)strlen(cmd)) {
+		raw_job.err = errno ? errno : EIO;
+	} else {
+		void *m = mmap(NULL, RAW_POOL, PROT_READ, MAP_SHARED, fd, 0);
+		if (m == MAP_FAILED) {
+			raw_job.err = errno ? errno : EIO;
+		} else {
+			raw_job.map = m;
+			if (read(fd, &raw_job.info, sizeof(raw_job.info)) != sizeof(raw_job.info) ||
+					!raw_job.info.w || raw_job.info.stopped) {
+				raw_job.err = EIO;
+			} else {
+				raw_job.dmabuf = ioctl(fd, RAW_DMABUF);
+			}
+		}
+	}
+	if (raw_job.err) {
+		if (raw_job.map) {
+			munmap(raw_job.map, RAW_POOL);
+			raw_job.map = NULL;
+		}
+		if (fd >= 0) {
+			close(fd);
+		}
+		fd = -1;
+	}
+	raw_job.fd = fd;
+	__atomic_store_n(&raw_job.state, JOB_DONE, __ATOMIC_RELEASE);
+	return NULL;
+}
+
+static bool raw_switching(void) {
+	return __atomic_load_n(&raw_job.state, __ATOMIC_ACQUIRE) != JOB_IDLE;
+}
+
+/* Starts opening cam; false if it cannot even start (IR, no thread). */
+static bool raw_open_begin(enum raw_cam cam) {
+	if (raw_switching()) {
+		return true;	/* one at a time: the one in flight wins */
+	}
 	raw_close();
 	raw.cam = cam;
 	raw.seq = 0;
@@ -158,28 +222,55 @@ static bool raw_open(enum raw_cam cam) {
 	if (cam == RAW_IR) {
 		return false;
 	}
-	raw.fd = open(RAW_DEV, O_RDWR | O_CLOEXEC);
-	if (raw.fd < 0) {
+	raw_job.cam = cam;
+	raw_job.started = raw_now();
+	__atomic_store_n(&raw_job.state, JOB_RUNNING, __ATOMIC_RELEASE);
+	if (pthread_create(&raw_job.th, NULL, raw_open_thread, NULL) != 0) {
+		__atomic_store_n(&raw_job.state, JOB_IDLE, __ATOMIC_RELEASE);
 		return false;
 	}
-	if (!raw_say(cam == RAW_FRONT ? "front" : "rear")) {
-		raw_close();
-		return false;
+	return true;
+}
+
+static void raw_open_ready(enum raw_cam cam);
+
+/*
+ * 0 still opening (or nothing in flight), 1 the camera is up, -1 it failed.
+ * A failed open is tried once more before the app gives up on it.
+ */
+static int raw_open_poll(void) {
+	if (__atomic_load_n(&raw_job.state, __ATOMIC_ACQUIRE) != JOB_DONE) {
+		return 0;
 	}
-	raw.map = mmap(NULL, RAW_POOL, PROT_READ, MAP_SHARED, raw.fd, 0);
-	if (raw.map == MAP_FAILED) {
-		raw.map = NULL;
-		raw_close();
-		return false;
+	pthread_join(raw_job.th, NULL);
+	__atomic_store_n(&raw_job.state, JOB_IDLE, __ATOMIC_RELEASE);
+	const char *name = raw_job.cam == RAW_FRONT ? "front" : "rear";
+	if (raw_job.fd < 0) {
+		fprintf(stderr, "ztcamera: %s did not start (%s), attempt %d\n", name,
+			strerror(raw_job.err), raw_job.tries + 1);
+		if (raw_job.tries++ < 1 && raw_open_begin(raw_job.cam)) {
+			return 0;
+		}
+		raw_job.tries = 0;
+		return -1;
 	}
-	if (read(raw.fd, &raw.info, sizeof(raw.info)) != sizeof(raw.info) || !raw.info.w) {
-		raw_close();
-		return false;
-	}
-	raw.dmabuf = ioctl(raw.fd, RAW_DMABUF);
+	raw_job.tries = 0;
+	fprintf(stderr, "ztcamera: %s up in %.2f s\n", name, raw_now() - raw_job.started);
+	raw.fd = raw_job.fd;
+	raw.map = raw_job.map;
+	raw.dmabuf = raw_job.dmabuf;
+	raw.info = raw_job.info;
+	raw_job.fd = raw_job.dmabuf = -1;
+	raw_job.map = NULL;
 	if (raw.dmabuf < 0) {
-		fprintf(stderr, "ztcamera: no DMA-BUF (%s), the frames will be copied\n", strerror(errno));
+		fprintf(stderr, "ztcamera: no DMA-BUF, the frames will be copied\n");
 	}
+	raw_open_ready(raw.cam);
+	return 1;
+}
+
+/* What every open sets up once the stream runs. */
+static void raw_open_ready(enum raw_cam cam) {
 	/* preview's own frame length: 25456 and 1266 lines (the vendor's mode tables) */
 	raw.coarse_max = cam == RAW_FRONT ? 1250 : 25000;
 	raw.coarse = cam == RAW_FRONT ? 1000 : 8000;
@@ -189,7 +280,6 @@ static bool raw_open(enum raw_cam cam) {
 	memcpy(raw.ccm, cam == RAW_FRONT ? front_ccm : rear_fm_d, sizeof(raw.ccm));
 	raw_set_exposure(raw.coarse, raw.again);
 	raw_focus_start();
-	return true;
 }
 
 /* Exposure towards the target, gain only once exposure is at its limit. */

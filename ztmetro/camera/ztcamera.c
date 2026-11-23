@@ -379,10 +379,10 @@ static void source_start(enum source_kind want) {
 	source_stop();
 	switch (want) {
 	case SRC_RAW:
-		if (raw_open(raw.cam)) {
+		/* the camera comes up on a thread; raw_source_tick() finishes or gives up */
+		if (raw_open_begin(raw.cam)) {
 			src.kind = SRC_RAW;
-			frame_alloc(raw.info.h, raw.info.w);	/* the review's size: the viewfinder is on the GPU */
-			snprintf(src.name, sizeof(src.name), "%s raw, no ISP",
+			snprintf(src.name, sizeof(src.name), "switching to the %s camera",
 				raw.cam == RAW_FRONT ? "front" : "rear");
 			break;
 		}
@@ -1206,6 +1206,13 @@ static void chrome_draw(cairo_t *cr) {
 	glyph(cr, "lenses");
 	cairo_restore(cr);
 
+	/* a camera coming up: the dark viewfinder says so, rather than a test scene */
+	if (src.kind == SRC_RAW && (raw_switching() || !raw.seq)) {
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.85);
+		zmc_text_centred(cr, raw_switching() ? "switching…" : "starting…", FONT_SEMILIGHT, 22,
+			zmc.width / 2, zmc.height / 2 - 14);
+	}
+
 	/* the status line, and anything that just happened */
 	cairo_set_source_rgba(cr, 1, 1, 1, 0.62);
 	char line[160];
@@ -1536,15 +1543,26 @@ static void aperture_toggle(void) {
 	}
 }
 
+/*
+ * Rear and front, each tap the other. The IR (iris) camera used to be a third
+ * stop here, and it has no picture: from the front the first tap landed on its
+ * test scene, and only the second reached the rear (8.78). It is out of the
+ * cycle until the secure world lets go of its sensor.
+ */
 static void facing_toggle(void) {
-	static bool ir_parked;	/* IR has no picture yet: the test scene shows, the next tap is rear */
 	/* also from the test scene when a camera failed to start: the other may work */
 	bool raw_dev = src.kind == SRC_SCENE && !replay_path && !device_path && access(RAW_DEV, F_OK) == 0;
-	if (src.kind == SRC_RAW || ir_parked || raw_dev) {
-		/* rear, front, IR, each from the one before */
-		raw.cam = ir_parked ? RAW_REAR : raw.cam == RAW_REAR ? RAW_FRONT : RAW_IR;
+	if (raw_switching()) {
+		note("switching cameras…");
+		return;
+	}
+	if (ui.recording) {
+		note("stop recording before switching cameras");
+		return;
+	}
+	if (src.kind == SRC_RAW || raw_dev) {
+		raw.cam = raw.cam == RAW_REAR ? RAW_FRONT : RAW_REAR;
 		ui.front = raw.cam == RAW_FRONT;
-		ir_parked = raw.cam == RAW_IR;
 		source_start(SRC_RAW);
 		return;
 	}
@@ -1859,13 +1877,30 @@ static void tick(void) {
 	if (now - last_scene >= FPS_MS) {
 		last_scene = now;
 		save_finish();
-		if (src.kind == SRC_RAW) {
+		if (raw_switching()) {
+			int r = raw_open_poll();
+			if (r > 0 && src.kind != SRC_RAW) {
+				raw_close();	/* the app moved on while it opened */
+			} else if (r > 0) {
+				frame_alloc(raw.info.h, raw.info.w);	/* the review's size: the viewfinder is on the GPU */
+				snprintf(src.name, sizeof(src.name), "%s raw, no ISP",
+					raw.cam == RAW_FRONT ? "front" : "rear");
+				chrome_redraw_mark();
+			} else if (r < 0 && src.kind == SRC_RAW) {
+				note("the %s camera did not start; tap the switch to try again",
+					raw.cam == RAW_FRONT ? "front" : "rear");
+				source_start(SRC_SCENE);
+			}
+		} else if (src.kind == SRC_RAW) {
 			uint32_t was = raw.seq;
 			const char *why = raw_poll();
 			if (why) {
 				note("camera: %s", why);
 				source_start(SRC_SCENE);
 			} else if (raw.seq != was) {
+				if (!was) {
+					chrome_redraw_mark();	/* "starting…" goes */
+				}
 				frame_arrived();
 			}
 		} else if (src.kind == SRC_SCENE) {
