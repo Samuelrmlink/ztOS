@@ -1,0 +1,3 @@
+# /dev/zrn-cam for the shell (group video). The node exists from boot (the
+# module's devname alias, kmod-static-nodes); the first open loads zrn-cam.
+KERNEL=="zrn-cam", GROUP="video", MODE="0660", OPTIONS+="static_node=zrn-cam"

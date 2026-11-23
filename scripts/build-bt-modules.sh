@@ -39,7 +39,7 @@ cd "$SRC"
 EXT_BT="bluetooth/driver:zrn-bt sensors/driver:zrn-bbd leds:zrn-led leds:zrn-flash
 	modem/zrn-modem:zrn-modem haptics:zrn-haptic power/hotplug:zrn-hotplug
 	power/idle:zrn-cpuidle power/suspend:zrn-sleep-init power/rtc:zrn-exynos-rtc
-	sensors/hall:zrn-hall"
+	sensors/hall:zrn-hall camera/driver:zrn-cam"
 EXT_SND="audio/driver:snd-zrn-abox"
 
 setup() {	# <dir>: the target's config, without paths from its own build
