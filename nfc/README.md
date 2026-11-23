@@ -1170,6 +1170,72 @@ and body only); nothing else 0x2F stays allowed. The `CORE_RESET` retry is
 already added. If the chip then detects the Chameleon, FW_CFG was the missing
 step; if not, the rfreg load (already drafted, still on hold) is next.
 
+## FW_CFG run (2026-11-22 20:45 CST): reply 4F 28 02 01 00, session stopped
+
+**LDO38 leak, found and fixed first.** Our sessions did restore LDO38: the
+19:46 session logs `restored to 0x2c (reads 0x2c)`. The 0xac seen at 20:32
+came from the boot chain after the aod-panel reboots at 20:04 and 20:06: no
+Linux code wrote it in those boots. The older mainline register dump shows
+the same 0xac after a boot. `zrn-i2c20` kept LDO38 "as found", so it left the
+rail on. Now:
+
+- the last `zrn_i2c20_put()` always switches LDO38 off, leaving 0x2c;
+- `zrn_i2c20_get_cycled()` holds it off first if it was on;
+- the rail was switched off by hand before this run (read back 0x2c).
+
+This run logged `LDO38 0x2c -> 0xac` at the start and
+`LDO38 off (reads 0x2c; …)` at the end.
+
+**Open path (timing only).** VEN is held off for 200 ms (with LDO38 off too,
+if it was on). Then LDO38 comes on, settles for 1 s, VEN goes on, and the
+driver waits 150 ms. ztnfc tries CORE_RESET up to 5 times, 400 ms apart.
+This time CORE_RESET was acked on the first try.
+
+Run (Chameleon on slot 8, inhibit held, battery 95%, wireless 0):
+
+```
+TX 20 00 01 00             RX 40 00 03 00 10 01          CORE_RESET ok
+TX 20 01 00                RX 40 01 14 … 0e 45 00 4b 02  CORE_INIT ok
+TX 2f 28 03 00 12 00       RX 4f 28 02 01 00             FW_CFG reply: 2-byte payload 01 00
+FW_CFG reply not 4f 28 01 00: stop
+```
+
+As required, the session stopped on the unexpected reply. **There was no
+RF_DISCOVER and no field.** CLK_REQ stayed 0 for the short session. Slot 4
+was restored, the inhibit removed, and the chip powered off. LDO38 is 0x2c.
+
+### Reading the reply (inferred)
+
+`4F 28` is the proprietary FW_CFG response, with a **2-byte** payload `01 00`
+where a 1-byte status was expected. There are two readings:
+
+- **Mainline layout** (`struct nci_prop_fw_cfg_rsp { u8 status; }`): the
+  first byte is the status. `0x01` is NCI `STATUS_REJECTED`, so the chip
+  refused the config.
+- **A Samsung 2-byte layout**: one leading byte, then status `0x00`, meaning
+  accepted.
+
+The HAL's own evidence leans towards "this chip does not take FW_CFG":
+
+- In `nfc_hal_open_sm`, stock sends FW_CFG only when the bootloader's bootinfo
+  version word is greater than 0x6f. Otherwise it sends a plain CORE_RESET.
+- `nfc_hal_fw_sm` gates FW_CFG support on further bootinfo bytes
+  (`[148] == 0x84`, `[151]`), and logs
+  `This version of bootloader does not support FW_CFG!!` otherwise.
+- We never read this chip's bootinfo; that needs bootloader mode, which is not
+  approved. So we don't know whether stock sends FW_CFG on this phone at all.
+
+### Options (each needs its own approval)
+
+1. **Treat `4F 28 02 01 00` as accepted** and rerun with the poll: the same
+   FW_CFG, then the identify scan. That is cheap, but it rests on the second
+   reading.
+2. **Read the bootinfo**: one GET_BOOTINFO (`00 01 00 00`) in bootloader mode
+   (FIRM high at power-up). This is a read-only command, but bootloader mode
+   is where flash writes happen. It would tell us whether stock sends FW_CFG
+   on this chip, and in which form.
+3. **Skip FW_CFG** and go to the rfreg stream (approved, on hold).
+
 ## Biggest unknowns
 
 1. **Clock.** Is CLKOUT (`oscclk_nfc`) running under ztOS, and does the chip
