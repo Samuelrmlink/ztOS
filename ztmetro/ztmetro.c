@@ -16475,14 +16475,24 @@ static int audio_stream_at(struct zt_server *server, int i) {
 	return -1;
 }
 
+/* note: the output Media plays on, dimmer after the label and cut short with an ellipsis (8.53) */
 static void draw_volume_slider(struct zt_server *server, cairo_t *cr, double track_y, const char *label,
-		int percent, bool mute, double inset) {
+		const char *note, int percent, bool mute, double inset) {
 	double w = server->width, content_w = w - 2 * AUDIO_PAD;
 	char value[16] = "—";
 	if (percent >= 0) snprintf(value, sizeof(value), "%d%%", percent);
 	if (mute && percent >= 0) snprintf(value, sizeof(value), "muted");
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	draw_text(cr, label, FONT_REGULAR, 15.0, AUDIO_PAD, track_y - 34, content_w - inset - 60, 0, false);
+	double label_w = content_w - inset - 60;
+	draw_text(cr, label, FONT_REGULAR, 15.0, AUDIO_PAD, track_y - 34, label_w, 0, false);
+	double lw = note && note[0] ? text_width(label, FONT_REGULAR, 15.0) + 8 : label_w;
+	if (lw < label_w - 24) {
+		char line[160];
+		snprintf(line, sizeof(line), "· %s", note);
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.6);
+		draw_text(cr, line, FONT_REGULAR, 15.0, AUDIO_PAD + lw, track_y - 34, label_w - lw, 0, false);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+	}
 	double vw = text_width(value, FONT_REGULAR, 15.0);
 	draw_text(cr, value, FONT_REGULAR, 15.0, w - AUDIO_PAD - inset - vw, track_y - 34, 0, 0, false);
 	/* the banner's bar, with a thumb to take hold of */
@@ -16579,13 +16589,15 @@ static void draw_audio_modal(struct zt_server *server) {
 		if (stream < 0) continue;
 		int percent;
 		bool mute = false;
+		char note[sizeof(st->out[0].desc) + 8] = "";
 		if (stream == VS_MEDIA) {
 			percent = selected >= 0 ? st->out[selected].percent : -1;
 			mute = selected >= 0 && st->out[selected].mute;
+			if (selected >= 0) audio_output_title(&st->out[selected], note, sizeof(note));
 		} else {
 			percent = stream_percent_of_level(*stream_level(server, stream));
 		}
-		draw_volume_slider(server, cr, server->audio_tracks[stream], vs_label(stream), percent, mute,
+		draw_volume_slider(server, cr, server->audio_tracks[stream], vs_label(stream), note, percent, mute,
 			overlay && i == 0 ? AUDIO_CARET_W : 0);
 	}
 	if (overlay) {
