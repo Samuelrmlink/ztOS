@@ -6,7 +6,10 @@ Type=oneshot
 Environment=XDG_RUNTIME_DIR=%t
 Environment=WAYLAND_DISPLAY=wayland-0
 ExecStart=/usr/local/libexec/ztos-waydroid-boot
-TimeoutStartSec=50
+# Android took ~85 s to be ready on 2026-11-22 22:03 (a cold boot with the
+# shell, audio and Bluetooth starting too); at 50 s the unit was killed before
+# "recover ready" could write the marker, and the shell said "has stopped".
+TimeoutStartSec=180
 
 [Install]
 WantedBy=default.target
