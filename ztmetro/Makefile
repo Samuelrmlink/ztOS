@@ -43,7 +43,7 @@ ZTENV_CODE = core/zt-environment-v1-protocol.c core/xdg-shell-protocol.c
 desktop/zt-environment-v1-protocol.h: $(ZTENV)
 	wayland-scanner server-header $< $@
 
-ztmetro: ztmetro.c core/zt-anim.h appearance.h wall-blur.h sleep-toggle.h shade-edit.h shade-edit.c lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
+ztmetro: ztmetro.c core/zt-anim.h appearance.h statusbar.h wall-blur.h sleep-toggle.h shade-edit.h shade-edit.c lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -161,7 +161,7 @@ passcoded/zrn-passcode: passcoded/zrn-passcode.c passcoded/passcode-proto.h
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
 EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
 EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h sound/eq-drag.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
-settings/ztsettings: settings/ztsettings.c shade-edit.h appearance.h settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h settings/wifi-list.h usbenergy/usb-energy-ui.h usbenergy/usb-energy.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
+settings/ztsettings: settings/ztsettings.c shade-edit.h appearance.h statusbar.h settings/statusbar-page.h settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h settings/wifi-list.h usbenergy/usb-energy-ui.h usbenergy/usb-energy.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c mms/apnconf.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h devtest/devtest-power.c devtest/devtest-power.h power/battery-health.h $(CORE_DEPS)
@@ -668,6 +668,12 @@ check-settings-config:
 check-appearance:
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-appearance-test tests/appearance.c
 	/tmp/ztmetro-appearance-test
+
+# the status bar's order, visibility and per-state colours (statusbar.h, 8.77)
+.PHONY: check-statusbar
+check-statusbar:
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-statusbar-test tests/statusbar.c -lm
+	/tmp/ztmetro-statusbar-test
 
 # Start's photo blurred for the frosted tiles and background (wall-blur.h)
 .PHONY: check-wall-blur

@@ -36,8 +36,10 @@ static inline void pods_bar_meter(cairo_t *cr, double x, double base, double h, 
 	cairo_fill(cr);
 }
 
-/* From x, on the bar's baseline, not past `limit`. */
-static inline void pods_bar_draw(cairo_t *cr, const struct pods_bar *b, double x, double base, double cell, double limit) {
+/* From x, on the bar's baseline, not past `limit`. Returns where it ends (x
+ * when it did not fit and nothing was drawn). */
+static inline double pods_bar_draw(cairo_t *cr, const struct pods_bar *b, double x, double base, double cell, double limit) {
+	double drawn = x;
 	double h = cell * 1.05, gap = h * 0.5, bar_w = cell * 0.2, space = cell * 0.22;
 	cairo_save(cr);
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -59,6 +61,7 @@ static inline void pods_bar_draw(cairo_t *cr, const struct pods_bar *b, double x
 			cairo_show_text(cr, letter);
 			pods_bar_meter(cr, end - bar_w, base, h, bar_w, left ? b->left : b->right,
 				left ? b->charge_left : b->charge_right);
+			drawn = end;
 		}
 	} else {
 		/* as one icon: the two stems side by side, touching. A bud reaches 1.25 heads
@@ -73,9 +76,11 @@ static inline void pods_bar_draw(cairo_t *cr, const struct pods_bar *b, double x
 			pods_bar_bud(cr, left_bud, base, h, -1);
 			pods_bar_bud(cr, left_bud + pair, base, h, 1);
 			pods_bar_meter(cr, end - bar_w, base, h, bar_w, b->right, b->charge_right);
+			drawn = end;
 		}
 	}
 	cairo_restore(cr);
+	return drawn;
 }
 
 #endif
