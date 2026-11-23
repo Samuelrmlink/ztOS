@@ -156,8 +156,8 @@ static bool shade_edit_long_press(struct zt_server *server, struct touch_point *
 static void shade_edit_down(struct zt_server *server, struct touch_point *p, double x, double y);
 static void shade_edit_move(struct zt_server *server, struct touch_point *p, double x, double y);
 static void shade_edit_up(struct zt_server *server, struct touch_point *p, bool cancelled);
-/* the frame, over the panel's tiles */
-static void shade_edit_draw(struct zt_server *server);
+/* the frame, over the panel's tiles; x0: a turned side sheet's left edge */
+static void shade_edit_draw(struct zt_server *server, float x0);
 #endif
 
 #endif

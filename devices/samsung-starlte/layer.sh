@@ -34,6 +34,18 @@ install -m755 "$DEVROOT/power/rtc/initialize-calendar.py" \
 install -m644 "$DEVROOT/prebuilts/power/zrn-sleep-init.ko" \
 	"$DEVROOT/prebuilts/power/zrn-exynos-rtc.ko" \
 	"$DEVROOT/prebuilts/power/exynos9810_acpm_tmu.fw" "$PW/mif-trial/"
+# the cameras: never loaded at boot. zrn-cam.ko comes with the module set
+# (scripts/build-bt-modules.sh) into extra/; its devname alias gives /dev/zrn-cam
+# from boot, and the first open loads it (camera/driver/install.sh). The udev
+# rule is in overlay/. The image ships held: zrn-cam-hold.conf blocks the load
+# by alias until the owner approves (camera/driver/install.sh --release lifts it);
+# zrn-cam-probe and modprobe by hand still work.
+install -Dm755 "$DEVROOT/camera/driver/zrn-cam-probe" "$R/usr/local/sbin/zrn-cam-probe"
+install -Dm644 /dev/stdin "$R/etc/modprobe.d/zrn-cam-hold.conf" <<'HOLD'
+# zrn-cam waits for approval: no load by alias (opening /dev/zrn-cam).
+# Remove this file (camera/driver/install.sh --release) to allow it.
+blacklist zrn-cam
+HOLD
 install -Dm644 -t "$R/usr/lib/firmware/brcm" "$DEVROOT"/firmware/bcmdhd* "$DEVROOT"/firmware/nvram*
 install -Dm644 "$DEVROOT/third_party/s9plus/firmware/bcm4361B2_semco.hcd" \
 	"$R/usr/lib/firmware/brcm/BCM.samsung,starlte.hcd"
@@ -72,6 +84,8 @@ for set in "$DEVROOT"/out/modules-*/; do
 	done
 	echo "modules for $rel: $(ls "$set"/*.ko | wc -l) from $set"
 done
+ls "$R"/usr/lib/modules/*/extra/zrn-cam.ko > /dev/null 2>&1 ||
+	echo "WARNING: no zrn-cam.ko in any module set: this image has no camera driver" >&2
 for moddir in "$R"/usr/lib/modules/*-zboot*; do
 	[ -d "$moddir" ] && ch depmod -a "$(basename "$moddir")" > /dev/null 2>&1 || true
 done

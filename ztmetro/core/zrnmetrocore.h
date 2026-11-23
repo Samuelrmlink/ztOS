@@ -36,7 +36,9 @@
 #define ZMC_TILT_OUT_MS	200
 #define ZMC_MARGIN	16	/* left edge of everything: 20 px on a 450 px wide reference */
 enum { ZMC_STYLE_METRO, ZMC_STYLE_DOTMATRIX };
-#define ZMC_HEADER_H	104	/* the title stays; the list moves under it */
+enum { ZMC_THEME_DARK, ZMC_THEME_LIGHT };	/* Metro's light/dark; DotMatrix ignores it */
+#define ZMC_HEADER_H	104	/* the title stays; the list moves under it (portrait) */
+#define ZMC_HEADER_H_LANDSCAPE	64	/* the same in landscape, with a smaller title; zmc_header_h() */
 #define ZMC_ACT_BACK	(-1)	/* the title: up a page */
 #define ZMC_ACT_PIVOT	(-2)	/* the next tab's title: slide to it (arg: its page) */
 #define ZMC_MAX_HITS	160
@@ -66,6 +68,7 @@ struct zmc_wheel {
 	int n, at;		/* how many tabs, and which is in front */
 	struct zmc_tab tabs[ZMC_MAX_TABS];
 	double w[ZMC_MAX_TABS];	/* how wide each title is drawn */
+	double size;		/* at this title size (smaller in landscape) */
 };
 
 struct zmc_app {
@@ -109,6 +112,11 @@ struct zmc_app {
 	 * already set what it does: the shell's frame, sizes for a window, a
 	 * pointer as a finger. The page is drawn again afterwards. */
 	void (*environment)(bool desktop);
+	/* the window has a new size (zmc.width, zmc.height; turned to landscape or
+	 * back), taken between frames: drop what was measured or drawn for the old
+	 * one. Whatever moved has stopped, the finger has been let go, a board and a
+	 * menu are closed; the page is drawn again afterwards. NULL: nothing to drop. */
+	void (*resized)(void);
 };
 
 struct zmc_buffer {
@@ -150,6 +158,7 @@ struct zmc_state {
 	 * ZMC_STYLE_DOTMATRIX draws switches, sliders, buttons, the loading dots
 	 * and page titles as dots, in the palette chosen on its home screen */
 	int style;
+	int theme;		/* ZMC_THEME_*: Metro light or dark (DotMatrix has its own palette) */
 	uint32_t dm_main, dm_accent;
 
 	int page;
@@ -165,6 +174,11 @@ struct zmc_state {
 	int anim_frames;
 	bool anim_active;
 	bool anim_cache_ready;	/* destination page already rendered for GLES */
+	/* the page is one flat colour (page_rgb) for now: drawn as that, not
+	 * from its cache, and the cache not drawn again (a call's panels
+	 * flipping over their background: ztphone) */
+	bool page_solid;
+	uint32_t page_rgb;
 	bool anim_prepared;	/* the destination was drawn ahead, while idle */
 	bool anim_target_pending;	/* prepare it in the black gap after the outgoing rows */
 	bool anim_back;		/* going back or closing: the old page turns away */
@@ -248,6 +262,11 @@ void zmc_on_frame(void (*step)(void));
 void zmc_watch_fd(int fd, void (*ready)(int fd, void *data), void *data);
 /* call `tick` every `ms` from the main loop; 0 stops it. One timer per app. */
 void zmc_every(int ms, void (*tick)(void));
+/* the window is wider than it is tall (the phone turned); changes only between
+ * frames, with zmc.width and zmc.height (see zmc_app.resized) */
+bool zmc_landscape(void);
+/* how tall the fixed title is now: ZMC_HEADER_H, or ZMC_HEADER_H_LANDSCAPE */
+int zmc_header_h(void);
 
 /* ---- drawing a page ---- */
 double zmc_header(cairo_t *cr, const char *title);	/* returns where the content starts */
@@ -311,6 +330,9 @@ void *zmc_gpu_dmabuf_import(int w, int h, uint32_t fourcc, uint64_t modifier, in
 void zmc_gpu_dmabuf_free(void *image);
 void zmc_gpu_dmabuf(void *image, const double corners[4][3], double alpha);
 void zmc_present(void);
+/* true when frames are drawn on the GPU (an .overlay runs only then) */
+void zmc_gpu_prepare(cairo_surface_t *source, unsigned revision);
+bool zmc_gpu_ready(void);
 
 /* Named Windows Phone transitions, from the Lumia 530 firmware. Draw one frame
  * at progress t (0..1) of `source` over the rectangle (x,y,w,h, points), on the
@@ -421,5 +443,15 @@ uint32_t zmc_now_ms(void);
 void zmc_read_file(const char *path, char *out, size_t size);	/* first line, or "" */
 uint32_t zmc_config_accent(void);
 void zmc_config_style(void);	/* style and palette from the same file; DotMatrix also sets the accent */	/* the accent in ~/.config/ztmetro/config */
+/* Metro's light/dark theme, from the same config (key "theme = light|dark",
+ * default dark) and the ZTRF_SHELL_THEME session env. DotMatrix ignores it. */
+void zmc_config_theme(void);
+/* The page background and the foreground/text for the current Metro theme,
+ * as 0xRRGGBB. Dark: bg black, fg white (today's look); Light: bg white, fg
+ * black. zmc_bg/zmc_fg set the Cairo source to each. */
+uint32_t zmc_bg_color(void);
+uint32_t zmc_fg_color(void);
+void zmc_bg(cairo_t *cr);
+void zmc_fg(cairo_t *cr);
 
 #endif

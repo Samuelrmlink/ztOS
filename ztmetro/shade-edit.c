@@ -6,7 +6,9 @@
  * Drawn as one layer over the panel's tiles and links (redrawn only when the
  * places change or a drag starts or ends) and, while a tile is carried, that
  * tile as a layer of its own under the finger. The places are the panel's own
- * (shade_tile_rect): four across and two rows, eight across turned.
+ * (shade_tile_rect); the tray's tiles are smaller, five across, so that a
+ * turned phone's side sheet (one portrait screen wide, the view's height)
+ * holds two rows of them. In the theme's colours (shell_light).
  */
 
 #define SE_BADGE	22.0	/* a tile's minus, in its top right corner */
@@ -29,11 +31,25 @@ static struct {
 	int n_tray;
 } se;
 
-#ifdef ZT_SHELL_LIGHT
 #define se_light(server) shell_light(server)
-#else
-#define se_light(server) false
-#endif
+#define SE_TRAY_ACROSS	5
+
+/* the panel's last usable row: upright above its bar, turned (the bar is
+ * along its side) the view's height */
+static double se_bottom(struct zt_server *server) {
+	return shade_panel_h(server) - (server->orient ? 0 : SHADE_HANDLE);
+}
+
+/* a point of the view in the panel's own points */
+static void se_panel(struct zt_server *server, double vx, double vy, double *x, double *y) {
+	if (server->orient != 0) {
+		*x = vx - shade_sheet_x0(server);
+		*y = vy;
+	} else {
+		*x = vx;
+		*y = vy - (server->shade_h - SHADE_MAX_H);
+	}
+}
 
 static bool shade_edit_active(void) {
 	return se.on;
@@ -45,10 +61,6 @@ static double se_tile_w(struct zt_server *server, double *h) {
 	return w;
 }
 
-static int se_across(struct zt_server *server) {
-	return server->width > server->height ? 8 : 4;
-}
-
 static double se_hint_y(struct zt_server *server) {
 	return shade_links_y(server) - 6;
 }
@@ -58,8 +70,9 @@ static double se_tray_top(struct zt_server *server) {
 }
 
 static void se_tray_tile(struct zt_server *server, int k, double *x, double *y, double *w, double *h) {
-	*w = se_tile_w(server, h);
-	se_tray_rect(k, se_across(server), SHADE_SIDE, se_tray_top(server), *w, *h, SHADE_GAP, x, y);
+	*w = (server->width - 2 * SHADE_SIDE - (SE_TRAY_ACROSS - 1) * SHADE_GAP) / (double)SE_TRAY_ACROSS;
+	*h = round(*w * 0.66);
+	se_tray_rect(k, SE_TRAY_ACROSS, SHADE_SIDE, se_tray_top(server), *w, *h, SHADE_GAP, x, y);
 }
 
 static void se_slot_rects(struct zt_server *server, double rects[SE_SLOTS][4]) {
@@ -95,7 +108,7 @@ static void se_draw(struct zt_server *server) {
 	bool light = se_light(server);
 	double ink = light ? 0 : 1, bg = light ? 1 : 0;
 	se.top = SHADE_TOP - 6;
-	double H = SHADE_MAX_H - SHADE_HANDLE - se.top;
+	double H = se_bottom(server) - se.top;
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, H, &cr);
 	cairo_set_source_rgb(cr, bg, bg, bg);
@@ -150,7 +163,7 @@ static void se_draw(struct zt_server *server) {
 	for (int k = 0; k < se.n_tray; k++) {
 		double x, y, w, h;
 		se_tray_tile(server, k, &x, &y, &w, &h);
-		if (y + h > SHADE_MAX_H - SHADE_HANDLE) break;	/* (a short panel: what fits) */
+		if (y + h > se_bottom(server)) break;	/* (a short panel: what fits) */
 		if (se.carrying == 2 && se.from == se.tray[k]) {
 			se_dashed(cr, x, y, w, h, ink, 0.4);
 			continue;
@@ -240,7 +253,7 @@ static int se_hit(struct zt_server *server, double x, double y) {
 /* The carried tile's own layer, drawn once as it is picked up. */
 static void se_pick_up(struct zt_server *server, int kind, int from, double x, double y, double tx, double ty) {
 	double w, h;
-	w = se_tile_w(server, &h);
+	w = se_tile_w(server, &h);	/* a place's size: where it is going */
 	se.carrying = kind;
 	se.from = from;
 	se.gx = x - tx;
@@ -260,14 +273,15 @@ static bool shade_edit_long_press(struct zt_server *server, struct touch_point *
 	if (!server->shade_open || p->index < 0 || p->index >= SE_SLOTS || quick_holds(server->quick[p->index])) {
 		return false;
 	}
-	double tx, ty, tw, th, panel_y = p->y - (server->shade_h - SHADE_MAX_H);
+	double tx, ty, tw, th, panel_x, panel_y;
+	se_panel(server, p->x, p->y, &panel_x, &panel_y);
 	shade_tile_rect(server, p->index, &tx, &ty, &tw, &th);
 	shade_tile_release(server, p->index);
 	server->shade_pressed = -1;
 	p->long_pressed = true;
 	shade_edit_begin(server);
 	if (server->quick[p->index] != Q_NONE) {
-		se_pick_up(server, 1, p->index, p->x, panel_y, tx, ty);
+		se_pick_up(server, 1, p->index, panel_x, panel_y, tx, ty);
 	}
 	p->index = SE_HIT_SLOT + p->index;
 	p->moved = false;
@@ -277,29 +291,34 @@ static bool shade_edit_long_press(struct zt_server *server, struct touch_point *
 }
 
 static void shade_edit_down(struct zt_server *server, struct touch_point *p, double x, double y) {
-	p->index = se_hit(server, x, y);
+	p->index = x < 0 ? -1 : se_hit(server, x, y);	/* (x < 0: beside a turned sheet) */
 	p->long_pressed = false;
 }
 
-static void shade_edit_move(struct zt_server *server, struct touch_point *p, double x, double y) {
-	double panel_y = y - (server->shade_h - SHADE_MAX_H);
-	if (!se.carrying && hypot(x - p->x0, y - p->y0) > SE_DRAG_SLOP) {
+static void shade_edit_move(struct zt_server *server, struct touch_point *p, double vx, double vy) {
+	double x, y, x0, y0;
+	se_panel(server, vx, vy, &x, &y);
+	se_panel(server, p->x0, p->y0, &x0, &y0);
+	if (!se.carrying && hypot(x - x0, y - y0) > SE_DRAG_SLOP) {
 		double tx, ty, tw, th;
 		if (p->index >= SE_HIT_SLOT && p->index < SE_HIT_SLOT + SE_SLOTS &&
 				server->quick[p->index - SE_HIT_SLOT] != Q_NONE) {
 			shade_tile_rect(server, p->index - SE_HIT_SLOT, &tx, &ty, &tw, &th);
-			se_pick_up(server, 1, p->index - SE_HIT_SLOT, p->x0, p->y0 - (server->shade_h - SHADE_MAX_H), tx, ty);
+			se_pick_up(server, 1, p->index - SE_HIT_SLOT, x0, y0, tx, ty);
 		} else if (p->index >= SE_HIT_TRAY && p->index < SE_HIT_TRAY + se.n_tray) {
 			se_tray_tile(server, p->index - SE_HIT_TRAY, &tx, &ty, &tw, &th);
-			se_pick_up(server, 2, se.tray[p->index - SE_HIT_TRAY], p->x0,
-				p->y0 - (server->shade_h - SHADE_MAX_H), tx, ty);
+			/* held where it was held, at a place's size */
+			double pw, ph;
+			pw = se_tile_w(server, &ph);
+			se_pick_up(server, 2, se.tray[p->index - SE_HIT_TRAY], x0, y0,
+				x0 - (x0 - tx) * pw / tw, y0 - (y0 - ty) * ph / th);
 		}
 	}
 	if (!se.carrying) return;
 	double w, h;
 	w = se_tile_w(server, &h);
 	se.cx = x - se.gx;
-	se.cy = panel_y - se.gy;
+	se.cy = y - se.gy;
 	double rects[SE_SLOTS][4];
 	se_slot_rects(server, rects);
 	int over = se_slot_at(rects, se.cx + w / 2, se.cy + h / 2, SHADE_GAP + 6);
@@ -357,15 +376,15 @@ static void shade_edit_up(struct zt_server *server, struct touch_point *p, bool 
 	}
 }
 
-static void shade_edit_draw(struct zt_server *server) {
+static void shade_edit_draw(struct zt_server *server, float x0) {
 	if (!se.on || !se.layer.tex) return;
-	layer_draw(server, &se.layer, 0, (float)se.top, 1.0f);
+	layer_draw(server, &se.layer, x0, (float)se.top, 1.0f);
 	if (se.carrying && se.drag_layer.tex) {
 		/* the carried tile, a little larger and lifted */
 		float m[16];
 		double w = se.drag_layer.w, h = se.drag_layer.h;
 		mat_identity(m);
-		mat_translate(m, (float)(se.cx + w / 2), (float)(se.cy + h / 2));
+		mat_translate(m, (float)(x0 + se.cx + w / 2), (float)(se.cy + h / 2));
 		mat_scale(m, 1.08f, 1.08f);
 		mat_translate(m, (float)(-w / 2), (float)(-h / 2));
 		mat_scale(m, (float)w, (float)h);

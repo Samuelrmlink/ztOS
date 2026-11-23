@@ -431,6 +431,9 @@ int main(void) {
 	uint32_t active[1] = { XDG_TOPLEVEL_STATE_ACTIVATED };
 	struct wl_array states = { sizeof(active), sizeof(active), active };
 	xdg_toplevel_configure(NULL, NULL, 360, 500, &states);
+	/* (the size is taken between frames, as xdg_surface_configure or the
+	 * main loop takes it: zmc_apply_resize) */
+	CHECK(zmc_apply_resize() && zmc.width == 360 && zmc.height == 500, "the new size not taken");
 	CHECK(!zmc.piv_cur && !zmc.piv_next && !zmc.piv_prev, "pictures of the old size kept");
 
 	if (failures) {

@@ -19,9 +19,10 @@ $(info removed programs built for another machine, to build them here: $(FOREIGN
 endif
 
 all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd \
-	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
+	coru/ztoscoru notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
 	store/ztstore power/ztpower servicemode/ztservicemode camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
-	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
+	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd \
+	passcoded/zrn-passcoded passcoded/zrn-passcode
 
 sounds/ztos-sounds: sounds/ztos-sounds.c volume-streams.h
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libpulse) -o $@ $< $(shell pkg-config --libs libpulse) -lm
@@ -162,10 +163,18 @@ JPEG_LIBS := $(shell pkg-config --exists libjpeg 2>/dev/null && pkg-config --lib
 gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 	$(APP_BUILD) $(JPEG_FLAGS) -o $@ gallery/ztgallery.c $(CORE) $(APP_LIBS) $(JPEG_LIBS) -lpthread
 
+# the passcode daemon (root) and its tool; Settings and the shell speak to it
+# through passcoded/passcode-proto.h
+passcoded/zrn-passcoded: passcoded/zrn-passcoded.c passcoded/passcode-proto.h ztos-user.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ passcoded/zrn-passcoded.c -lcryptsetup -lcrypto -lpthread
+
+passcoded/zrn-passcode: passcoded/zrn-passcode.c passcoded/passcode-proto.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ passcoded/zrn-passcode.c
+
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
 EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
 EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
-settings/ztsettings: settings/ztsettings.c settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
+settings/ztsettings: settings/ztsettings.c settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c mms/apnconf.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h devtest/devtest-power.c devtest/devtest-power.h power/battery-health.h $(CORE_DEPS)
@@ -313,7 +322,7 @@ contacts/ztcontacts: contacts/ztcontacts.c comm/comm.h comm/contact-store.h $(CO
 
 # the App Store: the repos in pacman.conf and the AUR (see store/README.md)
 STORE = store/ztstore.c store/util.c store/json.c store/pkg.c store/repo.c store/appstream.c store/aur.c \
-	store/sections.c store/search.c store/jobs.c store/icons.c store/install.c store/flathub.c store/shots.c
+	store/sections.c store/search.c store/jobs.c store/icons.c store/install.c store/flathub.c store/shots.c store/ztapps.c
 STORE_PKGS = librsvg-2.0 zlib
 store/ztstore: $(STORE) $(wildcard store/*.h) $(CORE_DEPS)
 	$(APP_BUILD) -DHAVE_RSVG $(shell pkg-config --cflags $(STORE_PKGS)) -o $@ $(STORE) $(CORE) $(APP_LIBS) \
@@ -334,6 +343,23 @@ browser/superscan: $(BROWSER) browser/webview.h browser/linux-dmabuf-v1-client-p
 
 # kept out of `all`/`install` until WPE is confirmed on the phone, so a missing
 # package cannot break the main build
+# ztWhatsApp: each part has its own Makefile. The engine needs nlohmann-json to build.
+.PHONY: whatsapp install-whatsapp clean-whatsapp
+whatsapp:
+	$(MAKE) -C whatsapp/engine
+	$(MAKE) -C whatsapp/ui
+	$(MAKE) -C whatsapp/notify
+
+install-whatsapp: whatsapp
+	$(MAKE) -C whatsapp/engine install
+	$(MAKE) -C whatsapp/ui install
+	$(MAKE) -C whatsapp/notify install
+
+clean-whatsapp:
+	$(MAKE) -C whatsapp/engine clean
+	$(MAKE) -C whatsapp/ui clean
+	$(MAKE) -C whatsapp/notify clean
+
 .PHONY: install-browser
 install-browser: browser/superscan
 	install -Dm755 browser/superscan /usr/local/bin/superscan
@@ -350,14 +376,16 @@ check-store:
 		$(CC) -std=c11 -Wall -o /tmp/ztstore-test-$$t tests/test_$$t.c util.c json.c pkg.c repo.c appstream.c aur.c sections.c flathub.c -lz && \
 		/tmp/ztstore-test-$$t || exit 1; done
 
-# ztOSCoreSensorFramework: starts every piece of hardware support with the
-# system, watches them, and reports what fails
-csf/ztoscsf: csf/ztoscsf.c ztos-user.h
-	$(CC) $(CFLAGS) $(WARN) -o $@ csf/ztoscsf.c
+# ztOSCOR-U (ztOS Central Operations Register Unit, formerly ztOSCoreSensorFramework):
+# starts every component with the system, watches them, and reports what fails
+coru/ztoscoru: coru/ztoscoru.c ztos-user.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ coru/ztoscoru.c
 
+# the boot splash on the framebuffer: the logo and what systemd is starting
+# (ztos-splash.service, docs/bootsplash/README.md)
 splash/ztos-splash: splash/ztos-splash.c
-	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags cairo pangocairo) -o $@ splash/ztos-splash.c \
-		$(shell pkg-config --libs cairo pangocairo)
+	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags cairo pangocairo libsystemd) -o $@ splash/ztos-splash.c \
+		$(shell pkg-config --libs cairo pangocairo libsystemd) -lm
 
 core/xdg-shell-client-protocol.h:
 	wayland-scanner client-header $(XDG) $@
@@ -464,6 +492,10 @@ install: check-arch
 	install -Dm644 clock/README.md /usr/local/share/doc/ztos/clock/README.md
 	install -Dm755 ledd/zrn-ledd /usr/local/sbin/zrn-ledd
 	install -Dm644 ledd/zrn-ledd.service /etc/systemd/system/zrn-ledd.service
+	install -Dm755 passcoded/zrn-passcoded /usr/local/sbin/zrn-passcoded
+	install -Dm755 passcoded/zrn-passcode /usr/local/sbin/zrn-passcode
+	install -Dm644 passcoded/zrn-passcoded.service /etc/systemd/system/zrn-passcoded.service
+	install -Dm644 passcoded/README.md /usr/local/share/doc/ztos/zrn-passcode.md
 	install -Dm755 touchkeyd/ztos-touchkeyd /usr/local/sbin/ztos-touchkeyd
 	install -Dm644 touchkeyd/ztos-touchkeyd.service /etc/systemd/system/ztos-touchkeyd.service
 	install -Dm755 sensord/ztoscsf-sensord /usr/local/sbin/ztoscsf-sensord
@@ -475,7 +507,7 @@ install: check-arch
 	install -Dm644 mms/ztmmsd.service /etc/systemd/system/ztmmsd.service
 	install -Dm644 mms/apns-extra.xml /usr/local/share/ztoscorenetworking/apns-extra.xml
 	test -e /etc/ztoscorenetworking/mms || install -Dm666 /dev/null /etc/ztoscorenetworking/mms
-	install -Dm755 csf/ztoscsf /usr/local/sbin/ztoscsf
+	install -Dm755 coru/ztoscoru /usr/local/sbin/ztoscoru
 	install -Dm755 notifyd/ztnotifyd /usr/local/bin/ztnotifyd
 	install -Dm755 phone/ztphone /usr/local/bin/ztphone
 	install -Dm755 messages/ztmessages /usr/local/bin/ztmessages
@@ -487,11 +519,11 @@ install: check-arch
 	install -Dm644 contacts/google-client.json.template /usr/local/share/ztos/google-client.json.template
 	install -Dm644 -t /usr/local/share/applications comm/ztphone.desktop comm/ztmessages.desktop comm/ztcontacts.desktop
 	install -Dm644 -t /usr/local/share/icons/hicolor/scalable/apps comm/ztphone.svg comm/ztmessages.svg comm/ztcontacts.svg
-	install -Dm644 csf/components /etc/ztoscoresensorframework/components
-	install -Dm644 csf/ztoscoresensorframework.service /etc/systemd/system/ztoscoresensorframework.service
+	install -Dm644 coru/components /etc/ztoscoru/components
+	install -Dm644 coru/ztoscoru.service /etc/systemd/system/ztoscoru.service
 
 clean:
-	rm -f servicemode/ztservicemode ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
+	rm -f servicemode/ztservicemode ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd coru/ztoscoru passcoded/zrn-passcoded passcoded/zrn-passcode notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h \
 		acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
@@ -760,3 +792,7 @@ check-demoloop-stop:
 # The native agent uses polkit's async callback API directly.
 auth/ztos-polkit-agent: auth/ztos-polkit-agent.c
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags polkit-agent-1 gio-unix-2.0) -o $@ $< $(shell pkg-config --libs polkit-agent-1 gio-unix-2.0)
+
+# ZroovMusic UI; playback is zroovd (zroovmusic/engine).
+zroovmusic/ztzroovmusic: zroovmusic/ztzroovmusic.c zroovmusic/zv-icons.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ zroovmusic/ztzroovmusic.c store/json.c $(CORE) $(APP_LIBS) -lpthread -lm -lz
