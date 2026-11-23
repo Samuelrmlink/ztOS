@@ -563,6 +563,15 @@ static void power_off(const struct camera *c)
 	}
 }
 
+/*
+ * Extra waits, for finding out why a sensor does not answer: before the bus
+ * comes up (the rails settled) and after reset is released. Timing only, no
+ * register; 0 is stock's sequence.
+ */
+static unsigned int settle_ms, after_reset_ms;
+module_param(settle_ms, uint, 0644);
+module_param(after_reset_ms, uint, 0644);
+
 static int power_on(const struct camera *c, bool rails_only)
 {
 	unsigned int i;
@@ -574,12 +583,16 @@ static int power_on(const struct camera *c, bool rails_only)
 		if (rails_only && !s->rail && s->marker != M_RESET_LOW && s->marker != M_IRIS_EN &&
 		    s->marker < M_MPS_D_ON)
 			continue;
+		if (!s->rail && s->marker == M_BUS_ON && settle_ms)
+			msleep(settle_ms);
 		ret = s->rail ? rail_set(s->rail, true) : do_marker(c, s->marker);
 		if (ret) {
 			note("%s: on step %u failed: %d", c->name, i, ret);
 			return ret;
 		}
 		wait_us(s->us);
+		if (!s->rail && s->marker == M_RESET_HIGH && after_reset_ms)
+			msleep(after_reset_ms);
 	}
 	return 0;
 }
@@ -618,6 +631,16 @@ static void id_diag(const struct camera *c)
 		n += scnprintf(line + n, sizeof(line) - n, " %02x", i2c_smbus_read_byte_data(pmic[PB02], i) & 0xff);
 	note("S2MPB02 22-2d:%s", line);
 	note("%s: reset pin reads %d", c->name, gpiod_get_value_cansleep(reset_gpio));
+	{	/* the 2L3's other address, by its ID pin; a read */
+		u8 id[2] = { 0, 0 };
+		u16 was = sensor->addr;
+		int r;
+
+		sensor->addr = 0x2d;
+		r = read16(sensor, 0x0000, id, 2);
+		sensor->addr = was;
+		note("%s: at 0x2d: %d, id %02x%02x", c->name, r, id[0], id[1]);
+	}
 	/* CMU_TOP CIS_CLK0/1: mux 0x1018/0x101c, div 0x1814/0x1818, gate 0x2018/0x201c (cmucal-sfr.c) */
 	if (!top_cmu)
 		top_cmu = ioremap(0x1a240000, 0x3000);
