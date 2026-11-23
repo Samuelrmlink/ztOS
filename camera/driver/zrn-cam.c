@@ -1174,6 +1174,16 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 			goto done;
 		}
 	}
+	/*
+	 * The rear sensor answered only after dvfs_cam was raised (the app's path
+	 * does it first; 22 Nov): every cycle asks for it, as a stream does, and
+	 * gives it back below. Approved values only (REGISTERS.md J and (a)).
+	 */
+	if (!stream) {
+		int r = apm_set(7, INTCAM_KHZ);
+
+		note("APM dvfs_cam %u: %d", INTCAM_KHZ, r);
+	}
 	ret = power_on(c, rails);
 	if (!ret && stream)
 		ret = stream_run(st_front, st_frame, st_tp);
@@ -1184,6 +1194,8 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 	if (!ret && rails)
 		note("%s: rails up", c->name);
 	power_off(c);
+	if (!stream)
+		cam_rest();
 	note("%s: off", c->name);
 	gpiod_put(reset_gpio);
 	reset_gpio = NULL;
