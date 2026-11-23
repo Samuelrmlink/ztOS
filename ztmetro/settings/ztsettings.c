@@ -183,8 +183,8 @@ enum action {
 	ACT_LED_SWITCH,		/* then one for each source */
 	ACT_LED_SWITCH_LAST = ACT_LED_SWITCH + N_LED_SOURCES - 1,
 	ACT_LED_COLOUR,		/* arg: source * 16 + place in the palette */
-	ACT_QUICK_SLOT,		/* then one for each of the eight places */
-	ACT_QUICK_LAST = ACT_QUICK_SLOT + 7,
+	ACT_QUICK_SLOT,		/* then one for each place (up to four rows of four) */
+	ACT_QUICK_LAST = ACT_QUICK_SLOT + SE_MAX - 1,
 	ACT_APP_SCALE_SLOT,	/* then one for each app listed */
 	ACT_APP_SCALE_LAST = ACT_APP_SCALE_SLOT + 23,
 };
@@ -217,6 +217,9 @@ static const char *const QUICK_IDS[] = { "wifi", "data", "bluetooth", "airplane"
 static const char *const QUICK_NAMES[] = { "Wi-Fi", "Mobile data", "Bluetooth", "Airplane mode",
 	"Rotation lock", "Flashlight", "Location", "Brightness", "All settings", "Vibration", "Audio", "Sleep", "(empty)" };
 #define N_QUICK 13
+#define QUICK_NONE 12	/* "none": an empty place */
+#define ZT_SHADE_EDIT_LOGIC_ONLY
+#include "../shade-edit.h"	/* the places' list, as the shell keeps it (two to four rows, 8.55) */
 
 #include "wifi-list.h"	/* struct network, and the rows merged by name */
 
@@ -311,7 +314,8 @@ static struct {
 	int force_rel_ms;	/* the release ("pop out"): length, 0 none */
 	int force_rel_strength;	/* and strength, % of the heavy pulse, 0 none */
 	int haptic_group[N_HAPTIC_GROUPS];	/* percent of the strength; 0 off */
-	int quick[8];		/* indexes into QUICK_IDS */
+	int quick[SE_MAX];	/* indexes into QUICK_IDS: the first n_quick are the places */
+	int n_quick;
 } app = {
 	/* the Lumia Cyan photos, until a choice is saved (an empty choice is
 	 * "none" and is saved as such) */
@@ -326,7 +330,8 @@ static struct {
 	.force_rel_ms = FORCE_MS_DEFAULT,
 	.force_rel_strength = 50,	/* ztmetro.c FORCE_RELEASE_STRENGTH */
 	.haptic_group = { 100, 100, 100, 100, 100, 100 },
-	.quick = { 0, 1, 2, 3, 10, 5, 7, 8 },
+	.quick = { 0, 1, 2, 3, 10, 5, 7, 8, 12, 12, 12, 12, 12, 12, 12, 12 },
+	.n_quick = 8,
 	.accent = 5,
 	.frost = 1,
 	.columns = 3,
@@ -505,16 +510,7 @@ static void config_load(void) {
 				}
 			}
 		} else if (strcmp(key, "quick") == 0) {
-			char *save = NULL;
-			int n = 0;
-			for (char *word = strtok_r(val, ", ", &save); word && n < 8; word = strtok_r(NULL, ", ", &save)) {
-				for (int q = 0; q < N_QUICK; q++) {
-					if (strcmp(word, QUICK_IDS[q]) == 0) {
-						app.quick[n++] = q;
-						break;
-					}
-				}
-			}
+			se_parse(val, QUICK_IDS, N_QUICK, QUICK_NONE, app.quick, &app.n_quick);
 		} else if (strcmp(key, "scale") == 0) {
 			snprintf(app.scale_text, sizeof(app.scale_text), "%s", val);
 		} else if (strcmp(key, "display_size") == 0) {
@@ -796,10 +792,7 @@ static void config_format(void) {
 	KEY("force_release_strength", "%d", app.force_rel_strength);
 	KEY("force_press_pressure", "%d", app.force_level);
 	char quick[CONFIG_VALUE_MAX - 8] = "";
-	for (int i = 0; i < 8; i++) {
-		size_t at = strlen(quick);
-		snprintf(quick + at, sizeof(quick) - at, "%s%s", i ? "," : "", QUICK_IDS[app.quick[i]]);
-	}
+	se_format(app.quick, app.n_quick, QUICK_IDS, quick, sizeof(quick));
 	KEY("quick", "%s", quick);
 	KEY("wifi_suspend", "%s", app.wifi_suspend ? "on" : "off");
 	KEY("auto_rotate", "%s", app.auto_rotate ? "on" : "off");
@@ -3683,12 +3676,16 @@ static double draw_haptics(cairo_t *cr) {
 	return draw_force_press(cr, y + 10);
 }
 
-/* The action centre's eight quick actions: which one stands in each place. */
+/* The action centre's quick actions: which one stands in each place, row by
+ * row, and a row more (empty) to start one in, as the panel's editor has;
+ * a row left all empty goes when it is saved. */
 static double draw_quick(cairo_t *cr) {
 	double y = zmc_header(cr, "quick tiles");
-	for (int i = 0; i < 8; i++) {
+	int shown = app.n_quick + SE_ROW > SE_MAX ? SE_MAX : app.n_quick + SE_ROW;
+	for (int i = 0; i < shown; i++) {
 		char caption[32];
-		snprintf(caption, sizeof(caption), "Row %d, place %d", i / 4 + 1, i % 4 + 1);
+		snprintf(caption, sizeof(caption), "Row %d, place %d%s", i / 4 + 1, i % 4 + 1,
+			i >= app.n_quick ? " (a new row)" : "");
 		y = picker(cr, y, caption, QUICK_NAMES, N_QUICK, app.quick[i], ACT_QUICK_SLOT + i);
 	}
 	return y + 20;
@@ -4178,7 +4175,10 @@ static void activate(int action, int arg) {
 	}
 	if (action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST) {
 		if (arg >= 0 && arg < N_QUICK) {
-			app.quick[action - ACT_QUICK_SLOT] = arg;
+			int slot = action - ACT_QUICK_SLOT;
+			app.n_quick = se_grow(app.quick, app.n_quick, slot, QUICK_NONE);
+			app.quick[slot] = arg;
+			app.n_quick = se_trim(app.quick, app.n_quick, QUICK_NONE);
 			config_save();
 		}
 		return;
