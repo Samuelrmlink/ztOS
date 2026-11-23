@@ -30,6 +30,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1793,8 +1794,31 @@ static bool touch(int phase, int id, double x, double y, uint32_t time) {
 
 static void v4l2_ready(int fd, void *data);
 
+/*
+ * For tests without a finger on the screen: SIGUSR1 presses the shutter,
+ * SIGUSR2 the facing button. Acted on in the next tick.
+ */
+static volatile sig_atomic_t sig_shutter, sig_facing;
+static void on_sig(int s) {
+	if (s == SIGUSR1) {
+		sig_shutter = 1;
+	} else {
+		sig_facing = 1;
+	}
+}
+
+static void facing_toggle(void);
+
 static void tick(void) {
 	uint32_t now = zmc_now_ms();
+	if (sig_facing) {
+		sig_facing = 0;
+		facing_toggle();
+	}
+	if (sig_shutter) {
+		sig_shutter = 0;
+		capture_photo();
+	}
 	static uint32_t last_scene;
 	if (ui.dial >= 0 && !ui.dial_closing) {
 		ui.dial_anim = fmin(1, ui.dial_anim + 0.16);
@@ -2018,6 +2042,8 @@ int main(int argc, char **argv) {
 	if (!device_path && !replay_path && access("/dev/video0", R_OK | W_OK) == 0) {
 		device_path = "/dev/video0";
 	}
+	signal(SIGUSR1, on_sig);
+	signal(SIGUSR2, on_sig);
 	int status = zmc_run(&camera, 0);
 	record_stop(NULL);
 	source_stop();

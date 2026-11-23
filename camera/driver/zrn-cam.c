@@ -688,6 +688,10 @@ static void id_diag(const struct camera *c)
 		note("CIS_CLK0 mux %08x div %08x gate %08x; CIS_CLK1 mux %08x div %08x gate %08x",
 		     readl(top_cmu + 0x1018), readl(top_cmu + 0x1814), readl(top_cmu + 0x2018),
 		     readl(top_cmu + 0x101c), readl(top_cmu + 0x1818), readl(top_cmu + 0x201c));
+		/* DMYQCH_CON_DFTMUX_TOP_QCH_CIS_CLK0..3: bit 0 enable, 1 clock_req, 2 ignore_force_pm_en */
+		if (top_cmu)
+			note("CIS_CLK0-3 QCH %08x %08x %08x %08x", readl(top_cmu + 0x3004), readl(top_cmu + 0x3008),
+			     readl(top_cmu + 0x300c), readl(top_cmu + 0x3010));
 }
 
 static void read_id(const struct camera *c)
@@ -1070,6 +1074,10 @@ static ssize_t run_write(struct file *f, const char __user *ubuf, size_t len, lo
 			note("CIS_CLK0 mux %08x div %08x gate %08x; CIS_CLK1 mux %08x div %08x gate %08x",
 			     readl(top_cmu + 0x1018), readl(top_cmu + 0x1814), readl(top_cmu + 0x2018),
 			     readl(top_cmu + 0x101c), readl(top_cmu + 0x1818), readl(top_cmu + 0x201c));
+		/* DMYQCH_CON_DFTMUX_TOP_QCH_CIS_CLK0..3: bit 0 enable, 1 clock_req, 2 ignore_force_pm_en */
+		if (top_cmu)
+			note("CIS_CLK0-3 QCH %08x %08x %08x %08x", readl(top_cmu + 0x3004), readl(top_cmu + 0x3008),
+			     readl(top_cmu + 0x300c), readl(top_cmu + 0x3010));
 		goto done;
 	}
 	if (!strncmp(cmd, "dvfs-", 5)) {
