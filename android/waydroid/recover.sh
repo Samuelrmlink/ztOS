@@ -233,6 +233,12 @@ case $1 in
                timeout 3 lxc-attach "${lxc_args[@]}" -- /system/bin/service check waydroidplatform 2>/dev/null | grep -q ': found$'; then
                 settings
                 /usr/local/libexec/ztos-waydroid-audio
+                # The shell's word that Android is up (ztMETRO's WD_READY_MARKER):
+                # without it ztMETRO says "Android Virtual Runtime has stopped" and
+                # launches no Android app. Root writes it here: ztos-waydroid-boot
+                # runs as the user, who cannot write /run (Permission denied after
+                # every login, 2026-11-22).
+                install -m644 /dev/null /run/ztos-waydroid-boot-ready
                 exit 0
             fi
             sleep 1
