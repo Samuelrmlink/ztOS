@@ -1094,6 +1094,82 @@ over the exact NFC loop and rerun the already-approved identify scan, to rule
 out coupling before touching the RF registers. The digital path is ready; only
 the analog bring-up is in question.
 
+## FW_CFG (clock config) — exact bytes, from the HAL (for owner approval; not sent)
+
+Read-only disassembly of `/vendor/lib64/nfc_nci_sec.so` (copied off the
+read-only VENDOR mount; md5 `e3f3ebb0…`), function
+`hal_nci_send_prop_fw_cfg(u8)` at `0x17a28`. This is what stock sends, and it
+is the prime suspect for the dead RF front-end (CLK_REQ never rose in any run).
+
+### What the HAL builds (from source / disassembly)
+
+- The packet starts `2F 28` (`strh #0x282f` → little-endian `2f 28`): GID 0x0F
+  proprietary, OID 0x28 = `NCI_PROP_FW_CFG`.
+- The payload length and fields depend on the chip's firmware major
+  (the argument, taken from `nfc_hal_info.version`, compared to `0x70`):
+  - **major < 0x70 (ours is `0x45`): payload length 3, fields in order
+    `CLK_TYPE, CLK_SPEED, CLK_REQ`** (written to stack offsets 3, 4, 5).
+  - major ≥ 0x70: payload length 1, just `CLK_SPEED`.
+- Each field is read with `get_config_int` from these keys, **defaulting to 0**
+  if the key is absent (`stur wzr` on the failure path):
+  - offset 3 ← `FW_CFG_CLK_TYPE`
+  - offset 4 ← `FW_CFG_CLK_SPEED`
+  - offset 5 ← `FW_CFG_CLK_REQ`
+  - The HAL first tries a hardware-rev-suffixed key (`%s_REV%d`, i.e.
+    `FW_CFG_CLK_SPEED_REV<hwrev>`), then the plain key.
+- It is sent with `__send_to_device`, and the reply checked is
+  `NCI_PROP_FW_CFG_RSP` (`4F 28 …`).
+
+### The board's values (observed)
+
+`/vendor/etc/libnfc-sec-vendor.conf` on this phone contains **only**
+`FW_CFG_CLK_SPEED=0x12` — no `FW_CFG_CLK_TYPE`, no `FW_CFG_CLK_REQ`, and no
+`_REV`-suffixed variants (confirmed by reading the whole file; it is the only
+NFC config file the HAL's `get_config` uses). So the two missing fields default
+to 0, and for our firmware (major 0x45 < 0x70) the exact packet is:
+
+```
+2F 28 03 00 12 00
+      │  │  │  └ CLK_REQ   = 0x00 (key absent -> default)
+      │  │  └ CLK_SPEED = 0x12 (FW_CFG_CLK_SPEED, vendor conf)
+      │  └ CLK_TYPE  = 0x00 (key absent -> default)
+      └ payload length 3
+```
+
+Expected reply: `4F 28 01 00` (status 0x00) — `does not support FW_CFG!!` is
+the HAL's error string if the bootloader rejects it.
+
+### Stored or volatile?
+
+**Most likely volatile** (inferred): the HAL sends FW_CFG from the open/init
+and firmware state machines with **no version-compare/skip** around it — unlike
+the RF registers, which it rewrites only when their version differs. A clock
+setting the chip needs told to it on each power-up fits a volatile,
+per-session register. This is **not certain** from static analysis; if the
+owner treats it as possibly-NVM, that only raises the approval bar, it does not
+change the bytes.
+
+### Risk and rollback
+
+- One proprietary 0x2F command, 6 bytes, the exact bytes stock sends on this
+  board. It configures the chip's clock source; it does not touch the firmware
+  image, the RF-register block, the eSE, MST, or EFS/BOOT.
+- If volatile (likely), it clears at the next power-down; rollback is a
+  power-cycle (our driver drops VEN on close). If it turns out to persist,
+  there is no read-back, so rollback would be re-sending a known value — but
+  `00 12 00` **is** the board's stock value, so re-sending it is the baseline.
+- Worst case on a bad value: the chip mis-locks its clock and still doesn't
+  detect — i.e. no worse than now, and cleared by the power-cycle on close.
+
+### Proposed use (one run, after approval of these exact bytes)
+
+In the stage-2 open path, right after `CORE_INIT` and before `CORE_SET_CONFIG`:
+send `2F 28 03 00 12 00`, require `4F 28 01 00`, then the normal identify-only
+poll. The kernel allowlist would gain exactly this one 0x2F packet (that opcode
+and body only); nothing else 0x2F stays allowed. The `CORE_RESET` retry is
+already added. If the chip then detects the Chameleon, FW_CFG was the missing
+step; if not, the rfreg load (already drafted, still on hold) is next.
+
 ## Biggest unknowns
 
 1. **Clock.** Is CLKOUT (`oscclk_nfc`) running under ztOS, and does the chip

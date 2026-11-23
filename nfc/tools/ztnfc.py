@@ -490,11 +490,16 @@ def read_classic(nci, info, deadline):
 def scan(dev, seconds, identify=False):
     nci = Nci(dev)
     try:
-        try:
-            nci.send([0x20, 0x00, 0x01, 0x00])
-        except OSError as e:
-            log(f"CORE_RESET not acked ({e.strerror}): chip did not answer on open")
-            return 1
+        for attempt in range(1, 4):		# a marginal start: retry CORE_RESET
+            try:
+                nci.send([0x20, 0x00, 0x01, 0x00])
+                break
+            except OSError as e:
+                log(f"CORE_RESET not acked ({e.strerror}), attempt {attempt}/3")
+                if attempt == 3:
+                    log("chip did not answer on open")
+                    return 1
+                time.sleep(0.3)
         r = nci.rsp((0, 0))
         if not r or r[3] != 0:
             log("CORE_RESET failed")
