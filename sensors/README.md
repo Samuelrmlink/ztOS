@@ -71,6 +71,97 @@ tried again on the next boot.
 - `watch accel|gyro|pressure|prox [MS]` on `/run/zrn-sensord.ctl` streams one
   more sensor for five seconds; ZrnDevTest's sensors page repeats it while open.
 
+### Proximity in calls (ROADMAP 8.24, 2026-11-12)
+
+Until now nothing used the proximity sensor: the always-on display stayed dark
+for a whole call (`aod_why`, "a call is under way") and a screen lit by a
+call took cheek touches. Now:
+
+- `ztoscorenetworkingd` tells `ztoscsf-sensord` the call's state and where
+  its sound goes (`call STATE ROUTE` on `/run/ztoscsf-sensord.ctl`, at each
+  change), and writes `call_audio=off|earpiece|speaker` to its status file,
+  which the sensor daemon reads when it starts.
+- `ztoscsf-sensord` turns the proximity sensor on only for a call held to the
+  ear: `dialing`, `ringing` (ours, ringing out) or `active`, with the sound
+  not on the speaker or a headset, and the screen on. An incoming call that
+  is still ringing does not count. Before the ADD it sends the TMD4906's
+  thresholds as Samsung's driver does before each one (`0xF2`, eight bytes,
+  big-endian: 2400, 1600, 16368, 1000, the `PROX_AUTOCAL_AMS` defaults; the
+  S9's device tree overrides none).
+- Near must hold 150 ms and far 300 ms before the shell is told
+  `prox_blank on|off`. The panel comes back at once when the call ends, the
+  sound goes to the speaker, the screen goes off, the hub restarts
+  (INIT_DONE) or the daemon stops.
+- The shell (`prox_blank_set`) switches the panel off and ignores the glass
+  and the force press, without the screen's own sleep: no lock, no lock
+  sound, no Waydroid freeze, no Wi-Fi change, no `screen off` to zrnperfd, so
+  the sensor stays on. The idle timer waits while it is blanked. It refuses
+  unless ztphone's call screen is up, the screen is on and the AOD is not
+  shown. The power key brings the panel back, and it stays on until the
+  sensor has said far and near again. `call_screen end` and a real
+  screen-off clear it. `ztmetro.state` has a `prox_blank on|off` line.
+- Fails safe: no reading, a dead hub or a dead daemon leaves the screen on.
+  If the daemon is killed while blanked, the power key or the end of the call
+  brings the panel back.
+
+Records, from Samsung's `ssp.h` and `ssp_data.c`: the proximity reading is 3
+bytes (`prox_detect` u8, 1 near; `prox_adc` u16). The daemon used to take 2,
+which put any frame with a proximity record out of step. Pressure is 6
+bytes (s32 count, 4096 per hPa for the LPS22H; s16 hundredths of a degree);
+the daemon used to print it as three 16-bit numbers. `/run/ztoscsf-sensors/`
+now has `prox` (`near|far ADC`) and `pressure` (`HPA RAW DEGREES`; no factory
+offset applied, since Samsung keeps that in EFS), and `status` has `call=`
+and `prox=off|on|near`.
+
+Host tests: `make -C ztmetro check-sensord` (the queue test and
+`sensord/test-sensord-prox.py`, the hub on a pty and the shell a FIFO). The
+shell side was run in the headless container (`desktop/dev/run.sh`): it
+refuses a blank outside a call, blanks during one, unblanks on the power key
+and holds that until far, and clears on call end and on screen off.
+
+On the phone, 12 Nov 2026, with simulated calls (`fake_dial`, `fake_ring`
+and `fake_answer` on `/run/ztoscorenetworking.ctl`; no radio command):
+
+- **Outgoing call:** proximity came on at dialling. The sensor said `near`, with an ADC of about 8700 to 8800. The phone's top was covered: light read 0 lux on every channel. The shell blanked 150 ms later. At the call's end the panel came back.
+- **Incoming call:** ringing kept the sensor off; answering turned it on.
+- **The shell's blank:**
+  - a screenshot fails while it's blanked, because the output is off;
+  - a tap doesn't unblank it;
+  - after an unblank, the screenshot draws again.
+- **Barometer:** `986.72 hPa`, with 35.8 °C at the chip.
+- **Hub:** no asserts.
+
+Not yet seen on the phone: a hand coming and going over an uncovered sensor.
+
+### Orientation, for auto-rotation (ROADMAP 8.33, 2026-11-12)
+
+- The shell sends `orient on` on `/run/ztoscsf-sensord.ctl` only while
+  auto-rotation could use it: Settings' Auto-rotate on, Rotation Lock off,
+  the screen on and no AOD. `orient off` otherwise. With it off, nothing
+  runs for it.
+- On, and with the screen on, the accelerometer runs at 100 ms
+  (`ORIENT_MS`; a watch asking for faster keeps its own rate) and
+  `sensord/orient.h` turns each reading into a quarter turn: 0 portrait,
+  1 turned left (earpiece on the left), 3 turned right, 2 upside down (off
+  unless `orient_180 on`).
+- Against flapping: a reading far from 1 g is ignored, so is a phone
+  within 25 degrees of flat (the last orientation stays), a new one must be
+  within 30 degrees of its centre (15 degrees of hysteresis either side of
+  the 45-degree line) and hold 300 ms. The first reading after it comes on,
+  or after the screen comes on, is taken at once.
+- Each change goes to the shell as `orientation N` and into
+  `/run/ztoscsf-sensors/orientation`; `status` has `orient=on|off N`. The
+  accelerometer's own file is written only while it is watched.
+- The hub's axes are taken as Android's (x right, y up, z out of the glass).
+  If the phone shows they are not, `orient_axes -y+x+z` (any signed order)
+  maps them, and is remembered in the state file.
+- Hub sensor 48 (`AUTO_ROTATION_SENSOR`) is not used: whether this firmware
+  has it is in its `0xF4` bitmap (`zrn-ssp.py info`), not yet read, and
+  adding a sensor the hub lacks may assert it. The accelerometer is known to
+  work.
+
+Host test: `sensord/test-sensord-orient.py` (in `make check-sensord`).
+
 ### The protocol, in short
 
 The phone opens with 9 bytes: command, length (2), options (2), data (4).
@@ -178,7 +269,8 @@ lhd after 30 seconds and left zero automatic restarts; no lhd survived. The
 CSF exhaustion test also verifies stop ordering with mocked hardware commands.
 Details and evidence are in `ztmetro/csf/POLISH.md` and `~/swarm/polish-report.md`.
 
-- Auto rotation from the accelerometer, proximity for calls, the compass.
+- Auto rotation from the accelerometer, the compass (`HARDWARE-AUDIT.md` has
+  what each would take).
 - GNSS: the same chip and daemon, `gpsd` from VENDOR on top of lhd.
 - The Settings brightness slider and the action centre tile still move the
   screen while auto brightness is on; the next change in the room overrides them.

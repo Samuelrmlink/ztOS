@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Service mode
+Comment=The modem's field test and service menus, to look at
+Exec=ztservicemode
+Terminal=false
+Type=Application
+Icon=ztservicemode
+Categories=System;

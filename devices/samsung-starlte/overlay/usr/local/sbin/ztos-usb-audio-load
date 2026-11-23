@@ -1,0 +1,35 @@
+#!/bin/sh
+# Load snd-usb-audio (modprobe runs this for it: /etc/modprobe.d/ztos-usb-audio.conf).
+#
+# udev asks for it when a USB audio device is plugged in, and at boot when one
+# is in already. As ztoscirrusaudio does for the speakers' driver, a mark is
+# left while it loads: if loading stops the kernel or kills modprobe (an oops),
+# the mark stays and later loads are skipped, so a bad module can't take the
+# phone down on every boot or plug. The speakers don't depend on it.
+#
+#   rm /var/lib/ztoscirrusaudio/usb-loading     try again
+MARK=${ZTOS_USB_AUDIO_MARK:-/var/lib/ztoscirrusaudio/usb-loading}   # the test sets these two
+SYSMODULE=${ZTOS_SYSMODULE:-/sys/module}
+say() {
+	echo "ztos-usb-audio: $*" >&2
+	echo "ztos-usb-audio: $*" > /dev/kmsg 2> /dev/null || true
+}
+[ -d "$SYSMODULE/snd_usb_audio" ] && exit 0
+if [ -e "$MARK" ]; then
+	say "not loading snd-usb-audio: an earlier load did not finish ($(cat "$MARK" 2> /dev/null)); remove $MARK to try again"
+	exit 1
+fi
+mkdir -p "${MARK%/*}"
+{ date '+%F %T'; cat /proc/sys/kernel/random/boot_id; } > "$MARK" 2> /dev/null && sync
+# the options in modprobe.d (index=-2) still apply with --ignore-install
+modprobe --ignore-install snd-usb-audio
+rc=$?
+if [ $rc -gt 128 ]; then
+	# killed while loading, an oops most likely: keep the mark
+	say "modprobe snd-usb-audio was killed (status $rc): not loading it again until $MARK is removed"
+	exit $rc
+fi
+rm -f "$MARK"
+sync
+[ $rc -eq 0 ] || say "modprobe snd-usb-audio failed (status $rc)"
+exit $rc

@@ -21,6 +21,9 @@
  *				texts carry on: see "packet data" below
  *	sms NUMBER TEXT		one message, in PDU mode (text mode is refused
  *				by this modem)
+ *	svc enter CODE|key N|back|end|ping|netinfo
+ *				Samsung's ServiceMode menus, to look at only:
+ *				servicemode.h
  *
  * Nothing is written to EFS. The modem's file channel is read, and its
  * requests may be answered without storing anything (see "what the modem
@@ -40,8 +43,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "../mms/mmspdu.h"
 
 #define AT_DEV		"/dev/umts_router"
 #define CTL		"/run/ztoscorenetworking.ctl"
@@ -68,10 +79,13 @@ struct state {
 	char call[12];		/* "", dialing, ringing (theirs), incoming, active */
 	char call_number[32];
 	char ipc[8];		/* "", alive, silent: does the CP answer IPC probes (debug only) */
+	bool data_held;		/* data_on, but the session is dropped while Wi-Fi is connected */
 };
 static struct state now = { "?", "", -1, 0, 0, 0, -1, -1, -1, false, false, false, "", -1 };
 static struct state written;
 static bool written_once;
+static int call_audio_route;	/* 0 off, 1 earpiece, 2 speaker: call_audio() */
+static const char *const call_audio_names[] = { "off", "earpiece", "speaker" };
 static char call_result[16];
 
 static const char *reg_name(int reg)
@@ -158,7 +172,9 @@ static void publish(void)
 {
 	static double written_ipc_rx;
 	static long written_at;
-	bool same = written_once && memcmp(&now, &written, sizeof(now)) == 0;
+	static int written_route;
+	bool same = written_once && memcmp(&now, &written, sizeof(now)) == 0 &&
+		written_route == call_audio_route;
 	if (same && (ipc_last_rx == written_ipc_rx || ms() - written_at < 60000))
 		return;
 	mkdir(STATUS_DIR, 0755);
@@ -170,19 +186,21 @@ static void publish(void)
 	int bars = status_bars(now.bars, reg);
 	fprintf(f, "call_result=%s\n", call_result);
 	fprintf(f, "call=%s\ncall_number=%s\n", now.call[0] ? now.call : "idle", now.call_number);
+	fprintf(f, "call_audio=%s\n", call_audio_names[call_audio_route]);
 	fprintf(f, "sim=%s\noperator=%s\nbars=%d\nregistered=%s\ntech=%s\nairplane=%d\ndata=%d\ndata_on=%d\n"
-		"ip=%s\nwifi_bars=%d\n",
+		"ip=%s\nwifi_bars=%d\ndata_held=%d\n",
 		now.sim, now.operator, bars, reg_name(reg), tech(),
 		/* (this modem's AT+CFUN? has been seen to say "off" while it is
 		 * registered: a registered radio is not in airplane mode) */
 		now.airplane && reg != 1 && reg != 5, now.data, now.data_on,
-		now.ip, now.wifi_bars);
+		now.ip, now.wifi_bars, now.data_held);
 	fprintf(f, "ipc=%s\nipc_last_rx=%.0f\n", now.ipc[0] ? now.ipc : "?", ipc_last_rx);
 	fclose(f);
 	chmod(STATUS ".new", 0644);
 	rename(STATUS ".new", STATUS);
 	written = now;
 	written_once = true;
+	written_route = call_audio_route;
 	written_ipc_rx = ipc_last_rx;
 	written_at = ms();
 	if (!same)
@@ -624,9 +642,15 @@ static void sms_who(const char *number, char *who, size_t size)
 	}
 }
 
+static bool mms_push(const char *pdu);
+static void sim_id_write(void);
+static void sim_id_answer(const char *l);
+
 static void sms_arrived(const char *pdu)
 {
 	char number[40], text[8192], escaped[16384], note[400];
+	if (mms_push(pdu))
+		return;		/* an MMS notification: ztmmsd's */
 	if (!sms_decode(pdu, number, sizeof(number), text, sizeof(text))) {
 		fprintf(stderr, "ztoscorenetworkingd: a message that could not be read\n");
 		return;
@@ -766,8 +790,29 @@ static bool release_saw_call;
  * modem starts on it. Sound is on from dialling: the network's own ringback
  * and announcements are part of the call.
  */
-static int call_audio_route;	/* 0 off, 1 earpiece, 2 speaker */
 static void ipc_send(int main_cmd, int sub, int type, const unsigned char *data, size_t len);
+
+/* The sensor daemon keeps the proximity sensor on for a call held to the ear
+ * and blanks the screen against a cheek (sensors/README.md, "Proximity in
+ * calls"): it is told the call's state and where its sound goes, each time
+ * either changes. */
+#define SENSORD_CTL	"/run/ztoscsf-sensord.ctl"
+static void tell_sensord(void)
+{
+	static char told[48];
+	char line[48];
+	snprintf(line, sizeof(line), "call %s %s\n", now.call[0] ? now.call : "idle",
+		call_audio_names[call_audio_route]);
+	if (!strcmp(line, told))
+		return;
+	/* not running: it reads the status file when it starts */
+	int fd = open(SENSORD_CTL, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0)
+		return;
+	if (write(fd, line, strlen(line)) == (ssize_t)strlen(line))
+		snprintf(told, sizeof(told), "%s", line);
+	close(fd);
+}
 
 static void call_audio(int route)
 {
@@ -800,6 +845,8 @@ static void call_audio(int route)
 	}
 	fprintf(stderr, "ztoscorenetworkingd: call audio: %s\n", names[route]);
 	call_audio_route = route;
+	tell_sensord();
+	publish();
 }
 
 static void call_set(const char *state, const char *number)
@@ -819,6 +866,9 @@ static void call_set(const char *state, const char *number)
 	if (!fake_call && !call_audio_route && (!strcmp(state, "active") || !strcmp(state, "dialing") || !strcmp(state, "ringing")))
 		call_audio(1);
 	if (!state[0] && now.call[0]) {
+		/* over: an answer pending from this call must not outlive it, or the next
+		 * call's RING is taken for this one's and never shown (2026-11-21) */
+		call_answering = false;
 		/* over: into the log */
 		if (!call_result[0]) snprintf(call_result, sizeof(call_result), "ended");
 		tell_shell("call_screen end\n");
@@ -834,6 +884,7 @@ static void call_set(const char *state, const char *number)
 		now.call_number[0] = 0;
 	}
 	snprintf(now.call, sizeof(now.call), "%s", state);
+	tell_sensord();
 	if (number && number[0])
 		snprintf(now.call_number, sizeof(now.call_number), "%s", number);
 	/* Calls must reach the UI even while an unrelated AT command is pending. */
@@ -927,6 +978,11 @@ static void on_line(char *l)
 		snprintf(sim_mccmnc, sizeof(sim_mccmnc), "%.6s", l);	/* MCC, and an MNC of 2 or 3 */
 		if (!net_set)
 			net_configure();
+		sim_id_write();
+		queue_at("AT+CRSM=176,28478,0,0,0");	/* EF_GID1 */
+		queue_at("AT+CRSM=176,28486,0,0,17");	/* EF_SPN */
+	} else if (!strncmp(l, "+CRSM:", 6) && !strncmp(sent, "AT+CRSM=176,", 12)) {
+		sim_id_answer(l);
 	} else if (!strncmp(l, "+CSQ:", 5)) {
 		int rssi = atoi(l + 5);
 		if (rssi >= 0 && rssi != 99) {
@@ -1004,7 +1060,7 @@ static void on_line(char *l)
 	} else if (!strcmp(l, "RING") || !strncmp(l, "+CRING", 6)) {
 		if (strcmp(now.call, "incoming"))
 			fprintf(stderr, "ztoscorenetworkingd: modem: %s\n", l);
-		if (strcmp(now.call, "incoming") && !call_answering) {
+		if (strcmp(now.call, "incoming") && !(call_answering && now.call[0])) {
 			call_set("incoming", "");
 			/* light the screen and bring the call up (launch is refused on
 			 * the lock screen; the note stays for that) */
@@ -1132,7 +1188,7 @@ static void data_wish(bool on, bool say)
 		unlink(DATA_OFF);
 		data_touch(DATA_WISH);
 		data_tried_at = 0;	/* now, not at the next half minute */
-		if (ctx_up) {
+		if (ctx_up && !now.data_held) {
 			/* still there from before it was switched off */
 			snprintf(now.ip, sizeof(now.ip), "%s", ctx_ip);
 			now.data = true;
@@ -1144,6 +1200,13 @@ static void data_wish(bool on, bool say)
 		now.data = false;	/* the interface comes down; the context stays */
 		now.ip[0] = 0;
 	}
+}
+
+/* Whether a data session should be up: the user's wish, held back while
+ * Wi-Fi is connected (see wifi_hold). The wish itself is never changed. */
+static bool data_want(void)
+{
+	return now.data_on && !now.data_held;
 }
 
 static void run(const char *fmt, ...)
@@ -1186,6 +1249,154 @@ static void data_route(void)
 			"ip link set rmnet0 down");
 		routed[0] = 0;
 	}
+}
+
+/* ---- MMS: what ztmmsd needs of the modem ---------------------------------
+ *
+ * The notifications: an SMS to the WAP push port (2948) is not a text. Its
+ * PDU (hex) goes to MMS_PUSH_DIR/<FNV>.pdu, whole or one part of several,
+ * for ztmmsd, which joins and reads them (mms/mmspdu.c); nothing of it is
+ * logged here but its part number.
+ *
+ * The connection: "mms on" / "mms off" on the control pipe. MMS goes through
+ * context 1 (rmnet0): for T-Mobile and its MVNOs (Mint) the data access point
+ * carries MMS (apns-conf.xml: type "default,supl,mms"). That context stays
+ * up when mobile data is switched off (see ctx_up); then rmnet0 is given its
+ * address with no default route, so only ztmmsd's sockets (bound to rmnet0)
+ * use it. If it was never up, it is brought up as for data. MMS_STATE says
+ * where to reach the MMSC from ("iface=", "dns=") while that holds; empty
+ * otherwise. An MMS access point of its own (a second context, rmnet1) is
+ * not done: see modem/TELEPHONY.md.
+ *
+ * The SIM's network, GID1 and SPN, for the access point auto-fill: SIM_ID,
+ * read by AT+CRSM (READ BINARY of EF_GID1 6F3E and EF_SPN 6F46) after
+ * AT+CIMI. The IMSI itself is never written down.
+ */
+#define MMS_PUSH_DIR	"/var/lib/ztoscorenetworking/mms/push"
+#define MMS_STATE	STATUS_DIR "/mms"
+#define SIM_ID		STATUS_DIR "/sim"
+#define MMS_HOLD_MS	300000L	/* an "mms on" not taken back is let go after this */
+static bool mms_wanted;
+static long mms_wanted_at;
+static char sim_gid1[33], sim_spn[33];
+static void data_activate(void);
+
+static bool mms_push(const char *pdu)
+{
+	struct sms_wap w;
+	if (!sms_wap_push(pdu, &w))
+		return false;
+	char dir[512], path[600], tmp[620];
+	snprintf(dir, sizeof(dir), "%s", sms_test_dir ? sms_test_dir : MMS_PUSH_DIR);
+	if (!sms_test_dir) {
+		mkdir("/var/lib/ztoscorenetworking", 0755);
+		mkdir("/var/lib/ztoscorenetworking/mms", 0755);
+	}
+	mkdir(dir, 0700);
+	unsigned hash = 2166136261u;
+	for (const char *c = pdu; *c; c++)
+		hash = (hash ^ (unsigned char)*c) * 16777619u;
+	snprintf(path, sizeof(path), "%s/%08x.pdu", dir, hash);
+	snprintf(tmp, sizeof(tmp), "%s.new", path);
+	FILE *f = fopen(tmp, "w");
+	bool ok = f && fprintf(f, "%s\n", pdu) > 0;
+	if (f && fclose(f))
+		ok = false;
+	if (ok)
+		ok = !rename(tmp, path);
+	fprintf(stderr, "ztoscorenetworkingd: an MMS notification (part %u of %u)%s\n",
+		w.total ? w.part : 1, w.total ? w.total : 1, ok ? "" : ": could not be kept");
+	return true;
+}
+
+static void mms_ask(bool on)
+{
+	mms_wanted = on;
+	mms_wanted_at = on ? ms() : 0;
+	if (on && !ctx_up)
+		data_tried_at = 0;
+}
+
+static void mms_keep(void)
+{
+	static char routed[48], said[200];
+	if (mms_wanted && ms() - mms_wanted_at > MMS_HOLD_MS) {
+		fprintf(stderr, "ztoscorenetworkingd: mms: held %ld s without \"mms off\": let go\n", MMS_HOLD_MS / 1000);
+		mms_wanted = false;
+	}
+	bool registered = now.eps_reg == 1 || now.eps_reg == 5 || now.ps_reg == 1 || now.ps_reg == 5;
+	if (mms_wanted && !data_want() && !ctx_up && registered &&
+			(!data_tried_at || ms() - data_tried_at > 30000))
+		data_activate();
+	if (now.data) {
+		routed[0] = 0;		/* data_route has rmnet0 */
+	} else if (mms_wanted && ctx_up && ctx_ip[0] && strcmp(routed, ctx_ip)) {
+		run("sysctl -qw net.ipv6.conf.rmnet0.disable_ipv6=1; ip addr flush dev rmnet0; "
+			"ip addr add %s/32 dev rmnet0 && ip link set rmnet0 up", ctx_ip);
+		snprintf(routed, sizeof(routed), "%s", ctx_ip);
+		fprintf(stderr, "ztoscorenetworkingd: mms: rmnet0 up for MMS only (no default route)\n");
+	} else if (!mms_wanted && routed[0]) {
+		run("ip addr flush dev rmnet0; ip link set rmnet0 down");
+		routed[0] = 0;
+	} else if (!ctx_up) {
+		routed[0] = 0;
+	}
+	char state[200] = "";
+	if (ctx_up && (now.data || routed[0]))
+		snprintf(state, sizeof(state), "iface=rmnet0\ndns=%s,%s\n", data_dns[0], data_dns[1]);
+	if (strcmp(state, said)) {
+		mkdir(STATUS_DIR, 0755);
+		FILE *f = fopen(MMS_STATE ".new", "w");
+		if (f) {
+			fputs(state, f);
+			fclose(f);
+			chmod(MMS_STATE ".new", 0644);
+			rename(MMS_STATE ".new", MMS_STATE);
+			snprintf(said, sizeof(said), "%s", state);
+		}
+	}
+}
+
+static void sim_id_write(void)
+{
+	mkdir(STATUS_DIR, 0755);
+	FILE *f = fopen(SIM_ID ".new", "w");
+	if (!f)
+		return;
+	fprintf(f, "mccmnc=%s\ngid1=%s\nspn=%s\n", sim_mccmnc, sim_gid1, sim_spn);
+	fclose(f);
+	chmod(SIM_ID ".new", 0644);
+	rename(SIM_ID ".new", SIM_ID);
+}
+
+/* +CRSM: 144,0,"<hex>", the answer to a READ BINARY of GID1 or SPN */
+static void sim_id_answer(const char *l)
+{
+	int sw1 = 0;
+	const char *q = strchr(l, '"');
+	if (sscanf(l + 6, " %d", &sw1) != 1 || sw1 != 144 || !q)
+		return;
+	char hex[80];
+	snprintf(hex, sizeof(hex), "%.79s", q + 1);
+	hex[strcspn(hex, "\"")] = 0;
+	if (strstr(sent, ",28478,")) {
+		/* GID1: hex as it is, without the padding */
+		size_t n = strlen(hex);
+		while (n >= 2 && (hex[n - 1] == 'F' || hex[n - 1] == 'f') && (hex[n - 2] == 'F' || hex[n - 2] == 'f'))
+			n -= 2;
+		snprintf(sim_gid1, sizeof(sim_gid1), "%.*s", (int)(n < 32 ? n : 32), hex);
+	} else if (strstr(sent, ",28486,")) {
+		/* SPN: a display byte, then the name, FF padded */
+		size_t o = 0;
+		for (size_t i = 2; hex[i] && hex[i + 1] && o + 1 < sizeof(sim_spn); i += 2) {
+			int c = hex_byte(hex + i);
+			if (c < 0 || c == 0xff)
+				break;
+			sim_spn[o++] = c >= 0x20 && c < 0x7f ? (char)c : '?';
+		}
+		sim_spn[o] = 0;
+	}
+	sim_id_write();
 }
 
 /* ---- SMS-SUBMIT in PDU mode --------------------------------------------- */
@@ -1365,6 +1576,8 @@ static bool ipc_send_ack(int main_cmd, int sub, int type, int aseq, const unsign
 {
 	return ipc_write(main_cmd, sub, type, aseq, data, len);
 }
+
+#include "servicemode.h"
 
 /* ---- packet data, through IPC ---------------------------------------------
  *
@@ -1591,7 +1804,7 @@ static void data_keep(void)
 		}
 	}
 	bool registered = now.eps_reg == 1 || now.eps_reg == 5 || now.ps_reg == 1 || now.ps_reg == 5;
-	if (now.data_on && !ctx_up && registered &&
+	if (data_want() && !ctx_up && registered &&
 			(!data_tried_at || ms() - data_tried_at > 30000))
 		data_activate();
 }
@@ -1924,15 +2137,19 @@ static void ipc_message(int main_cmd, int sub, int type, int mseq, const unsigne
 		/* what is the phone's or the SIM's own is not written down: its
 		 * presence only; nor any SMS (main 04) */
 		bool private = (main_cmd == 0x0d && sub == 0x09) || main_cmd == 0x0a || main_cmd == 0x04 ||
+			main_cmd == 0x0b /* ServiceMode screens: cell identities */ ||
 			(main_cmd == 0x05 && sub == 0x0c) || (main_cmd == 0x08 && sub == 0x06);
 		for (size_t i = 0; i < len && i < 64 && !private; i++)
 			sprintf(hex + 2 * i, "%02x", data[i]);
 		fprintf(stderr, "ztoscorenetworkingd: ipc <- %02x%02x t%d, %zu bytes: %s\n", main_cmd, sub, type, len,
 			private ? "(not logged)" : hex);
 	}
+	if (svc_message(main_cmd, sub, type, data, len))
+		return;
 	if (main_cmd == 0x01 && sub == 0x01) {
 		/* the modem has (re)started: whatever was up is not any more */
 		fprintf(stderr, "ztoscorenetworkingd: the modem started\n");
+		svc_modem_started();
 		replies_modem_started();
 		rfs_logged = 0;		/* a start's requests are logged again */
 		probe_out = false;
@@ -1995,7 +2212,7 @@ static void ipc_message(int main_cmd, int sub, int type, int mseq, const unsigne
 		int result = data[3] | data[4] << 8;
 		if (result != 0x8000) {
 			fprintf(stderr, "ztoscorenetworkingd: data: 0d%02x refused (0x%04x)\n", data[1], result);
-		} else if (data[1] == 0x01 && now.data_on && !ctx_up) {
+		} else if (data[1] == 0x01 && (data_want() || mms_wanted) && !ctx_up) {
 			data_bring_up();
 		}
 		data_asked_at = 0;
@@ -2013,7 +2230,7 @@ static void ipc_message(int main_cmd, int sub, int type, int mseq, const unsigne
 			ctx_up = true;
 			snprintf(data_dns[0], sizeof(data_dns[0]), "%d.%d.%d.%d", data[7], data[8], data[9], data[10]);
 			snprintf(data_dns[1], sizeof(data_dns[1]), "%d.%d.%d.%d", data[11], data[12], data[13], data[14]);
-			if (now.data_on) {
+			if (data_want()) {
 				snprintf(now.ip, sizeof(now.ip), "%s", ctx_ip);
 				now.data = true;
 			}
@@ -2082,6 +2299,8 @@ static void command(char *l)
 		screen_off = !strcmp(l, "screen off");
 		if (screen_off != was_off)
 			screen_tell_modem();
+		if (screen_off)
+			svc_end("the screen went off");	/* nobody is looking at it */
 		if (!screen_off) {
 			silent_polls = 0;	/* someone is looking: back to the normal rate */
 			next_poll = ms();	/* discard the old screen-off deadline */
@@ -2120,6 +2339,8 @@ static void command(char *l)
 		data_wish(true, true);
 	} else if (!strcmp(l, "data off")) {
 		data_wish(false, false);
+	} else if (!strcmp(l, "mms on") || !strcmp(l, "mms off")) {
+		mms_ask(l[5] == 'n');
 	} else if (!strncmp(l, "sms ", 4) || !strncmp(l, "smse ", 5)) {
 		bool escaped = l[3] == 'e';
 		char *body = l + (escaped ? 5 : 4), number[32], text[1801];
@@ -2214,6 +2435,8 @@ static void command(char *l)
 			}
 			ipc_send((int)m, (int)sb, (int)t, data, len);
 		}
+	} else if (!strncmp(l, "svc ", 4)) {
+		svc_command(l + 4);
 	} else if (!strcmp(l, "refresh")) {
 		written_once = false;
 	} else if (!strcmp(l, "replies")) {
@@ -2290,7 +2513,7 @@ static void wifi_read(void)
 
 	/* 4. sysfs link carrier or operstate */
 	if (bars < 0) {
-		p = popen("for d in /sys/class/net/w*; do "
+		p = popen("for d in /sys/class/net/w*; do [ -d $d/wireless ] || continue; "
 			"[ \"$(cat $d/carrier 2>/dev/null)\" = 1 ] && echo up && break; "
 			"[ \"$(cat $d/operstate 2>/dev/null)\" = up ] && echo up && break; done", "r");
 		if (p) {
@@ -2308,6 +2531,105 @@ static void wifi_read(void)
 		if (++wifi_fail_count >= 3)
 			now.wifi_bars = -1;
 	}
+}
+
+/* ---- mobile data held off while Wi-Fi is connected ---------------------- */
+
+/*
+ * Like Android: Wi-Fi connected with an address for WIFI_HOLD_MS, and the
+ * data context is taken down (only DATA_CID; calls, SMS and the modem's own
+ * IMS context are left alone). Wi-Fi gone (disconnected, out of range, the
+ * driver unbound for sleep, the interface removed), and it is asked for
+ * again at once. Driven by rtnetlink link and address events, not polled.
+ * The user's switch (data_on, DATA_WISH) is not touched.
+ */
+#define WIFI_HOLD_MS	5000L
+static int nl_fd = -1;
+static long wifi_up_since;	/* Wi-Fi connected with an address since, 0 not */
+
+static bool wifi_connected(void)
+{
+	struct ifaddrs *ifa, *i;
+	bool up = false;
+	if (getifaddrs(&ifa) != 0)
+		return false;
+	for (i = ifa; i && !up; i = i->ifa_next) {
+		char path[96];
+		if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_RUNNING))
+			continue;
+		snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", i->ifa_name);
+		if (access(path, F_OK) != 0)
+			continue;
+		unsigned a = ntohl(((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr);
+		if ((a >> 16) != 0xa9fe)	/* not 169.254 link-local */
+			up = true;
+	}
+	freeifaddrs(ifa);
+	return up;
+}
+
+static void nl_open(void)
+{
+	struct sockaddr_nl sa = { .nl_family = AF_NETLINK,
+		.nl_groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR };
+	nl_fd = socket(AF_NETLINK, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, NETLINK_ROUTE);
+	if (nl_fd >= 0 && bind(nl_fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+		close(nl_fd);
+		nl_fd = -1;
+	}
+	if (nl_fd < 0)
+		fprintf(stderr, "ztoscorenetworkingd: netlink: %s; Wi-Fi does not hold data off\n", strerror(errno));
+}
+
+/* Called on every netlink event and each pass of the loop: cheap. */
+static void wifi_hold(void)
+{
+	bool up = wifi_connected();
+	long t = ms();
+	if (!up) {
+		wifi_up_since = 0;
+		if (now.wifi_bars >= 0 && nl_fd >= 0)
+			now.wifi_bars = -1;
+		if (now.data_held) {
+			now.data_held = false;
+			data_tried_at = 0;	/* now */
+			if (ctx_up && now.data_on) {	/* never went down */
+				snprintf(now.ip, sizeof(now.ip), "%s", ctx_ip);
+				now.data = true;
+			}
+			fprintf(stderr, "ztoscorenetworkingd: data: Wi-Fi gone; mobile data back\n");
+		}
+		return;
+	}
+	if (!wifi_up_since) {
+		wifi_up_since = t;
+		if (now.wifi_bars < 0)
+			now.wifi_bars = 3;	/* wifi_read refines it */
+	}
+	if (!now.data_held && now.data_on && t - wifi_up_since >= WIFI_HOLD_MS) {
+		now.data_held = true;
+		fprintf(stderr, "ztoscorenetworkingd: data: Wi-Fi connected; mobile data held off\n");
+		now.data = false;
+		now.ip[0] = 0;
+		unlink(DATA_MARK);
+	}
+	/* the context goes down once nothing needs it: an MMS being sent or
+	 * fetched keeps it (mms_keep routes rmnet0 for it alone), and it goes
+	 * when the MMS is done */
+	if (now.data_held && ctx_up && !mms_wanted) {
+		data_deactivate();
+		ctx_up = false;
+	}
+	if (now.data_held && !now.data_on)
+		now.data_held = false;	/* nothing to hold */
+}
+
+static void nl_readable(void)
+{
+	char buf[8192];
+	while (recv(nl_fd, buf, sizeof(buf), 0) > 0)
+		;	/* what changed is read back whole in wifi_hold */
+	wifi_hold();
 }
 
 /* ---- the loop ------------------------------------------------------------ */
@@ -2436,11 +2758,14 @@ int main(int argc, char **argv)
 	}
 	mkdir(DATA_DIR, 0755);
 	data_wish(data_on_at_start, false);
+	nl_open();
+	wifi_hold();
 	fprintf(stderr, "ztoscorenetworkingd: up\n");
 
 	for (;;) {
-		struct pollfd fds[4] = {
+		struct pollfd fds[5] = {
 			{ at_fd, POLLIN, 0 }, { ctl_fd, POLLIN, 0 }, { ipc_fd, POLLIN, 0 }, { rfs_fd, POLLIN, 0 },
+			{ nl_fd, POLLIN, 0 },
 		};
 		if (fake_call && ms() >= fake_until) {
 			call_set("", "");
@@ -2536,9 +2861,15 @@ int main(int argc, char **argv)
 			wait = 500;
 		if (busy && AT_TIMEOUT_MS - (ms() - sent_at) < wait)
 			wait = AT_TIMEOUT_MS - (ms() - sent_at);
+		long svc_left = svc_idle_left();
+		if (svc_left >= 0 && svc_left < wait)
+			wait = svc_left;
+		if (wifi_up_since && !now.data_held && now.data_on &&
+				wifi_up_since + WIFI_HOLD_MS - ms() < wait)
+			wait = wifi_up_since + WIFI_HOLD_MS - ms();
 		if (wait < 0)
 			wait = 0;
-		if (poll(fds, 4, (int)wait) < 0 && errno != EINTR)
+		if (poll(fds, 5, (int)wait) < 0 && errno != EINTR)
 			break;
 		if (fds[0].revents & POLLIN)
 			at_readable();
@@ -2551,6 +2882,10 @@ int main(int argc, char **argv)
 			ipc_readable();
 		if (rfs_fd >= 0 && (fds[3].revents & POLLIN))
 			rfs_readable();
+		if (nl_fd >= 0 && (fds[4].revents & POLLIN))
+			nl_readable();
+		else if (wifi_up_since || now.data_held)
+			wifi_hold();	/* the hold-off timer, or the switch changed */
 		if (busy && ms() - sent_at > AT_TIMEOUT_MS) {
 			fprintf(stderr, "ztoscorenetworkingd: %s: no answer\n", sent);
 			if (!strncmp(sent, "AT+CMGS", 7)) sms_finish(false);
@@ -2579,6 +2914,7 @@ int main(int argc, char **argv)
 		if (!busy && !q_len) {
 			data_keep();
 			data_route();
+			mms_keep();
 			publish();
 		}
 	}

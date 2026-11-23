@@ -11,6 +11,7 @@ fail=0
 EP=1800000000	# the wall clock, for the memory's age
 R=$T/root PS=$R/sys/class/power_supply
 C=$PS/max77705-charger U=$PS/max77705-usbc W=$PS/max77705-wireless B=$PS/max170xx_battery
+TH=$R/sys/kernel/zrn_therm
 
 fresh() {	# new kernel (usbc), or "old": the charger and the gauge only
 	rm -rf "$R"; mkdir -p "$C" "$B" "$R/proc" "$R/run/zrn-led" "$R/sys/class/drm/card0-DSI-1"
@@ -18,7 +19,8 @@ fresh() {	# new kernel (usbc), or "old": the charger and the gauge only
 	echo 100.00 100.00 > "$R/proc/uptime"
 	w "$C" online=0 input_current_limit=500000 constant_charge_current=450000 \
 		constant_charge_voltage=4350000 charge_behaviour='[auto] inhibit-charge'
-	w "$B" temp=250 capacity=50 status=Discharging voltage_now=3900000 constant_charge_voltage_max=4350000
+	mkdir -p "$TH"; w "$TH" battery=250
+	w "$B" temp=333 capacity=50 status=Discharging voltage_now=3900000 constant_charge_voltage_max=4350000
 	if [ "${1:-}" != old ]; then
 		mkdir -p "$U" "$W"
 		w "$U" online=0 usb_type='[Unknown] SDP DCP CDP C PD' charger_type= current_max=0 voltage_now=5000000
@@ -84,7 +86,7 @@ fresh; plug dcp; run
 echo 900000 > "$C/input_current_limit"; tick 1; run
 check "aicl cut kept" "900 2100 auto" "$(lim)"
 check "aicl logged" "zrn-charge: wired dcp: in 900 mA, charge 2100 mA (aicl), battery 25.0 C" "$(cat "$T/out")"
-w "$B" temp=260; tick 30; run; check "aicl: not raised on the timer" "900 2100 auto" "$(lim)"
+w "$TH" battery=260; tick 30; run; check "aicl: not raised on the timer" "900 2100 auto" "$(lim)"
 echo 2000000 > "$C/constant_charge_current"; run; check "aicl: charge current still set" "900 2100 auto" "$(lim)"
 unplug; tick 1; run; plug dcp; tick 1; run; check "a 1 s drop-out keeps the cut" "900 2100 auto" "$(lim)"
 unplug; tick 1; run; tick 10; run; plug dcp; tick 1; run; check "a new plug: stock again" "1800 2100 auto" "$(lim)"
@@ -96,7 +98,7 @@ plug rp-3a; tick 1; run; check "another type: the cut is gone" "3000 2150 auto" 
 
 # --- temperature, with hysteresis ---
 fresh; plug dcp
-t() { w "$B" temp=$1; tick 30; run; check "$1: $2" "$2" "$(lim)"; }
+t() { w "$TH" battery=$1; tick 30; run; check "$1: $2" "$2" "$(lim)"; }
 t 250 "1800 2100 auto"
 t 410 "1800 1090 auto"
 read -r f < "$C/constant_charge_voltage"; check "41 C: float 4.15 V" 4150000 "$f"
@@ -127,9 +129,84 @@ w "$B" voltage_now=4100000; t 420 "1800 1090 inhibit-charge"
 w "$B" voltage_now=3990000; t 420 "1800 1090 auto"
 w "$B" voltage_now=4100000; t 420 "1800 1090 auto"
 w "$B" voltage_now=4200000; t 380 "1800 2100 auto"
+# stock's swelling entry: stop, charge again (4.15 V) only under 4.00 V, and so
+# again once full there
+fresh; plug dcp
+w "$B" voltage_now=4100000; t 410 "1800 1090 inhibit-charge"
+check "41 C above 4.0 V: logged" "zrn-charge: wired dcp: in 1800 mA, charge 1090 mA, stopped (warm until under 4000 mV), battery 41.0 C" "$(cat "$T/out")"
+w "$B" voltage_now=4010000; t 410 "1800 1090 inhibit-charge"
+w "$B" voltage_now=3990000; t 410 "1800 1090 auto"
+w "$B" voltage_now=4120000; t 410 "1800 1090 auto"
+w "$B" voltage_now=4150000 status=Full; t 410 "1800 1090 inhibit-charge"
+w "$B" voltage_now=4050000 status=Discharging; t 405 "1800 1090 inhibit-charge"
+w "$B" voltage_now=3990000; t 405 "1800 1090 auto"
+w "$B" voltage_now=4100000 status=Charging; t 390 "1800 2100 auto"
+w "$B" voltage_now=4100000; t 50 "1800 700 inhibit-charge"
+w "$B" voltage_now=3950000; t 50 "1800 700 auto"
+t 100 "1800 700 auto"
+t 200 "1800 2100 auto"
+w "$B" voltage_now=4100000; t 400 "1800 2100 auto"
+check "under 41 C: no hold at 4.1 V" "1800 2100 auto" "$(lim)"
+rm "$B/voltage_now"; t 420 "1800 1090 auto"
+check "voltage unreadable: no hold" "1800 1090 auto" "$(lim)"
+
+# the USB connector's thermistor: 80 C cuts charging, 75 C lets it go
+c() { w "$TH" $1; tick 30; run; check "$1: $2" "$2" "$(lim)"; }
+fresh; plug afc-9v 1650000 9000000; run
+c usb=790 "1650 2150 auto"
+c usb=800 "100 2150 inhibit-charge"
+check "usb 80 C: logged" "zrn-charge: wired afc-9v 9 V: in 100 mA, charge 2150 mA, stopped (usb connector hot), battery 25.0 C" "$(cat "$T/out")"
+c usb=760 "100 2150 inhibit-charge"
+rm "$TH/usb"; tick 30; run; check "usb unknown: stays cut" "100 2150 inhibit-charge" "$(lim)"
+c usb=750 "1650 2150 auto"
+w "$TH" usb=820; unplug; tick 30; run; check "usb hot, nothing in: as unplugged" "500 500 auto" "$(lim)"
+w "$TH" usb=300
+
+# the charger's thermistor: 46 C limits the input, 44 C lets it go
+fresh; plug afc-9v 1650000 9000000; run
+c charger=450 "1650 2150 auto"
+c charger=460 "1000 1250 auto"
+c charger=450 "1000 1250 auto"
+rm "$TH/charger"; tick 30; run; check "charger unknown: stays limited" "1000 1250 auto" "$(lim)"
+c charger=440 "1650 2150 auto"
+w "$TH" charger=470; plug afc-9v 1650000 5000000; tick 30; run
+check "charger hot, afc at 5 V: as dcp (stock: 9 V only)" "1800 2100 auto" "$(lim)"
+plug dcp; c charger=480 "1800 2100 auto"
+plug pd 3000000 5000000; c charger=480 "1800 2150 auto"
+check "charger hot, pd: logged" "zrn-charge: wired pd: in 1800 mA, charge 2150 mA (charger hot), battery 25.0 C" "$(cat "$T/out")"
+c charger=430 "3000 2150 auto"
+
+# both hot: stock's mix_limit
+fresh; plug dcp; run
+w "$TH" charger=500; t 415 "1800 1090 auto"
+w "$TH" charger=490; t 420 "1800 1090 auto"
+w "$TH" charger=500; t 420 "338 1090 auto"
+check "mix: logged" "zrn-charge: wired dcp: in 338 mA, charge 1090 mA (warm battery and charger hot), battery 42.0 C" "$(cat "$T/out")"
+w "$TH" charger=300; t 400 "338 1090 auto"
+t 390 "1800 2100 auto"
+w "$TH" charger=500; rm "$TH/battery"; tick 30; run
+check "mix: battery unknown, not entered" "1800 2100 auto" "$(lim)"
+# the aged float: Samsung's count (EFS batt_discharge_level / 100) at 1000 or more
+AGE=$R/run/android/mnt/vendor/efs/FactoryApp/batt_discharge_level
+fv() { local f; read -r f < "$C/constant_charge_voltage"; echo "$f"; }
+fresh; plug dcp; mkdir -p "$(dirname "$AGE")"
+echo 103986 > "$AGE"; t 250 "1800 2100 auto"; check "1039 cycles: 4.24 V" 4240000 "$(fv)"
+t 415 "1800 1090 auto"; check "aged and warm: 4.15 V" 4150000 "$(fv)"
+t 385 "1800 2100 auto"; check "aged, warm cleared: back to 4.24 V" 4240000 "$(fv)"
+t 50 "1800 700 auto"; check "aged and cold: 4.15 V" 4150000 "$(fv)"
+t 250 "1800 2100 auto"; check "aged, cold cleared: back to 4.24 V" 4240000 "$(fv)"
+echo 99999 > "$AGE"; t 250 "1800 2100 auto"; check "999 cycles: 4.35 V" 4350000 "$(fv)"
+echo 100000 > "$AGE"; t 250 "1800 2100 auto"; check "1000 cycles: 4.24 V" 4240000 "$(fv)"
+rm "$AGE"; t 250 "1800 2100 auto"; check "count unreadable: 4.35 V" 4350000 "$(fv)"
+echo garbage > "$AGE"; t 250 "1800 2100 auto"; check "count garbage: 4.35 V" 4350000 "$(fv)"
+# aged on an older kernel whose float can't be set: stop at 4.24 V, go on below 4.09 V
+fresh; plug dcp; mkdir -p "$(dirname "$AGE")"; echo 103986 > "$AGE"; rm "$C/constant_charge_voltage"
+w "$B" voltage_now=4245000; t 250 "1800 2100 inhibit-charge"
+w "$B" voltage_now=4100000; t 250 "1800 2100 inhibit-charge"
+w "$B" voltage_now=4085000; t 250 "1800 2100 auto"
 # no charge_behaviour: a stop is the least charge current
 fresh; plug dcp; rm "$C/charge_behaviour"; echo '[auto]' > "$C/charge_behaviour.x"
-w "$B" temp=520; tick 1; run; check "stop without charge_behaviour" "100" "$(( $(cat "$C/constant_charge_current") / 1000 ))"
+w "$TH" battery=520; tick 1; run; check "stop without charge_behaviour" "100" "$(( $(cat "$C/constant_charge_current") / 1000 ))"
 
 # --- 9 V: asked for, prepared, cut, dropped input first ---
 fresh; echo 0 > "$U/hv_enable"; plug dcp 1800000 5000000; : > "$T/trace"; run
@@ -140,14 +217,14 @@ max77705-usbc/hv_enable 1" "$(grep -E 'input_current|hv_enable' "$T/trace")"
 plug afc-9v 1650000 9000000; tick 2; run; check "afc 9 V" "1650 2150 auto" "$(lim)"
 echo enabled > "$R/sys/class/drm/card0-DSI-1/enabled"; tick 10; run; check "9 V, screen on" "500 1000 auto" "$(lim)"
 echo disabled > "$R/sys/class/drm/card0-DSI-1/enabled"; tick 10; run; check "9 V, screen off" "1650 2150 auto" "$(lim)"
-w "$B" temp=415; tick 10; : > "$T/trace"; run
+w "$TH" battery=415; tick 10; : > "$T/trace"; run
 check "41 C: input down first, then 9 V off" "max77705-charger/input_current_limit 500000
 max77705-usbc/hv_enable 0" "$(grep -E 'input_current|hv_enable' "$T/trace" | head -2)"
 check "41 C at 9 V" "500 1090 auto" "$(lim)"
 tick 2; run; check "41 C, the bus not yet at 5 V: wait" "500 1090 auto" "$(lim)"
 plug dcp 1800000 5000000; tick 2; run; check "41 C back at 5 V" "1800 1090 auto" "$(lim)"
 check "41 C: 9 V stays off" 0 "$(cat "$U/hv_enable")"
-w "$B" temp=385; tick 30; run; check "39 C: 9 V asked again" 1 "$(cat "$U/hv_enable")"
+w "$TH" battery=385; tick 30; run; check "39 C: 9 V asked again" 1 "$(cat "$U/hv_enable")"
 tick 11; run; check "the source stays at 5 V: dcp after the wait" "1800 2100 auto" "$(lim)"
 plug sdp; tick 1; run; check "sdp: no 9 V" 0 "$(cat "$U/hv_enable")"
 unplug; tick 1; run; check "unplug: 9 V off" 0 "$(cat "$U/hv_enable")"
@@ -158,8 +235,8 @@ fresh; plug dcp; tick 1; run; check "no hv_enable: limits only" "1800 2100 auto"
 fresh; w "$W" online=1; run
 check "wireless" "900 1200" "$(( $(cat "$W/input_current_limit") / 1000 )) $(( $(cat "$C/constant_charge_current") / 1000 ))"
 check "wireless: LED" charging "$(cat "$R/run/zrn-led/charge")"
-w "$B" temp=420; tick 30; run; check "wireless, warm" "700" "$(( $(cat "$C/constant_charge_current") / 1000 ))"
-mkdir -p "$PS/p9320-wireless"; echo 10000000 > "$PS/p9320-wireless/voltage_now"; w "$B" temp=250; tick 30; run
+w "$TH" battery=420; tick 30; run; check "wireless, warm" "700" "$(( $(cat "$C/constant_charge_current") / 1000 ))"
+mkdir -p "$PS/p9320-wireless"; echo 10000000 > "$PS/p9320-wireless/voltage_now"; w "$TH" battery=250; tick 30; run
 check "wireless 10 V" "650 1200" "$(( $(cat "$W/input_current_limit") / 1000 )) $(( $(cat "$C/constant_charge_current") / 1000 ))"
 plug dcp; tick 1; run; check "a cable on the pad: wired wins" "1800 2100 auto" "$(lim)"
 # the receiver's 10 V: hv_enable when allowed, its hv_state for the limit
@@ -169,11 +246,19 @@ w "$W" online=1; run; check "pad: 900 mA, 10 V asked" "900 1" "$(wl)"
 w "$X" hv_state=prepare; w "$W" input_current_limit=500000; : > "$T/trace"; tick 1; run
 check "pad: preparing, WCIN left to the receiver" "" "$(grep wireless/input "$T/trace")"
 w "$X" hv_state=10v; tick 1; run; check "pad at 10 V: 650 mA" "650 1" "$(wl)"
-w "$B" temp=415; tick 30; run; check "pad, 41 C: 10 V off" "650 0" "$(wl)"
+w "$TH" battery=415; tick 30; run; check "pad, 41 C: 10 V off" "650 0" "$(wl)"
 w "$X" hv_state=stepdown; tick 1; run; w "$X" hv_state=5v; tick 1; run
 check "pad back at 5 V: 900 mA" "900 0" "$(wl)"
-w "$B" temp=250; tick 30; run; check "pad, cool again: 10 V asked" "900 1" "$(wl)"
+w "$TH" battery=250; tick 30; run; check "pad, cool again: 10 V asked" "900 1" "$(wl)"
 plug dcp; w "$W" online=0; tick 1; run; check "a cable in: the receiver's 10 V off" 0 "$(cat "$X/hv_enable")"
+# unknown temperature counts as hot for the voltage (zrn-therm absent, an
+# ADC error, stale): never 9 V or 10 V, and the gauge's frozen 33.3 C is no answer
+unplug; w "$W" online=1; w "$X" hv_state=5v; tick 1; run; check "pad, known: 10 V asked" "900 1" "$(wl)"
+rm "$TH/battery"; tick 30; run; check "pad, temperature unknown: 10 V off" 0 "$(cat "$X/hv_enable")"
+w "$TH" battery=250; tick 30; run; check "pad, known again: 10 V asked" 1 "$(cat "$X/hv_enable")"
+printf 'garbage\n' > "$TH/battery"; tick 30; run; check "pad, unreadable value: 10 V off" 0 "$(cat "$X/hv_enable")"
+fresh; plug afc-9v 1650000 9000000; rm "$TH/battery"; run; check "afc, temperature unknown: no 9 V" 0 "$(cat "$U/hv_enable" 2>/dev/null || echo 0)"
+w "$TH" battery=505; tick 30; run; check "50.5 C from the thermistor: stop" "inhibit-charge" "$(lim | cut -d' ' -f3)"
 
 # --- over-current trips, remembered per charger ---
 fresh; w "$C" input_current_trips=0 input_current_trip_limit=0 input_current_trip_voltage=0
@@ -293,8 +378,8 @@ reg 0x83 0x20; check "old: dcp, Rp 1.5 A: dcp" "1800 2100 auto" "$(lim)"
 reg 0x82 0x30; check "old: cdp, Rp 3 A: cdp (as stock)" "1500 1500 auto" "$(lim)"
 reg 0x80; check "old: not yet known" "500 500 auto" "$(lim)"
 rm -f "$T/reg0x08" "$T/reg0x0a"; tick 1; run; check "old: no i2cget answer" "500 500 auto" "$(lim)"
-w "$B" temp=505; reg 0x8b; check "old: hot" "1800 1090 inhibit-charge" "$(lim)"
-w "$C" online=0; w "$B" temp=250; tick 10; run; check "old: unplug" "500 500 auto" "$(lim)"
+w "$TH" battery=505; reg 0x8b; check "old: hot" "1800 1090 inhibit-charge" "$(lim)"
+w "$C" online=0; w "$TH" battery=250; tick 10; run; check "old: unplug" "500 500 auto" "$(lim)"
 
 # --- the LED, as it was ---
 fresh
@@ -325,7 +410,7 @@ w "$C" input_current_limit=1200000 input_current_ramp=held input_current_limit_e
 check "ramp: not written again" "" "$(grep input_current "$T/trace")"
 check "ramp: the held ramp, one line" "zrn-charge: wired dcp: in 1800 mA, charge 2100 mA, ramp held, battery 25.0 C, effective 1200 mA, found 1200 mA" "$(cat "$T/out")"
 tick 30; run; check "ramp: then quiet" "" "$(cat "$T/out")"
-w "$B" temp=420; : > "$T/trace"; tick 30; run
+w "$TH" battery=420; : > "$T/trace"; tick 30; run
 check "ramp: warm, the charge current only" "max77705-charger/constant_charge_current 1090000" "$(grep current "$T/trace")"
 plug rp-3a; : > "$T/trace"; tick 1; run
 check "ramp: another type, one write" "max77705-charger/input_current_limit 3000000" "$(grep input_current "$T/trace")"

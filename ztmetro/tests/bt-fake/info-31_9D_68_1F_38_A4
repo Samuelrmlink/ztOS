@@ -1,0 +1,16 @@
+Device 31:9D:68:1F:38:A4 (public)
+	Name: PM220
+	Alias: PM220
+	Icon: printer
+	Paired: yes
+	Bonded: yes
+	Trusted: no
+	Blocked: no
+	Connected: no
+DBG: cs_proxies is empty
+	BREDR.Paired: yes
+	BREDR.Bonded: yes
+	BREDR.Connected: no
+	LE.Paired: no
+	LE.Bonded: no
+	LE.Connected: no

@@ -73,6 +73,37 @@ ids = {s["id"]: s["name"] for s in g["sinks"].values()}
 assert a.playing_on(70, g["links"], ids, g["chains"]) == "ztos-speaker"
 assert a.playing_on(71, g["links"], ids, g["chains"]) is None
 
+# what is playing where (ztos-bt-reconnect reads "playing" and "address"): a running
+# stream counts, a paused one linked to the same output doesn't
+on = {70: "ztos-speaker", 71: None}
+assert a.playing_outputs(g["streams"], on) == {"ztos-speaker"}
+paused = [dict(s, state="paused") for s in g["streams"]]
+assert a.playing_outputs(paused, on) == set()
+outs = a.output_entries(dict(g["sinks"], **{BT: dict(g["sinks"][BT], address="00:0D:44:EB:50:54")}),
+                        "ztos-speaker", {BT})
+assert [(o["name"], o["playing"], o.get("address")) for o in outs] == \
+    [(BT, True, "00:0D:44:EB:50:54"), ("ztos-speaker", False, None)], outs
+assert all("detail" not in o for o in outs), outs   # neither goes to a screen
+
+# the names the volume panel shows (8.53): clean, and a screen's output marked
+assert a.clean_name("RM_2685\x1b[0m") == "RM_2685"
+assert a.clean_name("\x1b[1;34mUE\x1b[0m  MINI\tBOOM\n") == "UE MINI BOOM"
+assert a.clean_name("A\x1b]0;title\x07B") == "A B"
+assert a.clean_name("Samuel’s AirPods Pro") == "Samuel’s AirPods Pro"
+assert a.clean_name(None) == "" and a.clean_name(" \x07 ") == ""
+gn = a.read_graph([node(80, {"media.class": "Audio/Sink", "node.name": "bluez_output.40_DA.1",
+                             "node.description": "Samuel’s\x1b[0m AirPods Pro", "api.bluez5.address": "40:DA"}),
+                   node(81, {"media.class": "Audio/Sink", "node.name": "alsa_output.platform-dp.hdmi-stereo",
+                             "node.description": "Dock"}),
+                   node(82, {"media.class": "Audio/Sink", "node.name": "odd", "node.description": "\x1b[0m"})])
+assert gn["sinks"]["bluez_output.40_DA.1"]["desc"] == "Samuel’s AirPods Pro"
+assert gn["sinks"]["odd"]["desc"] == "odd"          # nothing left of it: the node's name, as before
+on = a.output_entries(gn["sinks"], "bluez_output.40_DA.1", set())
+assert [(o["name"], o.get("detail")) for o in on] == [
+    ("alsa_output.platform-dp.hdmi-stereo", "hdmi"), ("bluez_output.40_DA.1", None), ("odd", None)], on
+assert not a.is_hdmi({"node.name": "ztos-speaker", "node.description": "Speaker"})
+assert a.is_hdmi({"node.name": "x"}, "hdmi-output-0 HDMI / DisplayPort")
+
 # WirePlumber's keys, and its state file
 KEY = "Output/Audio:application.name:Music"
 assert a.form_key({"application.id": "a", "application.name": "b"}) == "Output/Audio:application.id:a"
@@ -219,5 +250,10 @@ assert a.takeover_target({"sp", "u"}, {"sp": SP, "u": {"name": "u", "kind": "hea
 assert a.takeover_target({"sp", "h"}, {"sp": SP, "h": {"name": "h", "kind": "headphones"}, "b1": BTS("b1")}) == "b1"  # a plain jack doesn't count
 assert a.takeover_target({"old"}, {"sp": SP, "b1": BTS("b1")}) is None       # all new: a restart
 assert a.takeover_target({"sp"}, {"sp": SP, "b1": BTS("b1"), "b2": BTS("b2")}) is None  # two at once: ask
+# headphones plugged into the jack (ztos-headsetd's sink) take the audio as Bluetooth does
+JK = {"name": a.JACK_SINK, "kind": "headphones"}
+assert a.takeover_target({"sp"}, {"sp": SP, a.JACK_SINK: JK}) == a.JACK_SINK
+assert a.takeover_target({"sp", "b1"}, {"sp": SP, "b1": BTS("b1"), a.JACK_SINK: JK}) is None  # AirPods on: the user's choice
+assert a.takeover_target({"sp", a.JACK_SINK}, {"sp": SP, a.JACK_SINK: JK}) is None        # already there
 
 print("audiod: ok")

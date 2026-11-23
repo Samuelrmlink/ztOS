@@ -63,6 +63,37 @@ window. `desktop stop` sends SIGTERM to the session's process group and,
 3 s later, SIGKILL to whatever of it is still there (xfdesktop has been seen
 to outlive SIGTERM).
 
+### Rotation (ROADMAP 8.33)
+
+- **A monitor stood on its side.** Settings → display → desktop mode →
+  **Monitor rotation**, or `desktop rotate 0|90|180|270` on the control pipe.
+  It is kept as `rotation =` in `~/.config/ztmetro/desktop`. The value is the
+  Wayland output transform: 90 is a monitor turned a quarter clockwise, as
+  sway's `transform 90`. Every desktop output turns; the phone's panel never
+  does. wlr_scene draws it turned, and the pointer and a touchscreen follow
+  the layout. The desktop is laid out again and XFCE's pieces are put up
+  again (`ztos-desktop-session --refresh`), as for a new mode.
+- **XFCE's Display settings, wlr-randr, kanshi.** The desktop's outputs are
+  offered over wlr-output-management. A client may set their mode, scale
+  and transform. Turning one off, moving it, or any change to the phone's
+  panel is refused.
+- The state file has the output's size as laid out (turned) and a
+  `transform N` line.
+- XFCE's settings daemon applies its own saved display setup when the
+  session starts (seen in the dev container: a configuration with transform
+  0 at 4 s). Set the rotation in one place: XFCE's Display settings (XFCE
+  remembers it) or ztOS Settings, not both.
+- xfdesktop draws its wallpaper for the size it had: after a turn the
+  wallpaper may fill only the top until its style is "Zoomed" (seen in the
+  dev container).
+- **Desktop (ztdesk) on the phone.** It shows a turned desktop upright: the
+  capture is the output's own buffer, and ztdesk maps its corners back by the
+  transform. When the phone itself turns (auto-rotation), ztdesk is an
+  ordinary app: it gets a landscape size, and its touchpad and direct modes
+  work in the view as drawn.
+- XFCE is never drawn on the phone's panel directly. Only ztdesk shows it
+  there, so the phone's own orientation is covered by the point above.
+
 ## On a PC, without a phone
 
     ztmetro/desktop/dev/run.sh                      # captures in out/desktop/

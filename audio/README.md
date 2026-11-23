@@ -2,9 +2,9 @@
 
 The hardware, from the stock device tree: every sound passes through
 **ABOX**, an audio DSP block in the SoC (a Cortex-A7 running Samsung's
-"calliope" firmware), on its way to a **MAX98512** speaker amplifier (I2C)
-or a **CS47L93** codec (SPI; headphones, earpiece, microphones). Mainline has
-a driver for the codec only.
+"calliope" firmware), on its way to two **MAX98512** amplifiers (I2C: U8003 the speaker, U8002 the
+earpiece) or a **CS47L93** codec (U8004, SPI; headphones and microphones).
+Mainline has a driver for the codec only.
 
 ## How this is being developed
 
@@ -264,6 +264,89 @@ with a caret that opens all three; it goes 3 s after the last touch or key.
 
 `make check-volume-streams` tests both sides on the host.
 
+## USB audio (USB-C headphones, dongles): ROADMAP 8.62
+
+The kernel has no `SND_USB_AUDIO`. `audio/build-usb.sh` builds it as modules
+for boot-aod1 (7.1.0-zboot-wd-dp6 #63) without touching the image:
+`snd-hwdep`, `snd-rawmidi`, `snd-usbmidi-lib`, `snd-usb-audio`, into
+`audio/modules-usb/`. It works in a copy of the tree that built the phone's
+sound core (`out-target-snd`), adds only the USB audio options, and stops unless
+soundcore, snd, snd-timer and snd-pcm rebuilt there come out byte for byte
+the ones the phone runs, and every symbol resolves. `audio/build-usb.log` is
+the last build.
+
+On the phone they go in `/lib/modules/$(uname -r)/extra`, then `depmod`. udev
+loads them from `modules.alias` when a USB audio interface appears, at boot as
+well. `/etc/modprobe.d/ztos-usb-audio.conf` gives them `index=-2`, so card 0
+stays the speakers whichever loads first, and loads them through
+`/usr/local/sbin/ztos-usb-audio-load`. Like `ztoscirrusaudio`, that leaves a
+mark (`/var/lib/ztoscirrusaudio/usb-loading`) while it loads. A load killed
+by an oops keeps the mark, and nothing loads until it is removed
+(`audio/tests/usb-audio-load-test.sh`).
+
+PipeWire makes a sink and a source of the device. `ztos-audiod` calls it by
+its product name ("EarPods"), or "USB headphones" for a generic one, with kind
+headphones and `"mic"` set to its source. Plugged in, it takes the audio as the
+jack does, but not from Bluetooth or another USB output that is already there.
+Its microphone becomes the input with it, and also when it is chosen as the
+output. Unplugged, WirePlumber goes back to the output and input that were
+used before. The remote's buttons come as a HID keyboard (`KEY_VOLUMEUP`,
+`KEY_VOLUMEDOWN`, `KEY_PLAYPAUSE`), which the shell takes as it takes the
+jack's: play/pause to `playerctl`, and volume to the active output.
+
+## The equalizer: ztos-soundd (ROADMAP 8.67)
+
+The Sound app (and Settings > Sound) only edits settings. It sends one line
+per change to `$XDG_RUNTIME_DIR/ztos-sound.sock`. `ztos-soundd` keeps them
+in `~/.config/ztmetro/sound.json` and runs the filter chain as its own
+`pipewire -c` client:
+
+    app streams -> ztos-eq (the default sink) -> ztos-eq.out -> the output
+
+The output is ztos-speaker on the speaker (its crossover and limiter follow,
+then the ABOX sink), the AirPods' or another Bluetooth sink, or the USB
+sink. The chain is rebuilt when the output changes. A band change goes
+into the running graph with `pw-cli set-param <ztos-eq> Props`, with no
+rebuild. Each output kind has its own profile (speaker, headphones for USB
+and the jack, bluetooth).
+
+- **It was never on.** The unit was installed but never enabled (the
+  installer enabled audiod and the others, but not this one), so no
+  `ztos-eq` existed, the app's lines went to a socket nobody read, and
+  streams played straight into ztos-speaker. Measured on the phone with
+  `audio/tests/eq-measure.py` (1 kHz + 4 kHz at -36 dBFS each, band 6,
+  1 kHz, set to -12 dB, ztos-speaker's monitor): 0.00 dB change before; after,
+  1 kHz -12.00 dB and 4 kHz -0.96 dB.
+- **Which streams.** Every stream that follows the default goes through it,
+  on every output, including system sounds, ring and alarm. An app sent to
+  its own output on the apps page (`ztos-audiod`) goes straight there and
+  skips the equalizer.
+- **Its outputs.** A sink behind a fixed filter chain (the ABOX sink behind
+  ztos-speaker) is never one of them, the same rule as ztos-audiod's. Playing
+  into it would skip the speaker's limiter at the 100 % that 8.61 holds it at.
+  When the output goes, the chain plays into the newest output chosen before
+  that is still there (`"recent"` in sound.json), as WirePlumber would;
+  if none is left, into the one with the highest priority.
+- **Its limiter** (-1 dBFS) guards Bluetooth and USB. In front of ztos-speaker
+  it is bypassed (`lim:Bypass`). ztos-audiod gives a ring or alarm stream a
+  gain above 1 on the speaker, and that only comes down at ztos-speaker's
+  volume, after this chain. The speaker's own limiter, after its volume,
+  stays the protection.
+- **Auto headroom** (on by default): a boost takes its peak off the preamp,
+  so the boosted band stays at the level it was and everything else gets
+  quieter, with nothing clipped. Measured: band 6 +12 dB gave 1 kHz +0.00 dB
+  and 4 kHz -11.04 dB. On the speaker, bass under about 150 Hz is cut by the
+  speaker's guard high-pass, so a big bass boost mostly sounds quieter.
+- **The sliders** are vertical, one band per gesture (`ztmetro/sound/eq-drag.h`).
+  A touch takes the band whose column is nearest. The first 8 points of
+  movement fix the gesture's axis: up or down moves that band's gain, from
+  where it was; sideways does nothing. The frequency is fixed: Reset band puts
+  back one moved by the old two-way drag.
+
+Tests: `make -C ztmetro check-eq-drag check-soundd` on the host; on the
+phone, `audio/tests/eq-measure.py [--band N] [--gain dB]` (quiet, and it
+puts the band back).
+
 ## Not done
 
 - **Speaker protection.** On the stock system the DSP runs Maxim's DSM
@@ -271,8 +354,16 @@ with a caret that opens all three; it goes 3 s after the last touch or key.
   volume control stops at -4 dB, the analogue gain is +9 dB (stock +15) and
   the boost output about half way to stock's. It will be quieter than stock.
   Do not raise those without protection.
-- **Earpiece, headphones, microphones**: all on the CS47L93 codec (SPI), whose
-  bus is not in the device tree either. Mainline has the codec driver
+- **Earpiece**: the second MAX98512 (U8002), on the same amplifier I2S and
+  I2C as the speaker's, not on the codec (service manual, troubleshooting p3
+  and p29).
+- **Headphones, microphones**: on the CS47L93 codec (SPI), whose bus is not in
+  the device tree either. Both microphones are digital and take their 1.8 V
+  from the codec (MICBIAS), so they stay silent until the codec drives it. Mainline has the codec driver
   (madera), so this is the next piece.
+- **The 3.5 mm jack** (headphones, headsets, their buttons and microphone):
+  built, off by default until its codec writes are approved. See
+  `audio/HEADSET.md`. FM radio: `audio/FM-RADIO.md` (no FM chip on the
+  G960F as far as every source shows).
 - **Idle power**: the DSP core stays running after the first load.
 - Other rates and formats than 48 kHz / 16 bit / stereo (PipeWire converts).

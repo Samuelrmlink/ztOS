@@ -1,30 +1,107 @@
 #!/bin/sh
-# Bluetooth, as the shell shows it: every 2 s, into $XDG_RUNTIME_DIR/ztos-bt,
-#   on=0|1  connected=NAME  battery=PERCENT  streaming=0|1  apple=0|1
-# (apple: the device is Apple's. AirPods report battery their own way, so the
-# status bar's plain meter leaves them out.)
-# (the status bar's icon), and the Settings tile's live back while a device
-# is connected ($XDG_RUNTIME_DIR/ztos-live/ztsettings). One of it runs per
+# Bluetooth, as the shell shows it, into $XDG_RUNTIME_DIR/ztos-bt,
+#   on=0|1  connected=NAME  mac=MAC  macs=MAC,MAC  battery=PERCENT
+#   streaming=0|1  apple=0|1
+# (connected and mac: the first connected device, LE or BR/EDR alike; macs:
+# every connected one; battery: that first one's. apple: the device is
+# Apple's. AirPods report battery their own way, so the status bar's plain
+# meter leaves them out.)
+# (the status bar's icon, Settings' Bluetooth page: it asks BlueZ again when
+# this file changes), and the Settings tile's live back while a device is
+# connected ($XDG_RUNTIME_DIR/ztos-live/ztsettings). One of it runs per
 # session; the shell starts it.
+#
+# It looks when BlueZ says something it shows has changed: a dbus-monitor
+# follows PropertiesChanged on the system bus, filtered by the bus to the
+# adapter, devices, batteries and audio transports (so a GATT tool's stream
+# of notifications never wakes it), and a change ends the wait at once. A
+# timer still looks every 10 s with the screen on and every 60 s with it off
+# (each look starts three bluetoothctl clients), in case a signal was missed
+# or dbus-monitor is not there. The file is written only when it changes.
 f=${XDG_RUNTIME_DIR:-/tmp}/ztos-bt
 live=${XDG_RUNTIME_DIR:-/tmp}/ztos-live
 demoloop=${XDG_RUNTIME_DIR:-/tmp}/ztos-demoloop.active
+state=${XDG_RUNTIME_DIR:-/tmp}/ztmetro.state
+ON_S=${ZTOS_BT_STATE_ON_S:-10}		# the timer, screen on (tests shorten it)
+OFF_CHUNKS=${ZTOS_BT_STATE_OFF_CHUNKS:-12}	# screen off: this many 5 s waits
+# the shell's state file says "screen off" (builtins only: no process started)
+screen_off() {
+	[ -r "$state" ] || return 1
+	while IFS= read -r l; do
+		case $l in "screen off"*) return 0 ;; esac
+	done < "$state"
+	return 1
+}
 mkdir -p "$live"
+
+# A BlueZ change: look now. A kick that comes while looking is kept for the
+# next wait, which then does not start.
+kicked=0
+napping=
+trap 'kicked=1; [ -n "$napping" ] && kill "$napping" 2>/dev/null' USR1
+nap() {
+	[ "$kicked" = 1 ] && return
+	sleep "$1" &
+	napping=$!
+	[ "$kicked" = 1 ] || wait "$napping" 2>/dev/null
+	kill "$napping" 2>/dev/null
+	napping=
+}
+
+me=$$
+watch_bluez() {
+	r="type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'"
+	while kill -0 "$me" 2>/dev/null; do
+		dbus-monitor --system "$r,arg0='org.bluez.Adapter1'" "$r,arg0='org.bluez.Device1'" \
+			"$r,arg0='org.bluez.Battery1'" "$r,arg0='org.bluez.MediaTransport1'" 2>/dev/null |
+		while IFS= read -r l; do
+			# only what this file shows: a scan's RSSI changes do not count
+			case $l in
+			*'string "Connected"'* | *'string "Powered"'* | *'string "Percentage"'* | \
+			*'string "State"'* | *'string "Alias"'*)
+				kill -USR1 "$me" 2>/dev/null || exit 0 ;;
+			esac
+		done
+		sleep 10	# the bus went away, or no dbus-monitor: the timer still looks
+	done
+}
+watcher=
+if command -v dbus-monitor >/dev/null 2>&1; then
+	watch_bluez &
+	watcher=$!
+fi
+# (its dbus-monitor goes with it: no one is left listening on the bus)
+trap '[ -n "$watcher" ] && { pkill -P "$watcher" 2>/dev/null; kill "$watcher" 2>/dev/null; }; exit 0' TERM INT HUP
+
+last=
 while :; do
-	on=0 name= battery= streaming=0 apple=0
+	kicked=0
+	on=0 name= mac= macs= battery= streaming=0 apple=0
 	if bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
 		on=1
-		mac=$(bluetoothctl devices Connected 2>/dev/null | awk 'NR == 1 { print $2 }')
+		macs=$(bluetoothctl devices Connected 2>/dev/null |
+			awk '$1 ~ /Device$/ && $2 ~ /^[0-9A-Fa-f:]+$/ { printf "%s%s", s, $2; s = "," }')
+		mac=${macs%%,*}
 		if [ -n "$mac" ]; then
 			info=$(bluetoothctl info "$mac" 2>/dev/null)
-			name=$(printf '%s\n' "$info" | sed -n 's/^\tAlias: //p')
-			battery=$(printf '%s\n' "$info" | sed -n 's/.*Battery Percentage: .*(\([0-9]*\)).*/\1/p')
+			name=$(printf '%s\n' "$info" | sed -n 's/^\tAlias: //p' | head -n 1)
+			battery=$(printf '%s\n' "$info" | sed -n 's/.*Battery Percentage: .*(\([0-9]*\)).*/\1/p' | head -n 1)
 			printf '%s\n' "$info" | grep -qE 'Modalias: (bluetooth:v004C|usb:v05AC)' && apple=1
 			pactl list short sinks 2>/dev/null | grep "bluez_output" | grep -q RUNNING && streaming=1
 		fi
 	fi
-	printf 'on=%s\nconnected=%s\nbattery=%s\nstreaming=%s\napple=%s\n' "$on" "$name" "$battery" "$streaming" "$apple" > "$f.new"
-	mv "$f.new" "$f"
+	now="on=$on
+connected=$name
+mac=$mac
+macs=$macs
+battery=$battery
+streaming=$streaming
+apple=$apple"
+	if [ "$now" != "$last" ] || [ ! -e "$f" ]; then
+		printf '%s\n' "$now" > "$f.new"
+		mv "$f.new" "$f"
+		last=$now
+	fi
 	if [ -n "$name" ]; then
 		{
 			echo "title=Bluetooth"
@@ -48,5 +125,13 @@ while :; do
 	else
 		rm -f "$live/ztsettings"
 	fi
-	sleep 2
+	# screen off: up to 60 s, cut short the moment the screen comes on
+	if screen_off; then
+		i=0
+		while [ $i -lt "$OFF_CHUNKS" ] && [ "$kicked" = 0 ] && screen_off; do
+			nap 5; i=$((i + 1))
+		done
+	else
+		nap "$ON_S"
+	fi
 done

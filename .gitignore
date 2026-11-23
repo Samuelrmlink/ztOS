@@ -39,7 +39,10 @@ ztmetro/perfd/zrnperfd
 ztmetro/ledd/zrn-ledd
 ztmetro/sensord/ztoscsf-sensord
 ztmetro/modemd/ztoscorenetworkingd
-ztmetro/csf/ztoscsf
+ztmetro/mms/ztmmsd
+ztmetro/coru/ztoscoru
+ztmetro/passcoded/zrn-passcoded
+ztmetro/passcoded/zrn-passcode
 ztmetro/notifyd/ztnotifyd
 ztmetro/phone/ztphone
 ztmetro/messages/ztmessages
@@ -100,3 +103,4 @@ ztmetro/desktop/zt-desklat
 ztmetro/desktop/ztmove
 ztmetro/clock/ztclock
 ztmetro/clock/ztclockd
+ztmetro/usbenergy/ztusbenergyd

@@ -22,6 +22,12 @@
  *				game, say), at the big rung's ~2.3 GHz until it
  *				pins them too; normal, as any app.
  *				Forgotten when that process ends.
+ *	thermal-cap LITTLE BIG | off
+ *				zrn-thermald's ceilings, in kHz (0: none), applied
+ *				to every limit written here, over the ladder,
+ *				IntelligentBoost and the profiles alike; not kept
+ *				across a restart (zrn-thermald sends it again when
+ *				the status's thermal_cap= differs)
  *	tickle battery|charging|saver none|nominal|moderate|high
  *				the tickle mode for each condition (see tickle.c):
  *				on battery, plugged in, and with the power saver
@@ -39,6 +45,9 @@
  *				(700 by default; 0: every DTIM)
  *	motion MS		the touch boost's lift, held for MS (at most 3 s):
  *				the shell animating on its own clock past a touch
+ *	mif-scale on | off	with the screen off, the memory clock at 421 MHz
+ *				instead of 1794 (zrn-rails; on by default; held
+ *				at 1794 while DP is connected)
  *
  * /run/zrnperfd.ctl is that pipe (anyone may write), /run/zrnperfd.status
  * says what is set (and front=PID APP_ID: the app in front, for ztacctd),
@@ -109,6 +118,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <stdbool.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <dirent.h>
@@ -432,7 +442,8 @@ static void put(const char *path, const char *value) {
 	if (fd < 0) {
 		return;
 	}
-	if (write(fd, value, strlen(value)) < 0) {
+	/* ESRCH/ENOENT: a process moved between cgroups exited first; normal */
+	if (write(fd, value, strlen(value)) < 0 && errno != ESRCH && errno != ENOENT) {
 		fprintf(stderr, "zrnperfd: %s <- %s failed\n", path, value);
 	}
 	close(fd);
@@ -482,6 +493,7 @@ static long capped(const long *table, int n, double share) {
 enum boost { IDLE0, NOMINAL, INTERACTIVE, BIG, RAPID };
 static const char *const boost_names[] = { "idle0", "nominal", "interactive", "big", "rapid" };
 static int thermal_level;		/* the thermal limit (thermal_update): 0 cool, 1-3 marks passed */
+static long thermal_cap_khz[2];		/* zrn-thermald's ceilings, little and big (0: none) */
 static enum boost boost = IDLE0;	/* the resting state: two cores near 1.3 GHz */
 #define BOOST_SAMPLE_MS	250
 /* up a rung: above this share of one core, held this long (eco apps only
@@ -738,7 +750,21 @@ static void led_claim(int on) {
 }
 
 static long little_floor, little_ceiling;	/* policy0's lowest step and current max */
+static long gpu_floor, gpu_ceiling;		/* the GPU's limits as the rung set them (Hz); 0: not yet */
 static long touch_until;			/* touch boost on until then; 0: off */
+/* The motion hold (the shell's "motion MS"): the efficiency cores and the GPU
+ * each held at one clock while the shell animates, the clocks it holds (0:
+ * not held). A frequency step stalls this SoC ~3 ms while the PLL relocks;
+ * with schedutil stepping the little cores between 650 and 1500 MHz and the
+ * GPU at idle0's 260 MHz, about one frame in ten of a Start/apps swipe or a
+ * turn missed its vblank (9-11 %, worst 100 ms, 2026-11-21); held at
+ * 1.5 GHz and 455 MHz on the four efficiency cores, 2-3 %. Only the shell's
+ * own motion: a finger on an app keeps the plain touch boost. */
+#define MOTION_GPU_HZ	455000000
+static long hold_little, hold_gpu;
+/* the clocks it holds at, as set ("motionclk KHZ HZ", for measuring) */
+static long motion_khz = TOUCH_BOOST_KHZ, motion_hz = MOTION_GPU_HZ;
+static int power_level;			/* (power_update's; tentative here) */
 static long boost_ms(void);
 
 /* the touchscreen: the input device that reports multi-touch positions. Only
@@ -785,10 +811,95 @@ static void touch_boost(void) {
 	touch_until = boost_ms() + TOUCH_BOOST_MS;
 }
 
+/* The motion hold on (see hold_little): on top of a touch boost already on,
+ * or with one. The little cores' floor and, in idle0, their ceiling to
+ * TOUCH_BOOST_KHZ's step; the GPU's floor (and in idle0 its ceiling) to
+ * MOTION_GPU_HZ's. Not over a thermal or power limit's ceiling. */
+static void motion_hold(void) {
+	if (hold_little || !screen_on || profile == POWERSAVE || n_clusters < 1) {
+		return;
+	}
+	char path[96];
+	long table[32];
+	snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_available_frequencies", clusters[0]);
+	int n = points(path, table, 32);
+	if (n <= 0) {
+		return;
+	}
+	long want = nearest(table, n, motion_khz);
+	/* Only heat caps it. The power limit's levels 4 and 5 (the GPU at 60 %,
+	 * which on this Mali is its lowest step, 260 MHz; the efficiency cores
+	 * at 1.15 GHz) held through every animation once taken, and with the
+	 * screen on and an app open the phone draws 850-1000 mA at rest, under
+	 * the level's 1000 mA but over its 850 mA release: taken in an app's
+	 * launch, a level stayed for as long as the app did ("1222 mA: power
+	 * limit 5", 2026-11-22). The hold lasts what the motion does (at most
+	 * 3 s and its tail), so its cost is bounded; the limit still caps the
+	 * rungs and everything else. */
+	bool limited = thermal_level > 0;
+	if (limited && little_ceiling && want > little_ceiling) {
+		want = little_ceiling;
+	}
+	/* and never over zrn-thermald's ceiling, whatever else: the highest step
+	 * under it (its caps and the charger's temperature rules are not
+	 * zrnperfd's to lift) */
+	if (thermal_cap_khz[0] > 0 && want > thermal_cap_khz[0]) {
+		long fit = table[0];
+		for (int i = 0; i < n; i++)
+			if (table[i] <= thermal_cap_khz[0] && table[i] > fit)
+				fit = table[i];
+		want = fit;
+	}
+	hold_little = want;
+	if (little_ceiling && want > little_ceiling) {
+		snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_max_freq", clusters[0]);
+		put_long(path, want);	/* the ceiling first, then the floor up to it */
+	}
+	snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_min_freq", clusters[0]);
+	put_long(path, want);
+	n = points(perfial_gpu_file("available_frequencies"), table, 32);
+	if (n > 0 && shell_pid > 0 && gpu_ceiling > 0) {
+		long g = nearest(table, n, motion_hz);
+		if (limited && g > gpu_ceiling) {
+			g = gpu_ceiling;
+		}
+		if (g > gpu_floor) {
+			hold_gpu = g;
+			/* one clock, floor and ceiling: simple_ondemand stepping it
+			 * between 455 and 572 MHz mid-swipe is a step like any other */
+			put(perfial_gpu_file("device/power/control"), "on");
+			if (g > gpu_ceiling) {
+				put_long(perfial_gpu_file("max_freq"), g);
+				put_long(perfial_gpu_file("min_freq"), g);
+			} else {
+				put_long(perfial_gpu_file("min_freq"), g);
+				put_long(perfial_gpu_file("max_freq"), g);
+			}
+			put(perfial_gpu_file("device/power/control"), "auto");
+		}
+	}
+}
+
 static void touch_release(void) {
 	char path[96];
 	snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_min_freq", clusters[0]);
 	put_long(path, little_floor);
+	if (hold_little && little_ceiling && hold_little > little_ceiling) {
+		snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_max_freq", clusters[0]);
+		put_long(path, little_ceiling);	/* the floor first, then the ceiling down */
+	}
+	if (hold_gpu) {
+		put(perfial_gpu_file("device/power/control"), "on");
+		if (hold_gpu > gpu_ceiling) {
+			put_long(perfial_gpu_file("min_freq"), gpu_floor);
+			put_long(perfial_gpu_file("max_freq"), gpu_ceiling);
+		} else {
+			put_long(perfial_gpu_file("max_freq"), gpu_ceiling);
+			put_long(perfial_gpu_file("min_freq"), gpu_floor);
+		}
+		put(perfial_gpu_file("device/power/control"), "auto");
+	}
+	hold_little = hold_gpu = 0;
 	touch_until = 0;
 }
 
@@ -925,11 +1036,16 @@ static bool power_update(void) {
 		}
 		ua = ua < 0 ? -ua : ua;		/* on battery every reading is a draw */
 		power_ua = power_ua ? power_ua + (ua - power_ua) / 4 : ua;
+		/* while a finger or the shell's own motion is under way (the touch
+		 * boost's lease), no level past 3 is taken: 4 and 5 slow what draws
+		 * the screen (the GPU, the efficiency cores), and the draw of a
+		 * moving screen is what would take them */
+		int top_level = touch_until ? 3 : POWER_LEVELS;
 		if (power_ua > POWER_LIMIT_UA) {
 			calm_since = 0;
 			if (!above_since) {
 				above_since = now;
-			} else if (now - above_since >= POWER_TAKE_MS && level < POWER_LEVELS) {
+			} else if (now - above_since >= POWER_TAKE_MS && level < top_level) {
 				level++;
 				power_takes++;
 				above_since = now;
@@ -951,6 +1067,21 @@ static bool power_update(void) {
 	if (level == power_level) return false;
 	fprintf(stderr, "zrnperfd: %ld mA: power limit %d\n", power_ua / 1000, level);
 	power_level = level;
+	return true;
+}
+
+/* A finger or the shell's motion: levels 4 and 5 (the GPU and the
+ * efficiency cores, what draws the screen) let go for the lease. They come
+ * back a level per 0.75 s after it if the draw is still over the limit.
+ * With the screen on and an app open the phone sits between the release
+ * (850 mA) and the take (1000 mA), so a level once taken stayed: the owner's
+ * test of 2026-11-22 ran at level 5 throughout, 1000-1300 mA, the GPU held
+ * at 260 MHz and the efficiency cores at 1.15 GHz, 41-55 fps in app opens and
+ * closes with stalls of 150-750 ms. True if the level moved. */
+static bool power_ease(void) {
+	if (power_level <= 3) return false;
+	fprintf(stderr, "zrnperfd: power limit %d -> 3 while interacting\n", power_level);
+	power_level = 3;
 	return true;
 }
 
@@ -1068,6 +1199,152 @@ static bool boost_sample(void) {
 	return boost != was;
 }
 
+/* The shell's pages kept from reclaim, softly (cgroup v2 memory.low on its
+ * session scope and the slices above it, which pass it down: the mount has
+ * memory_recursiveprot). Under pressure (Waydroid and an app open) Start's
+ * pages went to zram while it sat still, and the next swipe or turn waited
+ * on 65-160 major faults in 25 ms (2026-11-21). Soft: under real shortage
+ * the kernel may still take them, unlike an mlock. The scope is new at each
+ * login, so this is done when the shell says it is up, and again on every
+ * apply (systemd resets these on a reload). */
+#define SHELL_MEMORY_LOW	(220L * 1024 * 1024)
+
+static void put_low(const char *dir) {
+	char path[300];
+	long have = 0;
+	snprintf(path, sizeof(path), "%s/memory.low", dir);
+	FILE *r = fopen(path, "r");
+	if (!r) {
+		return;
+	}
+	if (fscanf(r, "%ld", &have) != 1) have = 0;
+	fclose(r);
+	if (have < SHELL_MEMORY_LOW) {
+		put_long(path, SHELL_MEMORY_LOW);
+	}
+}
+
+/* every process of `from` (one cgroup) into `shell` if it is the shell, else `rest` */
+static void sort_procs(const char *from, const char *shell, const char *rest) {
+	char path[300];
+	snprintf(path, sizeof(path), "%s/cgroup.procs", from);
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		return;
+	}
+	pid_t pids[256];
+	int n = 0;
+	while (n < 256 && fscanf(f, "%d", &pids[n]) == 1) n++;
+	fclose(f);
+	for (int i = 0; i < n; i++) {
+		snprintf(path, sizeof(path), "%s/cgroup.procs", pids[i] == shell_pid ? shell : rest);
+		if (strcmp(pids[i] == shell_pid ? shell : rest, from) != 0) {
+			put_long(path, pids[i]);
+		}
+	}
+}
+
+/* The shell's pages kept from reclaim, softly: cgroup v2 memory.low on a
+ * cgroup of its own (zrn-shell, in its session scope; the scope's other
+ * processes, and whatever the shell starts, in zrn-rest beside it) and on
+ * every cgroup above it, which pass it down (the mount has
+ * memory_recursiveprot). Under pressure (Waydroid and an app open) Start's
+ * pages went to zram while it sat still and the next swipe or turn waited on
+ * them; protected with the scope as a whole, the scope's other members (the
+ * WhatsApp window among them) shared it, and 10 min idle still cost 1537
+ * major faults (2026-11-21). Soft: under real shortage the kernel may still
+ * take them. Done when the shell says it is up and on every apply (the scope
+ * is new each login; systemd resets limits on a reload; the shell's own
+ * children are moved out of its cgroup each time). */
+static void shell_memory_protect(void) {
+	if (shell_pid <= 0) {
+		return;
+	}
+	char path[256], line[256];
+	snprintf(path, sizeof(path), "/proc/%d/cgroup", shell_pid);
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		return;
+	}
+	char cg[200] = "";
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "0::", 3) == 0) {
+			snprintf(cg, sizeof(cg), "%s", line + 3);
+			cg[strcspn(cg, "\n")] = 0;
+		}
+	}
+	fclose(f);
+	char *leaf = strrchr(cg, '/');
+	if (leaf && strcmp(leaf, "/zrn-shell") == 0) {
+		*leaf = 0;	/* (already in its own: the scope is above) */
+	}
+	if (!cg[0] || strcmp(cg, "/") == 0 || !strstr(cg, ".scope")) {
+		return;
+	}
+	char scope[256], shell[300], rest[300];
+	snprintf(scope, sizeof(scope), "/sys/fs/cgroup%s", cg);
+	snprintf(shell, sizeof(shell), "%s/zrn-shell", scope);
+	snprintf(rest, sizeof(rest), "%s/zrn-rest", scope);
+	mkdir(shell, 0755);
+	mkdir(rest, 0755);
+	sort_procs(scope, shell, rest);
+	sort_procs(shell, shell, rest);	/* (what the shell started since) */
+	snprintf(path, sizeof(path), "%s/cgroup.subtree_control", scope);
+	put(path, "+memory");
+	put_low(shell);
+	/* and each cgroup above it, up to (not including) the root */
+	for (char *end = cg + strlen(cg); end > cg; ) {
+		*end = 0;
+		snprintf(path, sizeof(path), "/sys/fs/cgroup%s", cg);
+		put_low(path);
+		end = strrchr(cg, '/');
+		if (!end) break;
+	}
+}
+
+/* What the shell may lock: the pages of its files it has in use, when the
+ * screen goes off (pin_file_pages in the shell). memory.low keeps only what
+ * is charged to its cgroup, and the libraries and fonts it shares with every
+ * app are mostly charged elsewhere: 10 min idle still cost ~5,000 major
+ * faults (2026-11-21). The user's 8 MB is too little for its ~45 MB. */
+#define SHELL_MEMLOCK	(128L * 1024 * 1024)
+static void shell_memlock(void) {
+	struct rlimit r = { SHELL_MEMLOCK, SHELL_MEMLOCK };
+	if (shell_pid > 0 && prlimit(shell_pid, RLIMIT_MEMLOCK, &r, NULL) != 0) {
+		fprintf(stderr, "zrnperfd: shell %d memlock: %s\n", shell_pid, strerror(errno));
+	}
+}
+
+/* The shell on the efficiency cores only, every thread of it. Allowed the
+ * first big core too (the slices' cpuset), its frames now and then ran there
+ * at that core's resting 400 MHz, and those frames took twice as long: half
+ * of the missed vblanks left in a Start/apps swipe or a turn (2026-11-21:
+ * 2-4 % of frames over 20 ms; kept to cpu0-3, 0.9-1.3 %). Made again after
+ * every cpuset change, which resets it. */
+static void shell_cores(void) {
+	if (shell_pid <= 0 || n_clusters < 1) {
+		return;
+	}
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	for (int i = 0; cluster_cpus[0][i] >= 0; i++) {
+		CPU_SET(cluster_cpus[0][i], &set);
+	}
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/task", shell_pid);
+	DIR *dir = opendir(path);
+	struct dirent *entry;
+	while (dir && (entry = readdir(dir))) {
+		pid_t tid = atoi(entry->d_name);
+		if (tid > 0) {
+			sched_setaffinity(tid, sizeof(set), &set);
+		}
+	}
+	if (dir) {
+		closedir(dir);
+	}
+}
+
 static void apply(void) {
 	bool low = !screen_on && deepsleep;
 	bool idle0 = boost == IDLE0;	/* the resting state, screen on or off */
@@ -1127,9 +1404,21 @@ static void apply(void) {
 					fit = table[i];
 			max = fit;
 		}
+		/* zrn-thermald's ceiling, over everything above */
+		long tcap = thermal_cap_khz[big ? 1 : 0];
+		if (tcap > 0 && max > tcap) {
+			long fit = table[0];	/* the highest step under it */
+			for (int i = 0; i < n; i++)
+				if (table[i] <= tcap && table[i] > fit)
+					fit = table[i];
+			max = fit;
+		}
 		if (c == 0) {
 			little_floor = table[0];
 			little_ceiling = max;
+			if (hold_little > max) {
+				max = hold_little;	/* a motion hold on: kept through the change */
+			}
 		}
 		snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_governor", clusters[c]);
 		put(path, top_speed && !idle0 ? "performance" : "schedutil");
@@ -1167,13 +1456,18 @@ static void apply(void) {
 		 * the next frames took two vblanks each (Start's tiles coming back
 		 * from an app). The GPU still idles between frames at any clock */
 		long floor = screen_on ? (rest < max ? rest : max) : table[0];
+		if (profile == PERFORMANCE && !idle0) {
+			floor = top;
+		}
+		gpu_floor = floor;
+		gpu_ceiling = max;
+		if (hold_gpu) {
+			max = floor = hold_gpu;	/* a motion hold on: kept through the change */
+		}
 		/* lower the floor before the ceiling, and raise them the other way */
 		put_long(perfial_gpu_file("min_freq"), table[0]);
 		put_long(perfial_gpu_file("max_freq"), max);
 		put_long(perfial_gpu_file("min_freq"), floor);
-		if (profile == PERFORMANCE && !idle0) {
-			put_long(perfial_gpu_file("min_freq"), top);
-		}
 		put(perfial_gpu_file("device/power/control"), "auto");
 	}
 	/* Programs on the efficiency cores only, and the spare big cores off,
@@ -1202,6 +1496,8 @@ static void apply(void) {
 	idle_two_cores(false);		/* bring up whatever the new rung needs */
 	big_online(k > 0 ? k : 1);
 	cores_allowed(set);
+	shell_cores();
+	shell_memory_protect();
 	waydroid_cores(set);
 	idle_two_cores(park);		/* only idle0, screen off, parks cpu2+ of the efficiency cluster */
 	/* the light is zrn-ledd's: say only whether rapid boost is on, and only when
@@ -1243,6 +1539,54 @@ static void ib_publish(int ladder, int want) {
 }
 
 /* the tickle mode for the condition the phone is in, and what is set, for anyone to read */
+/* ---- the memory clock (power/rails/zrn-rails.c, power/RAIL-MAP.md gap 1) ------
+ * With the screen off the memory interface goes from its boot level, 1794 MHz,
+ * to stock's idle level, 421 MHz; back at screen on. It stays at 1794 MHz
+ * while an external display (DP) is connected. "mif-scale off" is the kill
+ * switch (kept across boots); zrn-rails mif_enable parameter is the other.
+ * One request per change, nothing on a timer. Without zrn-rails nothing happens. */
+#define MIF_PARAM	"/sys/module/zrn_rails/parameters/mif_khz"
+#define MIF_LOW		421000
+#define MIF_BOOT	1794000
+static bool mif_scale = true;
+static long mif_khz = MIF_BOOT;		/* what zrn-rails last accepted from us */
+
+static bool dp_connected(void) {
+	glob_t g;
+	bool on = false;
+	if (glob("/sys/class/drm/card*-DP-*/status", 0, NULL, &g) == 0) {
+		for (size_t i = 0; i < g.gl_pathc && !on; i++) {
+			char s[16] = "";
+			FILE *f = fopen(g.gl_pathv[i], "r");
+			if (f) {
+				if (fgets(s, sizeof(s), f)) {}
+				fclose(f);
+			}
+			on = strncmp(s, "connected", 9) == 0;
+		}
+		globfree(&g);
+	}
+	return on;
+}
+
+static void mif_apply(void) {
+	long want = (!screen_on && mif_scale && !dp_connected()) ? MIF_LOW : MIF_BOOT;
+	if (want == mif_khz) {
+		return;
+	}
+	int fd = open(MIF_PARAM, O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return;		/* zrn-rails not loaded: the memory stays where it is */
+	}
+	if (dprintf(fd, "%ld\n", want) > 0) {
+		mif_khz = want;
+		fprintf(stderr, "zrnperfd: memory clock %ld kHz\n", want);
+	} else {
+		fprintf(stderr, "zrnperfd: memory clock %ld kHz refused: %s\n", want, strerror(errno));
+	}
+	close(fd);
+}
+
 static void status(void) {
 	tickle_set_mode(tickle_when[condition()]);
 	FILE *f = fopen(STATUS ".new", "w");
@@ -1251,7 +1595,9 @@ static void status(void) {
 			deepsleep ? "on" : "off", screen_on ? "on" : "off");
 		fprintf(f, "cpus=%d\nclusters=%d\n", cpu_count, n_clusters);
 		fprintf(f, "condition=%s\nboost=%s\n", conditions[condition()], boost_names[boost]);
+		fprintf(f, "thermal_cap=%ld,%ld\n", thermal_cap_khz[0], thermal_cap_khz[1]);
 		fprintf(f, "wifi=%s\n", wifi_asleep ? "sleeping" : "on");
+		fprintf(f, "mif_scale=%s\nmif_khz=%ld\n", mif_scale ? "on" : "off", mif_khz);
 		fprintf(f, "wifi_sleep=%s\nwifi_powersave=%s\n", wifi_sleep_enabled ? "on" : "off",
 			wifi_powersave ? "on" : "off");
 		wlpm_status(f);
@@ -1278,6 +1624,7 @@ static void save(void) {
 			wifi_powersave ? "on" : "off");
 		fprintf(f, "wifi-suspend %s\nwifi-filter %s\nwifi-listen %d\n", wlpm_suspend_enabled ? "on" : "off",
 			wlpm_filter_enabled ? "on" : "off", wlpm_listen_ms);
+		fprintf(f, "mif-scale %s\n", mif_scale ? "on" : "off");
 		fprintf(f, "ib %s\n", ib_names[ib_mode]);
 		fprintf(f, "ib engine %s\n", ibnet_using_score() ? "score" : "cpu");
 		for (int c = 0; c < 3; c++) {
@@ -1292,6 +1639,20 @@ static int command(char *line, bool persist) {
 	char what[32] = "", value[32] = "", extra[64] = "";
 	if (sscanf(line, "%31s %31s %63s", what, value, extra) < 2) {
 		return 0;
+	}
+	if (strcmp(what, "thermal-cap") == 0) {
+		bool off = strcmp(value, "off") == 0;
+		long l = off ? 0 : atol(value), b = off ? 0 : atol(extra);
+		l = l < 0 ? 0 : l;
+		b = b < 0 ? 0 : b;
+		if (l == thermal_cap_khz[0] && b == thermal_cap_khz[1]) {
+			return 0;
+		}
+		thermal_cap_khz[0] = l;
+		thermal_cap_khz[1] = b;
+		fprintf(stderr, "zrnperfd: thermal ceiling %s (little %ld, big %ld kHz, from zrn-thermald)\n",
+			l || b ? "on" : "off", l, b);
+		return 2;
 	}
     if (strcmp(what, "compile") == 0) {
         pid_t pid = atoi(value);
@@ -1338,12 +1699,24 @@ static int command(char *line, bool persist) {
 	}
 	/* "motion MS": the shell is about to animate on its own clock (the logo
 	 * after the first unlock) longer than a touch boost lasts: hold it that long */
+	if (strcmp(what, "motionclk") == 0) {
+		long khz = atol(value), hz = atol(extra);
+		if (khz > 0) motion_khz = khz;
+		if (hz > 0) motion_hz = hz;
+		fprintf(stderr, "zrnperfd: motion hold at %ld kHz, GPU %ld Hz\n", motion_khz, motion_hz);
+		return 0;
+	}
 	if (strcmp(what, "motion") == 0) {
 		long ms = atol(value);
 		if (ms > 0) {
 			touch_boost();
 			if (touch_until) {
-				touch_until = boost_ms() + (ms > 3000 ? 3000 : ms);
+				long until = boost_ms() + (ms > 3000 ? 3000 : ms);
+				touch_until = until > touch_until ? until : touch_until;
+				motion_hold();
+				if (power_ease()) {
+					return 2;
+				}
 			}
 		}
 		return 0;
@@ -1352,6 +1725,9 @@ static int command(char *line, bool persist) {
 		shell_pid = atoi(value);
 		if (shell_pid > 0) {
 			prioritise(shell_pid, SHELL_NICE, UI_UCLAMP);
+			shell_cores();
+			shell_memory_protect();
+			shell_memlock();
 			fprintf(stderr, "zrnperfd: shell %d first in line\n", shell_pid);
 		}
 		return 2;	/* the GPU's limits, held back until now */
@@ -1425,11 +1801,18 @@ static int command(char *line, bool persist) {
 			wlpm_reconfigure();
 			fprintf(stderr, "zrnperfd: %s %s\n", what, value);
 		}
+	} else if (strcmp(what, "mif-scale") == 0) {
+		mif_scale = strcmp(value, "on") == 0;
+		if (persist) {
+			mif_apply();
+			fprintf(stderr, "zrnperfd: mif-scale %s\n", value);
+		}
 	} else if (strcmp(what, "screen") == 0) {
 		screen_on = strcmp(value, "off") != 0;
 		persist = false;
 		tickle_screen(screen_on);
 		wlpm_screen(screen_on);
+		mif_apply();
 		if (screen_on) {
 			/* the screen takes the radio back at once; the timer stops */
 			wifi_sleep_at = 0;
@@ -1517,6 +1900,35 @@ int main(void) {
 	} else if (!screen_on && !plugged && !wifi_asleep) {
 		wifi_sleep_at = boost_ms();
 	}
+	/* the module's level, so a restart of this daemon puts it right */
+	f = fopen(MIF_PARAM, "r");
+	if (f) {
+		if (fscanf(f, "%ld", &mif_khz) != 1) mif_khz = MIF_BOOT;
+		fclose(f);
+	}
+	mif_apply();
+	{
+		/* Restarted under a running shell: find it. The shell says "shell
+		 * PID" only as it starts, and without it the GPU's limits and the
+		 * motion hold wait for the next shell restart. */
+		DIR *proc = opendir("/proc");
+		struct dirent *e;
+		while (proc && shell_pid <= 0 && (e = readdir(proc))) {
+			pid_t pid = atoi(e->d_name);
+			char path[64], comm[32] = "";
+			snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+			FILE *c = pid > 0 ? fopen(path, "r") : NULL;
+			if (c) {
+				if (fgets(comm, sizeof(comm), c) && strcmp(comm, "ztmetro\n") == 0) {
+					char line[32];
+					snprintf(line, sizeof(line), "shell %d", pid);
+					command(line, false);
+				}
+				fclose(c);
+			}
+		}
+		if (proc) closedir(proc);
+	}
 	apply();
 	status();
 
@@ -1539,6 +1951,7 @@ int main(void) {
 	long touch_next_try = boost_ms() + 2000;
 	char pending[1024];
 	size_t pending_len = 0;
+	long sampled_at = 0;	/* the last look (see sample_due) */
 	while (!stopping) {
 		struct pollfd fds[6] = { { .fd = ctl, .events = POLLIN }, { .fd = uev, .events = POLLIN },
 			{ .fd = touch, .events = POLLIN }, { .fd = wl, .events = POLLIN } };
@@ -1552,6 +1965,13 @@ int main(void) {
 		int wait = tickle_timeout();
 		if (boost_live() && (wait < 0 || wait > BOOST_SAMPLE_MS)) {
 			wait = BOOST_SAMPLE_MS;
+		}
+		if (boost_live() && sampled_at > 0) {
+			long left = BOOST_SAMPLE_MS - (boost_ms() - sampled_at);	/* the next look is due */
+			left = left < 1 ? 1 : left;
+			if (wait < 0 || wait > left) {
+				wait = (int)left;
+			}
 		}
 		if (touch < 0 && (wait < 0 || wait > 2000)) {
 			wait = 2000;	/* the touchscreen's retry */
@@ -1598,6 +2018,9 @@ int main(void) {
 			 * 120 ms after touch-down, before the page had settled */
 			if (any) {
 				touch_boost();
+				if (screen_on && power_ease()) {
+					changed = 2;
+				}
 			}
 			if (down) {
 				/* input boost: a finger on an app means frames are about to be
@@ -1614,8 +2037,19 @@ int main(void) {
 		if (touch_until && boost_ms() >= touch_until) {
 			touch_release();
 		}
-		static long sampled_at;
-		{
+		/* The look (the load, the clocks, the fuel gauge, the thermal
+		 * sensors, IntelligentBoost's pass and its log row) every
+		 * BOOST_SAMPLE_MS, not at every wake-up. It ran at every one, and a
+		 * finger on the glass wakes this loop with each report of the
+		 * touchscreen: 24 looks a second on average while touching and up
+		 * to 130 (its log, 2026-11-22), each some 8 ms on an efficiency
+		 * core -- four fuel-gauge reads over I2C at ~0.9 ms (up to 5),
+		 * ten sysfs files at ~0.4, /proc -- next to the shell's thread on
+		 * the same cores and the I2C interrupt on cpu0. The owner saw it:
+		 * animations ran smoother driven from the control pipe (no
+		 * touchscreen events here) than under a finger. */
+		bool sample_due = !sampled_at || !screen_on || boost_ms() - sampled_at >= BOOST_SAMPLE_MS - 5;
+		if (sample_due) {
 			static long last_sampled;
 			static enum boost last_rung;
 			if (last_sampled && screen_on)
@@ -1694,6 +2128,10 @@ int main(void) {
 			ssize_t got;
 			while ((got = recv(uev, msg, sizeof(msg) - 1, 0)) > 0) {
 				msg[got] = 0;
+				if (memmem(msg, got, "SUBSYSTEM=drm", 13)) {
+					mif_apply();	/* DP in or out: 1794 MHz while it is there */
+					changed = changed ? changed : 1;
+				}
 				if (memmem(msg, got, "SUBSYSTEM=power_supply", 22)) {
 					bool now = read_plugged();
 					if (now != plugged && !changed) {
@@ -1740,6 +2178,8 @@ int main(void) {
 	if (touch_until) {
 		touch_release();
 	}
+	screen_on = true;
+	mif_apply();		/* the memory back at its boot level */
 	big_cores(true);	/* nothing is left switched off behind us */
 	cores_allowed("0-7");
 	fprintf(stderr, "zrnperfd: stopped, every app running\n");

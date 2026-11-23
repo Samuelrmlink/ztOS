@@ -1,0 +1,78 @@
+#!/bin/bash
+# zrn-therm-probe KO: zrn-therm's first run on the phone, a step at a time,
+# each behind a mark (camera/driver/zrn-cam-probe's way): a step leaves a mark
+# before it starts and clears it when it has returned. A later run that finds
+# a mark refuses: the step before it froze or reset the phone.
+#
+#   1 load, touching nothing (sampling=0: only ioremap)
+#   2 read the ADC's clock gate, then the battery channel only (5 conversions)
+#   3 if the battery reads sane (-20..90 C): every channel
+#   4 the fuel gauge's Temp, written once from it
+#   5 reload sampling on its own (the run it is left in), unless --no-keep
+#
+# Root. Prints what it saw; stops at the first thing that is not right, with
+# the module unloaded.
+set -u
+KO=${1:?zrn-therm.ko}
+KEEP=1; [ "${2:-}" = --no-keep ] && KEEP=0
+D=/var/lib/zrn-therm
+S=/sys/kernel/zrn_therm
+PS=/sys/class/power_supply
+mkdir -p $D
+if [ -e $D/doing ]; then
+	echo "zrn-therm-probe: a mark is left from an earlier run: '$(cat $D/doing)'. It froze or reset there; not retrying." >&2
+	exit 1
+fi
+mark() { printf '%s\n' "$*" > $D/doing; sync; }
+done_() { rm -f $D/doing; sync; }
+stop() { echo "STOP: $*"; rmmod zrn_therm 2>/dev/null; done_; exit 1; }
+rd() { cat "$1" 2>/dev/null || echo "?"; }
+show() {
+	echo "-- $1"
+	rd $S/raw; rd $S/status
+	echo "gauge temp $(rd $PS/max170xx_battery/temp), p9320 die raw $(rd $PS/p9320-wireless/die_temp_raw)" \
+		"(pad $(rd $PS/max77705-wireless/online)), charger $(rd $PS/max77705-charger/status)"
+}
+
+echo "before: gauge temp $(rd $PS/max170xx_battery/temp), p9320 die raw $(rd $PS/p9320-wireless/die_temp_raw)," \
+	"battery $(rd $PS/max170xx_battery/capacity) %, $(rd $PS/max170xx_battery/status)"
+lsmod | grep -q '^zrn_therm ' && stop "zrn_therm is already loaded"
+
+mark "1 insmod (no hardware access)"
+insmod "$KO" sampling=0 write_gauge=0 battery_only=1 open_gate=0 || stop "insmod failed"
+done_
+
+mark "2 gate read, then battery channel ADC conversions"
+echo 1 > $S/sample
+done_
+show "battery channel"
+grep -q 'last_err 0 ' $S/status || stop "the battery read failed (status above); nothing written"
+b=$(cat $S/battery 2>/dev/null) || stop "battery unknown (outside its table)"
+[ "$b" -ge -200 ] && [ "$b" -le 900 ] || stop "battery $b out of -20..90 C"
+
+mark "3 every channel"
+echo 0 > /sys/module/zrn_therm/parameters/battery_only
+echo 1 > $S/sample
+done_
+show "every channel"
+
+mark "4 fuel gauge Temp write"
+echo 1 > /sys/module/zrn_therm/parameters/write_gauge
+echo 1 > $S/sample
+done_
+sleep 1
+show "after the gauge write"
+grep -q 'gauge_write 0 ' $S/status || stop "the gauge write failed"
+g=$(rd $PS/max170xx_battery/temp)
+b=$(cat $S/battery)
+[ "$g" != "?" ] && [ $((g - b)) -ge -2 ] && [ $((g - b)) -le 2 ] || stop "the gauge reads $g after $b was written"
+
+rmmod zrn_therm || stop "rmmod failed"
+if [ $KEEP = 1 ]; then
+	mark "5 insmod, sampling"
+	insmod "$KO" || stop "insmod (sampling) failed"
+	sleep 2
+	done_
+	show "sampling"
+fi
+echo "zrn-therm-probe: ok"

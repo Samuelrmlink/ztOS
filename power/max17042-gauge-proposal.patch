@@ -1,0 +1,58 @@
+--- a/drivers/power/supply/max17042_battery.c
++++ b/drivers/power/supply/max17042_battery.c
+@@ -38,6 +38,7 @@
+ 
+ /* Interrupt mask bits */
+ #define CFG_ALRT_BIT_ENBL	(1 << 2)
++#define CFG_TEX_BIT		(1 << 8)	/* Temp is written by the host */
+ 
+ #define VFSOC0_LOCK		0x0000
+ #define VFSOC0_UNLOCK		0x0080
+@@ -101,6 +102,18 @@
+ 	u32 data;
+ 	struct regmap *map = chip->regmap;
+ 
++	/*
++	 * With Config.TEX set the gauge does not measure: Temp holds whatever
++	 * the host last wrote. A firmware that set it (Samsung's, on the
++	 * MAX77705) and is gone leaves a value that never changes; reporting
++	 * it as the battery's temperature would hide a hot battery.
++	 */
++	ret = regmap_read(map, MAX17042_CONFIG, &data);
++	if (ret < 0)
++		return ret;
++	if (data & CFG_TEX_BIT)
++		return -ENODATA;
++
+ 	ret = regmap_read(map, MAX17042_TEMP, &data);
+ 	if (ret < 0)
+ 		return ret;
+@@ -209,6 +222,10 @@
+ 	}
+ 
+ 	ret = max17042_get_temperature(chip, &temp);
++	if (ret == -ENODATA) {		/* not measured: say nothing of it */
++		*health = POWER_SUPPLY_HEALTH_UNKNOWN;
++		goto out;
++	}
+ 	if (ret < 0)
+ 		goto health_error;
+ 
+@@ -268,7 +285,8 @@
+ 		if (ret < 0)
+ 			return ret;
+ 
+-		val->intval = data;
++		/* Cycles counts in 1 % of a cycle; the ABI wants whole cycles */
++		val->intval = data / 100;
+ 		break;
+ 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
+ 		ret = regmap_read(map, MAX17042_MinMaxVolt, &data);
+@@ -1045,6 +1063,7 @@
+ 	.reg_bits = 8,
+ 	.val_bits = 16,
+ 	.val_format_endian = REGMAP_ENDIAN_NATIVE,
++	.max_register = 0xff,	/* so debugfs can show the gauge's registers */
+ };
+ 
+ static const struct regmap_range max77759_fg_registers[] = {

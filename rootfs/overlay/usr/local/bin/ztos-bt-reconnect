@@ -1,0 +1,556 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""ztos-bt-reconnect: a Bluetooth audio device that drops while it plays: the players
+pause, and the device is called back.
+
+ztOS doesn't reconnect Bluetooth devices by itself: not at boot, not when
+bluetoothd or WirePlumber starts, not after a disconnect or a suspend
+(/etc/bluetooth/main.conf has ReconnectAttempts = 0, and WirePlumber's
+bluez5.auto-connect is empty: 52-ztos-bluetooth.conf). This daemon is the one
+exception, and it is narrow:
+
+    a device that went away while an app was playing through it (out of range,
+    switched off or put away mid-song) is called back, for a few minutes.
+
+"Playing through it" is per device: an app's stream was running (not paused) to
+that device's own output, bluez_output.<ADDRESS>.*, when it went. Sound playing
+on the speaker, or on another Bluetooth device, doesn't count for this one.
+ztos-audiod works that out from PipeWire's graph (through ztos-eq too) and says
+so in $XDG_RUNTIME_DIR/ztos-audio-state.json ("outputs": "playing", "address");
+this daemon follows that file and BlueZ's signals.
+
+Not called back:
+  - a device that wasn't playing, or was playing nothing of its own;
+  - a disconnect this phone made (org.bluez.Reason.Local: Settings' "disconnect",
+    an app's Disconnect(), Bluetooth switched off) or a failed authentication;
+  - anything that isn't an audio device (A2DP sink, HFP/HSP headset, LE Audio):
+    keyboards, the Chameleon, phones. They connect only when something asks for
+    them by address (cubridge, Settings, an Android app), as ever;
+  - anything after Bluetooth is switched off, the device is removed, bluetoothd
+    goes away, or the window (WINDOW_S) runs out.
+Once it is back, ztos-audiod moves the sound to it (it takes the audio as any
+Bluetooth output that connects does). Nothing is kept on disk: after a reboot
+nothing is called back.
+
+Paused, not moved (ROADMAP 8.64): Android's "audio becoming noisy". Whenever a
+device drops while it was playing (whatever the reason, the phone's own
+disconnect too), the players are paused at once, before the sound can fall
+through to the speaker: every MPRIS player (playerctl), and Android's media
+session in Waydroid (ztos-waydroid-recover media pause: Spotify and the rest).
+Nothing here ever plays: a device that comes back, called back or by itself,
+finds the players paused. They play again only when someone asks: the play
+button, or the device's own play (AVRCP, an AirPods' tap or ear detection).
+
+It never pairs, trusts, scans or powers anything: its only call is
+Device1.Connect() on that one device, at most one at a time per device, at the
+times in INTERVALS_S.
+"""
+import ctypes
+import json
+import os
+import re
+import struct
+import subprocess
+import sys
+import time
+
+RUN = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+AUDIO_STATE = os.path.join(RUN, "ztos-audio-state.json")
+
+# what pauses the players when the device carrying their sound drops: each runs at
+# once, side by side. Pause only, never a toggle: nothing here can start a player.
+PAUSE_COMMANDS = (
+    ("playerctl", "--all-players", "pause"),
+    # Android's media button session (Spotify...); nothing if Android is frozen or down
+    ("sudo", "-n", "/usr/local/libexec/ztos-waydroid-recover", "media", "pause"),
+)
+# tests only: a program run as PROGRAM COMMAND... instead of each command
+PAUSE_WRAPPER = os.environ.get("ZTOS_BT_RECONNECT_TEST_PAUSE")
+
+BUS_NAME = "org.bluez"
+DEVICE_IFACE = "org.bluez.Device1"
+ADAPTER_IFACE = "org.bluez.Adapter1"
+PROPS_IFACE = "org.freedesktop.DBus.Properties"
+OM_IFACE = "org.freedesktop.DBus.ObjectManager"
+
+WINDOW_S = 300          # how long a device is called back for, counted with the phone asleep too
+# when each Connect() starts, from the disconnect (then every last one until the window ends).
+# A page that finds nothing takes about 5 s of the radio.
+INTERVALS_S = (3, 10, 20, 35, 60, 90, 120, 180, 240)
+GONE_GRACE_S = 30       # its output went this long before the link did: it wasn't playing then
+REASON_WAIT_S = 1.0     # Connected=false and the Disconnected signal come in either order
+CONNECT_TIMEOUT_S = 60
+
+# BlueZ's reasons that mean this phone (someone on it) ended the link
+EXPLICIT_REASONS = {"org.bluez.Reason.Local", "org.bluez.Reason.Authentication"}
+# what makes a device an audio output: its UUIDs (16-bit, as in the Bluetooth base UUID)
+AUDIO_UUIDS = {
+    "0000110b",     # A2DP sink (headphones, speakers)
+    "00001108",     # HSP headset
+    "0000111e",     # HFP hands-free
+    "0000184e",     # LE Audio: ASCS
+    "00001850",     # LE Audio: PACS
+}
+OUTPUT_RE = re.compile(r"^bluez_output\.([0-9A-Fa-f]{2}(?:_[0-9A-Fa-f]{2}){5})(?:\.|$)")
+MAC_RE = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
+PATH_RE = re.compile(r"^(/org/bluez/hci\d+)/dev_([0-9A-F]{2}(?:_[0-9A-F]{2}){5})$")
+
+
+def log(*words):
+    print("ztos-bt-reconnect:", *words, file=sys.stderr, flush=True)
+
+
+def now_s():
+    """Seconds that keep counting while the phone sleeps (the window is real time)."""
+    try:
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    except (AttributeError, OSError):
+        return time.monotonic()
+
+
+def mac_of_path(path):
+    m = PATH_RE.match(str(path))
+    return m.group(2).replace("_", ":") if m else None
+
+
+def mac_of_output(o):
+    """A Bluetooth output's device address: what ztos-audiod says, or its node name's."""
+    if not isinstance(o, dict) or o.get("kind") != "bluetooth":
+        return None
+    addr = o.get("address")
+    if isinstance(addr, str) and MAC_RE.match(addr.upper()):
+        return addr.upper()
+    m = OUTPUT_RE.match(str(o.get("name", "")))
+    return m.group(1).replace("_", ":").upper() if m else None
+
+
+def bt_outputs(text):
+    """ztos-audiod's state file: {address: playing} for the Bluetooth outputs there.
+    None if it can't be read (then nothing changes)."""
+    try:
+        state = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(state, dict) or not isinstance(state.get("outputs"), list):
+        return None
+    out = {}
+    for o in state["outputs"]:
+        mac = mac_of_output(o)
+        if mac:
+            out[mac] = out.get(mac, False) or o.get("playing") is True
+    return out
+
+
+def is_audio_device(uuids):
+    for u in uuids or ():
+        if str(u).lower()[:8] in AUDIO_UUIDS:
+            return True
+    return False
+
+
+class Policy:
+    """The decisions, with no D-Bus and no clock of its own: every call says when.
+
+    audio(outputs, now)          ztos-audiod's Bluetooth outputs: {address: playing}
+    disconnected(mac, reason, audio_device, now)
+                                 a device's link went (reason: BlueZ's, or None);
+                                 True if it is to be called back
+    connected(mac) / removed(mac) / bluetooth_off(macs) / bluez_gone()
+    due(now)                     the devices to call Connect() on now
+    connect_done(mac, error, now)
+    wake_in(now)                 seconds until due() has something, or None
+    """
+
+    def __init__(self):
+        self.out = {}        # address -> {"present": bool, "playing": bool, "gone": time or None}
+        self.pending = {}    # address -> {"since", "deadline", "attempt", "next", "busy"}
+
+    # ---- what plays where
+    def audio(self, outputs, now):
+        if outputs is None:
+            return
+        for mac, playing in outputs.items():
+            self.out[mac] = {"present": True, "playing": bool(playing), "gone": None}
+        for mac, o in self.out.items():
+            if mac not in outputs and o["present"]:
+                # gone: what it was doing last is kept, that's what counts at the disconnect
+                o["present"] = False
+                o["gone"] = now
+
+    def was_playing(self, mac, now):
+        o = self.out.get(mac)
+        if not o or not o["playing"]:
+            return False
+        return o["present"] or (o["gone"] is not None and now - o["gone"] <= GONE_GRACE_S)
+
+    # ---- BlueZ
+    def disconnected(self, mac, reason, audio_device, now, playing=None):
+        """playing: whether it was, as seen when the link went (else as of now)."""
+        if playing is None:
+            playing = self.was_playing(mac, now)
+        o = self.out.get(mac)
+        if o:
+            o["playing"] = False         # once: the next disconnect is judged on its own
+        elif mac not in self.pending:
+            # never an output here (the Chameleon, a keyboard...): nothing to say
+            return False
+        if reason in EXPLICIT_REASONS:
+            return self._no(mac, "disconnected here (%s): not called back" % reason)
+        if not audio_device:
+            return self._no(mac, "not an audio device: not called back")
+        if not playing:
+            return self._no(mac, "nothing was playing through it: not called back")
+        self.pending[mac] = {"since": now, "deadline": now + WINDOW_S, "attempt": 0,
+                             "next": now + INTERVALS_S[0], "busy": False}
+        log(mac, "dropped while playing (%s): calling it back for %d s" % (reason or "no reason given", WINDOW_S))
+        return True
+
+    def _no(self, mac, why):
+        self.pending.pop(mac, None)
+        log(mac, why)
+        return False
+
+    def connected(self, mac):
+        p = self.pending.pop(mac, None)
+        if p:
+            log(mac, "back (calls made: %d)" % p["attempt"])
+
+    def removed(self, mac):
+        if self.pending.pop(mac, None):
+            log(mac, "removed: no longer called back")
+        self.out.pop(mac, None)
+
+    def bluetooth_off(self, macs):
+        for mac in macs:
+            if self.pending.pop(mac, None):
+                log(mac, "Bluetooth switched off: no longer called back")
+
+    def bluez_gone(self):
+        if self.pending:
+            log("bluetoothd went away: calling nothing back")
+        self.pending.clear()
+
+    # ---- the calls
+    def due(self, now):
+        macs = []
+        for mac, p in list(self.pending.items()):
+            if now >= p["deadline"]:
+                log(mac, "not back within %d s: given up" % WINDOW_S)
+                del self.pending[mac]
+            elif not p["busy"] and now >= p["next"]:
+                p["busy"] = True
+                p["attempt"] += 1
+                macs.append(mac)
+        return macs
+
+    def connect_done(self, mac, error, now):
+        p = self.pending.get(mac)
+        if not p:
+            return
+        p["busy"] = False
+        if error is None:
+            self.connected(mac)
+            return
+        # gone for good. (NotReady, the adapter coming back after a resume, is tried
+        # again: Bluetooth switched off ends the calls through Powered.)
+        if error.endswith(".DoesNotExist") or error.endswith(".UnknownObject"):
+            self._no(mac, "can't be called back: %s" % error)
+            return
+        # the next one at its time from the disconnect; past the list, every minute
+        if p["attempt"] < len(INTERVALS_S):
+            nxt = p["since"] + INTERVALS_S[p["attempt"]]
+        else:
+            nxt = now + 60
+        p["next"] = max(now + 1, nxt)
+        log(mac, "try %d: %s" % (p["attempt"], error))
+
+    def wake_in(self, now):
+        times = []
+        for p in self.pending.values():
+            times.append(p["deadline"])
+            if not p["busy"]:
+                times.append(p["next"])
+        return max(0.0, min(times) - now) if times else None
+
+
+# ---- inotify, for ztos-audiod's file (replaced by rename): no polling
+IN_CLOSE_WRITE = 0x08
+IN_MOVED_TO = 0x80
+IN_CREATE = 0x100
+
+
+def inotify_dir(path):
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+    if fd < 0:
+        return None
+    if libc.inotify_add_watch(fd, path.encode(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE) < 0:
+        os.close(fd)
+        return None
+    return fd
+
+
+def inotify_names(fd):
+    names = []
+    while True:
+        try:
+            data = os.read(fd, 4096)
+        except BlockingIOError:
+            return names
+        if not data:
+            return names
+        i = 0
+        while i + 16 <= len(data):
+            _wd, _mask, _cookie, n = struct.unpack_from("iIII", data, i)
+            names.append(data[i + 16:i + 16 + n].split(b"\0", 1)[0].decode("utf-8", "replace"))
+            i += 16 + n
+
+
+class Daemon:
+    """BlueZ's signals and ztos-audiod's file into Policy; Policy's calls out.
+    io: connect(path, done(error)), device_props(path, cb(props or None)),
+    after(seconds, fn) -> handle, cancel(handle), pause() (the players)."""
+
+    def __init__(self, io, clock=now_s):
+        self.io = io
+        self.clock = clock
+        self.policy = Policy()
+        self.adapters = {}       # adapter path -> powered
+        self.paths = {}          # address -> device path
+        self.audio_dev = {}      # address -> is an audio device (from its UUIDs)
+        self.reasons = {}        # address -> (reason, time) from the Disconnected signal
+        self.waiting = {}        # address -> handle: Connected=false, waiting for the reason
+        self.timer = None
+
+    # ---- start: what BlueZ has now
+    def objects(self, objs):
+        for path, ifaces in (objs or {}).items():
+            if ADAPTER_IFACE in ifaces:
+                self.adapters[str(path)] = bool(ifaces[ADAPTER_IFACE].get("Powered", False))
+            if DEVICE_IFACE in ifaces:
+                self._device(str(path), ifaces[DEVICE_IFACE])
+
+    def _device(self, path, props):
+        mac = mac_of_path(path)
+        if not mac:
+            return None
+        self.paths[mac] = path
+        if "UUIDs" in props:
+            self.audio_dev[mac] = is_audio_device(props["UUIDs"])
+        return mac
+
+    def audio_text(self, text):
+        self.policy.audio(bt_outputs(text), self.clock())
+        self._arm()
+
+    # ---- BlueZ's signals
+    def properties_changed(self, iface, changed, path):
+        path = str(path)
+        if iface == ADAPTER_IFACE and "Powered" in changed:
+            self.adapters[path] = bool(changed["Powered"])
+            if not changed["Powered"]:
+                self.policy.bluetooth_off([m for m, p in self.paths.items() if p.startswith(path + "/")])
+        elif iface == DEVICE_IFACE:
+            mac = self._device(path, changed)
+            if mac and "Connected" in changed:
+                if changed["Connected"]:
+                    self._cancel_wait(mac)
+                    self.policy.connected(mac)
+                else:
+                    self._cancel_wait(mac)
+                    # what it was playing is taken now: the stream may move to the
+                    # speaker before the reason comes
+                    at = self.clock()
+                    was = self.policy.was_playing(mac, at)
+                    if was:
+                        # now, not after the reason: the sound is on its way to the speaker
+                        log(mac, "dropped while playing: pausing the players")
+                        self.io.pause()
+                    self.waiting[mac] = self.io.after(REASON_WAIT_S, lambda: self._judge(mac, at, was))
+        self._arm()
+
+    def disconnected_signal(self, reason, path):
+        mac = mac_of_path(path)
+        if mac:
+            self.reasons[mac] = (str(reason), self.clock())
+
+    def interfaces_removed(self, path, ifaces):
+        mac = mac_of_path(path)
+        if mac and DEVICE_IFACE in ifaces:
+            self._cancel_wait(mac)
+            self.policy.removed(mac)
+            self.paths.pop(mac, None)
+            self.audio_dev.pop(mac, None)
+        if ADAPTER_IFACE in ifaces:
+            self.adapters.pop(str(path), None)
+        self._arm()
+
+    def interfaces_added(self, path, ifaces):
+        self.objects({path: ifaces})
+
+    def bluez_owner(self, owner):
+        if not owner:
+            for mac in list(self.waiting):
+                self._cancel_wait(mac)
+            self.policy.bluez_gone()
+            self.adapters.clear()
+        self._arm()
+
+    def _cancel_wait(self, mac):
+        h = self.waiting.pop(mac, None)
+        if h is not None:
+            self.io.cancel(h)
+
+    def _judge(self, mac, dropped, was):
+        """dropped: when Connected went false; was: playing through it then."""
+        self.waiting.pop(mac, None)
+        reason, at = self.reasons.pop(mac, (None, 0))
+        if abs(dropped - at) > 10:
+            reason = None
+        path = self.paths.get(mac)
+        if mac in self.audio_dev or not path:
+            self._decide(mac, reason, self.audio_dev.get(mac, False), dropped, was)
+            return
+        # UUIDs not seen yet: ask (the answer can't make it a reconnect for a non-audio device)
+        self.io.device_props(path, lambda props: self._decide(
+            mac, reason, is_audio_device((props or {}).get("UUIDs")), dropped, was))
+
+    def _decide(self, mac, reason, audio_device, now, was):
+        self.policy.disconnected(mac, reason, audio_device, now, was)
+        self._arm()
+
+    # ---- calls and the timer
+    def _arm(self):
+        if self.timer is not None:
+            self.io.cancel(self.timer)
+            self.timer = None
+        now = self.clock()
+        for mac in self.policy.due(now):
+            self._call(mac)
+        wait = self.policy.wake_in(self.clock())
+        if wait is not None:
+            self.timer = self.io.after(max(0.5, wait), self._tick)
+
+    def _tick(self):
+        self.timer = None
+        self._arm()
+
+    def _call(self, mac):
+        path = self.paths.get(mac)
+        adapter = path.rsplit("/", 1)[0] if path else None
+        if not path or not self.adapters.get(adapter, False):
+            self.policy.connect_done(mac, "org.bluez.Error.NotReady", self.clock())
+            return
+        log(mac, "calling it back: Connect()")
+
+        def done(error):
+            self.policy.connect_done(mac, error, self.clock())
+            self._arm()
+        self.io.connect(path, done)
+
+
+def main():
+    import dbus
+    import dbus.mainloop.glib
+    from gi.repository import GLib
+
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()      # exits if the bus goes away: systemd starts it again
+    loop = GLib.MainLoop()
+
+    class IO:
+        def after(self, seconds, fn):
+            def run():
+                fn()
+                return False
+            return GLib.timeout_add(int(seconds * 1000), run)
+
+        def cancel(self, handle):
+            GLib.source_remove(handle)
+
+        def connect(self, path, done):
+            try:
+                dev = dbus.Interface(bus.get_object(BUS_NAME, path, introspect=False), DEVICE_IFACE)
+                dev.Connect(reply_handler=lambda: done(None),
+                            error_handler=lambda e: done(e.get_dbus_name() or "failed"),
+                            timeout=CONNECT_TIMEOUT_S)
+            except dbus.DBusException as e:
+                name = e.get_dbus_name() or "failed"
+
+                def later():
+                    done(name)
+                    return False
+                GLib.idle_add(later)
+
+        def pause(self):
+            for cmd in PAUSE_COMMANDS:
+                argv = ([PAUSE_WRAPPER] if PAUSE_WRAPPER else []) + list(cmd)
+                try:
+                    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL, close_fds=True)
+                except OSError as e:
+                    log("can't pause (%s): %s" % (cmd[0], e))
+                    continue
+
+                def reaped(pid, status, cmd=cmd, p=p):
+                    p.returncode = 0        # GLib has reaped it: subprocess mustn't wait again
+                    code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else status
+                    # playerctl says 1 when no player is there to pause: that's fine
+                    if code != 0 and not (cmd[0] == "playerctl" and code == 1):
+                        log("pause: %s exited %d" % (" ".join(cmd[-2:]), code))
+                GLib.child_watch_add(GLib.PRIORITY_DEFAULT, p.pid, reaped)
+
+        def device_props(self, path, cb):
+            try:
+                props = dbus.Interface(bus.get_object(BUS_NAME, path, introspect=False), PROPS_IFACE)
+                props.GetAll(DEVICE_IFACE, reply_handler=cb, error_handler=lambda e: cb(None))
+            except dbus.DBusException:
+                cb(None)
+
+    d = Daemon(IO())
+
+    def load_objects():
+        try:
+            om = dbus.Interface(bus.get_object(BUS_NAME, "/", introspect=False), OM_IFACE)
+            om.GetManagedObjects(reply_handler=d.objects, error_handler=lambda e: None)
+        except dbus.DBusException:
+            pass
+
+    bus.add_signal_receiver(lambda iface, changed, inval, path=None: d.properties_changed(str(iface), changed, path),
+                            "PropertiesChanged", PROPS_IFACE, BUS_NAME, path_keyword="path")
+    bus.add_signal_receiver(lambda name, message, path=None: d.disconnected_signal(name, path),
+                            "Disconnected", DEVICE_IFACE, BUS_NAME, path_keyword="path")
+    bus.add_signal_receiver(lambda path, ifaces: d.interfaces_added(str(path), ifaces),
+                            "InterfacesAdded", OM_IFACE, BUS_NAME)
+    bus.add_signal_receiver(lambda path, ifaces: d.interfaces_removed(str(path), [str(i) for i in ifaces]),
+                            "InterfacesRemoved", OM_IFACE, BUS_NAME)
+
+    def owner(name):
+        d.bluez_owner(name)
+        if name:
+            load_objects()
+    bus.watch_name_owner(BUS_NAME, owner)
+
+    def read_audio():
+        try:
+            with open(AUDIO_STATE) as f:
+                d.audio_text(f.read())
+        except OSError:
+            pass
+    fd = inotify_dir(RUN)
+    if fd is None:
+        log("no inotify: reading ztos-audiod's file every 2 s")
+        GLib.timeout_add_seconds(2, lambda: read_audio() or True)
+    else:
+        def changed(_fd, _cond):
+            if os.path.basename(AUDIO_STATE) in inotify_names(fd):
+                read_audio()
+            return True
+        GLib.io_add_watch(fd, GLib.IO_IN, changed)
+    read_audio()
+    log("started")
+    loop.run()
+
+
+if __name__ == "__main__":
+    main()

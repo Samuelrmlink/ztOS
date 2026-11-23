@@ -52,6 +52,19 @@ assert a.needs_boost(20, dict(SPEAKER, percent=0))
 # Bluetooth: the device's volume comes after the encoder, so never above 1
 assert a.stream_gain(57, BT) == 1.0 and a.needs_boost(57, BT)
 assert close(a.stream_gain(20, BT), a.cube(20) / a.cube(30))
+# wired headphones: never above unity, and a ring or an alarm turns them up no
+# further than HEADPHONE_BOOST_MAX, however loud it should be
+HP = {"name": "ztos-headphones", "kind": "headphones", "percent": 10, "mute": False}
+assert a.stream_gain(57, HP) <= 1.0 and a.stream_gain(100, dict(HP, percent=1)) == 1.0
+assert a.needs_boost(57, HP)
+assert a.boost_percent(100, HP) == a.HEADPHONE_BOOST_MAX
+assert a.boost_percent(20, HP) <= a.HEADPHONE_BOOST_MAX
+assert not a.needs_boost(100, dict(HP, percent=a.HEADPHONE_BOOST_MAX))
+assert a.needs_boost(100, dict(HP, percent=a.HEADPHONE_BOOST_MAX, mute=True))
+for lvl in range(0, 101, 5):
+    for pc in range(0, 101, 10):
+        if a.needs_boost(lvl, dict(HP, percent=pc)):
+            assert a.boost_percent(lvl, dict(HP, percent=pc)) <= a.HEADPHONE_BOOST_MAX
 # nothing known about the output: the level alone, as before
 assert close(a.stream_gain(57, None), a.cube(57))
 assert a.stream_gain(0, SPEAKER) == 0.0

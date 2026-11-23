@@ -6,7 +6,7 @@ set -euo pipefail
 # Waydroid not set up yet (ztos-waydroid-images: no images, or no binder in
 # this kernel): no Android to freeze or set (done), none to start (3: not up).
 if [[ ! -e /var/lib/waydroid/waydroid.cfg ]]; then
-    case $1 in freeze|display|settings|audio) exit 0 ;; *) exit 3 ;; esac
+    case $1 in freeze|display|settings|audio|media) exit 0 ;; *) exit 3 ;; esac
 fi
 lxc_args=(-P /var/lib/waydroid/lxc -n waydroid)
 # Frozen, or stuck half way (FREEZING: something thawed the cgroup under a
@@ -61,6 +61,15 @@ settings() {
             # the ring stream first: leaving vibrate unmutes notifications at 1
             cmd media_session volume --stream 2 --set "$1" || exit
             cmd media_session volume --stream 5 --set 0 || exit
+            # media at full: ztOS sets the loudness (the panel, the keys,
+            # ztos-audiod). Android at 5 of 15 left Spotify at -33 dB, so it
+            # sounded muted (8.54). Every output Android keeps a level for.
+            for k in volume_music volume_music_speaker volume_music_bt_a2dp \
+                     volume_music_ble_headset volume_music_headset \
+                     volume_music_usb_headset volume_music_remote_submix; do
+                settings put system "$k" 15
+            done
+            cmd media_session volume --stream 3 --set 15 || exit
             settings put system sound_effects_enabled 0
             settings put system lockscreen_sounds_enabled 0
             settings put system dtmf_tone 0
@@ -89,6 +98,14 @@ display() {
     local key=KEYCODE_SLEEP
     [[ $1 == on ]] && key=KEYCODE_WAKEUP
     android_sh '[ "$(getprop sys.boot_completed)" = 1 ] && cmd input keyevent '"$key" >/dev/null 2>&1 || true
+}
+# A media key to Android's media button session (the app that last played:
+# Spotify...), as a headset's would be. Only pause: ztos-bt-reconnect's, when
+# the Bluetooth device carrying the sound drops (ROADMAP 8.64). A frozen or
+# stopped Android plays nothing, and is left as it is.
+media() {
+    [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == RUNNING ]] || return 0
+    android_sh '[ "$(getprop sys.boot_completed)" = 1 ] && cmd media_session dispatch "$1"' sh "$1" >/dev/null 2>&1 || true
 }
 case $1 in
     audio)
@@ -126,6 +143,10 @@ case $1 in
     settings)
         [[ $# == 1 ]] || exit 2
         settings
+        ;;
+    media)
+        [[ $# == 2 && $2 == pause ]] || exit 2
+        media pause
         ;;
     install)
         [[ $# == 2 ]] || exit 2
@@ -233,6 +254,12 @@ case $1 in
                timeout 3 lxc-attach "${lxc_args[@]}" -- /system/bin/service check waydroidplatform 2>/dev/null | grep -q ': found$'; then
                 settings
                 /usr/local/libexec/ztos-waydroid-audio
+                # The shell's word that Android is up (ztMETRO's WD_READY_MARKER):
+                # without it ztMETRO says "Android Virtual Runtime has stopped" and
+                # launches no Android app. Root writes it here: ztos-waydroid-boot
+                # runs as the user, who cannot write /run (Permission denied after
+                # every login, 2026-11-22).
+                install -m644 /dev/null /run/ztos-waydroid-boot-ready
                 exit 0
             fi
             sleep 1

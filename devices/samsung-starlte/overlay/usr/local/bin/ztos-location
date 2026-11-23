@@ -1,0 +1,21 @@
+#!/bin/sh
+# ztos-location: the phone's location switch, from a terminal.
+#   ztos-location            what it is now (enabled=, engine=, readers=)
+#   ztos-location on | off   turn it on or off (kept across reboots)
+# Off means ztos-gnss-gate keeps the GNSS engine off for every reader
+# (geoclue, Linux gpsd, Waydroid's bridge). The shell's Location tile does
+# the same. Only root and the phone's user may switch it.
+CTL=/run/ztos-gnss/control
+STATE=/run/ztos-gnss/state
+case "${1:-status}" in
+on|off)
+	[ -p $CTL ] || { echo "ztos-location: the GNSS gate is not running" >&2; exit 1; }
+	[ -w $CTL ] || { echo "ztos-location: only the phone's user or root may switch location" >&2; exit 1; }
+	printf '%s\n' "$1" > $CTL
+	;;
+status)
+	cat $STATE 2>/dev/null || { echo "ztos-location: the GNSS gate is not running" >&2; exit 1; }
+	;;
+*)
+	echo "usage: ztos-location [on | off | status]" >&2; exit 2 ;;
+esac

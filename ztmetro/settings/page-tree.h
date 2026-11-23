@@ -40,14 +40,17 @@ enum page {
 	PAGE_POWER,	/* battery + performance: power, then hardware */
 	PAGE_SYSTEM,	/* date + region, keyboard, developer, about */
 	PAGE_ANIMATION,	/* animation speeds */
-	PAGE_STYLE,	/* the shell's style: chosen, then applied with a warning */
-	PAGE_TILES,	/* Tiles Shell: the start screen's columns and background */
+	PAGE_TILES,	/* home screen: how Start's tiles and its background photo look */
+	PAGE_OVERLAYS,	/* app switcher + search: their backdrops' opacity, frost, brightness */
 	PAGE_LOCK,	/* Lock Screen: its photo, and whether waking shows it */
 	PAGE_APP_SCALE,	/* app scaling: a size for each app */
 	PAGE_LED,	/* the front LED: what lights it, and in what colour */
 	PAGE_AOD,	/* the always-on display: shown when, its theme, its brightness */
 	PAGE_DESKTOP,	/* desktop mode: XFCE on a monitor (ztmetro/desktop/desktop-page.c) */
 	PAGE_ANDROID,	/* Android apps (Waydroid): what they may do on the phone */
+	PAGE_PASSCODE,	/* the lock screen's passcode (zrn-passcoded): passcodepage.h */
+	PAGE_PASSCODE_ENTRY,	/* typing one: new, confirm, current */
+	PAGE_PASSCODE_KEY,	/* the recovery key, shown once */
 	/* Sound's pages (sound/sound-pages.h), in its order: two pivots of two tabs */
 	PAGE_SOUND_EQ, PAGE_SOUND_FX, PAGE_SOUND_OUT, PAGE_SOUND_APPS,
 	/* AirPods' (pods/pods-pages.h), in its order: four tabs */
@@ -55,6 +58,7 @@ enum page {
 	/* ZrnDevTest's (devtest/devtest-pages.h), in its order */
 	PAGE_DEVTEST, PAGE_DEVTEST_SYSTEM, PAGE_DEVTEST_SENSORS, PAGE_DEVTEST_JOURNAL, PAGE_DEVTEST_KERNEL,
 	PAGE_DEVTEST_SHELL, PAGE_DEVTEST_HARDWARE, PAGE_DEVTEST_LOGS, PAGE_DEVTEST_ANIM, PAGE_DEVTEST_PREVIEW,
+	PAGE_DEVTEST_TEMPS, PAGE_DEVTEST_CHARGING,
 	N_PAGES
 };
 
@@ -94,12 +98,15 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_ACCENTS] = PAGE_THEME,
 	[PAGE_TILES] = PAGE_THEME,
 	[PAGE_LOCK] = PAGE_THEME,
+	[PAGE_PASSCODE] = PAGE_LOCK,
+	[PAGE_PASSCODE_ENTRY] = PAGE_PASSCODE,
+	[PAGE_PASSCODE_KEY] = PAGE_PASSCODE,
 	[PAGE_AOD] = PAGE_DISPLAY,
 	[PAGE_DESKTOP] = PAGE_DISPLAY,
-	[PAGE_WALLS] = PAGE_TILES,	/* or Lock Screen: see page_parent */
-	[PAGE_ANIMATION] = PAGE_THEME,
-	[PAGE_STYLE] = PAGE_THEME,
+	[PAGE_WALLS] = PAGE_THEME,	/* customization's background row, for either photo */
+	[PAGE_ANIMATION] = PAGE_DISPLAY,
 	[PAGE_NAVIGATION] = PAGE_THEME,
+	[PAGE_OVERLAYS] = PAGE_THEME,
 	[PAGE_BOOST] = PAGE_POWER,
 	[PAGE_SOUND_EQ] = PAGE_AUDIO,
 	[PAGE_SOUND_FX] = PAGE_AUDIO,
@@ -114,6 +121,8 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_DEVTEST_SYSTEM] = PAGE_DEVTEST,
 	[PAGE_DEVTEST_SENSORS] = PAGE_DEVTEST,
 	[PAGE_DEVTEST_HARDWARE] = PAGE_DEVTEST,
+	[PAGE_DEVTEST_TEMPS] = PAGE_DEVTEST,
+	[PAGE_DEVTEST_CHARGING] = PAGE_DEVTEST,
 	[PAGE_DEVTEST_ANIM] = PAGE_DEVTEST,
 	[PAGE_DEVTEST_PREVIEW] = PAGE_DEVTEST_ANIM,
 	[PAGE_DEVTEST_JOURNAL] = PAGE_DEVTEST_LOGS,
@@ -135,9 +144,14 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "accents", PAGE_ACCENTS },
 	{ "wallpapers", PAGE_WALLS },
 	{ "animation", PAGE_ANIMATION },
-	{ "style", PAGE_STYLE },
-	{ "tiles", PAGE_TILES },
+	{ "home-screen", PAGE_TILES },
+	{ "animations", PAGE_ANIMATION },
+	{ "tiles", PAGE_TILES },	/* its old name (Tiles Shell) */
+	{ "switcher-search", PAGE_OVERLAYS },
 	{ "lock", PAGE_LOCK },
+	{ "passcode", PAGE_PASSCODE },
+	{ "passcode-entry", PAGE_PASSCODE_ENTRY },
+	{ "passcode-key", PAGE_PASSCODE_KEY },
 	{ "navigation", PAGE_NAVIGATION },
 	{ "quick", PAGE_QUICK },
 	{ "display", PAGE_DISPLAY },
@@ -184,20 +198,22 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "devtest-logs", PAGE_DEVTEST_LOGS },
 	{ "devtest-animations", PAGE_DEVTEST_ANIM },
 	{ "devtest-preview", PAGE_DEVTEST_PREVIEW },
+	{ "devtest-temperatures", PAGE_DEVTEST_TEMPS },
+	{ "devtest-charging", PAGE_DEVTEST_CHARGING },
 };
 #define N_PAGE_NAMES (int)(sizeof(PAGE_NAMES) / sizeof(PAGE_NAMES[0]))
 
-/* Whose photo the picker is choosing, and so where it goes back to. */
+/* Whose photo the picker is choosing (both go back to customization). */
 enum { WALL_TARGET_TILES = 1, WALL_TARGET_LOCK = 2 };
 
 /* Pages that are another module's, in a row. */
 static inline bool page_is_sound(int page) { return page >= PAGE_SOUND_EQ && page <= PAGE_SOUND_APPS; }
 static inline bool page_is_pods(int page) { return page >= PAGE_PODS_STATUS && page <= PAGE_PODS_ABOUT; }
-static inline bool page_is_devtest(int page) { return page >= PAGE_DEVTEST && page <= PAGE_DEVTEST_PREVIEW; }
+static inline bool page_is_devtest(int page) { return page >= PAGE_DEVTEST && page <= PAGE_DEVTEST_CHARGING; }
 
 /* Where back goes from a page. */
 static inline int page_parent(int page, int wall_target) {
-	if (page == PAGE_WALLS && wall_target == WALL_TARGET_LOCK) return PAGE_LOCK;
+	(void)wall_target;	/* (the picker went back to Lock Screen for its photo until 8.70) */
 	return page >= 0 && page < N_PAGES ? PAGE_PARENTS[page] : PAGE_NO_PARENT;
 }
 

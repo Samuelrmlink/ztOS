@@ -1,7 +1,7 @@
 # Bluetooth on the Galaxy S9: working (2026-10-18)
 
 Up at boot: `zrn-bluetooth.service` loads `driver/zrn-bt.ko` and runs
-`btattach` (Broadcom protocol); `zrn-bluetooth-addr.service` gives the
+`btattach` (Broadcom protocol, 3 Mbaud: see "UART speed" below); `zrn-bluetooth-addr.service` gives the
 controller the phone's own address from EFS (`50:77:05:8E:75:B9` here,
 cached in `/var/lib/zrn-bluetooth`) before bluetoothd starts. Other devices see
 the phone's hostname (`ztos`): bluetoothd's hostname plugin overrides the `Name`
@@ -33,6 +33,117 @@ What it took, beyond the plan below:
 Tools used to find this, in the scratchpad of the session: raw register
 pokes over /dev/mem, a loopback test, and reading the UART pins as GPIO
 inputs with pull-downs (the chip drives its TX high once powered).
+
+## UART speed: 3 Mbaud (ROADMAP 8.58, 2026-11-22)
+
+Until 8.58 the HCI link ran at 115200 baud, about 90 kbit/s of payload. AAC
+music to the AirPods played for half a second and went silent (a sine tone,
+which encodes small, played). Read on the phone: `stty` 115200, UART_BT
+`UBRDIV` 0x6b / `UFRACVAL` 0x8 (200 MHz / 1736), and in the setup log the
+Read Local Name answer took 24 ms in both passes, before and after the
+firmware, which is 255 bytes at 115200.
+
+Why: `patch-btbcm.py` gave hci_bcm a 3 Mbaud fallback for starlte, but with
+btattach the line discipline already sets the operating speed to the tty's
+(`hci_uart_tty_open`: `hu->oper_speed = c_ospeed`), and that comes first. So
+hci_bcm "switched" the chip to 115200. The fallback is gone from the patch.
+
+Now `zrn-bluetooth` runs `btattach -S <speed>`. hci_bcm still talks to the chip
+at 115200 first (its `init_speed`) and loads the firmware at that speed (~11 s).
+Then it sends the Broadcom baud command 0xfc18 and moves the host UART to the
+new speed. The speed is the board's: `max-speed` in the device tree's
+`bluetooth-board` node (`kernel/make-dts.py`). A tree without it gets 3000000.
+
+* **3000000 is stock's:** stock `libbt-vendor.so` (G960FXXUHFVG4, vendor
+  partition) logs "set UART baud %i" with 3000000 twice, before and after the
+  patch download, and `userial_vendor_init` defaults to it. No
+  `bt_vendor.conf` exists to change that.
+* **The divisor:** 200 MHz / 66 makes 3,030,303 baud (+1.0 %, `UBRDIV` 3,
+  `UFRACVAL` 2), well inside the ±2–3 % a UART tolerates. No divider of
+  CMU_PERIC1's 200 MHz makes 3 Mbaud exactly (200/3 is not an integer).
+* **Not faster:** 4 Mbaud would be exact (200 MHz / 50), but samsung_tty caps
+  at 3000000. Above 3000000, hci_bcm first sends the 48 MHz UART clock command
+  (0xfc45), and it reads `bcm->dev` to do that, which is NULL under btattach.
+  It would oops.
+* **Headroom:** 2.4 Mbit/s of payload. AAC at 320 kbit/s plus a 64 kbit/s
+  voice link is about 6 times less.
+* **Why not serdev:** a `brcm,bcm4345c5` serdev child needs the UART in the
+  device tree. Here zrn-bt registers it at runtime, after it has opened the
+  clock gates and taken it out of USI reset, since an earlier read hangs the
+  bus. hci_bcm's serdev driver would also take BT_EN, HOST_WAKE and the chip's
+  runtime PM, which zrn-bt and its sleep fixes own.
+* **Restarting the service:** at 115200 a second `btattach` in the same boot
+  found the chip where the first left it. At 3 Mbaud it would not, because
+  hci_bcm always starts at 115200. So `zrn-bluetooth` resets the chip first
+  (zrn-bt's write-only `power_cycle` parameter: BT_EN low 30 ms, then high)
+  when `/run/zrn-bluetooth.attached` says it attached before in this boot.
+* **Rollback:** a drop-in with `Environment=ZRN_BT_SPEED=115200` for
+  `zrn-bluetooth.service`, or the old script, then a reboot. zrn-bt cannot be
+  reloaded within a boot.
+
+Test: `bluetooth/test-uart-speed.sh`, on the host. It checks the speed choice
+and the divisor.
+
+## Reconnecting (ROADMAP 8.52, 2026-11-22)
+
+ztOS connects a device only when something asks for it by address: Settings, an
+Android app through the bridge, a daemon such as cubridge (the Chameleon). It
+doesn't call devices back by itself. The one exception: an audio device that
+drops while an app is playing through it (out of range, switched off or put
+away mid-song) is called back for up to 5 minutes by `ztos-bt-reconnect`. It
+has to be the device carrying that sound, not the speaker or another headset,
+and the disconnect must not have come from the phone (Settings' "disconnect",
+Bluetooth off). Once the device is back, `ztos-audiod` gives it the sound.
+
+What used to call devices back, and what stops it now:
+
+| Who | What it did | Now |
+|---|---|---|
+| PipeWire (`bluez5.auto-connect` in `52-ztos-bluetooth.conf`) | `ConnectProfile()` on every paired, trusted audio device 2 s after it first saw it, at every boot and every WirePlumber or bluetoothd start. The journal at each boot shows `Unable to get Hands-Free Voice gateway SDP record: Host is down` about 9 s after bluetoothd starts, then the AirPods connected | `bluez5.auto-connect = [ ]` |
+| bluetoothd's policy plugin | after a link loss, A2DP/HFP devices called back 7 times over about 2 minutes; after a suspend, called back on resume (`policy.c:reconnect_timeout()`, 22 Nov), whether anything was playing or not | `[Policy] ReconnectAttempts = 0` in `main.conf` |
+| `ztos-bt-reconnect` | (new) | calls back only the audio device that was playing as it dropped |
+
+Still as BlueZ does it, and not the phone's own doing:
+
+* A trusted device may connect to the phone by itself: AirPods taken out of
+  their case, a speaker switched on. The controller accepts pages from bonded
+  devices (`device_list` in debugfs), and the agent allows a trusted device's
+  services without asking.
+* A bonded LE device with an auto-connect profile (HID over GATT, LE Audio)
+  goes on the kernel's accept list, and the controller connects when that
+  device advertises. None is paired now. The Chameleon has no such profile.
+  Its entry, `auto_connect 5`, is cubridge's pending `Connect()`.
+* A classic HID device that wants the host to reconnect it is paged for 3
+  minutes by the input plugin. None is paired now, and `input.conf` has no
+  switch for it.
+
+### Paused when it drops, never played again by the phone (ROADMAP 8.64)
+
+A device that drops while it carries the sound pauses the players at once, as
+Android does for "audio becoming noisy": `ztos-bt-reconnect` runs
+`playerctl --all-players pause` (MPRIS) and `ztos-waydroid-recover media pause`
+(Android's media button session: Spotify and the rest in Waydroid) as soon as
+BlueZ says `Connected=false`, whatever the reason. Before this, nothing paused
+anything: on 22 Nov Spotify's stream ran on through two drops of the AirPods
+(logcat: `AAudioStream_requestStart` at 22:17:44, no pause until the owner's
+at 22:19:45; AudioFlinger `write blocked for 947 msecs` at each drop, while
+PipeWire moved the stream to the speaker), and when the AirPods came back
+(called back, or by themselves) ztos-audiod moved the still-playing stream
+back to them. It sounded like autoplay. Nothing on the phone ever sends play:
+the players play again only for the play button, or for the device's own play
+(AVRCP). The callback itself is unchanged: a device that was playing is still
+called back, and finds the players paused.
+
+Two gaps, not this item's: AVRCP play/pause from a headset reaches only MPRIS
+players (through `mpris-proxy`). Android's apps have no MPRIS player here, and
+bluetoothd can't make its AVRCP key device (`init_uinput(): No such file or
+directory`: no `/dev/uinput`), so an AirPods tap doesn't reach Spotify. And
+`ztos-podsd` reads ear detection, but doesn't act on it: the pods' own AVRCP
+does that.
+
+To check: `journalctl --user -u ztos-bt-reconnect` says what it decided for each
+audio device that dropped. Tests: `make -C ztmetro check-bt-reconnect
+check-bt-reconnect-e2e check-audiod`.
 
 ## The original plan (2026-10-18, morning)
 

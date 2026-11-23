@@ -69,6 +69,14 @@ WCIN counts as the wireless input only while CHGIN is not valid; CHGIN wins
 when both are there anyway. The wireless supply takes the charger's
 "wireless" child node when the DT has one, so the fuel gauge can list it in
 power-supplies and report Charging on a pad.
+
+Float voltage: constant_charge_voltage is writable, through the driver's own
+max77705_set_float_voltage() (CHG_CNFG_04 0xBB, CHG_CV_PRM bits 5:0, a
+read-modify-write that keeps bits 7:6), clamped to 4.15-4.35 V. zrn-charge
+sets 4.24 V for an aged battery (Samsung's 1000-cycle step) and 4.15 V in
+the warm and cold steps; probe still sets the battery's own 4.35 V. Approved
+by the owner 2026-11-12. This step has its own mark, so it also applies to a
+driver the rest of this script has already patched.
 """
 from pathlib import Path
 import sys
@@ -141,8 +149,51 @@ hblock('\t/* zboot: max77705-charger state { */\n', '\t/* } zboot */\n', '''\tst
 HFILE.write_text(h)
 
 s = CFILE.read_text()
+FLOAT_MARK = 'zboot: float voltage writable'
+
+
+def float_step(s):
+    """constant_charge_voltage writable, 4.15-4.35 V (idempotent, own mark)."""
+    if FLOAT_MARK in s:
+        return s
+    old_w = '''	switch (psp) {
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+		return true;
+'''
+    new_w = '''	switch (psp) {
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
+	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:	/* zboot: float voltage writable */
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+		return true;
+'''
+    old_s = '''	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+		mutex_lock(&chg->lock);
+		max77705_set_ceiling(chg, MAX77705_IN_CHGIN, val->intval);
+		mutex_unlock(&chg->lock);
+		break;
+'''
+    new_s = '''	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
+		/* zboot: 4.15 V (warm, cold) to 4.35 V (the battery's own) */
+		err = max77705_set_float_voltage(chg, clamp_val(val->intval, 4150000, 4350000));
+		break;
+''' + old_s
+    for old, new in ((old_w, new_w), (old_s, new_s)):
+        if s.count(old) != 1:
+            die(f'float anchor changed: {old.splitlines()[1]!r}')
+        s = s.replace(old, new)
+    return s
+
+
 if MARK in s:
-    print('patch-max77705-charger: already applied')
+    t = float_step(s)
+    if t != s:
+        CFILE.write_text(t)
+        print('patch-max77705-charger: already applied; float voltage made writable')
+    else:
+        print('patch-max77705-charger: already applied')
     sys.exit(0)
 
 
@@ -1024,6 +1075,7 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 
 ''')
 
+s = float_step(s)
 CFILE.write_text(s)
 print('patch-max77705-charger: AICL back-off, input-current ramp, battery charge current, '
-      'max77705-wireless')
+      'max77705-wireless, float voltage writable')

@@ -13,6 +13,11 @@ bool zmc_perflog(void);	/* zrnmetrocore.c */
 #include <wayland-egl.h>
 #include <math.h>
 #include <stdint.h>
+
+/* the themed page background (zrnmetrocore.c): white in light, black in dark.
+ * The frame clear matches it, so the entrance and the page-turn gap show the
+ * theme colour, not black. */
+uint32_t zmc_bg_color(void);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +39,7 @@ static struct {
 	struct wl_egl_window *window;
 	struct wl_surface *wl_surface;
 	GLuint program, white;
-	GLint size, eye, alpha, opaque, solid, color, native, reveal, dpitch;
+	GLint size, eye, alpha, opaque, solid, color, native;
 	int w, h, scale, tile_h, max_size;
 	bool ready, failed;
 	unsigned clock;
@@ -43,8 +48,6 @@ static struct {
 	unsigned frames, uploads;
 	size_t bytes;
 } gpu;
-
-float zmg_reveal = 1.0f, zmg_dot_pitch = 4.6f;
 
 static double clock_ms(void) {
 	struct timespec ts;
@@ -108,18 +111,11 @@ bool zmg_init(struct wl_display *display, struct wl_surface *surface, int w, int
 		"void main(){ uv=texcoord; gl_Position=vec4(2.0*position.x/size.x-1.0,"
 		"1.0-2.0*position.y/size.y,0.0,1.0-position.z/eye); }";
 	static const char fragment[] =
-		"precision mediump float; varying vec2 uv; uniform sampler2D image;\n"
-		"#ifdef GL_FRAGMENT_PRECISION_HIGH\n#define HP highp\n#else\n#define HP mediump\n#endif\n"
+		"precision mediump float; varying vec2 uv; uniform sampler2D image;"
 		"uniform float alpha; uniform bool opaque; uniform bool solid; uniform vec4 color;"
 		"uniform bool native;"	/* an EGLImage samples in order; Cairo's BGRA is swapped */
-		/* the DotMatrix style's arrival (zmg_reveal): through a lattice of dots */
-		"uniform float reveal; uniform float dpitch;"
 		"void main(){ if(solid){gl_FragColor=color;return;} vec4 c=texture2D(image,uv);"
 		"c=vec4(native?c.rgb:c.bgr,opaque?1.0:c.a)*alpha;"
-		"if(reveal<0.999){ HP vec2 q=gl_FragCoord.xy/dpitch; HP vec2 cell=floor(q);"
-		"HP float h=fract(sin(dot(cell,vec2(12.9898,78.233)))*43758.5453);"
-		"float r=0.36+max(0.0,reveal-0.7)*1.5;"
-		"c*=step(h,reveal/0.7)*(1.0-smoothstep(r-0.08,r,length(fract(q)-0.5))); }"
 		"gl_FragColor=c; }";
 	GLuint vs = zmr_shader(GL_VERTEX_SHADER, vertex), fs = zmr_shader(GL_FRAGMENT_SHADER, fragment);
 	if (!vs || !fs) {
@@ -145,8 +141,6 @@ bool zmg_init(struct wl_display *display, struct wl_surface *surface, int w, int
 	gpu.solid = glGetUniformLocation(gpu.program, "solid");
 	gpu.color = glGetUniformLocation(gpu.program, "color");
 	gpu.native = glGetUniformLocation(gpu.program, "native");
-	gpu.reveal = glGetUniformLocation(gpu.program, "reveal");
-	gpu.dpitch = glGetUniformLocation(gpu.program, "dpitch");
 	static const unsigned char white[] = {255,255,255,255};
 	glGenTextures(1, &gpu.white);
 	glBindTexture(GL_TEXTURE_2D, gpu.white);
@@ -190,7 +184,8 @@ void zmg_begin(int w, int h, int scale) {
 	glViewport(0, 0, w * scale, h * scale);
 	glDisable(GL_SCISSOR_TEST);
 	glDisable(GL_DEPTH_TEST);
-	glClearColor(0, 0, 0, 1);
+	uint32_t zbg = zmc_bg_color();
+	glClearColor(((zbg >> 16) & 0xff) / 255.0f, ((zbg >> 8) & 0xff) / 255.0f, (zbg & 0xff) / 255.0f, 1);
 	glClear(GL_COLOR_BUFFER_BIT);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
@@ -372,8 +367,6 @@ void zmg_surface(cairo_surface_t *source, unsigned revision, double x0, double y
 	if (left >= right || top >= bottom) return;
 	glUniform1i(gpu.solid, 0);
 	glUniform1i(gpu.native, 0);
-	glUniform1f(gpu.reveal, zmg_reveal);
-	glUniform1f(gpu.dpitch, zmg_dot_pitch * gpu.scale);
 	glUniform1i(gpu.opaque, cairo_image_surface_get_format(source) == CAIRO_FORMAT_RGB24);
 	glUniform1f(gpu.alpha, alpha);
 	int first = (int)top / gpu.tile_h, last = (int)ceil(bottom / gpu.tile_h);
@@ -427,8 +420,6 @@ void zmg_row_draw(unsigned texture, double u0, double v0, double u1, double v1,
 	}
 	glUniform1i(gpu.solid, 0);
 	glUniform1i(gpu.native, 0);
-	glUniform1f(gpu.reveal, zmg_reveal);
-	glUniform1f(gpu.dpitch, zmg_dot_pitch * gpu.scale);
 	glUniform1i(gpu.opaque, 1);
 	glUniform1f(gpu.alpha, alpha);
 	glBindTexture(GL_TEXTURE_2D, texture);
@@ -534,8 +525,6 @@ void zmg_dmabuf_draw(void *image, const struct zmg_vertex c[4], float alpha) {
 	}
 	glUniform1i(gpu.solid, 0);
 	glUniform1i(gpu.native, 1);
-	glUniform1f(gpu.reveal, zmg_reveal);
-	glUniform1f(gpu.dpitch, zmg_dot_pitch * gpu.scale);
 	glUniform1i(gpu.opaque, 1);
 	glUniform1f(gpu.alpha, alpha);
 	glBindTexture(GL_TEXTURE_2D, e->tex);

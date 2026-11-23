@@ -114,5 +114,3 @@ swipes right closes the app, the viewer included, so a pinch can't start there.
 
 The viewer draws in `.overlay`, and needs the GPU. So does the grid's thumbnails, like
 Settings' wallpaper grid. Without one the grid stays grey and a tap does nothing.
-Under the DotMatrix style photos are still plain photos on the GPU, as in Camera's roll;
-the pictures of the page used during a page turn are dots.

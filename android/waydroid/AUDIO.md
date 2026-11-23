@@ -352,3 +352,73 @@ rollback is required.
 No physical audio recording or reboot was performed. Boot persistence is
 configured, not reboot-tested: another agent is using the phone, and this task
 forbids restarting ztMETRO or Waydroid.
+
+## Android audio out of sight (ROADMAP 8.54)
+
+Report: Spotify (Waydroid) showed as playing, but no sound came out.
+Investigated on 2026-11-22. The owner had not played Spotify that boot, so
+this comes from the code, the journals and the live freeze/thaw state, not
+from a capture of Spotify itself.
+
+### What stops Android's sound
+
+1. **Android is frozen whenever none of its windows is in front.**
+   `ztos-waydroid-power` (power.sh) freezes the whole container on `idle`
+   (Home, another app, the lock screen) and `screen-off`. Only `keep_awake` in
+   `android.conf` was exempt. Nothing checked whether Android was playing. A
+   frozen AudioFlinger writes nothing, so the music stops, while the media tile
+   keeps its last "Playing" (`media/receiver.py` only changes on a POST, and a
+   frozen Android sends none). On the phone `android.conf` doesn't exist, and
+   the power state was `idle` with the container FROZEN.
+2. **Settings > Background apps didn't reach the freeze.** That switch says
+   "Keeps running ... while the screen is off". `ztos-waydroid-network` and
+   zrnperfd read `background-apps`, but power.sh read `keep_awake` only. An app
+   chosen in Settings got Android's background rights, but Android was still
+   frozen under it.
+3. **Android's own restriction.** `ztos-waydroid-network` sets
+   `RUN_ANY_IN_BACKGROUND ignore` and the `restricted` standby bucket on every
+   app that isn't chosen. The logcat this boot shows
+   `AppStandbyController: com.spotify.music restricted by user`. This image's
+   `services.jar` has "Service.startForeground() not allowed due to bg
+   restriction" and "cached idle & background restricted". So Android itself
+   may stop the media service of an app that isn't chosen once it leaves the
+   top. This is not shown with Spotify yet.
+
+The host side was healthy:
+- Waydroid's `stream-properties` volume is 1.0 and not muted.
+- ztos-audiod holds no mute or volume for it.
+- The Pulse socket is bind-mounted.
+- After a HAL reconnect AudioFlinger opened its output: speaker, 48 kHz, master
+  volume 1.0, not muted.
+
+### Fix
+
+- power.sh honours `background-apps`, using the same ID forms that
+  `ztos-waydroid-network` and `background-apps.h` read.
+- power.sh doesn't freeze while Android has an uncorked Pulse stream
+  (`application.name` Waydroid). Its display still sleeps. One finite watcher
+  sleeps in `pactl subscribe`. Once Android has been quiet for 10 s (the gap
+  between tracks), it runs `sync` again, which freezes. It stops early when
+  Android is in front again or the audio server goes. A focus change during the
+  hold leaves the freeze to the watcher.
+
+### Verified
+
+- Host: `tests/test_reliability_power.py` (10 tests; the old 3 were stale, they
+  needed a phone and didn't expect `display`).
+- Phone: a 6 s silent stream named Waydroid, played through `pw-play` with the
+  container RUNNING and the policy `idle`. `sync` left it RUNNING with the
+  watcher up, and a `sync` 2 s after the end didn't freeze. It was FROZEN about
+  10 s after playback ended, and the watcher was gone.
+
+Not verified: Spotify itself playing out of sight, and point 3. Look in logcat
+for `bg restriction` or `stopForeground` after leaving Spotify while it plays.
+
+## Ready marker (found with 8.54)
+
+`ztos-waydroid-boot` is a user unit, and it wrote ztMETRO's ready marker
+`/run/ztos-waydroid-boot-ready` itself. That fails with "Permission denied"
+after every login. Without the marker, ztMETRO says "Android Virtual Runtime
+has stopped" 120 s after the session starts and launches no Android app. A
+greetd shell restart at 21:14 showed it. `ztos-waydroid-recover ready` (root)
+now writes the marker.

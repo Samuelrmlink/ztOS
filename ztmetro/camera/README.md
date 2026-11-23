@@ -36,8 +36,7 @@ shutter now uses the same glyph. The SVG remains an icon-theme fallback.
   front, IR; IR has no picture yet, so it says so and shows the labelled test scene. The
   aperture button toggles F1.5 and F2.4 on the rear, inside the driver's move limit.
   Photos are full size, 12 MP rear and 8 MP front, upright, the front mirrored like its
-  viewfinder. Under DotMatrix the viewfinder is dots, but the camera-roll thumbnail is
-  still a plain picture and the shutter glyph draws wrong.
+  viewfinder.
 * Default: `/dev/video0` if accessible, otherwise a labelled animated test scene.
 * `--device /dev/videoN`: single-plane V4L2 capture, MMAP streaming, negotiated
   YUYV at a requested 640x480. Failed setup falls back to the labelled scene.

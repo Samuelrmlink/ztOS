@@ -54,6 +54,16 @@ def deliver(number, text, wide=False, concat=None, pid=0, stamp=1):
     return SMSC + tp.hex().upper()
 
 
+def wap_push(number, data, part=None):
+    udh = bytes([0x05, 0x04, 0x0b, 0x84, 0x23, 0xf0])
+    if part:
+        udh += bytes([0x00, 0x03]) + bytes(part)
+    ud = bytes([1 + len(udh) + len(data), len(udh)]) + udh + data
+    scts = bytes.fromhex("62010312340100")
+    tp = bytes([0x44]) + address(number) + bytes([0, 4]) + scts + ud
+    return SMSC + tp.hex().upper()
+
+
 def ipc_frame(pdu, network=2):
     data = bytes.fromhex(pdu)
     return (bytes([network, 0, 0, 0, 0, len(data)]) + data).hex()
@@ -114,6 +124,18 @@ def check(daemon):
         expect("a frame that is not GSM is refused", 7)
         err = inject(deliver("+94770000007", "x" * 7 + "€" * 0 + "y" * 150 + "z"))
         expect("a full message", 8)
+        # an MMS notification: 8-bit data to the WAP push port, kept for
+        # ztmmsd (a .pdu file), not a text in the log
+        push = wap_push("+15550100", b"\x01\x06\x01\xbe" + b"\x8c\x82\x98T1\x00\x8d\x92", part=(9, 2, 1))
+        err = inject(push)
+        expect("an MMS notification is not a text", 8)
+        kept = [f for f in os.listdir(d) if f.endswith(".pdu")]
+        if len(kept) != 1 or open(os.path.join(d, kept[0])).read().strip() != push:
+            failures.append(("the notification kept for ztmmsd", kept))
+        else:
+            print("ok   the notification kept for ztmmsd")
+        if "MMS notification (part 1 of 2)" not in err:
+            failures.append(("the notification said", err))
     print("FAILED" if failures else "all passed", failures or "")
     return 1 if failures else 0
 

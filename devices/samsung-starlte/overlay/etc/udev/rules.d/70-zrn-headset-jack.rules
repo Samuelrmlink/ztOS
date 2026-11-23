@@ -1,0 +1,5 @@
+# The 3.5 mm jack's switches and buttons (snd-zrn-abox headset=1): the
+# signed-in user's, for ztos-headsetd (a user service). The shell reads the
+# buttons through its own seat as it reads every keyboard. Before
+# 73-seat-late.rules, which turns uaccess into the session's ACL.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="S9 Headset Jack", TAG+="uaccess"

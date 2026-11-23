@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
@@ -29,19 +30,88 @@
 #include "viewporter-client-protocol.h"
 #include "zt-environment-v1-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
-#include "../retro/dm-chrome.h"
 #include "zrnmetrocore.h"
 #include "zmc-gesture.h"
 #include "zrnboard.h"
 #include "zrnmetrogpu.h"
 #include "zrnmetrorender.h"
+#include "zt-anim.h"
+
+/* Animation speeds (8.66, zt-anim.h): read from the config as it was at the
+ * last page turn or touch, so a change in Settings is in every app's next
+ * motion without a message to each. */
+static struct zt_anim_cfg zanim = {	/* (the defaults until the config is read) */
+	.global = ZT_ANIM_GLOBAL_DEFAULT, .kind = { [0 ... ZT_ANIM_N - 1] = ZT_ANIM_KIND_DEFAULT },
+};
+static struct timespec zanim_mtime;
+static bool zanim_read;
+int zmc_page_anim = ZT_ANIM_APP_PAGES;
+int zmc_next_anim = -1;
+
+static void zanim_refresh(void) {
+	char path[512], line[256];
+	snprintf(path, sizeof(path), "%s/.config/ztmetro/config", getenv("HOME") ? getenv("HOME") : "");
+	struct stat st;
+	bool there = stat(path, &st) == 0;
+	if (zanim_read && there && st.st_mtim.tv_sec == zanim_mtime.tv_sec && st.st_mtim.tv_nsec == zanim_mtime.tv_nsec) {
+		return;
+	}
+	if (zanim_read && !there) return;
+	zanim_read = true;
+	zt_anim_defaults(&zanim);
+	if (!there) return;
+	zanim_mtime = st.st_mtim;
+	FILE *f = fopen(path, "r");
+	while (f && fgets(line, sizeof(line), f)) {
+		char *eq = strchr(line, '=');
+		if (line[0] == '#' || !eq) continue;
+		*eq = 0;
+		char *k = line, *v = eq + 1;
+		while (*k == ' ' || *k == '\t') k++;
+		char *e = eq;
+		while (e > k && (e[-1] == ' ' || e[-1] == '\t')) *--e = 0;
+		while (*v == ' ' || *v == '\t') v++;
+		v[strcspn(v, "\r\n")] = 0;
+		for (e = v + strlen(v); e > v && (e[-1] == ' ' || e[-1] == '\t'); ) *--e = 0;
+		zt_anim_config_line(&zanim, k, v);
+	}
+	if (f) fclose(f);
+}
+
+int zmc_anim_ms(int kind, int ms) {
+	if (!zanim_read) zanim_refresh();
+	return (int)zt_anim_ms(&zanim, kind, ms > 0 ? (uint32_t)ms : 0);
+}
+
+/* `dt` ms of a clock-stepped motion (a glide, a spring) at a kind's speed;
+ * off: one long step that lands it. */
+static double zanim_dt(int kind, double dt) {
+	double rate = zt_anim_rate(&zanim, kind);
+	return rate > 0 ? dt * rate : 10000.0;
+}
+
+/* The page turn's clock: how much faster than written it runs (set as it
+ * begins; off: so fast that it ends at its next frame). */
+static double turn_rate = 1.0;
+
+static uint32_t turn_elapsed(void) {
+	int32_t since = (int32_t)(zmc_now_ms() - zmc.anim_start);
+	if (since <= 0) return 0;
+	double ms = since * turn_rate;
+	return ms > 2e9 ? 2000000000u : (uint32_t)ms;
+}
+
+/* The turn at its end now, whatever its speed. */
+static void turn_finish_now(void) {
+	zmc.anim_start = zmc_now_ms() - (uint32_t)ceil(zmc.anim_total / turn_rate) - 1;
+}
 
 #define MARGIN		ZMC_MARGIN
-#define HEADER_H	ZMC_HEADER_H
+#define HEADER_H	zmc_header_h()	/* the title's height now: smaller in landscape */
 #define MAX_HITS	ZMC_MAX_HITS
 #define MAX_ROWS	ZMC_MAX_ROWS
 #define SLOP		8
-#define CAPS_H		32	/* includes Segoe UI caps descenders; stays fixed during pivots */
+#define CAPS_H		(landscape ? 22 : 32)	/* includes Segoe UI caps descenders; stays fixed during pivots */
 /*
  * Page changes, timed off a 30 fps recording of the phone itself (Windows
  * Central, "Notification and Actions on Windows Phone 8.1"). Going into an
@@ -89,6 +159,26 @@ static void (*timer_tick)(void);
 static void present(void);
 static bool toplevel_active, toplevel_ever_active;	/* (xdg_toplevel_configure) */
 static double scroll_max(void);
+/* the window is wider than tall: set with zmc.width and zmc.height, only when
+ * a new size is taken (zmc_apply_resize), or at the first configure */
+static bool landscape;
+static bool zmc_apply_resize(void);
+static void landscape_check(void);
+static bool resize_clamp;	/* the page's first drawing at a new size: bring the scroll inside it */
+
+/* A size is landscape when the phone has turned: a window on the desktop
+ * (zt_environment_v1) is often wider than tall and keeps the phone's title. */
+static bool size_landscape(int width, int height) {
+	return width > height && !zmc.desktop;
+}
+
+bool zmc_landscape(void) {
+	return landscape;
+}
+
+int zmc_header_h(void) {
+	return landscape ? ZMC_HEADER_H_LANDSCAPE : ZMC_HEADER_H;
+}
 
 /*
  * The list on a surface of its own.
@@ -135,7 +225,6 @@ static void fling_step(void);
 static double page_y(double y);
 static void slider_set(double x, bool done);
 static void slider_tapped(double x);
-static void zmc_trace(const char *what);
 static int slider_live = -1;		/* percent while dragging, -1 otherwise */
 static void draw_slider_live(double s);
 static void zmc_activate(struct zmc_hit *hit);
@@ -156,6 +245,8 @@ static bool board_touch_motion(int32_t id, double x, double y);
 static bool board_touch_up(int32_t id);
 static void board_touch_cancel(void);
 static void board_paint(cairo_t *cr);
+static void board_drop(void);
+static void board_fit(void);
 static void back_forget(void);
 static void pivot_drop_all(void);
 static int back_queued;
@@ -238,49 +329,62 @@ uint32_t zmc_config_accent(void) {
 	return color;
 }
 
-static bool dotmatrix(void) {
-	return zmc.style == ZMC_STYLE_DOTMATRIX;
-}
-
-void zmc_config_style(void) {
+/*
+ * Metro's light or dark theme, modelled on the SDK's Z_THEME_DARK/Z_THEME_LIGHT
+ * (zrnui theme.ini [dark]/[light]): the background and the text swap, the accent
+ * stays. Read from the config file and the session env; the session value
+ * wins so a running app keeps the theme the shell started in.
+ */
+void zmc_config_theme(void) {
 	char path[512], line[256], value[32];
 	snprintf(path, sizeof(path), "%s/.config/ztmetro/config", getenv("HOME") ? getenv("HOME") : "");
 	FILE *f = fopen(path, "r");
-	int palette = 0;
-	zmc.style = ZMC_STYLE_METRO;
+	zmc.theme = ZMC_THEME_DARK;
 	while (f && fgets(line, sizeof(line), f)) {
-		if (sscanf(line, " style = %31s", value) == 1) {
-			zmc.style = strcmp(value, "dotmatrix") == 0 ? ZMC_STYLE_DOTMATRIX : ZMC_STYLE_METRO;
-		} else if (sscanf(line, " dotmatrix_palette = %31s", value) == 1) {
-			palette = isdigit((unsigned char)value[0]) ? atoi(value) : dm_palette_index(value);
+		if (sscanf(line, " theme = %31s", value) == 1) {
+			zmc.theme = strcmp(value, "light") == 0 ? ZMC_THEME_LIGHT : ZMC_THEME_DARK;
 		}
 	}
 	if (f) {
 		fclose(f);
 	}
-	/* the session's style, which the shell was started in, over the file's:
-	 * after the file changes the session restarts, and until then an app
-	 * keeps the style everything else around it has */
-	const char *session = getenv("ZTRF_SHELL_STYLE");
+	const char *session = getenv("ZTRF_SHELL_THEME");
 	if (session) {
-		zmc.style = strcmp(session, "dotmatrix") == 0 ? ZMC_STYLE_DOTMATRIX : ZMC_STYLE_METRO;
+		zmc.theme = strcmp(session, "light") == 0 ? ZMC_THEME_LIGHT : ZMC_THEME_DARK;
 	}
-	if (palette < 0 || palette >= DM_PALETTES) palette = 0;
-	zmc.dm_main = dm_palettes[palette][0];
-	zmc.dm_accent = dm_palettes[palette][1];
-	if (zmc.style == ZMC_STYLE_DOTMATRIX) {
-		zmc.accent = zmc.dm_accent;
-	}
-	/* what the app fills and strokes comes out as dots in the style */
-	dm_wrap_active = dotmatrix;
-	dm_wrap_main = zmc.dm_main;
-	dm_wrap_accent = zmc.dm_accent;
-	dm_wrap_pitch = 2.3;
 }
 
+uint32_t zmc_bg_color(void) {
+	return zmc.theme == ZMC_THEME_LIGHT ? 0xffffff : 0x000000;
+}
 
-/* the dim of an unlit-but-there dot, as on the home screen */
-#define DM_DIM_ALPHA	0.42
+uint32_t zmc_fg_color(void) {
+	return zmc.theme == ZMC_THEME_LIGHT ? 0x000000 : 0xffffff;
+}
+
+void zmc_bg(cairo_t *cr) {
+	uint32_t c = zmc_bg_color();
+	cairo_set_source_rgb(cr, ((c >> 16) & 0xff) / 255.0, ((c >> 8) & 0xff) / 255.0, (c & 0xff) / 255.0);
+}
+
+void zmc_fg(cairo_t *cr) {
+	uint32_t c = zmc_fg_color();
+	cairo_set_source_rgb(cr, ((c >> 16) & 0xff) / 255.0, ((c >> 8) & 0xff) / 255.0, (c & 0xff) / 255.0);
+}
+
+/* A plain rectangle of the theme's background or ink on the GPU: what is
+ * cleared behind a pressed row or a moving thumb must not show black in light. */
+static void zmg_rect_theme(double x, double y, double w, double h, bool ink) {
+	uint32_t c = ink ? zmc_fg_color() : zmc_bg_color();
+	zmg_rect(x, y, w, h, ((c >> 16) & 0xff) / 255.0f, ((c >> 8) & 0xff) / 255.0f, (c & 0xff) / 255.0f);
+}
+
+/* The theme's background or ink, with an alpha, for what the core draws over
+ * a page (a menu, a picker's box). */
+static void zmc_theme_rgba(cairo_t *cr, bool ink, double alpha) {
+	uint32_t c = ink ? zmc_fg_color() : zmc_bg_color();
+	cairo_set_source_rgba(cr, ((c >> 16) & 0xff) / 255.0, ((c >> 8) & 0xff) / 255.0, (c & 0xff) / 255.0, alpha);
+}
 
 void zmc_accent(cairo_t *cr) {
 	zmc_set_rgb(cr, zmc.accent);
@@ -290,22 +394,7 @@ void zmc_accent(cairo_t *cr) {
  * The loading dots: five of them cross the top of the page one behind the
  * other, quick at the edges and slow through the middle, then a pause.
  */
-/* DotMatrix: a dim row of dots across the top and a lit run sweeping it */
-static double busy_head(void) {
-	return ((now_ms() - zmc.busy_since) % 1400) / 1400.0;
-}
-
 static void draw_dots(cairo_t *cr) {
-	if (dotmatrix()) {
-		double pitch = 6, head = busy_head() * (zmc.width + 8 * pitch);
-		for (double x = pitch / 2; x < zmc.width; x += pitch) {
-			double back = head - x;
-			bool lit = back >= 0 && back < 6 * pitch;
-			dm_cairo_dot(cr, x, 4.5, 4, back < pitch && lit ? zmc.dm_accent : zmc.dm_main,
-				lit ? 1.0 - back / (6 * pitch) * 0.7 : 0.18, lit ? 0.6 : 0);
-		}
-		return;
-	}
 	uint32_t t = (now_ms() - zmc.busy_since) % 2600;
 	zmc_accent(cr);
 	for (int i = 0; i < 5; i++) {
@@ -333,31 +422,6 @@ void zmc_picture(cairo_t *cr, cairo_surface_t *picture, double x, double y, doub
 	int side = w < h ? w : h;
 	if (side <= 0) return;
 	double ox = (w - side) / 2.0, oy = (h - side) / 2.0;
-	if (dotmatrix()) {
-		/* (the grid of the shapes around it: dm-wrap.c's) */
-		double pitch = dm_wrap_pitch;
-		cairo_surface_flush(picture);
-		const unsigned char *data = cairo_image_surface_get_data(picture);
-		int stride = cairo_image_surface_get_stride(picture);
-		int cells = (int)floor(size / pitch);
-		double k = (double)side / (cells > 0 ? cells : 1);
-		double r = ((zmc.dm_main >> 16) & 255) / 255.0, g = ((zmc.dm_main >> 8) & 255) / 255.0, b = (zmc.dm_main & 255) / 255.0;
-		dm_wrap_raw++;
-		for (int row = 0; row < cells; row++) {
-			const uint32_t *line = (const uint32_t *)(data + (size_t)(oy + (row + 0.5) * k) * stride);
-			for (int col = 0; col < cells; col++) {
-				uint32_t px = line[(int)(ox + (col + 0.5) * k)];
-				double lum = (0.3 * ((px >> 16) & 255) + 0.59 * ((px >> 8) & 255) + 0.11 * (px & 255)) / 255.0;
-				lum = 0.12 + 0.88 * lum;
-				cairo_set_source_rgb(cr, r * lum, g * lum, b * lum);
-				cairo_new_sub_path(cr);
-				cairo_arc(cr, x + (col + 0.5) * pitch, y + (row + 0.5) * pitch, pitch * 0.36, 0, 2 * M_PI);
-				cairo_fill(cr);
-			}
-		}
-		dm_wrap_raw--;
-		return;
-	}
 	cairo_save(cr);
 	cairo_rectangle(cr, x, y, size, size);
 	cairo_clip(cr);
@@ -370,9 +434,6 @@ void zmc_picture(cairo_t *cr, cairo_surface_t *picture, double x, double y, doub
 }
 
 void zmc_set_rgb(cairo_t *cr, uint32_t color) {
-	if (dotmatrix() && !dm_map_raw) {
-		color = dm_palette_colour(color, zmc.dm_main, zmc.dm_accent);	/* the palette's two */
-	}
 	cairo_set_source_rgb(cr, ((color >> 16) & 0xff) / 255.0,
 		((color >> 8) & 0xff) / 255.0, (color & 0xff) / 255.0);
 }
@@ -429,9 +490,6 @@ static PangoFontDescription *font_at(const char *font, double size) {
 
 double zmc_text(cairo_t *cr, const char *s, const char *font, double size,
 		double x, double y, double wrap_width) {
-	if (dotmatrix()) {
-		return dm_type(cr, s, size, x, y, 0, 0, false, wrap_width);
-	}
 	PangoLayout *layout = steady_layout(cr);
 	pango_layout_set_font_description(layout, font_at(font, size));
 	pango_layout_set_text(layout, s, -1);
@@ -449,10 +507,6 @@ double zmc_text(cairo_t *cr, const char *s, const char *font, double size,
 
 /* One line of it, with an ellipsis where it would not fit in the width. */
 void zmc_text_line(cairo_t *cr, const char *s, const char *font, double size, double x, double y, double width) {
-	if (dotmatrix()) {
-		dm_type(cr, s, size, x, y, width, 0, false, 0);
-		return;
-	}
 	PangoLayout *layout = steady_layout(cr);
 	pango_layout_set_font_description(layout, font_at(font, size));
 	pango_layout_set_text(layout, s, -1);
@@ -485,14 +539,18 @@ void zmc_add_hit(double x, double y, double w, double h, int action, int arg) {
  * entry 108 points down. A pivot's title is followed by the next one in grey,
  * running off the edge.
  */
+/* In landscape the header is ZMC_HEADER_H_LANDSCAPE tall and everything in it
+ * comes down in proportion: the title 30 points (48 x 64 / 104), the caps line
+ * 6 points down, the title 14, the first entry 68. */
+static double title_size(void) {
+	return landscape ? 30 : 48;
+}
+
 /* How wide a pivot title is, set in the title face. */
 static int pivot_title_width(cairo_t *cr, const char *text) {
-	if (dotmatrix()) {
-		return (int)ceil(dm_type_width(text, 48));
-	}
 	PangoLayout *layout = steady_layout(cr);
 	PangoFontDescription *desc = pango_font_description_from_string(FONT_SEMILIGHT);
-	pango_font_description_set_absolute_size(desc, 48 * PANGO_SCALE);
+	pango_font_description_set_absolute_size(desc, title_size() * PANGO_SCALE);
 	pango_layout_set_font_description(layout, desc);
 	pango_layout_set_text(layout, text, -1);
 	int w, h;
@@ -502,16 +560,24 @@ static int pivot_title_width(cairo_t *cr, const char *text) {
 	return w;
 }
 
+/* Where the title sits: portrait, the measured numbers; landscape, the same
+ * scaled to its header. (x stays at MARGIN - 3 in both, so that the tabs'
+ * strip, drawn from its own picture, lines up with it.) */
+#define TITLE_X		(MARGIN - 3)
+#define TITLE_Y		(landscape ? 14 : 24)
+#define CAPS_Y		(landscape ? 6 : 14)
+
 /* The title, and the tabs after it in grey, running off the edge. */
 double zmc_pivot_wheel(cairo_t *cr, const struct zmc_tab *tabs, int count, int page) {
 	struct zmc_wheel *wh = &zmc.wheel;
 	count = count > ZMC_MAX_TABS ? ZMC_MAX_TABS : count;
-	bool same = wh->n == count;
+	bool same = wh->n == count && wh->size == title_size();
 	for (int i = 0; same && i < count; i++) {
 		same = wh->tabs[i].page == tabs[i].page && wh->tabs[i].title == tabs[i].title;
 	}
 	if (!same) {
 		wh->n = count;
+		wh->size = title_size();
 		for (int i = 0; i < count; i++) {
 			wh->tabs[i] = tabs[i];
 			wh->w[i] = pivot_title_width(cr, tabs[i].title);
@@ -521,53 +587,43 @@ double zmc_pivot_wheel(cairo_t *cr, const struct zmc_tab *tabs, int count, int p
 	for (int i = 0; i < count; i++) {
 		if (tabs[i].page == page) wh->at = i;
 	}
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, zmc.app->caps, FONT_SEMIBOLD, 11.5, MARGIN, 14, 0);
-	zmc_text(cr, tabs[wh->at].title, FONT_SEMILIGHT, 48, MARGIN - 3, 24, 0);
+	double size = title_size(), hit_h = HEADER_H - 14;
+	zmc_fg(cr);
+	zmc_text(cr, zmc.app->caps, FONT_SEMIBOLD, 11.5, MARGIN, CAPS_Y, 0);
+	zmc_text(cr, tabs[wh->at].title, FONT_SEMILIGHT, size, TITLE_X, TITLE_Y, 0);
 	if (drawing_page_in_front) {
 		marquee_title("");	/* it runs off the edge on purpose */
 	}
 	/* The tabs go round, at rest as they do while they move: two short titles
 	 * would otherwise show a third that was not there a moment ago. */
 	cairo_set_source_rgb(cr, 0.38, 0.38, 0.38);
-	double x = MARGIN - 3 + wh->w[wh->at] + 16;
+	double x = TITLE_X + wh->w[wh->at] + 16;
 	for (int k = 1; x < zmc.width && wheel_has(k); k++) {
 		int i = (wh->at + k) % count;
-		zmc_text(cr, tabs[i].title, FONT_SEMILIGHT, 48, x, 24, 0);
+		zmc_text(cr, tabs[i].title, FONT_SEMILIGHT, size, x, TITLE_Y, 0);
 		x += wh->w[i] + 16;
 	}
 	/* the next tab, to its right edge of the screen: before the title's own hit,
 	 * which would otherwise take the tap. It slides across, as a swipe would. */
 	double w = wh->w[wh->at];
 	if (wheel_has(1)) {
-		zmc_add_hit(MARGIN + w + 8, 0, zmc.width - (MARGIN + w + 8), 90, ZMC_ACT_PIVOT, 0);
+		zmc_add_hit(MARGIN + w + 8, 0, zmc.width - (MARGIN + w + 8), hit_h, ZMC_ACT_PIVOT, 0);
 	}
 	zmc.pivot_set = true;
-	zmc_add_hit(0, 0, zmc.width, 90, ZMC_ACT_BACK, 0);
-	return 108;
+	zmc_add_hit(0, 0, zmc.width, hit_h, ZMC_ACT_BACK, 0);
+	return HEADER_H + 4;
 }
 
 double zmc_header(cairo_t *cr, const char *title) {
-	if (dotmatrix()) {
-		/* the app's name small and dim, the page's title in the dot font */
-		dm_cairo_text(cr, zmc.app->caps, MARGIN, 12, 2.2, zmc.dm_main, DM_DIM_ALPHA, 0);
-		double pitch = 5;
-		cairo_save(cr);
-		cairo_rectangle(cr, 0, 0, zmc.width, HEADER_H);
-		cairo_clip(cr);
-		dm_cairo_text(cr, title, MARGIN, 38, pitch, zmc.dm_main, 1, 0.7);
-		cairo_restore(cr);
-		zmc_add_hit(0, 0, zmc.width, 90, ZMC_ACT_BACK, 0);
-		return 108;
-	}
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, zmc.app->caps, FONT_SEMIBOLD, 11.5, MARGIN, 14, 0);
-	zmc_text(cr, title, FONT_SEMILIGHT, 48, MARGIN - 3, 24, 0);
+	double hit_h = HEADER_H - 14;
+	zmc_fg(cr);
+	zmc_text(cr, zmc.app->caps, FONT_SEMIBOLD, 11.5, MARGIN, CAPS_Y, 0);
+	zmc_text(cr, title, FONT_SEMILIGHT, title_size(), TITLE_X, TITLE_Y, 0);
 	if (drawing_page_in_front) {
 		marquee_title(title);
 	}
-	zmc_add_hit(0, 0, zmc.width, 90, ZMC_ACT_BACK, 0);
-	return 108;
+	zmc_add_hit(0, 0, zmc.width, hit_h, ZMC_ACT_BACK, 0);
+	return HEADER_H + 4;
 }
 
 /*
@@ -576,7 +632,7 @@ double zmc_header(cairo_t *cr, const char *title) {
  * page (a turn, a tab) is right and this costs nothing at rest. Only while it moves
  * it is drawn again, from a small picture of its own, over the header on the GPU.
  * A pivot's title runs off the edge on purpose, into the next tab's. Without the
- * GPU, or under DotMatrix's fixed dots, it stays as drawn.
+ * GPU it stays as drawn.
  */
 static struct {
 	char text[128];		/* the title of the page in front, if it does not fit */
@@ -590,12 +646,12 @@ static struct {
 } mq;
 
 static double marquee_overflow(double width) {
-	return width + (MARGIN - 3) + MARGIN - zmc.width;
+	return width + TITLE_X + MARGIN - zmc.width;
 }
 
 /* (from the drawing of the page in front, which may be on the page turn's thread) */
 static void marquee_title(const char *title) {
-	if (dotmatrix() || strcmp(mq.text, title) == 0) {
+	if (strcmp(mq.text, title) == 0) {
 		return;
 	}
 	snprintf(mq.text, sizeof(mq.text), "%s", title);
@@ -632,7 +688,7 @@ static void marquee_arm(void) {
 	if (!mq.text[0]) {
 		return;
 	}
-	mq.width = zmc_text_width(mq.text, FONT_SEMILIGHT, 48);
+	mq.width = zmc_text_width(mq.text, FONT_SEMILIGHT, title_size());
 	mq.overflow = marquee_overflow(mq.width);
 	if (mq.overflow <= 0) {
 		return;
@@ -645,15 +701,15 @@ static void marquee_arm(void) {
 
 /* Its picture, made as it starts to move and dropped when it stops. */
 static bool marquee_begin(void) {
-	int w = (int)ceil(mq.width + 6) * zmc.scale, h = (HEADER_H - 24) * zmc.scale;
+	int w = (int)ceil(mq.width + 6) * zmc.scale, h = (HEADER_H - TITLE_Y) * zmc.scale;
 	if (w > 4096) {
 		return false;	/* more than one texture: it stays as the page drew it */
 	}
 	mq.picture = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
 	cairo_t *cr = cairo_create(mq.picture);
 	cairo_scale(cr, zmc.scale, zmc.scale);
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, mq.text, FONT_SEMILIGHT, 48, 0, 0, 0);
+	zmc_fg(cr);
+	zmc_text(cr, mq.text, FONT_SEMILIGHT, title_size(), 0, 0, 0);
 	cairo_destroy(cr);
 	cairo_surface_flush(mq.picture);
 	mq.revision++;
@@ -670,9 +726,9 @@ static void marquee_draw(double s) {
 		marquee_end();	/* the cached header has it at its start */
 		return;
 	}
-	double at = MARGIN - 3 - off, x0 = at > 0 ? at : 0;
-	zmg_rect(0, CAPS_H, zmc.width, HEADER_H - CAPS_H, 0, 0, 0);
-	gpu_surface_rect(mq.picture, (x0 - at) * s, (CAPS_H - 24) * s, (zmc.width - at) * s, (HEADER_H - 24) * s,
+	double at = TITLE_X - off, x0 = at > 0 ? at : 0;
+	zmg_rect_theme(0, CAPS_H, zmc.width, HEADER_H - CAPS_H, false);
+	gpu_surface_rect(mq.picture, (x0 - at) * s, (CAPS_H - TITLE_Y) * s, (zmc.width - at) * s, (HEADER_H - TITLE_Y) * s,
 		x0, CAPS_H, zmc.width, HEADER_H, 1);
 }
 
@@ -680,7 +736,7 @@ static void marquee_draw(double s) {
  * from one entry to the next, and nothing drawn between them. */
 double zmc_entry(cairo_t *cr, double y, const char *title, const char *detail,
 		int action, int arg) {
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_fg(cr);
 	zmc_text(cr, title, FONT_SEMILIGHT, 25.5, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, detail, FONT_REGULAR, 12, MARGIN, y + 31, 0);
@@ -689,24 +745,7 @@ double zmc_entry(cairo_t *cr, double y, const char *title, const char *detail,
 }
 
 void zmc_toggle(cairo_t *cr, double x, double y, bool on) {
-	if (dotmatrix()) {
-		/* 11 x 5 dots: a rounded frame, and a 3 x 3 knob that sits right when on */
-		double pitch = 54.0 / 11, ox = x + pitch / 2, oy = y + 24.0 / 2 - 2 * pitch;
-		for (int r = 0; r < 5; r++) {
-			for (int c = 0; c < 11; c++) {
-				bool edge = r == 0 || r == 4 || c == 0 || c == 10, corner = (r == 0 || r == 4) && (c == 0 || c == 10);
-				bool knob = r >= 1 && r <= 3 && (on ? c >= 7 && c <= 9 : c >= 1 && c <= 3);
-				if (corner || (!edge && !knob)) {
-					continue;
-				}
-				uint32_t col = knob && on ? zmc.dm_accent : zmc.dm_main;
-				double a = knob ? 1 : on ? 1 : DM_DIM_ALPHA;
-				dm_cairo_dot(cr, ox + c * pitch, oy + r * pitch, pitch, col, a, knob && on ? 0.7 : 0);
-			}
-		}
-		return;
-	}
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_fg(cr);
 	cairo_set_line_width(cr, 2);
 	cairo_rectangle(cr, x + 1, y + 1, 52, 22);
 	cairo_stroke(cr);
@@ -718,7 +757,7 @@ void zmc_toggle(cairo_t *cr, double x, double y, bool on) {
 	cairo_rectangle(cr, x + 4, y + 4, 46, 16);
 	cairo_fill(cr);
 
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_fg(cr);
 	if (on) {
 		cairo_rectangle(cr, x + 41, y - 1, 12, 26);
 	} else {
@@ -738,23 +777,10 @@ void zmc_slider(cairo_t *cr, double x, double y, double w, int percent, const ch
 	}
 	char pct_str[16];
 	snprintf(pct_str, sizeof(pct_str), "%d%%", percent);
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_fg(cr);
 	zmc_text(cr, pct_str, FONT_SEMIBOLD, 14, x + w - 42, y, 0);
 
 	double track_y = y + 24;
-	if (dotmatrix()) {
-		/* a row of dots, lit to the value, with a three-dot knob */
-		double pitch = 5;
-		int n = (int)(w / pitch), lit = (int)lround(percent / 100.0 * (n - 1));
-		for (int i = 0; i < n; i++) {
-			bool on = i <= lit;
-			dm_cairo_dot(cr, x + pitch / 2 + i * pitch, track_y + 2, pitch, zmc.dm_main, on ? 1 : DM_DIM_ALPHA, 0);
-		}
-		for (int k = -1; k <= 1; k++) {
-			dm_cairo_dot(cr, x + pitch / 2 + lit * pitch, track_y + 2 + k * pitch, pitch, zmc.dm_accent, 1, 0.7);
-		}
-		return;
-	}
 	cairo_set_source_rgb(cr, 0.22, 0.22, 0.22);
 	cairo_rectangle(cr, x, track_y, w, 4);
 	cairo_fill(cr);
@@ -764,7 +790,7 @@ void zmc_slider(cairo_t *cr, double x, double y, double w, int percent, const ch
 	cairo_rectangle(cr, x, track_y, fill_w, 4);
 	cairo_fill(cr);
 
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_fg(cr);
 	cairo_rectangle(cr, x + fill_w - 5, track_y - 7, 10, 18);
 	cairo_fill(cr);
 }
@@ -930,7 +956,7 @@ static void vl_pin_cairo(cairo_t *cr, double scroll) {
 	cairo_rectangle(cr, vl.l.pin_x, fmax(vl_pin_at + vl.l.pin_y, HEADER_H), vl.l.pin_w,
 		vl.l.pin_h);
 	cairo_clip(cr);
-	cairo_set_source_rgb(cr, 0, 0, 0);
+	zmc_bg(cr);
 	cairo_paint(cr);
 	cairo_translate(cr, 0, vl_pin_at);
 	vl.l.draw_row(cr, vl_pin_row);
@@ -1091,12 +1117,10 @@ static int vl_pick(int *row_out) {
 
 static void vl_paint_row(cairo_surface_t *target, const struct zmc_list *l, double top, int row, int scale) {
 	cairo_t *cr = cairo_create(target);
-	cairo_set_source_rgb(cr, 0, 0, 0);
+	zmc_bg(cr);
 	cairo_paint(cr);
 	cairo_scale(cr, scale, scale);
-	dm_wrap_origin_y = (top + row * l->row_h) * scale;
 	l->draw_row(cr, row);
-	dm_wrap_origin_y = 0;
 	cairo_destroy(cr);
 	cairo_surface_flush(target);
 }
@@ -1379,7 +1403,7 @@ static cairo_surface_t *cache_snapshot(int scale) {
 	cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24,
 		zmc.width * scale, zmc.height * scale);
 	cairo_t *cr = cairo_create(surface);
-	cairo_set_source_rgb(cr, 0, 0, 0);
+	zmc_bg(cr);
 	cairo_paint(cr);
 	double k = (double)scale / zmc.scale, zs = zmc.scale;
 	cairo_scale(cr, k, k);
@@ -1407,7 +1431,7 @@ static cairo_surface_t *page_snapshot(int page, double scroll, int scale) {
 		zmc.width * scale, zmc.height * scale);
 	cairo_t *cr = cairo_create(surface);
 	cairo_scale(cr, scale, scale);
-	cairo_set_source_rgb(cr, 0, 0, 0);
+	zmc_bg(cr);
 	cairo_paint(cr);
 	if (scroll != 0) {
 		/* the list where it was scrolled to, the title over it */
@@ -1420,7 +1444,7 @@ static cairo_surface_t *page_snapshot(int page, double scroll, int scale) {
 		cairo_restore(cr);
 		cairo_rectangle(cr, 0, 0, zmc.width, HEADER_H);
 		cairo_clip(cr);
-		cairo_set_source_rgb(cr, 0, 0, 0);
+		zmc_bg(cr);
 		cairo_paint(cr);
 		vl_skip = true;
 	}
@@ -1443,23 +1467,6 @@ static void turned_strip_motion(cairo_t *cr, cairo_surface_t *source, double y0,
 		double degrees, double alpha, double dx, double depth) {
 	if (alpha <= 0.01) {
 		return;
-	}
-	if (dotmatrix() && (fabs(degrees) >= 0.05 || alpha < 1)) {
-		/* no turn in this style: the row lights up, or goes out, dot by dot,
-		 * on the turn's clock */
-		double reveal = alpha * (1 - fmin(1, fabs(degrees) / TURN_IN_DEG));
-		if (reveal <= 0.001) return;
-		degrees = 0;
-		if (!cr) {
-			zmg_reveal = (float)reveal;
-			double w = zmc.width;
-			struct zmg_vertex q[4] = { {dx,y0,depth}, {dx+w,y0,depth}, {dx,y1,depth}, {dx+w,y1,depth} };
-			zmg_surface(source, source == zmc.cache ? cache_gen : 0,
-				0, y0 * ANIM_SCALE, w * ANIM_SCALE, y1 * ANIM_SCALE, q, 1);
-			zmg_reveal = 1;
-			return;
-		}
-		alpha = reveal;		/* (no dots without the GPU: a fade) */
 	}
 	if (!cr) {
 		double a = degrees * M_PI / 180.0, w = zmc.width;
@@ -1672,7 +1679,7 @@ static void cache_ensure(int scale) {
 			zmc.cache = cache_create(zmc.width * scale, h);
 		}
 		cairo_t *cr = cairo_create(zmc.cache);
-		cairo_set_source_rgb(cr, 0, 0, 0);
+		zmc_bg(cr);
 		cairo_paint(cr);
 		cairo_scale(cr, scale, scale);
 		vl_begin(vl_frozen ? held_at : -1);
@@ -1716,6 +1723,16 @@ static void cache_ensure(int scale) {
 	drawing_page_in_front = false;
 	if (zmc.page >= 0 && zmc.page < CACHE_PAGES) {
 		cache_page_pts[zmc.page] = vl.active ? 0 : zmc.content_h;
+	}
+	if (resize_clamp) {
+		/* a new size: any page may now be shorter than where it was scrolled
+		 * to (above, only a long list is), or have been pulled past an end.
+		 * A list under a menu stays where the menu's picture has it. */
+		resize_clamp = false;
+		if (!vl_frozen) {
+			double max = scroll_max();
+			zmc.scroll = zmc.scroll > max ? max : zmc.scroll < 0 ? 0 : zmc.scroll;
+		}
 	}
 	zmc_list_lock(false);
 	zmc.cache_stale = false;
@@ -1764,8 +1781,9 @@ void zmc_redraw(void) {
  * What the finger is on sinks back a little as it touches, the side under
  * the finger furthest, and springs back when it lifts or starts to scroll.
  * In 2D that is a small shrink anchored on the far side from the finger. */
-#define PRESS_IN_MS	ZMC_TILT_IN_MS
-#define PRESS_OUT_MS	ZMC_TILT_OUT_MS
+/* at the press tilt's speed (zt-anim.h); off, 1 ms: there at once */
+#define PRESS_IN_MS	zt_anim_wait_ms(&zanim, ZT_ANIM_PRESS, ZMC_TILT_IN_MS)
+#define PRESS_OUT_MS	zt_anim_wait_ms(&zanim, ZT_ANIM_PRESS, ZMC_TILT_OUT_MS)
 
 /* As the shell's tiles (Windows Phone's tilt): in, linearly; out on WP's
  * Log(10) curve, fast and then slower and slower, and only once the dip has
@@ -1852,6 +1870,32 @@ static double press_geometry(double w, double h, double *rx, double *ry) {
 	return PRESS_SINK * fall;
 }
 
+/* What lies behind the thing pressed, to clear its place with as it sinks. In
+ * light, the page's own colour just outside its top left corner, so that a tile
+ * on a surface of its own (the call screen's dark) leaves no frame of the
+ * theme's white round it; in dark the background, as it always was.
+ * x, y: the corner in the cache, points. */
+static uint32_t press_behind(double x, double y) {
+	uint32_t c = zmc_bg_color();
+	if (zmc.theme != ZMC_THEME_LIGHT || !zmc.cache) {
+		return c;
+	}
+	int cw = cairo_image_surface_get_width(zmc.cache), ch = cairo_image_surface_get_height(zmc.cache);
+	double k = (double)cw / zmc.width;
+	int px = (int)floor(x * k) - 1, py = (int)floor(y * k) - 1;
+	if (px < 0) px = 0;
+	if (py < 0) py = 0;
+	if (px >= cw || py >= ch) {
+		return c;
+	}
+	cairo_surface_flush(zmc.cache);
+	const unsigned char *data = cairo_image_surface_get_data(zmc.cache);
+	if (!data) {
+		return c;
+	}
+	return *(const uint32_t *)(data + (size_t)py * cairo_image_surface_get_stride(zmc.cache) + (size_t)px * 4) & 0xffffff;
+}
+
 static void draw_press(cairo_t *cr, int scale) {
 	double p = press_amount();
 	if (p <= 0.001) {
@@ -1872,7 +1916,11 @@ static void draw_press(cairo_t *cr, int scale) {
 				-X*sin(ry)-Y*sin(rx) };
 		}
 		zmg_clip(0, HEADER_H, zmc.width, zmc.height - HEADER_H);
-		zmg_rect(x, y, w, h, 0, 0, 0);
+		bool own_row = vl.active && !vl_frozen && hit->y >= vl.top + vl.cache_rows * vl.l.row_h;
+		uint32_t behind = own_row ? zmc_bg_color() :
+			press_behind(x, hit->y - (vl.active && vl_frozen ? zmc.scroll : 0));
+		zmg_rect(x, y, w, h, ((behind >> 16) & 0xff) / 255.0f, ((behind >> 8) & 0xff) / 255.0f,
+			(behind & 0xff) / 255.0f);
 		if (vl.active && !vl_frozen && hit->y >= vl.top + vl.cache_rows * vl.l.row_h) {
 			/* a row of a long list: from its own texture */
 			int r = (int)floor((hit->y + 0.01 - vl.top) / vl.l.row_h), slot = vl_get(r, scale);
@@ -1919,7 +1967,10 @@ static void draw_press(cairo_t *cr, int scale) {
 	cairo_clip(cr);
 	/* black where it was (it only ever gets smaller), then the cells */
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-	cairo_set_source_rgb(cr, 0, 0, 0);
+	uint32_t behind = vl.active && !vl_frozen && h->y >= vl.top + vl.cache_rows * vl.l.row_h ?
+		zmc_bg_color() : press_behind(h->x, h->y - (vl.active && vl_frozen ? off : 0));
+	cairo_set_source_rgb(cr, ((behind >> 16) & 0xff) / 255.0, ((behind >> 8) & 0xff) / 255.0,
+		(behind & 0xff) / 255.0);
 	cairo_rectangle(cr, x, y, w, hh);
 	cairo_fill(cr);
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
@@ -1997,10 +2048,8 @@ static cairo_surface_t *pivot_snapshot(int page, double scroll, int scale, struc
 		double top = HEADER_H + (scroll < 0 ? -scroll : 0);
 		cairo_rectangle(cr, 0, top, zmc.width, zmc.height - top);
 		cairo_clip(cr);
-		dm_wrap_origin_y = scroll * scale;
 		cairo_translate(cr, 0, -scroll);
 		zmc.app->render(cr, page);
-		dm_wrap_origin_y = 0;
 		cairo_restore(cr);
 		cairo_rectangle(cr, 0, 0, zmc.width, HEADER_H);
 		cairo_clip(cr);
@@ -2051,10 +2100,12 @@ static double wheel_pos(long k) {
  * when it moved in, with nothing after it. */
 #define WHEEL_ROW_H	(HEADER_H - CAPS_H)
 static cairo_surface_t *wheel_titles;
-static char wheel_titles_of[ZMC_MAX_TABS * 48];
+static char wheel_titles_of[ZMC_MAX_TABS * 48 + 32];
 
 static void wheel_titles_ensure(void) {
-	char of[sizeof(wheel_titles_of)] = "";
+	char of[sizeof(wheel_titles_of)];
+	/* (the size and the ink are part of what it is of: landscape, the theme) */
+	snprintf(of, sizeof(of), "%g %06x\n", title_size(), zmc_fg_color());
 	double wide = 0;
 	for (int i = 0; i < zmc.wheel.n; i++) {
 		size_t at = strlen(of);
@@ -2073,13 +2124,13 @@ static void wheel_titles_ensure(void) {
 	wheel_titles = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)ceil(wide + 6) * s, zmc.wheel.n * WHEEL_ROW_H * s);
 	cairo_t *cr = cairo_create(wheel_titles);
 	cairo_scale(cr, s, s);
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_fg(cr);
 	for (int i = 0; i < zmc.wheel.n; i++) {
 		cairo_save(cr);
 		cairo_rectangle(cr, 0, i * WHEEL_ROW_H, wide + 6, WHEEL_ROW_H);
 		cairo_clip(cr);
-		/* (where the header has it: 24 down, and the strip starts at CAPS_H) */
-		zmc_text(cr, zmc.wheel.tabs[i].title, FONT_SEMILIGHT, 48, 0, i * WHEEL_ROW_H + 24 - CAPS_H, 0);
+		/* (where the header has it: TITLE_Y down, and the strip starts at CAPS_H) */
+		zmc_text(cr, zmc.wheel.tabs[i].title, FONT_SEMILIGHT, title_size(), 0, i * WHEEL_ROW_H + TITLE_Y - CAPS_H, 0);
 		cairo_restore(cr);
 	}
 	cairo_destroy(cr);
@@ -2365,7 +2416,7 @@ static bool draw_pivot(cairo_t *cr, int scale) {
 		/* a critically damped spring, by the clock, in small steps */
 		double dt = now - zmc.slide_last;
 		zmc.slide_last = now;
-		dt = dt > 50 ? 50 : dt;
+		dt = zanim_dt(zmc_page_anim, dt > 50 ? 50 : dt);	/* (the pages' speed) */
 		double x = zmc.swipe_dx, v = zmc.slide_v, T = zmc.slide_target, k = PIVOT_SPRING_W;
 		bool arrived = false;
 		while (dt > 0 && !arrived) {
@@ -2397,7 +2448,7 @@ static bool draw_pivot(cairo_t *cr, int scale) {
 	wheel_titles_ensure();
 	if (cr) {
 		cairo_save(cr);
-		cairo_set_source_rgb(cr, 0, 0, 0);
+		zmc_bg(cr);
 		cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
 		cairo_paint(cr);
 		cairo_restore(cr);
@@ -2453,7 +2504,16 @@ static int present_list(int scale) {
 		int head = HEADER_H * scale, stride = buffer->width * 4;
 		cairo_surface_flush(zmc.cache);
 		memcpy(buffer->data, cairo_image_surface_get_data(zmc.cache), (size_t)stride * head);
-		memset((char *)buffer->data + (size_t)stride * head, 0, (size_t)stride * (buffer->height - head));
+		uint32_t back = zmc_bg_color();
+		if (!back) {
+			memset((char *)buffer->data + (size_t)stride * head, 0, (size_t)stride * (buffer->height - head));
+		} else {
+			/* (the theme's background, light: past the list's end it shows) */
+			uint32_t *px = (uint32_t *)((char *)buffer->data + (size_t)stride * head);
+			for (size_t i = 0, n = (size_t)buffer->width * (buffer->height - head); i < n; i++) {
+				px[i] = 0xff000000u | back;
+			}
+		}
 		wl_surface_set_buffer_scale(zmc.surface, scale);
 		wl_surface_attach(zmc.surface, buffer->wl_buffer, 0, 0);
 		wl_surface_damage_buffer(zmc.surface, 0, 0, buffer->width, buffer->height);
@@ -2513,6 +2573,19 @@ static void present_gpu(uint32_t ms) {
 	} else if (!zmc.quit_after_anim && (zmc.slide_active || zmc.swiping || zmc.spring) &&
 			draw_pivot(NULL, zmc.scale)) {
 		/* The same spring and title parallax, composed as textured quads. */
+	} else if (!zmc.quit_after_anim && zmc.page_solid) {
+		/* one colour: a rect, no 15 MB page read by the GPU each frame
+		 * (and no page drawn and uploaded for it) */
+		zmg_rect(0, 0, zmc.width, zmc.height, ((zmc.page_rgb >> 16) & 255) / 255.0f,
+			((zmc.page_rgb >> 8) & 255) / 255.0f, (zmc.page_rgb & 255) / 255.0f);
+		if (zmc.app->overlay) {
+			zmc.app->overlay(zmc.page);
+		}
+		if (!zmc.app->overlay_above_header) {
+			/* (the title's strip over it, as from the cache: the same colour) */
+			zmg_rect(0, 0, zmc.width, HEADER_H, ((zmc.page_rgb >> 16) & 255) / 255.0f,
+				((zmc.page_rgb >> 8) & 255) / 255.0f, (zmc.page_rgb & 255) / 255.0f);
+		}
 	} else if (!zmc.quit_after_anim) {
 		cache_ensure(zmc.scale);
 		double s = zmc.scale, off = zmc.scroll;
@@ -2553,17 +2626,7 @@ static void present_gpu(uint32_t ms) {
 	if (!zmc.anim_active) {
 		board_draw();
 	}
-	if (zmc.busy && !zmc.anim_active && dotmatrix()) {
-		double pitch = 6, head = busy_head() * (zmc.width + 8 * pitch);
-		for (double x = pitch / 2; x < zmc.width; x += pitch) {
-			double back = head - x;
-			bool lit = back >= 0 && back < 6 * pitch;
-			uint32_t c = back < pitch && lit ? zmc.dm_accent : zmc.dm_main;
-			double k = lit ? 1.0 - back / (6 * pitch) * 0.7 : 0.18;
-			zmg_rect(x - 1.4, 3.1, 2.8, 2.8, ((c >> 16) & 255) / 255.0f * k, ((c >> 8) & 255) / 255.0f * k,
-				(c & 255) / 255.0f * k);
-		}
-	} else if (zmc.busy && !zmc.anim_active) {
+	if (zmc.busy && !zmc.anim_active) {
 		uint32_t t = (now_ms() - zmc.busy_since) % 2600;
 		float r = ((zmc.accent >> 16) & 255) / 255.0f;
 		float g = ((zmc.accent >> 8) & 255) / 255.0f, b = (zmc.accent & 255) / 255.0f;
@@ -2621,7 +2684,7 @@ static void *bg_draw(void *unused) {
 		if (surface) cairo_surface_destroy(surface);
 		surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24, zmc.width * scale, h);
 		cairo_t *cr = cairo_create(surface);
-		cairo_set_source_rgb(cr, 0, 0, 0);
+		zmc_bg(cr);
 		cairo_paint(cr);
 		cairo_scale(cr, scale, scale);
 		zmc.n_hits = 0;
@@ -2707,8 +2770,47 @@ static void gpu_prepare_destination(int target) {
 	zmg_prepare(zmc.anim_to_surface, cache_gen);
 }
 
+/* The theme changed under the running app (Settings' own switch): the rows a
+ * long list keeps as textures, and those drawn ahead on the thread, were drawn
+ * in the old one, as were the pictures of the other tab and the page behind.
+ * All are drawn again. (The slider's digits and the board's scrim look after
+ * themselves; zmc_redraw takes the page.) */
+static void theme_check(void) {
+	static int seen = -1;
+	if (seen == zmc.theme) {
+		return;
+	}
+	bool first = seen < 0;
+	seen = zmc.theme;
+	if (first) {
+		return;
+	}
+	vl_slots_set = false;	/* (vl_get forgets them, on this thread) */
+	pthread_mutex_lock(&vl_q);
+	for (int i = 0; i < VL_READY; i++) {
+		if (!vl_ready[i].busy) {
+			vl_ready[i].row = -1;
+		}
+	}
+	pthread_mutex_unlock(&vl_q);
+	back_forget();
+	if (!zmc.slide_active && !zmc.swiping && !zmc.spring) {
+		pivot_forget();
+	}
+	zmc.cache_stale = true;
+}
+
+static bool resizing;	/* a new size is being taken (zmc_apply_resize) */
+
 static void present(void) {
 	if (!zmc.configured) return;
+	if (resizing) {
+		/* asked for by an app's callback while the new size is taken: the
+		 * frame comes once it is all taken, at the new size */
+		zmc.dirty = true;
+		return;
+	}
+	theme_check();
 	if (zmc.frame) {
 		zmc.dirty = true;
 		return;
@@ -2729,17 +2831,16 @@ static void present(void) {
 	}
 	last_frame = began;
 	/* an entrance can be set to start a moment from now: black until then */
-	int32_t since = (int32_t)(now_ms() - zmc.anim_start);
-	uint32_t ms = since > 0 ? (uint32_t)since : 0;
+	uint32_t ms = turn_elapsed();	/* (on the turn's clock: its speed in Settings) */
 	if (zmc.anim_target_pending) {
 		uint32_t out = rows_duration(&zmc.out_rows, ROW_OUT_MS);
 		if (ms >= out) {
 			gpu_prepare_destination(zmc.anim_to);
-			ms = now_ms() - zmc.anim_start;
+			ms = turn_elapsed();
 			/* Expensive page content may exceed the gap. The new page still
 			 * gets its complete entrance, starting with its first row. */
 			if (ms > out + GAP_MS) {
-				zmc.anim_start += ms - (out + GAP_MS);
+				zmc.anim_start += (uint32_t)((ms - (out + GAP_MS)) / turn_rate);
 				ms = out + GAP_MS;
 			}
 			zmc.anim_total = out + GAP_MS + rows_duration(&zmc.in_rows, ROW_IN_MS);
@@ -2808,7 +2909,7 @@ static void present(void) {
 	 * not painted black first and then over, that alone is 15 MB a frame) */
 
 	if (zmc.anim_active) {
-		cairo_set_source_rgb(cr, 0, 0, 0);
+		zmc_bg(cr);
 		cairo_paint(cr);
 		zmc.anim_frames++;
 		draw_turnstile(cr, ms);
@@ -2828,18 +2929,25 @@ static void present(void) {
 			cairo_set_source_surface(cr, zmc.cache, 0, 0);
 			cairo_paint(cr);
 		} else if (vl.active) {
-			cairo_set_source_rgb(cr, 0, 0, 0);
+			zmc_bg(cr);
 			cairo_paint(cr);
 			vl_draw(cr, scale);
 		} else {
 			cairo_set_source_surface(cr, zmc.cache, 0, -off);
 			cairo_paint(cr);	/* past the cache's end it is black (SOURCE, no extend) */
+			int end = cairo_image_surface_get_height(zmc.cache) - off;
+			if (end < buffer->height && zmc_bg_color()) {
+				/* and there the theme's background, in light */
+				cairo_rectangle(cr, 0, end, buffer->width, buffer->height - end);
+				zmc_bg(cr);
+				cairo_fill(cr);
+			}
 		}
 		cairo_restore(cr);
 		if (top > head) {
 			cairo_save(cr);
 			cairo_rectangle(cr, 0, head, buffer->width, top - head);
-			cairo_set_source_rgb(cr, 0, 0, 0);
+			zmc_bg(cr);
 			cairo_fill(cr);
 			cairo_restore(cr);
 		}
@@ -2849,7 +2957,7 @@ static void present(void) {
 		cairo_paint(cr);
 		draw_press(cr, scale);
 	} else {
-		cairo_set_source_rgb(cr, 0, 0, 0);
+		zmc_bg(cr);
 		cairo_paint(cr);
 	}
 
@@ -3045,6 +3153,14 @@ static void begin_animation_(bool have_from, bool have_to, int target, double ta
 		zmc.anim_total = (have_from ? rows_duration(&zmc.out_rows, ROW_OUT_MS) + GAP_MS : 0) +
 			(in > title ? in : title);
 	}
+	/* its speed: an app closing, a page of Settings asked for from outside
+	 * (zmc_next_anim), or the app's own pages. The entrance keeps the
+	 * shell's speed, which it was started with (entrance_rate). */
+	zanim_refresh();
+	int kind = zmc.quit_after_anim ? ZT_ANIM_APP_CLOSE : zmc_next_anim >= 0 ? zmc_next_anim : zmc_page_anim;
+	zmc_next_anim = -1;
+	double rate = zt_anim_rate(&zanim, kind);
+	turn_rate = zmc.entrance ? 1.0 : rate > 0 ? rate : 1e6;	/* (off: over at the next frame) */
 	zmc.anim_frames = 0;
 	if (!zmc.anim_cache_ready && !bg.busy) zmc.n_hits = 0;	/* touch_down blocks input during the turn */
 	uint32_t now = now_ms();
@@ -3106,6 +3222,7 @@ static void fling_step(void) {
 	double dt = now - zmc.fling_last;
 	zmc.fling_last = now;
 	if (dt > 50) dt = 50;
+	dt = zanim_dt(ZT_ANIM_SCROLL, dt);	/* scrolling's speed; off: it lands now */
 	if (vl_frozen) {
 		zmc.fling = false;
 		return;
@@ -3164,12 +3281,13 @@ static bool hit_under(double x, double page_y_at, struct zmc_hit *out) {
 
 static void touch_down(void *data, struct wl_touch *touch, uint32_t serial, uint32_t time,
 		struct wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y) {
+	zanim_refresh();	/* (the speeds as Settings left them: one stat) */
 	if (board_touch_down(id, wl_fixed_to_double(x), wl_fixed_to_double(y))) {
 		return;
 	}
 	if (zmc.anim_active && zmc.entrance && (int32_t)(now_ms() - zmc.anim_start) > ENTER_HOLD_MS) {
 		/* a finger does not wait for the page to finish gliding in */
-		zmc.anim_start = now_ms() - zmc.anim_total;
+		turn_finish_now();
 		present();
 	}
 	/* a finger more on the app's territory: the app's too (a pinch) */
@@ -3569,6 +3687,7 @@ static void env_environment(void *data, struct zt_environment_v1 *e, uint32_t ki
 		xdg_toplevel_set_min_size(zmc.toplevel, 0, 0);
 		xdg_toplevel_set_max_size(zmc.toplevel, 0, 0);
 	}
+	landscape_check();
 	if (zmc.app->environment) {
 		zmc.app->environment(desktop);
 	}
@@ -3820,10 +3939,42 @@ static const struct wl_seat_listener seat_listener = {
 	.name = seat_name,
 };
 
-static bool configure_resized;
 static bool toplevel_active;
 static bool toplevel_ever_active;
 static bool settle_when_configured;
+/* A size the shell asked for, not yet taken (zmc_apply_resize). */
+static bool resize_pending;
+static int resize_w, resize_h;
+/* ZMC_TEST_ROTATE=1: SIGUSR1 turns the app's size a quarter and back, for
+ * trying a live resize before the shell can turn the screen. While turned the
+ * shell's own sizes are kept aside, not taken: it shows the wider window
+ * shrunk to fit, and would answer with a taller one, and so on. */
+static volatile sig_atomic_t test_rotate_asked;
+static bool test_turned;
+static int test_back_w, test_back_h;
+
+static void resize_ask(int width, int height) {
+	resize_w = width;
+	resize_h = height;
+	resize_pending = width != zmc.width || height != zmc.height;
+}
+
+static void test_rotate_signal(int signo) {
+	(void)signo;
+	test_rotate_asked = 1;
+}
+
+static void test_rotate(void) {
+	test_turned = !test_turned;
+	if (test_turned) {
+		test_back_w = zmc.width;
+		test_back_h = zmc.height;
+		resize_ask(zmc.height, zmc.width);
+	} else {
+		resize_ask(test_back_w, test_back_h);
+	}
+	fprintf(stderr, "%s: test rotate to %dx%d\n", zmc.app->app_id, resize_w, resize_h);
+}
 
 static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial) {
 	xdg_surface_ack_configure(xdg_surface, serial);
@@ -3832,19 +3983,28 @@ static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, u
 		/* Snapshot the first page before the shell uncovers the window. The
 		 * shell and client use the same monotonic reveal time. */
 		zmc.configured = true;
-		configure_resized = false;
 		int speed = 100;
 		const char *speed_env = getenv("ZTMETRO_MENU_SPEED");
 		if (speed_env) {
 			speed = atoi(speed_env);
 		}
-		if (speed < 50 || speed > 200) {
+		/* the shell's speed for how it was opened, the master's included
+		 * (zt-anim.h); 0: that animation is off */
+		bool entrance_off = speed_env && speed == 0 && speed_env[0] == '0';
+		if (speed < 1 || speed > 10000) {
 			speed = 100;
 		}
 		zmc.entrance_rate = 100.0 / speed;
 		const char *slow = getenv("ZTMETRO_SLOW_MOTION");
 		if (slow && atoi(slow) != 0) {
 			zmc.entrance_rate *= 5.0;
+		}
+		/* ZTMETRO_NO_ENTRANCE: the shell brings the window in itself (a
+		 * call's Readerboard swivel): the page is drawn settled at once */
+		if (getenv("ZTMETRO_NO_ENTRANCE") || entrance_off) {
+			zmc.entrance = false;
+			zmc_redraw();
+			return;
 		}
 		zmc.entrance = true;
 		const char *stamp = getenv("ZTMETRO_ENTER_MS");
@@ -3863,15 +4023,16 @@ static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, u
 			}
 			if (zmc.anim_active) {
 				if (zmc.anim_target_pending) gpu_prepare_destination(zmc.anim_to);
-				zmc.anim_start = now_ms() - zmc.anim_total;
+				turn_finish_now();
 			}
-			if (configure_resized) zmc.cache_stale = true;
-			configure_resized = false;
+			/* (gpu_prepare_destination has waited for the turn's thread) */
+			zmc_apply_resize();
 			present();
 		}
 	}
-	if (configure_resized) {
-		configure_resized = false;
+	/* A new size: taken now, between events, unless the page turn's thread is
+	 * drawing; then at the first round of the main loop after it is done. */
+	if (resize_pending && zmc_apply_resize()) {
 		zmc_redraw();
 	}
 }
@@ -3900,14 +4061,16 @@ static void xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel
 	toplevel_active = active;
 	zmc.active = active;	/* apps pause what they hold when they lose the front */
 	if (width > 0 && height > 0) {
-		if (zmc.width != width || zmc.height != height) {
-			/* pictures of the old window: stretched to the new one, if kept */
-			pivot_drop_all();
-			back_forget();
+		if (!zmc.configured) {
+			/* nothing drawn yet: the first page is laid out at this size */
+			zmc.width = width;
+			zmc.height = height;
+			landscape = size_landscape(width, height);
+		} else if (!test_turned) {
+			/* kept until it can be taken whole (xdg_surface_configure);
+			 * zmc_apply_resize drops the pictures of the old window */
+			resize_ask(width, height);
 		}
-		configure_resized |= zmc.width != width || zmc.height != height;
-		zmc.width = width;
-		zmc.height = height;
 	}
 }
 
@@ -3972,18 +4135,22 @@ static double digit_w[11];
 #define DIGIT_H		22
 
 static void digits_ensure(int scale) {
-	static int made_at;
-	if (digits && made_at == scale) {
+	static int made_at, made_theme;
+	if (digits && made_at == scale && made_theme == zmc.theme) {
 		return;
 	}
 	if (digits) {
+		zmg_forget(digits);
 		cairo_surface_destroy(digits);
 	}
 	made_at = scale;
+	made_theme = zmc.theme;
 	digits = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 11 * DIGIT_CELL * scale, DIGIT_H * scale);
 	cairo_t *cr = cairo_create(digits);
 	cairo_scale(cr, scale, scale);
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	/* in the ink zmc_slider writes the percentage in: white on black was
+	 * invisible on a light page */
+	zmc_fg(cr);
 	for (int i = 0; i < 11; i++) {
 		char glyph[2] = { i < 10 ? (char)('0' + i) : '%', 0 };
 		digit_w[i] = zmc_text_width(glyph, FONT_SEMIBOLD, DIGIT_SIZE);
@@ -4002,14 +4169,14 @@ static void draw_slider_live(double s) {
 	float r = ((zmc.accent >> 16) & 255) / 255.0f;
 	float g = ((zmc.accent >> 8) & 255) / 255.0f, b = (zmc.accent & 255) / 255.0f;
 	double track = y + 24, fill = h->w * slider_live / 100.0;
-	zmg_rect(h->x - 6, track - 8, h->w + 12, 20, 0, 0, 0);	/* the old thumb and fill */
+	zmg_rect_theme(h->x - 6, track - 8, h->w + 12, 20, false);	/* the old thumb and fill */
 	zmg_rect(h->x, track, h->w, 4, 0.22f, 0.22f, 0.22f);
 	zmg_rect(h->x, track, fill, 4, r, g, b);
-	zmg_rect(h->x + fill - 5, track - 7, 10, 18, 1, 1, 1);
+	zmg_rect_theme(h->x + fill - 5, track - 7, 10, 18, true);
 	/* the percentage, where zmc_slider writes it */
 	digits_ensure((int)s);
 	double x = h->x + h->w - 42;
-	zmg_rect(x - 2, y - 1, 46, DIGIT_H, 0, 0, 0);
+	zmg_rect_theme(x - 2, y - 1, 46, DIGIT_H, false);
 	char text[8];
 	snprintf(text, sizeof(text), "%d%%", slider_live);
 	for (const char *c = text; *c; c++) {
@@ -4108,7 +4275,7 @@ double zmc_switch(cairo_t *cr, double y, const char *title, bool on, int action)
 }
 
 double zmc_switch_arg(cairo_t *cr, double y, const char *title, bool on, int action, int arg) {
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_fg(cr);
 	double title_h = zmc_text(cr, title, FONT_SEMILIGHT, 21, MARGIN, y, zmc.width - 2 * MARGIN - 64);
 	double label = zmc_switch_label_y(title_h), more = label - ZMC_SWITCH_LINE;
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
@@ -4129,21 +4296,14 @@ double zmc_textbox(cairo_t *cr, double y, const char *caption, const char *value
 	zmc_text(cr, caption, FONT_REGULAR, 13, MARGIN, y, 0);
 	y += 22;
 	/* the box: white with black text while it is being typed into */
-	if (dotmatrix()) {
-		/* lit dots on a dim box: black type on lit dots cannot be read */
-		cairo_set_source_rgb(cr, focused ? 0.3 : 0.16, focused ? 0.3 : 0.16, focused ? 0.3 : 0.16);
-	} else if (focused) {
+	if (focused) {
 		cairo_set_source_rgb(cr, 1, 1, 1);
 	} else {
 		cairo_set_source_rgb(cr, 0.78, 0.78, 0.78);
 	}
 	cairo_rectangle(cr, MARGIN, y, w, h);
 	cairo_fill(cr);
-	if (dotmatrix()) {
-		cairo_set_source_rgb(cr, 1, 1, 1);
-	} else {
-		cairo_set_source_rgb(cr, 0, 0, 0);
-	}
+	cairo_set_source_rgb(cr, 0, 0, 0);
 	char shown[160];
 	snprintf(shown, sizeof(shown), "%s%s", value, focused ? "|" : "");
 	zmc_text(cr, shown, FONT_REGULAR, 17, MARGIN + 8, y + 8, 0);
@@ -4207,10 +4367,136 @@ void zmc_osk_box(int bottom) {
 	osk_tell(line);
 }
 
-double zmc_text_width(const char *s, const char *font, double size) {
-	if (dotmatrix()) {
-		return dm_type_width(s, size);
+/* ---- a new size ----------------------------------------------------------------
+ *
+ * The shell may give the window a new size at any moment: the phone turned to
+ * landscape and back. The size waits (resize_pending) and is taken here, between
+ * events and never while the page turn's thread draws (it reads the size), so
+ * that a frame is laid out for one size throughout. Taking it lets go of the
+ * finger (what it was on is elsewhere now: a lift must not tap whatever is
+ * there instead), lands what was moving, closes a board and a menu, and drops
+ * every picture drawn at the old size. The page is drawn again at the next
+ * frame. Returns false when there was nothing to take, or not yet. */
+static bool zmc_apply_resize(void) {
+	if (!resize_pending || bg.busy || resizing) {
+		return false;
 	}
+	resizing = true;	/* (an app's present() from here on waits for the end) */
+	resize_pending = false;
+	/* the finger, as touch_cancel lets it go but at once: no press easing out
+	 * over a row that has moved. A slider keeps the value it was dragged to. */
+	hold_at = 0;
+	held = false;
+	board_touch_cancel();
+	if (app_touch_id >= 0) {
+		int32_t id = app_touch_id;
+		app_touch_id = -1;
+		zmc.app->touch(3, id, 0, 0, 0);
+	}
+	if (zmc.touching && zmc.sliding && zmc.app->slide && zmc.slider.w > 0) {
+		int value = (int)lround((zmc.last_y - zmc.slider.x) / zmc.slider.w * 100);
+		zmc.app->slide(zmc.slider.action, value < 0 ? 0 : value > 100 ? 100 : value, true);
+	}
+	zmc.touching = false;
+	zmc.sliding = false;
+	slider_live = -1;
+	zmc.button_down = false;
+	zmc.moved = false;
+	zmc.axis = 0;
+	zmc.press_from = zmc.press_to = 0;
+	zmc.press_start = 0;
+	zmc.fling = false;
+	zmc.vel = 0;
+	/* a menu over the page was placed for the old one: closed, as a tap beside
+	 * it closes it (zmc_menu's last hit covers everything) */
+	for (int i = zmc.n_hits - 1; i >= 0; i--) {
+		struct zmc_hit *h = &zmc.hits[i];
+		if (h->h >= 100000 && h->x == 0 && h->y == 0) {
+			if (h->action && zmc.app->activate) {
+				zmc.app->activate(h->action, h->arg);
+			}
+			break;
+		}
+	}
+	/* the tabs: a slide lands where it was going, measured at the old width
+	 * (the next tab, or this one again); a drag under the finger goes back */
+	if (zmc.slide_active) {
+		int to = (int)lround(-zmc.slide_target / zmc.width);
+		zmc.slide_active = false;
+		zmc.swipe_dx = 0;
+		if (to != 0) {
+			pivot_land(to);
+		}
+	}
+	zmc.swiping = zmc.spring = false;
+	zmc.swipe_caught = false;
+	zmc.swipe_dx = 0;
+	/* a page change or the first page's entrance ends now (present() finishes
+	 * it at the next frame, the page drawn at the new size); a destination not
+	 * drawn yet is not drawn at the old one */
+	if (zmc.anim_active) {
+		zmc.anim_target_pending = false;
+		zmc.anim_prepared = false;
+		zmc.anim_cache_ready = false;
+		turn_finish_now();
+	}
+	board_drop();
+	/* the size itself; the rows' thread reads it while it draws a row */
+	zmc_list_lock(true);
+	zmc.width = resize_w;
+	zmc.height = resize_h;
+	landscape = size_landscape(zmc.width, zmc.height);
+	zmc_list_lock(false);
+	/* what was drawn at the old size: the page (made again at the new size,
+	 * not kept at the largest it ever was), the list's rows, those drawn ahead
+	 * on the thread, both tabs, the page behind */
+	if (zmc.cache) {
+		zmg_forget(zmc.cache);
+		cairo_surface_destroy(zmc.cache);
+		zmc.cache = NULL;
+	}
+	vl_slots_set = false;	/* (vl_get forgets them, on this thread) */
+	pthread_mutex_lock(&vl_q);
+	for (int i = 0; i < VL_READY; i++) {
+		if (!vl_ready[i].busy) {
+			vl_ready[i].row = -1;
+		}
+	}
+	pthread_mutex_unlock(&vl_q);
+	pivot_drop_all();	/* every tab's picture: this one and those either side */
+	back_forget();
+	zmc.n_hits = 0;		/* nothing of the old layout to tap until it is drawn again */
+	zmc.cache_stale = true;
+	resize_clamp = true;
+	osk_told = -1;		/* the box being typed into is told again where it ends */
+	if (zmc.app->resized) {
+		zmc.app->resized();
+	}
+	resizing = false;
+	zmc.dirty = true;
+	return true;
+}
+
+/* The window went to a desktop or came back to the phone at the same size: a
+ * desktop window wider than tall has the portrait title, the phone's the
+ * landscape one. Taken as a new size is, so all of the old layout goes. */
+static void landscape_check(void) {
+	if (size_landscape(zmc.width, zmc.height) == landscape) {
+		return;
+	}
+	if (!zmc.configured) {
+		landscape = size_landscape(zmc.width, zmc.height);
+		return;
+	}
+	if (!resize_pending) {
+		resize_w = zmc.width;
+		resize_h = zmc.height;
+	}
+	resize_pending = true;	/* (taken now, or once the page turn's thread is done) */
+	zmc_apply_resize();
+}
+
+double zmc_text_width(const char *s, const char *font, double size) {
 	cairo_surface_t *scratch = cairo_image_surface_create(CAIRO_FORMAT_A8, 1, 1);
 	cairo_t *cr = cairo_create(scratch);
 	PangoLayout *layout = pango_cairo_create_layout(cr);
@@ -4231,21 +4517,7 @@ void zmc_text_centred(cairo_t *cr, const char *s, const char *font, double size,
 	zmc_text(cr, s, font, size, cx - zmc_text_width(s, font, size) / 2, y, 0);
 }
 
-struct wifi_args { double x, y, size; int bars; };
-static void wifi_shape(cairo_t *cr, void *data) {
-	const struct wifi_args *a = data;
-	int saved = zmc.style;
-	zmc.style = ZMC_STYLE_METRO;	/* the shape itself, to be dotted */
-	zmc_wifi_glyph(cr, a->x, a->y, a->size, a->bars);
-	zmc.style = saved;
-}
-
 void zmc_wifi_glyph(cairo_t *cr, double x, double y, double size, int bars) {
-	if (dotmatrix()) {
-		struct wifi_args a = { x, y, size, bars };
-		dm_dotify(cr, x, y, size, size, size / 7, wifi_shape, &a);
-		return;
-	}
 	/* a quarter fan standing on its point at the bottom middle */
 	double cx = x + size / 2, cy = y + size * 0.86, r = size * 0.78;
 	double red, green, blue, alpha;
@@ -4413,6 +4685,15 @@ void zmc_present(void) {
 		return;
 	}
 	present();
+}
+
+/* a picture handed to the GPU ahead of its first use (it is uploaded now, not in a frame) */
+void zmc_gpu_prepare(cairo_surface_t *source, unsigned revision) {
+	zmg_prepare(source, revision);
+}
+
+bool zmc_gpu_ready(void) {
+	return zmg_ready();
 }
 
 /* ---- named transitions (ztmetro/core; see the Lumia 530 notes) -------------
@@ -4603,7 +4884,8 @@ void zmc_board_open(const struct zmc_board *board) {
 		board_log = fopen("/tmp/zmc-frames.log", "a");
 	}
 	bd.b = *board;
-	bd.rows = (board->count + board->cols - 1) / board->cols;
+	board_fit();
+	bd.rows = (bd.b.count + bd.b.cols - 1) / bd.b.cols;
 	board_atlas_draw();
 	int s = board_scale();
 	if (board->draw_box && board->box_w > 0 && board->box_h > 0) {
@@ -4620,14 +4902,23 @@ void zmc_board_open(const struct zmc_board *board) {
 		bd.label = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, zmc.width * s, (int)ceil(bd.label_h * s));
 		cairo_t *cr = cairo_create(bd.label);
 		cairo_scale(cr, s, s);
-		cairo_set_source_rgb(cr, 1, 1, 1);
+		zmc_fg(cr);
 		zmc_text(cr, board->label, FONT_SEMIBOLD, 13.5, board->x0, 2, 0);
 		cairo_destroy(cr);
 		cairo_surface_flush(bd.label);
 	}
+	/* the scrim, and the "old page gone" of a picker: the theme's background
+	 * (black in dark, white in light), made again if the theme
+	 * has changed since */
+	uint32_t scrim = 0xff000000u | zmc_bg_color();
+	if (bd.black && *(uint32_t *)cairo_image_surface_get_data(bd.black) != scrim) {
+		zmg_forget(bd.black);
+		cairo_surface_destroy(bd.black);
+		bd.black = NULL;
+	}
 	if (!bd.black) {
 		bd.black = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
-		*(uint32_t *)cairo_image_surface_get_data(bd.black) = 0xff000000;
+		*(uint32_t *)cairo_image_surface_get_data(bd.black) = scrim;
 		cairo_surface_mark_dirty(bd.black);
 	}
 	zmc.fling = false;
@@ -4657,7 +4948,9 @@ static double board_ms(void) {
 	}
 	slow = read;
 #endif
-	return (double)(uint32_t)(zmc_now_ms() - bd.start) / slow;
+	/* at the app's pages' speed; off: far past its end */
+	double rate = zt_anim_rate(&zanim, zmc_page_anim);
+	return rate > 0 ? (double)(uint32_t)(zmc_now_ms() - bd.start) * rate / slow : 1e9;
 }
 
 void zmc_board_close(void) {
@@ -4710,12 +5003,60 @@ static void board_forget(void) {
 	}
 }
 
+/* A new size: the board goes at once, not turning out, its tiles laid out for
+ * the old one. A choice made on it still stands; closed() runs either way. */
+static void board_drop(void) {
+	if (bd.state == BOARD_HIDDEN) {
+		return;
+	}
+	void (*closed)(void) = bd.b.closed;
+	bool chosen = bd.apply != NULL;
+	board_forget();	/* (runs the choice, and closed() after it) */
+	if (closed && !chosen) {
+		closed();
+	}
+	bd.touched = false;
+}
+
+/* In landscape a board laid out for portrait runs off the bottom (the letters,
+ * four across, would be 150 points each): more columns of smaller cells, as
+ * many as make the cells largest with every row on the screen. A cell keeps
+ * what it has under its square (cell_h - cell_w). Portrait is left as asked. */
+static void board_fit(void) {
+	struct zmc_board *b = &bd.b;
+	if (!landscape || b->count <= 0 || b->cols <= 0) {
+		return;
+	}
+	int rows = (b->count + b->cols - 1) / b->cols;
+	double room_h = zmc.height - b->top - 8;
+	if (rows * (b->cell_h + b->gap) - b->gap <= room_h) {
+		return;
+	}
+	double extra = b->cell_h - b->cell_w;
+	double right = zmc.width - (b->x0 + b->cols * b->cell_w + (b->cols - 1) * b->gap);
+	double room_w = zmc.width - b->x0 - (right > 0 ? right : MARGIN);
+	double best = -1;
+	int best_cols = b->cols;
+	for (int cols = b->cols + 1; cols <= b->count; cols++) {
+		int r = (b->count + cols - 1) / cols;
+		double side_w = (room_w - (cols - 1) * b->gap) / cols;
+		double side_h = (room_h - (r - 1) * b->gap) / r - extra;
+		double side = side_w < side_h ? side_w : side_h;
+		if (side > best) {
+			best = side;
+			best_cols = cols;
+		}
+	}
+	if (best > 0) {
+		b->cols = best_cols;
+		b->cell_w = best;
+		b->cell_h = best + extra;
+	}
+}
+
 static void board_scrim(double alpha) {
 	if (alpha <= 0.001 || !bd.black) {
 		return;
-	}
-	if (dotmatrix() && !bd.b.picker) {
-		alpha *= 0.97 / ZB_SCRIM;	/* dots are open: what is behind would read through them */
 	}
 	double c[4][3] = { { 0, 0, 0 }, { zmc.width, 0, 0 }, { 0, zmc.height, 0 }, { zmc.width, zmc.height, 0 } };
 	zmc_gpu_quad(bd.black, 1, c, alpha);
@@ -4725,8 +5066,7 @@ static double board_run_ms(double turn_ms) {
 	return zb_delay(bd.b.count - 1) + turn_ms;
 }
 
-/* One tile, `ms` after the first one's start, turning about its own middle or
- * (DotMatrix: dots have no perspective) lighting up or going out dot by dot. */
+/* One tile, `ms` after the first one's start, turning about its own middle. */
 static void board_tile(int i, double ms, bool in) {
 	const double pitch = bd.b.cell_h + bd.b.gap, w = bd.b.cell_w, h = bd.b.cell_h;
 	double own = ms - zb_delay(i);
@@ -4748,19 +5088,6 @@ static void board_tile(int i, double ms, bool in) {
 		return;	/* its turn has not come, or it has gone */
 	}
 	double t = fmax(0, own / run);
-	if (dotmatrix()) {
-		double e = zb_swivel_ease(t, in), reveal = in ? e : 1 - e;
-		if (reveal <= 0.001) return;
-		/* dots are open: nothing behind may read through them */
-		double back[4][3] = { { x, y, 0 }, { x + w, y, 0 }, { x, y + h, 0 }, { x + w, y + h, 0 } };
-		zmc_gpu_quad(bd.black, 1, back, reveal);
-		struct zmg_vertex q[4] = { { (float)x, (float)y, 0 }, { (float)(x + w), (float)y, 0 },
-			{ (float)x, (float)(y + h), 0 }, { (float)(x + w), (float)(y + h), 0 } };
-		zmg_reveal = (float)reveal;
-		zmg_surface(bd.atlas, bd.revision, x * s, sy * s, (x + w) * s, (sy + h) * s, q, 1);
-		zmg_reveal = 1;
-		return;
-	}
 	double c[4][3];
 	double alpha = zt_corners(&A, t, x, y, w, h, c);
 	zmc_gpu_quad_region(bd.atlas, bd.revision, x * s, sy * s, w * s, h * s, c, alpha);
@@ -4858,18 +5185,14 @@ static void board_paint(cairo_t *cr) {
 		return;
 	}
 	cairo_save(cr);
-	cairo_set_source_rgba(cr, 0, 0, 0, bd.b.picker ? 1 : dotmatrix() ? 0.97 : ZB_SCRIM);
-	dm_wrap_raw++;
+	zmc_theme_rgba(cr, false, bd.b.picker ? 1 : ZB_SCRIM);
 	cairo_paint(cr);
-	dm_wrap_raw--;
 	cairo_set_source_surface(cr, bd.atlas, 0, bd.b.top * board_scale());
-	dm_wrap_raw++;
 	cairo_paint(cr);
 	if (bd.label) {
 		cairo_set_source_surface(cr, bd.label, 0, (bd.b.top - bd.label_h) * board_scale());
 		cairo_paint(cr);
 	}
-	dm_wrap_raw--;
 	cairo_restore(cr);
 }
 
@@ -4986,34 +5309,11 @@ double zmc_button(cairo_t *cr, double x, double y, double w, const char *label, 
 		zmc.pressed.button;
 	cairo_save(cr);
 	cairo_new_path(cr);
-	if (dotmatrix()) {
-		/* a frame of dots with its corners dropped; pressed, it lights up */
-		double pitch = 5;
-		int nc = (int)(w / pitch), nr = (int)(h / pitch);
-		double ox = x + (w - (nc - 1) * pitch) / 2, oy = y + (h - (nr - 1) * pitch) / 2;
-		uint32_t col = down ? zmc.dm_accent : zmc.dm_main;
-		for (int r = 0; r < nr; r++) {
-			for (int c = 0; c < nc; c++) {
-				bool edge = r == 0 || r == nr - 1 || c == 0 || c == nc - 1;
-				bool corner = (r == 0 || r == nr - 1) && (c == 0 || c == nc - 1);
-				if (edge && !corner) {
-					dm_cairo_dot(cr, ox + c * pitch, oy + r * pitch, pitch, col, down ? 1 : 0.8, down ? 0.6 : 0);
-				}
-			}
-		}
-		zmc_set_rgb(cr, down ? zmc.dm_accent : zmc.dm_main);
-		zmc_text_centred(cr, label, FONT_SEMIBOLD, 14.5, x + w / 2, y + 10);
-		cairo_restore(cr);
-		if (zmc.n_hits < MAX_HITS) {
-			zmc.hits[zmc.n_hits++] = (struct zmc_hit){ x, y, w, h, action, arg, false, true };
-		}
-		return y + h + 12;
-	}
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_fg(cr);
 	if (down) {
 		cairo_rectangle(cr, x, y, w, h);
 		cairo_fill(cr);
-		cairo_set_source_rgb(cr, 0, 0, 0);
+		zmc_bg(cr);
 	} else {
 		cairo_set_line_width(cr, line);
 		cairo_rectangle(cr, x + line / 2, y + line / 2, w - line, h - line);
@@ -5027,33 +5327,9 @@ double zmc_button(cairo_t *cr, double x, double y, double w, const char *label, 
 	return y + h + 12;
 }
 
-struct round_args { double cx, y; const char *glyph; };
-static void round_shape(cairo_t *cr, void *data) {
-	const struct round_args *a = data;
-	const double d = 44;
-	cairo_set_line_width(cr, 2.6);
-	cairo_new_path(cr);
-	cairo_arc(cr, a->cx, a->y + d / 2, d / 2 - 1.3, 0, 2 * M_PI);
-	cairo_stroke(cr);
-	cairo_save(cr);
-	cairo_translate(cr, a->cx, a->y + d / 2);
-	round_glyph(cr, a->glyph);
-	cairo_restore(cr);
-}
-
 void zmc_round_button(cairo_t *cr, double cx, double y, const char *glyph, const char *label,
 		int action, int arg) {
 	const double d = 44;
-	if (dotmatrix()) {
-		/* the ring and its glyph as dots */
-		struct round_args a = { cx, y, glyph };
-		dm_dotify(cr, cx - d / 2 - 2, y - 2, d + 4, d + 4, 2.4, round_shape, &a);
-		if (label && label[0]) {
-			zmc_text_centred(cr, label, FONT_REGULAR, 11.5, cx, y + d + 3);
-		}
-		zmc_add_hit(cx - 34, y - 4, 68, d + (label && label[0] ? 26 : 8), action, arg);
-		return;
-	}
 	cairo_save(cr);
 	cairo_set_line_width(cr, 2.2);
 	cairo_new_path(cr);	/* (text leaves a current point: the ring would be joined to it) */
@@ -5069,23 +5345,38 @@ void zmc_round_button(cairo_t *cr, double cx, double y, const char *glyph, const
 }
 
 void zmc_menu(cairo_t *cr, double y, const char *const *items, int count, int action, int cancel_action) {
-	const double row = 50;
+	double row = 50, size = 24, inset = 8;
 	double h = count * row + 16;
 	/* everything drawn so far goes dim, and no longer takes a tap */
 	cairo_save(cr);
-	cairo_set_source_rgba(cr, 0, 0, 0, 0.72);
+	zmc_theme_rgba(cr, false, 0.72);	/* toward the theme's background */
 	cairo_paint(cr);
 	cairo_restore(cr);
 	zmc.n_hits = 0;
 	if (y + h > zmc.scroll + zmc.height - 8) {
 		y = zmc.scroll + zmc.height - 8 - h;	/* all of it on the screen */
+		double room = zmc.height - 8 - HEADER_H;
+		if (landscape && h > room) {
+			/* taller than the room under the title (landscape): closer
+			 * rows in a smaller face, and never over the title */
+			row = fmax(28, fmin(40, (room - 16) / count));
+			size = row * 0.48;
+			inset = (row - size * 1.33) / 2;
+			h = count * row + 16;
+			y = zmc.scroll + zmc.height - 8 - h;
+			if (y < zmc.scroll + HEADER_H) {
+				y = zmc.scroll + HEADER_H;
+			}
+		}
 	}
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	/* the menu in the theme's contrast colours, as the phone's: white with
+	 * black text in dark, black with white text in light */
+	zmc_theme_rgba(cr, true, 1);
 	cairo_rectangle(cr, 0, y, zmc.width, h);
 	cairo_fill(cr);
-	cairo_set_source_rgb(cr, 0, 0, 0);
+	zmc_theme_rgba(cr, false, 1);
 	for (int i = 0; i < count; i++) {
-		zmc_text(cr, items[i], FONT_SEMILIGHT, 24, MARGIN, y + 8 + i * row + 8, zmc.width - 2 * MARGIN);
+		zmc_text(cr, items[i], FONT_SEMILIGHT, size, MARGIN, y + 8 + i * row + inset, zmc.width - 2 * MARGIN);
 		zmc_add_hit(0, y + 8 + i * row, zmc.width, row, action, i);
 	}
 	/* (the first hit under a point is the one taken: the items, then the rest) */
@@ -5095,12 +5386,12 @@ void zmc_menu(cairo_t *cr, double y, const char *const *items, int count, int ac
 double zmc_field(cairo_t *cr, double y, const char *caption, const char *value) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, caption, FONT_REGULAR, 13, MARGIN, y, 0);
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_fg(cr);
 	return y + 20 + zmc_text(cr, value, FONT_REGULAR, 16, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 12;
 }
 
 double zmc_choice(cairo_t *cr, double y, const char *title, const char *value, int action) {
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_fg(cr);
 	zmc_text(cr, title, FONT_SEMILIGHT, 20, MARGIN, y, 0);
 	zmc_accent(cr);
 	zmc_text(cr, value, FONT_REGULAR, 15, MARGIN, y + 26, 0);
@@ -5112,8 +5403,8 @@ double zmc_choice(cairo_t *cr, double y, const char *title, const char *value, i
  * the chosen value, the other options sliding out from behind it as the box
  * turns from an outline into the white edit background and the chosen one
  * takes the accent colour; it closes the same way backwards. */
-#define PICKER_OPEN_MS	250
-#define PICKER_CLOSE_MS	200
+#define PICKER_OPEN_MS	zt_anim_wait_ms(&zanim, zmc_page_anim, 250)	/* (the app's pages' speed) */
+#define PICKER_CLOSE_MS	zt_anim_wait_ms(&zanim, zmc_page_anim, 200)
 double zmc_picker(cairo_t *cr, double y, const char *caption, const char *const *options,
 		int count, int selected, bool open, int action) {
 	static int moving;		/* the picker that is open, opening or closing */
@@ -5158,7 +5449,7 @@ double zmc_picker(cairo_t *cr, double y, const char *caption, const char *const 
 	cairo_set_source_rgba(cr, 1, 1, 1, p);
 	cairo_rectangle(cr, x, y, w, h);
 	cairo_fill(cr);
-	cairo_set_source_rgb(cr, 1, 1, 1);
+	zmc_theme_rgba(cr, true, 1);	/* the outline in the ink: white on white was no box in light */
 	cairo_set_line_width(cr, 2);
 	cairo_rectangle(cr, x + 1, y + 1, w - 2, h - 2);
 	cairo_stroke(cr);
@@ -5169,10 +5460,13 @@ double zmc_picker(cairo_t *cr, double y, const char *caption, const char *const 
 		/* each option slides from where the chosen one sits to its own place */
 		double top = y + 4 * p + i * row * p;
 		if (i == selected) {
+			/* closed, in the ink (on the page); open, the accent */
 			double r, g, b;
+			uint32_t f = zmc_fg_color();
+			double fr = ((f >> 16) & 0xff) / 255.0, fg = ((f >> 8) & 0xff) / 255.0, fb = (f & 0xff) / 255.0;
 			zmc_accent(cr);
 			cairo_pattern_get_rgba(cairo_get_source(cr), &r, &g, &b, NULL);
-			cairo_set_source_rgb(cr, 1 + (r - 1) * p, 1 + (g - 1) * p, 1 + (b - 1) * p);
+			cairo_set_source_rgb(cr, fr + (r - fr) * p, fg + (g - fg) * p, fb + (b - fb) * p);
 		} else {
 			if (p <= 0.001) {
 				continue;
@@ -5225,7 +5519,7 @@ int zmc_render_png(const struct zmc_app *app, int page, int height, const char *
 	zmc.app = app;
 	zmc.height = height;
 	zmc.accent = zmc_config_accent();
-	zmc_config_style();
+	zmc_config_theme();
 	/* (ZMC_RENDER_SCROLL: how a list looks scrolled, for looking at it) */
 	const char *scroll = getenv("ZMC_RENDER_SCROLL");
 	struct zmc_rowset rows;
@@ -5241,13 +5535,19 @@ int zmc_render_png(const struct zmc_app *app, int page, int height, const char *
 	return status == CAIRO_STATUS_SUCCESS ? 0 : 1;
 }
 
-/* ZMC_TRACE=1: how long start-up takes, step by step, on stderr */
-static void zmc_trace(const char *what) {
+/* ZMC_TRACE=1: how long start-up takes, step by step, on stderr. The first
+ * line gives the monotonic clock (the shell's now_ms) and the shell's
+ * ZTMETRO_ENTER_MS, so a launch can be timed from the tap. */
+void zmc_trace(const char *what) {
 	static struct timespec t0;
 	static int on = -1;
 	if (on < 0) {
 		on = getenv("ZMC_TRACE") != NULL;
 		clock_gettime(CLOCK_MONOTONIC, &t0);
+		if (on) {
+			const char *enter = getenv("ZTMETRO_ENTER_MS");
+			fprintf(stderr, "trace t0 %u ms monotonic, enter at %s\n", zmc_now_ms(), enter ? enter : "-");
+		}
 	}
 	if (on) {
 		struct timespec t;
@@ -5268,7 +5568,7 @@ int zmc_run(const struct zmc_app *app, int first_page) {
 	zmc.app = app;
 	zmc.page = first_page;
 	zmc.accent = zmc_config_accent();
-	zmc_config_style();
+	zmc_config_theme();
 	/* Pixels per point: the shell's scale, rounded up, as it asks of every
 	 * surface. 4 was the S9 (1440 px) for every phone: the J5 (720 px, 1.67)
 	 * drew Settings 1728 px wide, 5.8 times the pixels its panel shows */
@@ -5323,9 +5623,23 @@ int zmc_run(const struct zmc_app *app, int first_page) {
 		wl_region_destroy(none);
 	}
 	wl_surface_commit(zmc.surface);
+	if (getenv("ZMC_TEST_ROTATE")) {
+		/* (no SA_RESTART: the signal wakes the poll below) */
+		struct sigaction turn = { .sa_handler = test_rotate_signal };
+		sigemptyset(&turn.sa_mask);
+		sigaction(SIGUSR1, &turn, NULL);
+	}
 
 	/* the display, the app's own descriptors and its timer; asleep otherwise */
 	while (zmc.running) {
+		if (test_rotate_asked) {
+			test_rotate_asked = 0;
+			test_rotate();
+		}
+		/* a new size that had to wait for the page turn's thread */
+		if (resize_pending && zmc.configured && zmc_apply_resize()) {
+			zmc_redraw();
+		}
 		while (wl_display_prepare_read(zmc.display) != 0) {
 			wl_display_dispatch_pending(zmc.display);
 		}

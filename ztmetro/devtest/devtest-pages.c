@@ -22,9 +22,10 @@
 #include "ztos-hw.h"
 #include "zrnmetrocore.h"
 #include "devtest-pages.h"
+#include "devtest-power.h"
 
 enum page { PAGE_HUB, PAGE_SYSTEM, PAGE_SENSORS, PAGE_JOURNAL, PAGE_KERNEL, PAGE_SHELL, PAGE_HARDWARE,
-	PAGE_LOGS /* the hub's second tab */, PAGE_ANIM, PAGE_PREVIEW };
+	PAGE_LOGS /* the hub's second tab */, PAGE_ANIM, PAGE_PREVIEW, PAGE_TEMPS, PAGE_CHARGING };
 enum action { ACT_OPEN = DEVTEST_ACTIONS + 1, ACT_PLAY };
 
 static int first_page;
@@ -137,6 +138,8 @@ static double draw_hub(cairo_t *cr) {
 	double y = tab_header(cr, PAGE_HUB);
 	y = zmc_entry(cr, y, "system", "kernel, memory, storage, load", ACT_OPEN, PAGE_SYSTEM);
 	y = zmc_entry(cr, y, "sensors", "battery, charger, heat, clocks: live", ACT_OPEN, PAGE_SENSORS);
+	y = zmc_entry(cr, y, "temperatures", "stock's thermistors, and what this kernel can read", ACT_OPEN, PAGE_TEMPS);
+	y = zmc_entry(cr, y, "charging", "cable, PD, wireless pad, battery cycles: live", ACT_OPEN, PAGE_CHARGING);
 	y = zmc_entry(cr, y, "hardware", "what this kernel drives, and what it does not", ACT_OPEN, PAGE_HARDWARE);
 	y = zmc_entry(cr, y, "animations", "Windows Phone 8.1's transitions, from the Lumia 530's firmware", ACT_OPEN, PAGE_ANIM);
 	return y + 20;
@@ -425,14 +428,21 @@ static double shape(enum curve c, double w, double t) {
 
 static double lerp(double a, double b, double t) { return a + (b - a) * t; }
 
-/* The four rows, drawn once at the screen's scale and kept as textures. */
+/* The four rows, drawn once at the screen's scale and kept as textures; made
+ * again when the window has a new width (the phone turned). */
 static cairo_surface_t *cards[STAGE_ROWS];
 static double card_w;
 
 static void cards_make(void) {
 	static const char *labels[STAGE_ROWS] = { "wi-fi", "bluetooth", "theme", "display" };
-	if (cards[0]) {
+	if (cards[0] && card_w == zmc.width - 2 * ZMC_MARGIN) {
 		return;
+	}
+	for (int r = 0; r < STAGE_ROWS; r++) {
+		if (cards[r]) {
+			cairo_surface_destroy(cards[r]);
+			cards[r] = NULL;
+		}
 	}
 	int sc = zmc.scale > 0 ? zmc.scale : 1;
 	card_w = zmc.width - 2 * ZMC_MARGIN;
@@ -477,7 +487,7 @@ static void card_quad(cairo_surface_t *card, double x, double y, double w, doubl
 }
 
 static double stage_top(void) {
-	return ZMC_HEADER_H + 120;
+	return zmc_header_h() + 120;
 }
 
 /* The preview page's moving part, every frame on the GPU. */
@@ -541,6 +551,8 @@ double devtest_render(cairo_t *cr, int page) {
 	case PAGE_HARDWARE: return draw_hardware(cr);
 	case PAGE_ANIM: return draw_anims(cr);
 	case PAGE_PREVIEW: return draw_preview(cr);
+	case PAGE_TEMPS: return devtest_draw_temps(cr);
+	case PAGE_CHARGING: return devtest_draw_charging(cr);
 	}
 	return 0;
 }
@@ -570,6 +582,8 @@ void devtest_arrived(int page) {
 	}
 	switch (tab) {
 	case PAGE_SENSORS:
+	case PAGE_TEMPS:
+	case PAGE_CHARGING:
 		zmc_every(1000, tick);	/* only while this page is open */
 		break;
 	case PAGE_JOURNAL:

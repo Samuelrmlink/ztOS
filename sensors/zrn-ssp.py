@@ -24,7 +24,7 @@ SENSORS = {
     "gesture": 6, "prox": 7, "light": 9, "prox_raw": 10, "orientation": 12,
     "step_det": 13, "sig_motion": 14, "gyro_uncal": 15, "game_rot": 16, "rot": 17,
     "step_cnt": 18, "light_ir": 24, "int_gyro": 25, "tilt": 26, "pickup": 27,
-    "light_flicker": 31, "light_cct": 32, "accel_uncal": 33,
+    "light_flicker": 31, "light_cct": 32, "accel_uncal": 33, "auto_rotation": 48,
 }
 NAMES = {v: k for k, v in SENSORS.items()}
 
@@ -149,7 +149,8 @@ def main():
         sensor = SENSORS.get(name, None)
         sensor = int(name) if sensor is None else sensor
         wanted.append(sensor)
-        hub.call(0xD1)  # the phone is awake
+        # (no 0xD1 "the phone is awake": it made the hub's firmware assert,
+        # sensors/README.md "Hub firmware patch"; Samsung's driver never sends it)
         print(f"add {NAMES.get(sensor, sensor)}: {hub.add(sensor, int(ms or 200), int(batch or 0))!r}")
     try:
         while True:

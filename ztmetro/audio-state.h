@@ -370,6 +370,51 @@ static inline bool audio_pending_over(const struct audio_state *st, const char *
 	return i < 0 || st->out[i].current;
 }
 
+/* What the volume panel calls an output, beside its Media slider: a Bluetooth
+ * device by its own name as BlueZ gives it ("Samuel's AirPods Pro"), the rest
+ * by what they are. The daemon's "detail" "hdmi" is sound going to the dock's
+ * screen. A name is trimmed and its runs of spaces made one (the parser turns
+ * control characters into spaces). out should hold a whole desc; one too small
+ * is cut on a character's edge. Long names are the drawing's to ellipsize. */
+static inline void audio_output_title(const struct audio_output *o, char *out, size_t cap) {
+	const char *fixed = NULL;
+	if (!cap) return;
+	out[0] = 0;
+	if (!strcmp(o->detail, "hdmi")) fixed = "Dock / HDMI";
+	else if (!strcmp(o->kind, "speaker")) fixed = "Phone speaker";
+	else if (!strcmp(o->kind, "headphones")) fixed = "Wired headphones";
+	if (fixed) {
+		snprintf(out, cap, "%s", fixed);
+		return;
+	}
+	const char *from = strcmp(o->desc, o->name) ? o->desc : "";
+	size_t at = 0;
+	bool space = false, cut = false;
+	for (const char *p = from; *p; p++) {
+		if (*p == ' ') {
+			space = at > 0;
+			continue;
+		}
+		if (at + (space ? 2 : 1) >= cap) {
+			cut = true;
+			break;
+		}
+		if (space) out[at++] = ' ';
+		space = false;
+		out[at++] = *p;
+	}
+	if (cut) {	/* back to the start of the character it stopped in */
+		size_t start = at;
+		while (start > 0 && ((unsigned char)out[start - 1] & 0xc0) == 0x80) start--;
+		if (start > 0 && ((unsigned char)out[start - 1] & 0x80)) start--;
+		if (start < at && aj_utf8_len((const unsigned char *)out + start, (const unsigned char *)out + at) !=
+				(int)(at - start)) at = start;
+		while (at > 0 && out[at - 1] == ' ') at--;
+	}
+	out[at] = 0;
+	if (!at) snprintf(out, cap, "%s", !strcmp(o->kind, "bluetooth") ? "Bluetooth device" : "Audio output");
+}
+
 /* The tile's label: the action centre's are in capitals. */
 static inline void audio_label_caps(char *out, size_t cap, const char *label) {
 	size_t i = 0;

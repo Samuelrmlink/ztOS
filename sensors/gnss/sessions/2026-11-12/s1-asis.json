@@ -1,0 +1,74 @@
+{
+ "accuracy_m_last": 6.0,
+ "accuracy_m_median": 6.0,
+ "accuracy_m_p95": 8.0,
+ "bad_checksums": 0,
+ "epochs": 233,
+ "first_accuracy_s": 24.1,
+ "fix_gaps_s": [],
+ "fix_quality": {
+  "0": 18,
+  "1": 217
+ },
+ "gsa_by_talker": {
+  "BD": 234,
+  "GA": 234,
+  "GI": 234,
+  "GN": 703,
+  "GP": 235,
+  "QZ": 234
+ },
+ "gsv_by_talker": {
+  "BD": 651,
+  "GA": 654,
+  "GL": 661,
+  "GP": 669
+ },
+ "hdop_median": 0.6,
+ "lines": 5673,
+ "sats_used_gga_max": 35,
+ "sats_used_gga_median": 30,
+ "systems": {
+  "BeiDou": {
+   "epochs_used": 212,
+   "in_view_median": 9,
+   "prns_seen": 9,
+   "snr_max": 37,
+   "snr_median": 29,
+   "tracked_median": 7,
+   "used_max": 8,
+   "used_median": 6
+  },
+  "GLONASS": {
+   "epochs_used": 216,
+   "in_view_median": 9,
+   "prns_seen": 10,
+   "snr_max": 42,
+   "snr_median": 30,
+   "tracked_median": 9,
+   "used_max": 9,
+   "used_median": 8
+  },
+  "GPS": {
+   "epochs_used": 217,
+   "in_view_median": 10,
+   "prns_seen": 10,
+   "snr_max": 39,
+   "snr_median": 31.0,
+   "tracked_median": 9,
+   "used_max": 9,
+   "used_median": 8
+  },
+  "Galileo": {
+   "epochs_used": 206,
+   "in_view_median": 11.0,
+   "prns_seen": 11,
+   "snr_max": 39,
+   "snr_median": 25.0,
+   "tracked_median": 8.0,
+   "used_max": 9,
+   "used_median": 7.5
+  }
+ },
+ "ttff_s": 24.1
+}

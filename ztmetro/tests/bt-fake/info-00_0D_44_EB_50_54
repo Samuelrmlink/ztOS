@@ -1,0 +1,9 @@
+Device 00:0D:44:EB:50:54 (public)
+	Name: UE MINI BOOM
+	Alias: UE MINI BOOM
+	Icon: audio-headset
+	Paired: yes
+	Bonded: yes
+	Trusted: yes
+	Blocked: no
+	Connected: yes

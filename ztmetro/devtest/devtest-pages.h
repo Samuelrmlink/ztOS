@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ZrnDevTest's pages, for whichever app has them as its own: Settings under
- * developer, and the zrndevtest app. Ten pages in a row from `first`, in the order of
+ * developer, and the zrndevtest app. Twelve pages in a row from `first`, in the order of
  * DEVTEST_PAGE_NAMES. Their actions are from DEVTEST_ACTIONS up.
  */
 #ifndef DEVTEST_PAGES_H
@@ -11,7 +11,7 @@
 
 #define DEVTEST_ACTIONS 300000
 #define DEVTEST_ACTIONS_END 310000
-#define DEVTEST_PAGES 10
+#define DEVTEST_PAGES 12
 
 void devtest_pages_setup(int first, int anim, long anim_ms);
 double devtest_render(cairo_t *cr, int page);

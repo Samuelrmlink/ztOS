@@ -1,0 +1,12 @@
+[Unit]
+Description=Mark Android ready for ztMETRO once the Waydroid session is up
+After=ztos-waydroid-session.service
+PartOf=ztos-waydroid-session.service
+
+[Service]
+Type=oneshot
+Environment=XDG_RUNTIME_DIR=%t
+ExecStart=/usr/local/libexec/ztos-waydroid-ready
+# Waits as long as Android takes (its own limit is 10 minutes), not the
+# 50 s that killed the boot unit before it could write the marker.
+TimeoutStartSec=660

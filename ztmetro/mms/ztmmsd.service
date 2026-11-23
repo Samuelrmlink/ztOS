@@ -1,0 +1,12 @@
+[Unit]
+Description=Picture messages (MMS): fetch, store and send through the MMSC
+After=ztoscorenetworking.service
+Wants=ztoscorenetworking.service
+
+[Service]
+ExecStart=/usr/local/sbin/ztmmsd
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical.target

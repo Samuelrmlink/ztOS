@@ -1,0 +1,61 @@
+panfrost: BOs anywhere in RAM, and no WARN when pages run out (ROADMAP 8.68)
+
+Proposed, not flashed. Against build/linux-7.1-dp (7.1.0-zboot-wd-dp6).
+
+The port's S9P_GEM_DMA32 keeps every Panfrost BO in ZONE_DMA (DMA32 is empty on
+this phone: /proc/zoneinfo DMA 396037 pages managed, DMA32 0, Normal 504089).
+GPU allocations failed with -ENOMEM (x0 = 0xfffffffffffffff4 in the WARN's
+registers) while the Normal zone had room: 59 "panfrost_mmu.c:478
+panfrost_mmu_map" WARNs in boot -2 of 2026-11-22 (41 ztsound, 16 ztmetro,
+2 HwBinder), each ~60 ms of console output. Nothing Panfrost allocates is
+scanned out (kmsro: the scanout buffers are s9p dumb buffers), and the G72's
+MMU takes 40-bit physical addresses. To check before flashing: a client buffer
+s9p would import for the plane path must still be refused above 4 GB
+(s9p_decon_program_address writes a u32); today such an import already fails
+unless the BO happens to be contiguous. ztmetro/FREEZE.md (2026-10-24) found
+the same mechanism behind Superscan's freezes.
+
+Apply: patch -p1 -d <kernel tree> < kernel/proposed/8.68-panfrost-no-dma32.patch
+
+--- a/drivers/gpu/drm/panfrost/panfrost_gem.c	2026-11-22 23:58:42.215814236 -0500
++++ b/drivers/gpu/drm/panfrost/panfrost_gem.c	2026-11-22 23:59:03.883222531 -0500
+@@ -489,10 +489,19 @@
+ 	if (IS_ERR(shmem))
+ 		return ERR_CAST(shmem);
+ 
+-	/* S9P_GEM_DMA32: below 4 GB, so KMS can scan this out directly */
+-	mapping_set_gfp_mask(shmem->base.filp->f_mapping,
+-			     (mapping_gfp_mask(shmem->base.filp->f_mapping)
+-			      & ~__GFP_HIGHMEM) | __GFP_DMA32);
++	/*
++	 * S9P_GEM_DMA32 removed. It kept every BO below 4 GB "so KMS can scan
++	 * it out", but nothing Panfrost allocates is scanned out here: with
++	 * kmsro the shell's scanout buffers are s9p's own (dumb, DMA-contiguous,
++	 * made by the display device), and s9p's PRIME import of a shmem BO
++	 * fails anyway unless it is contiguous. On this phone ZONE_DMA32 is
++	 * empty and __GFP_DMA32 falls to ZONE_DMA, about 1.5 GB of the 3.5:
++	 * GPU memory ran out there with the Normal zone's 2 GB unused, and
++	 * every failure was a WARN in panfrost_mmu_map (59 in one boot of
++	 * 2026-11-22, from ztsound and ztmetro, ~60 ms of console each). The
++	 * Mali-G72's MMU takes 40-bit physical addresses (the dma mask is set
++	 * from MMU_FEATURES).
++	 */
+ 
+ 	bo = to_panfrost_bo(&shmem->base);
+ 	bo->noexec = !!(flags & PANFROST_BO_NOEXEC);
+--- a/drivers/gpu/drm/panfrost/panfrost_mmu.c	2026-11-22 23:58:42.215917884 -0500
++++ b/drivers/gpu/drm/panfrost/panfrost_mmu.c	2026-11-22 23:59:03.883362523 -0500
+@@ -475,8 +475,12 @@
+ 		prot |= IOMMU_NOEXEC;
+ 
+ 	sgt = drm_gem_shmem_get_pages_sgt(shmem);
+-	if (WARN_ON(IS_ERR(sgt)))
++	if (IS_ERR(sgt)) {
++		/* out of memory (or a signal): the ioctl fails and Mesa copes;
++		 * not a kernel bug, so no WARN and its stack dump */
++		dev_warn_ratelimited(pfdev->base.dev, "BO map: no pages (%pe)\n", sgt);
+ 		return PTR_ERR(sgt);
++	}
+ 
+ 	ret = mmu_map_sg(pfdev, mapping->mmu, mapping->mmnode.start << PAGE_SHIFT,
+ 			 prot, sgt);

@@ -45,6 +45,10 @@ class GateBase(unittest.TestCase):
         gate.KEEP_GLOB = str(self.tmp / 'keep-*')
         gate.KEEP_SCREEN_GLOB = str(self.tmp / 'user-*' / 'keep-screen')
         gate.LAST = str(self.tmp / 'last')
+        gate.OFF_FLAG = str(self.tmp / 'state' / 'off')
+        gate.STATE = str(self.tmp / 'run' / 'state')
+        gate.CONTROL = str(self.tmp / 'run' / 'control')
+        gate.USER_CONF = str(self.tmp / 'user.conf')
         self.inhibit = Path(gate.INHIBIT)
         # boot clock and screen under test control; no systemctl, no threads
         self.clock = [1000.0]
@@ -423,6 +427,137 @@ class NmeaTests(GateBase):
                 gate.feed(self.reader, chunk)
         self.assertNotIn(self.reader, gate.clients)
         self.assertNotIn(self.reader, gate.backlog)
+
+
+class SwitchTests(GateBase):
+    """The location switch: OFF_FLAG, CONTROL and STATE."""
+
+    def state(self):
+        return dict(l.split('=', 1) for l in
+                    Path(self.gate.STATE).read_text().split())
+
+    def test_off_stops_a_running_engine_and_persists(self):
+        gate = self.gate
+        gate.running = True
+        gate.policy()
+        self.assertEqual(self.state(), {'enabled': '1', 'engine': 'tracking', 'readers': '1'})
+        gate.control_line('off\n')
+        self.assertFalse(gate.running)
+        self.assertEqual([a[0] for a in self.actions], ['stop'])
+        self.assertTrue(os.path.exists(gate.OFF_FLAG))
+        self.assertEqual(self.state()['engine'], 'disabled')
+        self.assertEqual(self.state()['enabled'], '0')
+        # a fresh gate (a reboot) reads it back
+        gate.enabled = True
+        gate.load_enabled()
+        self.assertFalse(gate.enabled)
+
+    def test_off_refuses_new_readers_and_sends_no_last_fix(self):
+        gate = self.gate
+        gate.last_fix = (1.0, 2.0, 5.0, 0.0)   # made up
+        gate.control_line('location off')
+        with gate.lock:
+            gate.start_engine('reader arrived; GPS on')
+        self.assertFalse(gate.running)
+        self.assertEqual(self.actions, [])
+        self.assertFalse(self.inhibit.exists())
+        # the accept path: no $PZTLF while off
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+
+        class Server:
+            calls = 0
+
+            def accept(self_):
+                Server.calls += 1
+                if Server.calls > 1:
+                    raise StopPump()
+                return a, None
+        with self.assertRaises(StopPump):
+            gate.accept_loop(Server())
+        b.setblocking(False)
+        with self.assertRaises(BlockingIOError):
+            b.recv(100)
+        self.assertFalse(gate.running)
+
+    def test_on_starts_for_waiting_readers(self):
+        gate = self.gate
+        gate.control_line('off')
+        gate.policy()
+        self.assertFalse(gate.running)
+        gate.control_line('on')
+        self.assertTrue(gate.running)
+        self.assertEqual(self.actions[-1][0], 'start')
+        self.assertFalse(os.path.exists(gate.OFF_FLAG))
+        self.assertEqual(self.state()['enabled'], '1')
+
+    def test_on_without_readers_starts_nothing(self):
+        gate = self.gate
+        gate.clients.clear()
+        gate.control_line('off')
+        gate.control_line('on')
+        self.assertFalse(gate.running)
+        self.assertEqual(self.actions, [])
+        self.assertEqual(self.state()['engine'], 'off')
+
+    def test_unknown_and_repeated_commands(self):
+        gate = self.gate
+        with patch.object(gate, 'log') as log:
+            gate.control_line('reboot')
+            gate.control_line('on')      # already on: nothing
+        self.assertEqual(len(log.call_args_list), 1)
+        self.assertIn('unknown', log.call_args_list[0][0][0])
+        self.assertEqual(self.actions, [])
+
+    def test_state_written_only_on_change(self):
+        gate = self.gate
+        gate.running = True
+        writes = []
+        real = gate.os.replace
+
+        def replace(src, dst):
+            writes.append(dst)
+            real(src, dst)
+        with patch.object(gate.os, 'replace', side_effect=replace):
+            for _ in range(5):
+                self.tick()
+                gate.policy()
+        self.assertEqual([w for w in writes if w == gate.STATE], [gate.STATE])
+        self.assertEqual(os.stat(gate.STATE).st_mode & 0o777, 0o644)
+        text = Path(gate.STATE).read_text()
+        self.assertNotIn('.', text)      # no coordinates, nothing fractional
+
+    def test_engine_states(self):
+        gate = self.gate
+        gate.ENGINE_SEEN = 30
+        with gate.lock:
+            self.assertEqual(gate.engine_state(), 'off')
+            gate.running = True
+            gate.engine_seen = -1e9
+            self.assertEqual(gate.engine_state(), 'starting')
+            gate.engine_seen = self.clock[0]
+            self.assertEqual(gate.engine_state(), 'tracking')
+            gate.capped = True
+            self.assertEqual(gate.engine_state(), 'capped')
+            gate.enabled = False
+            self.assertEqual(gate.engine_state(), 'disabled')
+
+    def test_control_fifo_mode_and_group(self):
+        gate = self.gate
+        Path(gate.USER_CONF).write_text('ZTOS_USER=nobody-here\nZTOS_GID=%d\n' % os.getgid())
+        self.assertEqual(gate.user_gid(), os.getgid())
+        fd = gate.control_open()
+        self.addCleanup(os.close, fd)
+        st = os.stat(gate.CONTROL)
+        import stat
+        self.assertTrue(stat.S_ISFIFO(st.st_mode))
+        self.assertEqual(st.st_mode & 0o777, 0o620)
+        self.assertEqual(st.st_gid, os.getgid())
+        w = os.open(gate.CONTROL, os.O_WRONLY | os.O_NONBLOCK)
+        os.write(w, b'off\n')
+        os.close(w)
+        self.assertEqual(os.read(fd, 256), b'off\n')
 
 
 if __name__ == '__main__':

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Write ztMETRO's ready marker (/run/ztos-waydroid-boot-ready) once Android is
+# up, for every start of the Waydroid session: the boot, a launch, a push thaw.
+# `ztos-waydroid-recover ready` (root) writes it. ztos-waydroid-boot also
+# waits for it, but under its unit's time limit: killed at 50 s while a cold
+# Android took ~85 s, it left no marker and the shell said "has stopped"
+# (2026-11-22). This unit waits as long as the session runs, up to 10 minutes.
+set -u
+deadline=$((SECONDS + ${ZTOS_WAYDROID_READY_MAX:-600}))
+ready=false
+while (( SECONDS < deadline )); do
+	systemctl --user -q is-active ztos-waydroid-session.service || break
+	# (each call waits up to 90 s for Android itself)
+	if sudo -n /usr/local/libexec/ztos-waydroid-recover ready; then
+		ready=true
+		break
+	fi
+	sleep 5
+done
+if "$ready"; then
+	logger -t ztos-waydroid-ready 'Android ready; marker set'
+	# `ready` thaws Android; freeze it again if nothing of it is in front
+	ztos-waydroid-power sync || true
+else
+	logger -t ztos-waydroid-ready 'Android not ready while its session ran; no marker'
+fi
+exit 0

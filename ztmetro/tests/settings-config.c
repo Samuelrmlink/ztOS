@@ -111,6 +111,23 @@ int main(void) {
 	config_keys_written(k, 1);
 	assert(!k[0].force && config_keys_changed(k, 1) == 0);
 
+	/* the brightness slider's lift: written with no SIGHUP only when it is
+	 * the one key changed (the shell already has the level) */
+	set(&k[0], "brightness", "40");
+	set(&k[1], "timeout", "30");
+	assert(!config_only_changed(k, 2, "brightness"));
+	snprintf(k[0].value, sizeof(k[0].value), "62");
+	assert(config_only_changed(k, 2, "brightness"));
+	snprintf(k[0].value, sizeof(k[0].value), "40");
+	k[0].force = true;
+	assert(config_only_changed(k, 2, "brightness"));
+	snprintf(k[1].value, sizeof(k[1].value), "60");
+	assert(!config_only_changed(k, 2, "brightness"));
+	k[0].force = false;
+	assert(!config_only_changed(k, 2, "brightness"));
+	k[1].key = NULL;	/* an unfilled slot */
+	assert(!config_only_changed(k, 2, "brightness"));
+
 	/* a line longer than the buffer passes whole, and its rest is not taken for a key */
 	static char huge[CONFIG_LINE_MAX * 3], expect[CONFIG_LINE_MAX * 4];
 	memset(huge, 'x', CONFIG_LINE_MAX + 50);

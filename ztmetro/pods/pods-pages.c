@@ -573,11 +573,9 @@ static double settings_banner(cairo_t *cr, double y) {
 static void read_only_end(cairo_t *cr, double y0, double y1, int hits) {
 	if (settings_open()) return;
 	zmc.n_hits = hits;
-	if (zmc.style == ZMC_STYLE_METRO) {
-		cairo_set_source_rgba(cr, 0, 0, 0, 0.45);
-		cairo_rectangle(cr, 0, y0 - 4, zmc.width, y1 - y0 + 4);
-		cairo_fill(cr);
-	}
+	cairo_set_source_rgba(cr, 0, 0, 0, 0.45);
+	cairo_rectangle(cr, 0, y0 - 4, zmc.width, y1 - y0 + 4);
+	cairo_fill(cr);
 }
 
 static bool mode_available(int i) {

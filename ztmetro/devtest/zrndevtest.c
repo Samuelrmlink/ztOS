@@ -25,11 +25,11 @@ static const struct zmc_app devtest = {
 };
 
 int main(int argc, char **argv) {
-	static const char *names[] = { "hub", "system", "sensors", "journal", "kernel", "shell", "hardware", "logs", "animations", "preview" };
+	static const char *names[] = { "hub", "system", "sensors", "journal", "kernel", "shell", "hardware", "logs", "animations", "preview", "temperatures", "charging" };
 	if (argc == 4 && strcmp(argv[1], "--render") == 0) {
 		/* ZT_ANIM=N ZT_ANIM_MS=T: the animations page with N played T ms in */
 		devtest_pages_setup(0, getenv("ZT_ANIM") ? atoi(getenv("ZT_ANIM")) : -1, 0);
-		for (int i = 0; i < 10; i++) {
+		for (int i = 0; i < 12; i++) {
 			if (strcmp(names[i], argv[2]) == 0) {
 				return zmc_render_png(&devtest, i, i == 8 ? 1400 : 664, argv[3]);
 			}

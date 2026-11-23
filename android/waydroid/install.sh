@@ -72,9 +72,11 @@ install -Dm644 "$here/ztos-waydroid-audio-reconnect.service" /etc/systemd/user/z
 install -Dm755 "$here/launch.sh" /usr/local/bin/ztos-waydroid-launch
 install -Dm755 "$here/power.sh" /usr/local/bin/ztos-waydroid-power
 install -Dm755 "$here/ztos-waydroid-boot" /usr/local/libexec/ztos-waydroid-boot
+install -Dm755 "$here/ztos-waydroid-ready" /usr/local/libexec/ztos-waydroid-ready
 install -Dm644 "$here/ztos-waydroid-network.service" /etc/systemd/system/ztos-waydroid-network.service
 install -Dm644 "$here/ztos-waydroid-session.service" /etc/systemd/user/ztos-waydroid-session.service
 install -Dm644 "$here/ztos-waydroid-boot.service" /etc/systemd/user/ztos-waydroid-boot.service
+install -Dm644 "$here/ztos-waydroid-ready.service" /etc/systemd/user/ztos-waydroid-ready.service
 mkdir -p /etc/systemd/system/waydroid-container.service.d
 cat > /etc/systemd/system/waydroid-container.service.d/ztos-recovery.conf <<'UNIT'
 [Service]
@@ -84,7 +86,7 @@ UNIT
 sudoers=$(mktemp)
 trap 'rm -f "$sudoers"' EXIT
 cat > "$sudoers" <<RULES
-$ZTOS_USER ALL=(root) NOPASSWD: /usr/local/libexec/ztos-waydroid-recover audio, /usr/local/libexec/ztos-waydroid-recover prepare, /usr/local/libexec/ztos-waydroid-recover ready, /usr/local/libexec/ztos-waydroid-recover recover, /usr/local/libexec/ztos-waydroid-recover freeze, /usr/local/libexec/ztos-waydroid-recover unfreeze, /usr/local/libexec/ztos-waydroid-recover display on, /usr/local/libexec/ztos-waydroid-recover display off, /usr/local/libexec/ztos-waydroid-recover settings, /usr/local/libexec/ztos-waydroid-recover install *, /usr/local/libexec/ztos-waydroid-recover remove *, /usr/local/libexec/ztos-waydroid-recover close *
+$ZTOS_USER ALL=(root) NOPASSWD: /usr/local/libexec/ztos-waydroid-recover audio, /usr/local/libexec/ztos-waydroid-recover prepare, /usr/local/libexec/ztos-waydroid-recover ready, /usr/local/libexec/ztos-waydroid-recover recover, /usr/local/libexec/ztos-waydroid-recover freeze, /usr/local/libexec/ztos-waydroid-recover unfreeze, /usr/local/libexec/ztos-waydroid-recover display on, /usr/local/libexec/ztos-waydroid-recover display off, /usr/local/libexec/ztos-waydroid-recover settings, /usr/local/libexec/ztos-waydroid-recover media pause, /usr/local/libexec/ztos-waydroid-recover install *, /usr/local/libexec/ztos-waydroid-recover remove *, /usr/local/libexec/ztos-waydroid-recover close *
 RULES
 visudo -cf "$sudoers"
 install -m440 "$sudoers" /etc/sudoers.d/ztos-waydroid

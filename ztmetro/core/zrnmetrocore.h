@@ -35,8 +35,9 @@
 #define ZMC_TILT_IN_MS	90
 #define ZMC_TILT_OUT_MS	200
 #define ZMC_MARGIN	16	/* left edge of everything: 20 px on a 450 px wide reference */
-enum { ZMC_STYLE_METRO, ZMC_STYLE_DOTMATRIX };
-#define ZMC_HEADER_H	104	/* the title stays; the list moves under it */
+enum { ZMC_THEME_DARK, ZMC_THEME_LIGHT };	/* Metro's light/dark */
+#define ZMC_HEADER_H	104	/* the title stays; the list moves under it (portrait) */
+#define ZMC_HEADER_H_LANDSCAPE	64	/* the same in landscape, with a smaller title; zmc_header_h() */
 #define ZMC_ACT_BACK	(-1)	/* the title: up a page */
 #define ZMC_ACT_PIVOT	(-2)	/* the next tab's title: slide to it (arg: its page) */
 #define ZMC_MAX_HITS	160
@@ -66,6 +67,7 @@ struct zmc_wheel {
 	int n, at;		/* how many tabs, and which is in front */
 	struct zmc_tab tabs[ZMC_MAX_TABS];
 	double w[ZMC_MAX_TABS];	/* how wide each title is drawn */
+	double size;		/* at this title size (smaller in landscape) */
 };
 
 struct zmc_app {
@@ -109,6 +111,11 @@ struct zmc_app {
 	 * already set what it does: the shell's frame, sizes for a window, a
 	 * pointer as a finger. The page is drawn again afterwards. */
 	void (*environment)(bool desktop);
+	/* the window has a new size (zmc.width, zmc.height; turned to landscape or
+	 * back), taken between frames: drop what was measured or drawn for the old
+	 * one. Whatever moved has stopped, the finger has been let go, a board and a
+	 * menu are closed; the page is drawn again afterwards. NULL: nothing to drop. */
+	void (*resized)(void);
 };
 
 struct zmc_buffer {
@@ -146,11 +153,7 @@ struct zmc_state {
 	bool env_known;		/* the shell has said which */
 	char env_output[32];	/* the output it is shown on */
 	uint32_t accent;	/* 0xRRGGBB */
-	/* the shell's style (ztRetrofit): the same widgets with another face.
-	 * ZMC_STYLE_DOTMATRIX draws switches, sliders, buttons, the loading dots
-	 * and page titles as dots, in the palette chosen on its home screen */
-	int style;
-	uint32_t dm_main, dm_accent;
+	int theme;		/* ZMC_THEME_*: Metro light or dark */
 
 	int page;
 	double scroll, content_h;
@@ -165,6 +168,11 @@ struct zmc_state {
 	int anim_frames;
 	bool anim_active;
 	bool anim_cache_ready;	/* destination page already rendered for GLES */
+	/* the page is one flat colour (page_rgb) for now: drawn as that, not
+	 * from its cache, and the cache not drawn again (a call's panels
+	 * flipping over their background: ztphone) */
+	bool page_solid;
+	uint32_t page_rgb;
 	bool anim_prepared;	/* the destination was drawn ahead, while idle */
 	bool anim_target_pending;	/* prepare it in the black gap after the outgoing rows */
 	bool anim_back;		/* going back or closing: the old page turns away */
@@ -226,6 +234,8 @@ struct zmc_state {
 extern struct zmc_state zmc;
 /* ZTMETRO_PERFLOG=1: frame and page timings on stderr (off by default) */
 bool zmc_perflog(void);
+/* ZMC_TRACE=1: a step of start-up, timed, on stderr (the first call starts the clock) */
+void zmc_trace(const char *what);
 
 /* ---- running ---- */
 int zmc_run(const struct zmc_app *app, int first_page);
@@ -248,6 +258,11 @@ void zmc_on_frame(void (*step)(void));
 void zmc_watch_fd(int fd, void (*ready)(int fd, void *data), void *data);
 /* call `tick` every `ms` from the main loop; 0 stops it. One timer per app. */
 void zmc_every(int ms, void (*tick)(void));
+/* the window is wider than it is tall (the phone turned); changes only between
+ * frames, with zmc.width and zmc.height (see zmc_app.resized) */
+bool zmc_landscape(void);
+/* how tall the fixed title is now: ZMC_HEADER_H, or ZMC_HEADER_H_LANDSCAPE */
+int zmc_header_h(void);
 
 /* ---- drawing a page ---- */
 double zmc_header(cairo_t *cr, const char *title);	/* returns where the content starts */
@@ -311,6 +326,9 @@ void *zmc_gpu_dmabuf_import(int w, int h, uint32_t fourcc, uint64_t modifier, in
 void zmc_gpu_dmabuf_free(void *image);
 void zmc_gpu_dmabuf(void *image, const double corners[4][3], double alpha);
 void zmc_present(void);
+/* true when frames are drawn on the GPU (an .overlay runs only then) */
+void zmc_gpu_prepare(cairo_surface_t *source, unsigned revision);
+bool zmc_gpu_ready(void);
 
 /* Named Windows Phone transitions, from the Lumia 530 firmware. Draw one frame
  * at progress t (0..1) of `source` over the rectangle (x,y,w,h, points), on the
@@ -368,9 +386,7 @@ double zmc_text(cairo_t *cr, const char *s, const char *font, double size, doubl
 void zmc_text_line(cairo_t *cr, const char *s, const char *font, double size, double x, double y, double width);
 void zmc_add_hit(double x, double y, double w, double h, int action, int arg);
 void zmc_set_rgb(cairo_t *cr, uint32_t color);
-/* A picture (a person's photo) cut to a square at x, y, `size` points across.
- * Under DotMatrix it is dots on the page's lattice, each as bright as what is
- * under it, in the palette's main colour: never a photograph among the dots. */
+/* A picture (a person's photo) cut to a square at x, y, `size` points across. */
 void zmc_picture(cairo_t *cr, cairo_surface_t *picture, double x, double y, double size);
 void zmc_accent(cairo_t *cr);
 
@@ -418,8 +434,28 @@ void zmc_list_lock(bool lock);
  * the ends of a list, so an app only calls it for something of its own. */
 void zmc_haptic(const char *kind);
 uint32_t zmc_now_ms(void);
+/* Animation speeds (core/zt-anim.h, Settings > animations). zmc_page_anim is
+ * the kind this app's pages turn as (ZT_ANIM_APP_PAGES; Settings sets its
+ * own); zmc_next_anim, when not -1, is the next turn's alone (a page asked
+ * for from outside). zmc_anim_ms: a length of a kind's motion as set, 0: off. */
+extern int zmc_page_anim, zmc_next_anim;
+int zmc_anim_ms(int kind, int ms);
+/* the same for something waiting on it (a clock compared against it): 1 when off */
+static inline int zmc_anim_wait(int kind, int ms) {
+	int v = zmc_anim_ms(kind, ms);
+	return v > 0 ? v : 1;
+}
 void zmc_read_file(const char *path, char *out, size_t size);	/* first line, or "" */
-uint32_t zmc_config_accent(void);
-void zmc_config_style(void);	/* style and palette from the same file; DotMatrix also sets the accent */	/* the accent in ~/.config/ztmetro/config */
+uint32_t zmc_config_accent(void);	/* the accent in ~/.config/ztmetro/config */
+/* Metro's light/dark theme, from the same config (key "theme = light|dark",
+ * default dark) and the ZTRF_SHELL_THEME session env. */
+void zmc_config_theme(void);
+/* The page background and the foreground/text for the current Metro theme,
+ * as 0xRRGGBB. Dark: bg black, fg white (today's look); Light: bg white, fg
+ * black. zmc_bg/zmc_fg set the Cairo source to each. */
+uint32_t zmc_bg_color(void);
+uint32_t zmc_fg_color(void);
+void zmc_bg(cairo_t *cr);
+void zmc_fg(cairo_t *cr);
 
 #endif

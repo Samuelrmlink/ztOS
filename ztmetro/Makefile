@@ -18,10 +18,11 @@ ifneq ($(FOREIGN),)
 $(info removed programs built for another machine, to build them here: $(FOREIGN))
 endif
 
-all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd \
-	csf/ztoscsf notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
-	store/ztstore power/ztpower camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
-	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
+all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest devices/ztdevices perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd \
+	coru/ztoscoru notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
+	store/ztstore power/ztpower servicemode/ztservicemode usbview/ztusbview camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
+	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd \
+	passcoded/zrn-passcoded passcoded/zrn-passcode usbenergy/ztusbenergyd
 
 sounds/ztos-sounds: sounds/ztos-sounds.c volume-streams.h
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libpulse) -o $@ $< $(shell pkg-config --libs libpulse) -lm
@@ -30,13 +31,6 @@ sounds/ztos-sounds: sounds/ztos-sounds.c volume-streams.h
 # battery come from there, and the shell falls back to looking for itself
 IAL_FLAGS := $(shell pkg-config --exists ztos-ial 2>/dev/null && echo -DHAVE_ZTOS_IAL $$(pkg-config --cflags ztos-ial))
 IAL_LIBS := $(shell pkg-config --exists ztos-ial 2>/dev/null && pkg-config --libs --static ztos-ial)
-
-# ztRetrofit's styles beside Metro: retro/ (DotMatrix: the dot engine and its launcher)
-RETRO = retro/dotmatrix.c retro/dm-launcher.c retro/dm-chrome.c
-RETRO_DEPS = $(RETRO) core/zrnboard.h retro/dotmatrix.h retro/dm-launcher.h retro/dm-chrome.h retro/dm-glyphs.h
-# every cairo fill and stroke through retro/dm-wrap.c: the style's dots
-DM_WRAP = retro/dm-wrap.c
-DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
 
 # desktop mode (desktop/): the outputs after the panel, in the same session
 DESK_DEPS = desktop/desktop.c desktop/deco.c desktop/desktop.h desktop/wlr-layer-shell-unstable-v1-protocol.h \
@@ -49,14 +43,9 @@ ZTENV_CODE = core/zt-environment-v1-protocol.c core/xdg-shell-protocol.c
 desktop/zt-environment-v1-protocol.h: $(ZTENV)
 	wayland-scanner server-header $< $@
 
-ztmetro: ztmetro.c volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+ztmetro: ztmetro.c core/zt-anim.h appearance.h wall-blur.h sleep-toggle.h shade-edit.h shade-edit.c lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o $@ ztmetro.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
-
-# the DotMatrix screens rendered offscreen to PNG files, to check them without a phone
-retro/dm-test: retro/dm-test.c $(RETRO_DEPS)
-	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags egl glesv2 cairo) -o $@ retro/dm-test.c $(RETRO) \
-		$(shell pkg-config --libs egl glesv2 cairo) -lm
+		-o $@ ztmetro.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
 xdg-shell-protocol.h:
 	wayland-scanner server-header $(XDG) $@
@@ -69,12 +58,11 @@ apps/ztapps: apps/ztapps.c
 # ZrnMetroCore: the window, motion and widgets our own apps share
 VIEWPORTER := $(WP)/stable/viewporter/viewporter.xml
 CORE = core/zrnmetrocore.c core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c \
-	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c \
-	retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
-CORE_DEPS = $(CORE) core/zt-clock.h core/zrnboard.h retro/dotmatrix.h retro/dm-chrome.h retro/dm-glyphs.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h \
+	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c
+CORE_DEPS = $(CORE) core/zt-clock.h core/zt-anim.h core/zrnboard.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h \
 	core/zt-environment-v1-client-protocol.h core/xdg-decoration-unstable-v1-client-protocol.h
 APP_BUILD = $(CC) $(CFLAGS) $(WARN) -Icore $(shell pkg-config --cflags $(APP_PKGS)) $(IAL_FLAGS)
-APP_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(APP_PKGS)) $(IAL_LIBS) -lm
+APP_LIBS = $(shell pkg-config --libs $(APP_PKGS)) $(IAL_LIBS) -lm
 
 # ztmirror: the screen and touch over USB (or QEMU's forwarded port)
 mirror/wlr-screencopy-client.h: mirror/wlr-screencopy-unstable-v1.xml
@@ -162,18 +150,26 @@ JPEG_LIBS := $(shell pkg-config --exists libjpeg 2>/dev/null && pkg-config --lib
 gallery/ztgallery: gallery/ztgallery.c gallery/gallery-logic.h $(CORE_DEPS)
 	$(APP_BUILD) $(JPEG_FLAGS) -o $@ gallery/ztgallery.c $(CORE) $(APP_LIBS) $(JPEG_LIBS) -lpthread
 
-# Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
-EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c desktop/desktop-page.c
-EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
-settings/ztsettings: settings/ztsettings.c volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h $(EMBEDDED_DEPS) $(CORE_DEPS)
-	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
+# the passcode daemon (root) and its tool; Settings and the shell speak to it
+# through passcoded/passcode-proto.h
+passcoded/zrn-passcoded: passcoded/zrn-passcoded.c passcoded/passcode-proto.h ztos-user.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ passcoded/zrn-passcoded.c -lcryptsetup -lcrypto -lpthread
 
-devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h $(CORE_DEPS)
-	$(APP_BUILD) -o $@ devtest/zrndevtest.c devtest/devtest-pages.c $(CORE) $(APP_LIBS)
+passcoded/zrn-passcode: passcoded/zrn-passcode.c passcoded/passcode-proto.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ passcoded/zrn-passcode.c
+
+# Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
+EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
+EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h sound/eq-drag.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
+settings/ztsettings: settings/ztsettings.c shade-edit.h appearance.h settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h settings/wifi-list.h usbenergy/usb-energy-ui.h usbenergy/usb-energy.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
+	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c mms/apnconf.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
+
+devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h devtest/devtest-power.c devtest/devtest-power.h power/battery-health.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-power.c $(CORE) $(APP_LIBS)
 
 # Devices and Services: what is running, crashed or missing
 # ztSound: the equalizer and effects (the engine, ztos-soundd, ships in rootfs/overlay/usr/local/bin)
-sound/ztsound: sound/ztsound.c sound/sound-pages.c sound/sound-pages.h audio-apps.h audio-state.h audio-sync.h $(CORE_DEPS)
+sound/ztsound: sound/ztsound.c sound/sound-pages.c sound/sound-pages.h sound/eq-drag.h audio-apps.h audio-state.h audio-sync.h $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ sound/ztsound.c sound/sound-pages.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devices/ztdevices: devices/ztdevices.c $(CORE_DEPS)
@@ -188,14 +184,33 @@ osial/ztosial: osial/ztosial.c $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ osial/ztosial.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 # Power Management: battery fuel gauge, sleep diagnostics, wake history
-power/ztpower: power/ztpower.c $(CORE_DEPS)
+power/ztpower: power/ztpower.c power/battery-health.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ power/ztpower.c $(CORE) $(APP_LIBS)
+
+# USBView: the USB tree from sysfs, read only (usbview/usb-tree.h)
+usbview/ztusbview: usbview/ztusbview.c usbview/usb-tree.h usbview/usb-ids.h usbenergy/usb-energy.h usbenergy/usb-energy-ui.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ usbview/ztusbview.c $(CORE) $(APP_LIBS)
+
+# ServiceMode: the modem's field test and menus, to look at (modemd/servicemode.h)
+servicemode/ztservicemode: servicemode/ztservicemode.c $(CORE_DEPS)
+	$(APP_BUILD) -o $@ servicemode/ztservicemode.c $(CORE) $(APP_LIBS)
 
 perfd/zrnperfd: perfd/zrnperfd.c perfd/wlpm.c perfd/wlpm.h perfd/tickle.c perfd/tickle.h background-apps.h ztos-user.h perfd/iblog.c perfd/iblog.h perfd/ibnet.c perfd/ibnet.h perfd/perfial.c perfd/perfial.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ perfd/zrnperfd.c perfd/wlpm.c perfd/tickle.c perfd/iblog.c perfd/ibnet.c perfd/perfial.c -lm
 
 perfd/ztprofile: perfd/ztprofile.c perfd/wlpm.c perfd/wlpm.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ perfd/ztprofile.c perfd/wlpm.c -lm
+
+# What each USB accessory drew from the phone: the user's daemon (usbenergy/README.md)
+UE_DEPS = usbenergy/usb-energy.h usbenergy/usb-energy-track.h
+usbenergy/ztusbenergyd: usbenergy/ztusbenergyd.c $(UE_DEPS)
+	$(CC) $(CFLAGS) $(WARN) -Wno-format-truncation -o $@ usbenergy/ztusbenergyd.c
+
+.PHONY: install-usbenergy
+install-usbenergy: usbenergy/ztusbenergyd
+	install -Dm755 usbenergy/ztusbenergyd /usr/local/bin/ztusbenergyd
+	install -Dm644 usbenergy/ztusbenergyd.service /usr/lib/systemd/user/ztusbenergyd.service
+	install -Dm644 usbenergy/README.md /usr/local/share/doc/ztos/usb-energy.md
 
 # Battery and data use per app: the root daemon, its command (acct/README.md)
 ACCT_DEPS = acct/acctd.h acct/acct-common.h acct/acct-bpf.h ztos-user.h
@@ -242,18 +257,24 @@ install-acct: acct/ztacctd acct/ztacct acct/ztusage
 touchkeyd/ztos-touchkeyd: touchkeyd/ztos-touchkeyd.c
 	$(CC) $(CFLAGS) $(WARN) -o $@ touchkeyd/ztos-touchkeyd.c
 
-sensord/ztoscsf-sensord: sensord/ztoscsf-sensord.c
+sensord/ztoscsf-sensord: sensord/ztoscsf-sensord.c sensord/orient.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ sensord/ztoscsf-sensord.c -lm
 
 # the modem's state for the shell (signal, operator, data), and airplane mode, SMS
-modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c
-	$(CC) $(CFLAGS) $(WARN) -o $@ modemd/ztoscorenetworkingd.c
+modemd/ztoscorenetworkingd: modemd/ztoscorenetworkingd.c modemd/servicemode.h mms/mmspdu.c mms/mmspdu.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ modemd/ztoscorenetworkingd.c mms/mmspdu.c
+
+# picture messages (MMS): the daemon, its PDU codec and the access point list
+MMS = mms/mmspdu.c mms/apnconf.c
+MMS_DEPS = $(MMS) mms/mmspdu.h mms/apnconf.h
+mms/ztmmsd: mms/ztmmsd.c $(MMS_DEPS)
+	$(CC) $(CFLAGS) $(WARN) -o $@ mms/ztmmsd.c $(MMS)
 
 # notifications from other programs, what is playing, and push
 ledd/zrn-ledd: ledd/zrn-ledd.c ledd/led-policy.h ztos-user.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ ledd/zrn-ledd.c
 
-notifyd/ztnotifyd: notifyd/ztnotifyd.c notifyd/download-watch.h
+notifyd/ztnotifyd: notifyd/ztnotifyd.c notifyd/download-watch.h notifyd/therm-watch.h
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libsystemd) -o $@ notifyd/ztnotifyd.c \
 		$(shell pkg-config --libs libsystemd)
 
@@ -303,7 +324,7 @@ contacts/ztcontacts: contacts/ztcontacts.c comm/comm.h comm/contact-store.h $(CO
 
 # the App Store: the repos in pacman.conf and the AUR (see store/README.md)
 STORE = store/ztstore.c store/util.c store/json.c store/pkg.c store/repo.c store/appstream.c store/aur.c \
-	store/sections.c store/search.c store/jobs.c store/icons.c store/install.c store/flathub.c store/shots.c
+	store/sections.c store/search.c store/jobs.c store/icons.c store/install.c store/flathub.c store/shots.c store/ztapps.c
 STORE_PKGS = librsvg-2.0 zlib
 store/ztstore: $(STORE) $(wildcard store/*.h) $(CORE_DEPS)
 	$(APP_BUILD) -DHAVE_RSVG $(shell pkg-config --cflags $(STORE_PKGS)) -o $@ $(STORE) $(CORE) $(APP_LIBS) \
@@ -324,6 +345,23 @@ browser/superscan: $(BROWSER) browser/webview.h browser/linux-dmabuf-v1-client-p
 
 # kept out of `all`/`install` until WPE is confirmed on the phone, so a missing
 # package cannot break the main build
+# ztWhatsApp: each part has its own Makefile. The engine needs nlohmann-json to build.
+.PHONY: whatsapp install-whatsapp clean-whatsapp
+whatsapp:
+	$(MAKE) -C whatsapp/engine
+	$(MAKE) -C whatsapp/ui
+	$(MAKE) -C whatsapp/notify
+
+install-whatsapp: whatsapp
+	$(MAKE) -C whatsapp/engine install
+	$(MAKE) -C whatsapp/ui install
+	$(MAKE) -C whatsapp/notify install
+
+clean-whatsapp:
+	$(MAKE) -C whatsapp/engine clean
+	$(MAKE) -C whatsapp/ui clean
+	$(MAKE) -C whatsapp/notify clean
+
 .PHONY: install-browser
 install-browser: browser/superscan
 	install -Dm755 browser/superscan /usr/local/bin/superscan
@@ -340,14 +378,16 @@ check-store:
 		$(CC) -std=c11 -Wall -o /tmp/ztstore-test-$$t tests/test_$$t.c util.c json.c pkg.c repo.c appstream.c aur.c sections.c flathub.c -lz && \
 		/tmp/ztstore-test-$$t || exit 1; done
 
-# ztOSCoreSensorFramework: starts every piece of hardware support with the
-# system, watches them, and reports what fails
-csf/ztoscsf: csf/ztoscsf.c ztos-user.h
-	$(CC) $(CFLAGS) $(WARN) -o $@ csf/ztoscsf.c
+# ztOSCOR-U (ztOS Central Operations Register Unit, formerly ztOSCoreSensorFramework):
+# starts every component with the system, watches them, and reports what fails
+coru/ztoscoru: coru/ztoscoru.c ztos-user.h
+	$(CC) $(CFLAGS) $(WARN) -o $@ coru/ztoscoru.c
 
+# the boot splash on the framebuffer: the logo and what systemd is starting
+# (ztos-splash.service, docs/bootsplash/README.md)
 splash/ztos-splash: splash/ztos-splash.c
-	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags cairo pangocairo) -o $@ splash/ztos-splash.c \
-		$(shell pkg-config --libs cairo pangocairo)
+	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags cairo pangocairo libsystemd) -o $@ splash/ztos-splash.c \
+		$(shell pkg-config --libs cairo pangocairo libsystemd) -lm
 
 core/xdg-shell-client-protocol.h:
 	wayland-scanner client-header $(XDG) $@
@@ -417,6 +457,15 @@ install: check-arch
 	install -Dm644 ntfy/ztntfy.desktop /usr/local/share/applications/ztntfy.desktop
 	install -Dm644 ntfy/ztntfy.svg /usr/local/share/icons/hicolor/scalable/apps/ztntfy.svg
 	install -Dm755 power/ztpower /usr/local/bin/ztpower
+	install -Dm755 usbview/ztusbview /usr/local/bin/ztusbview
+	install -Dm755 usbenergy/ztusbenergyd /usr/local/bin/ztusbenergyd
+	install -Dm644 usbenergy/ztusbenergyd.service /usr/lib/systemd/user/ztusbenergyd.service
+	install -Dm644 usbenergy/README.md /usr/local/share/doc/ztos/usb-energy.md
+	install -Dm644 usbview/ztusbview.desktop /usr/local/share/applications/ztusbview.desktop
+	install -Dm644 usbview/ztusbview.svg /usr/local/share/icons/hicolor/scalable/apps/ztusbview.svg
+	install -Dm755 servicemode/ztservicemode /usr/local/bin/ztservicemode
+	install -Dm644 servicemode/ztservicemode.desktop /usr/local/share/applications/ztservicemode.desktop
+	install -Dm644 servicemode/ztservicemode.svg /usr/local/share/icons/hicolor/scalable/apps/ztservicemode.svg
 	install -Dm755 osial/ztosial /usr/local/bin/ztosial
 	install -Dm644 osial/ztosial.desktop /usr/local/share/applications/ztosial.desktop
 	install -Dm644 osial/ztosial.svg /usr/local/share/icons/hicolor/scalable/apps/ztosial.svg
@@ -451,6 +500,10 @@ install: check-arch
 	install -Dm644 clock/README.md /usr/local/share/doc/ztos/clock/README.md
 	install -Dm755 ledd/zrn-ledd /usr/local/sbin/zrn-ledd
 	install -Dm644 ledd/zrn-ledd.service /etc/systemd/system/zrn-ledd.service
+	install -Dm755 passcoded/zrn-passcoded /usr/local/sbin/zrn-passcoded
+	install -Dm755 passcoded/zrn-passcode /usr/local/sbin/zrn-passcode
+	install -Dm644 passcoded/zrn-passcoded.service /etc/systemd/system/zrn-passcoded.service
+	install -Dm644 passcoded/README.md /usr/local/share/doc/ztos/zrn-passcode.md
 	install -Dm755 touchkeyd/ztos-touchkeyd /usr/local/sbin/ztos-touchkeyd
 	install -Dm644 touchkeyd/ztos-touchkeyd.service /etc/systemd/system/ztos-touchkeyd.service
 	install -Dm755 sensord/ztoscsf-sensord /usr/local/sbin/ztoscsf-sensord
@@ -458,7 +511,11 @@ install: check-arch
 	install -Dm755 modemd/ztoscorenetworkingd /usr/local/sbin/ztoscorenetworkingd
 	install -Dm644 modemd/ztoscorenetworking-modem.service /etc/systemd/system/ztoscorenetworking-modem.service
 	install -Dm644 modemd/ztoscorenetworking.service /etc/systemd/system/ztoscorenetworking.service
-	install -Dm755 csf/ztoscsf /usr/local/sbin/ztoscsf
+	install -Dm755 mms/ztmmsd /usr/local/sbin/ztmmsd
+	install -Dm644 mms/ztmmsd.service /etc/systemd/system/ztmmsd.service
+	install -Dm644 mms/apns-extra.xml /usr/local/share/ztoscorenetworking/apns-extra.xml
+	test -e /etc/ztoscorenetworking/mms || install -Dm666 /dev/null /etc/ztoscorenetworking/mms
+	install -Dm755 coru/ztoscoru /usr/local/sbin/ztoscoru
 	install -Dm755 notifyd/ztnotifyd /usr/local/bin/ztnotifyd
 	install -Dm755 phone/ztphone /usr/local/bin/ztphone
 	install -Dm755 messages/ztmessages /usr/local/bin/ztmessages
@@ -470,32 +527,39 @@ install: check-arch
 	install -Dm644 contacts/google-client.json.template /usr/local/share/ztos/google-client.json.template
 	install -Dm644 -t /usr/local/share/applications comm/ztphone.desktop comm/ztmessages.desktop comm/ztcontacts.desktop
 	install -Dm644 -t /usr/local/share/icons/hicolor/scalable/apps comm/ztphone.svg comm/ztmessages.svg comm/ztcontacts.svg
-	install -Dm644 csf/components /etc/ztoscoresensorframework/components
-	install -Dm644 csf/ztoscoresensorframework.service /etc/systemd/system/ztoscoresensorframework.service
+	install -Dm644 coru/components /etc/ztoscoru/components
+	install -Dm644 coru/ztoscoru.service /etc/systemd/system/ztoscoru.service
 
 clean:
-	rm -f ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd csf/ztoscsf notifyd/ztnotifyd splash/ztos-splash \
+	rm -f servicemode/ztservicemode usbview/ztusbview usbenergy/ztusbenergyd ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd coru/ztoscoru passcoded/zrn-passcoded passcoded/zrn-passcode notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h \
 		acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
 
 # Uses a private Wayland seat; does not touch the running compositor or display.
 .PHONY: check-arch check-keyboard
-check-keyboard: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-keyboard: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-keyboard-test
 
 .PHONY: check-launch
-check-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-launch-test tests/launch-state.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-launch: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-launch-test tests/launch-state.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-launch-test
 
+# An Android app tapped while Android is not ready starts it (tests/waydroid-launch.c)
+.PHONY: check-waydroid-launch
+check-waydroid-launch: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-waydroid-launch-test tests/waydroid-launch.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+	/tmp/ztmetro-waydroid-launch-test
+
 .PHONY: check-auth
-check-auth: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-auth: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-auth-test
 
 # what the Bluetooth agent asks the shell, and the agent itself (no D-Bus, no phone)
@@ -509,7 +573,7 @@ check-bt-pair:
 .PHONY: check-bt-pair-sheet
 check-bt-pair-sheet: xdg-shell-protocol.h
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
-		$(IAL_FLAGS) -o /tmp/ztmetro-bt-pair-sheet-test tests/bt-pair-sheet.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) \
+		$(IAL_FLAGS) -o /tmp/ztmetro-bt-pair-sheet-test tests/bt-pair-sheet.c \
 		$(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-bt-pair-sheet-test
 
@@ -518,33 +582,98 @@ check-bt-pair-sheet: xdg-shell-protocol.h
 # what the modem daemon reports of the SIM and the signal; no modem
 .PHONY: check-modem-sim
 check-modem-sim:
-	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c
+	$(CC) -std=gnu11 -Wall -Wno-unused-result -Wno-format-truncation -Wno-stringop-truncation -o /tmp/ztmetro-modem-sim-test tests/modem-sim.c mms/mmspdu.c
 	/tmp/ztmetro-modem-sim-test
+
+# USBView's reading of sysfs, on a fake tree (no USB, no root)
+.PHONY: check-usbview
+check-usbview:
+	$(CC) -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-format-truncation -g \
+		-o /tmp/ztmetro-usbview-test usbview/tests/test-usbtree.c
+	/tmp/ztmetro-usbview-test usbview/tests/expected.txt
+
+# ztusbenergyd's accounting on a fake phone: sysfs, uevents, the gauge (no USB, no root)
+.PHONY: check-usbenergy
+check-usbenergy:
+	$(CC) -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-format-truncation -g \
+		-o /tmp/ztmetro-usbenergy-test usbenergy/tests/test-usbenergy.c -lm
+	/tmp/ztmetro-usbenergy-test
+
+# ServiceMode (modemd/servicemode.h): what reaches the CP, which keys pass; no modem
+.PHONY: check-servicemode
+check-servicemode:
+	$(CC) -std=c11 -Wall -Wno-unused-parameter -o /tmp/ztmetro-servicemode-test modemd/tests/servicemode.c mms/mmspdu.c
+	/tmp/ztmetro-servicemode-test
+
+# MMS without a network: the PDU codec, the access point auto-fill, and the
+# modem daemon handing notifications over
+.PHONY: check-mms
+check-mms: mms/ztmmsd modemd/ztoscorenetworkingd
+	$(CC) -std=c11 -Wall -Wextra -Wno-unused-parameter -g -o /tmp/ztmetro-mms-test mms/tests/mms-test.c $(MMS)
+	cd mms && /tmp/ztmetro-mms-test tests/apns-stock-fixture.xml apns-extra.xml
+	sh mms/tests/ztmmsd-cli.sh mms/ztmmsd
+	python3 modemd/tests/sms-fixtures.py modemd/ztoscorenetworkingd
+
+.PHONY: check-sensord
+check-sensord:
+	python3 sensord/test-sensord-queue.py
+	python3 sensord/test-sensord-prox.py
+	python3 sensord/test-sensord-orient.py
+	python3 sensord/test-sensord-pocket.py
 
 .PHONY: check-csf
 check-csf:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -o /tmp/ztmetro-csf-test ../sensors/test-csf-failure.c
 	/tmp/ztmetro-csf-test && /tmp/ztmetro-csf-test reset-fails
 
-check-reload-hub: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP)
-	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-reload-hub-test tests/reload-hub.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+check-reload-hub: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-reload-hub-test tests/reload-hub.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-reload-hub-test
+
+.PHONY: check-location
+check-location: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
+	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
+		-o /tmp/ztmetro-location-test tests/location-tile.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+	/tmp/ztmetro-location-test
 
 .PHONY: check-bt-list
 check-bt-list:
-	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-list-test tests/bt-list.c
-	/tmp/ztmetro-bt-list-test
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-list-test tests/bt-list.c
+	FAKE_BT=$(CURDIR)/tests/bt-fake /tmp/ztmetro-bt-list-test
+	sh tests/bt-state.sh ../os/overlay/usr/local/bin/ztos-bt-state
+
+.PHONY: check-wifi-list
+check-wifi-list:
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-wifi-list-test tests/wifi-list.c
+	/tmp/ztmetro-wifi-list-test
 
 .PHONY: check-clock
 check-clock:
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-clock-test tests/zt-clock.c
 	/tmp/ztmetro-clock-test
 
+.PHONY: check-anim-speed
+check-anim-speed:
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-anim-speed-test tests/anim-speed.c
+	/tmp/ztmetro-anim-speed-test
+
 .PHONY: check-settings-config
 check-settings-config:
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-settings-config-test tests/settings-config.c
 	/tmp/ztmetro-settings-config-test
+
+# the appearance keys (appearance.h), and the config's move away from DotMatrix
+.PHONY: check-appearance
+check-appearance:
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-appearance-test tests/appearance.c
+	/tmp/ztmetro-appearance-test
+
+# Start's photo blurred for the frosted tiles and background (wall-blur.h)
+.PHONY: check-wall-blur
+check-wall-blur:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-wall-blur-test tests/wall-blur.c
+	/tmp/ztmetro-wall-blur-test
 
 .PHONY: check-led
 check-led: ledd/zrn-ledd
@@ -559,10 +688,10 @@ check-slider-gesture:
 	/tmp/ztmetro-slider-gesture-test
 
 # the real core, with Wayland and GL as stubs that count (tests/swipe-cost/)
-SWIPE_BUILD = $(CC) -std=gnu11 -O1 -g -w -Itests/swipe-cost -Icore -Iretro $(shell pkg-config --cflags $(APP_PKGS) json-c)
-SWIPE_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs cairo pangocairo gdk-pixbuf-2.0 xkbcommon json-c) -lm -lpthread
+SWIPE_BUILD = $(CC) -std=gnu11 -O1 -g -w -Itests/swipe-cost -Icore $(shell pkg-config --cflags $(APP_PKGS) json-c)
+SWIPE_LIBS = $(shell pkg-config --libs cairo pangocairo gdk-pixbuf-2.0 xkbcommon json-c) -lm -lpthread
 SWIPE_CORE = core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c \
-	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
+	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c
 .PHONY: check-slider-touch check-swipe-cost check-pivot-wheel
 check-pivot-wheel: $(CORE_DEPS)
 	$(SWIPE_BUILD) -o /tmp/ztmetro-pivot-wheel-test tests/pivot-wheel.c $(SWIPE_CORE) $(SWIPE_LIBS)
@@ -576,6 +705,12 @@ check-swipe-cost: $(CORE_DEPS)
 	$(SWIPE_BUILD) -c -o /tmp/ztmetro-swipe-pages.o sound/sound-pages.c
 	$(SWIPE_BUILD) -o /tmp/ztmetro-swipe-cost-test tests/swipe-cost.c /tmp/ztmetro-swipe-app.o /tmp/ztmetro-swipe-pages.o $(SWIPE_CORE) $(SWIPE_LIBS)
 	SWIPE_DIR=/tmp/ztmetro-swipe-cost /tmp/ztmetro-swipe-cost-test apps
+
+# ztnotifyd's battery-temperature-sensor watch, in a scratch directory
+.PHONY: check-therm-watch
+check-therm-watch:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-therm-watch-test tests/therm-watch.c
+	/tmp/ztmetro-therm-watch-test
 
 .PHONY: check-settings-tree
 check-settings-tree:
@@ -601,6 +736,16 @@ check-audio-state:
 .PHONY: check-audiod
 check-audiod:
 	python3 tests/audiod.py
+	python3 tests/audiod_usb.py
+
+# ztos-bt-reconnect (ROADMAP 8.52): which Bluetooth device is called back after it
+# drops, from pretend BlueZ signals and pw-dump data through ztos-audiod's own code;
+# then the daemon itself against a pretend bluetoothd on a private bus (about 20 s)
+.PHONY: check-bt-reconnect check-bt-reconnect-e2e
+check-bt-reconnect:
+	python3 tests/bt-reconnect.py
+check-bt-reconnect-e2e:
+	python3 tests/bt-reconnect-e2e.py
 
 # the three volumes (volume-streams.h): the keys' choice, media playing, the gains,
 # the levels' files; and ztos-audiod's side of them
@@ -615,6 +760,15 @@ check-volume-streams:
 .PHONY: check-audiod-live
 check-audiod-live:
 	python3 tests/audiod_live.py
+
+# the equalizer's bands as vertical sliders, one band per gesture, and its
+# engine ztos-soundd: outputs, target, limiter, graph (8.67)
+.PHONY: check-eq-drag check-soundd
+check-eq-drag:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-eq-drag-test tests/eq-drag.c -lm
+	/tmp/ztmetro-eq-drag-test
+check-soundd:
+	python3 ../audio/tests/soundd-test.py
 
 .PHONY: check-audio-apps
 check-audio-apps:
@@ -650,6 +804,19 @@ check-power-key:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-power-key-test tests/power-key.c
 	/tmp/ztmetro-power-key-test
 
+.PHONY: check-rotation
+check-rotation:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-rotation-test tests/rotation.c -lm
+	/tmp/ztmetro-rotation-test
+
+.PHONY: check-burn-in
+# burn-in.h: the shift's schedule (equal shares, one step at a time, 2-4 px)
+# and the heartbeat file zrn-sleepd's watch reads; then that watch itself
+check-burn-in:
+	$(CC) -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -o /tmp/ztmetro-burn-in-test tests/burn-in.c
+	/tmp/ztmetro-burn-in-test
+	python3 ../power/suspend/test-shell-watch.py
+
 .PHONY: check-osk-numeric
 check-osk-numeric:
 	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-osk-numeric-test tests/osk-numeric.c -lm
@@ -664,6 +831,25 @@ check-notify:
 	$(CC) -std=c11 -g -Wall -Wextra -Werror -Wno-format-truncation -o /tmp/ztmetro-download-watch-test tests/download-watch.c
 	/tmp/ztmetro-download-watch-test
 
+# the lock screen's "what keeps it awake": zrn-sleep-why's reply read in (C),
+# and the tool itself on a fake root (ROADMAP 8.30)
+.PHONY: check-shade-edit
+check-shade-edit:
+	$(CC) -std=c11 -g -Wall -Wextra -Werror -o /tmp/ztmetro-shade-edit-test tests/shade-edit.c
+	/tmp/ztmetro-shade-edit-test
+
+.PHONY: check-sleep-toggle
+check-sleep-toggle:
+	$(CC) -std=c11 -g -Wall -Wextra -Werror -o /tmp/ztmetro-sleep-toggle-test tests/sleep-toggle.c
+	/tmp/ztmetro-sleep-toggle-test
+	python3 ../power/suspend/test-sleepd-hardening.py
+
+.PHONY: check-lock-awake
+check-lock-awake:
+	$(CC) -std=c11 -g -Wall -Wextra -Werror -o /tmp/ztmetro-lock-awake-test tests/lock-awake.c
+	/tmp/ztmetro-lock-awake-test
+	python3 ../power/suspend/test-sleep-why.py
+
 # the daemon itself, on a private bus and a fake $$HOME: touches no running session
 .PHONY: check-notify-daemon
 check-notify-daemon: notifyd/ztnotifyd
@@ -677,3 +863,7 @@ check-demoloop-stop:
 # The native agent uses polkit's async callback API directly.
 auth/ztos-polkit-agent: auth/ztos-polkit-agent.c
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags polkit-agent-1 gio-unix-2.0) -o $@ $< $(shell pkg-config --libs polkit-agent-1 gio-unix-2.0)
+
+# ZroovMusic UI; playback is zroovd (zroovmusic/engine).
+zroovmusic/ztzroovmusic: zroovmusic/ztzroovmusic.c zroovmusic/zv-icons.h $(CORE_DEPS)
+	$(APP_BUILD) -o $@ zroovmusic/ztzroovmusic.c store/json.c $(CORE) $(APP_LIBS) -lpthread -lm -lz

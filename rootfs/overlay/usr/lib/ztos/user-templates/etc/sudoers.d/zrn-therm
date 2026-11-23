@@ -1,0 +1,3 @@
+# Settings > Battery > "Try again" (ztmetro/settings/therm-retry.h): clear the battery
+# temperature sensor's failed-load mark and load its driver. This one command, nothing else.
+@USER@ ALL=(root) NOPASSWD: /usr/local/sbin/zrn-therm-load --retry
