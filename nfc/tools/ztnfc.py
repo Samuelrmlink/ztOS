@@ -485,18 +485,28 @@ def read_classic(nci, info, deadline):
 def scan(dev, seconds, identify=False):
     nci = Nci(dev)
     try:
+        # FW_CFG first, before CORE_RESET, as the stock HAL does for an
+        # S3NRN82 (nfc_hal_open_sm): owner-approved exact bytes 2F 28 01 12
+        # (1-byte form, CLK_SPEED 0x12). Continue only if the first payload
+        # byte is 0x00; 0x02 (Clock Mismatch) or anything else: stop, no retry.
         for attempt in range(1, 6):		# a marginal start: up to 5 tries
             try:
-                nci.send([0x20, 0x00, 0x01, 0x00])
+                nci.send([0x2F, 0x28, 0x01, 0x12])
                 if attempt > 1:
-                    log(f"CORE_RESET acked on attempt {attempt}/5")
+                    log(f"FW_CFG acked on attempt {attempt}/5")
                 break
             except OSError as e:
-                log(f"CORE_RESET not acked ({e.strerror}), attempt {attempt}/5")
+                log(f"FW_CFG not acked ({e.strerror}), attempt {attempt}/5")
                 if attempt == 5:
                     log("chip did not answer on open")
                     return 1
                 time.sleep(0.4)
+        r = nci.rsp((0x0F, 0x28))
+        if r is None or len(r) < 4 or r[2] < 1 or r[3] != 0x00:
+            log(f"FW_CFG status not 00 ({'none' if r is None else hx(r)}): stop")
+            return 1
+        log("FW_CFG accepted")
+        nci.send([0x20, 0x00, 0x01, 0x00])
         r = nci.rsp((0, 0))
         if not r or r[3] != 0:
             log("CORE_RESET failed")
@@ -506,13 +516,6 @@ def scan(dev, seconds, identify=False):
         if not r or r[3] != 0:
             log("CORE_INIT failed")
             return 1
-        # FW_CFG, owner-approved exact bytes (clock type 0, speed 0x12, req 0)
-        nci.send([0x2F, 0x28, 0x03, 0x00, 0x12, 0x00])
-        r = nci.rsp((0x0F, 0x28))
-        if r is None or bytes(r) != bytes([0x4F, 0x28, 0x01, 0x00]):
-            log(f"FW_CFG reply not 4f 28 01 00 ({'none' if r is None else hx(r)}): stop")
-            return 1
-        log("FW_CFG accepted")
         nci.send([0x20, 0x02, 0x08, 0x02, 0x00, 0x02, 0xF4, 0x01, 0x08, 0x01, 0x01])
         r = nci.rsp((0, 2))
         if not r or r[3] != 0:

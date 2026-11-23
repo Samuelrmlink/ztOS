@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Sweep check that exactly one proprietary (GID 0x0F) packet passes the
- * allowlist: 2F 28 03 00 12 00 (FW_CFG). cc -O2 test-nci-filter-prop.c
- *   A. 2F 28, length 3: every one of the 2^24 payloads (exhaustive).
+ * allowlist: 2F 28 01 12 (FW_CFG, 1-byte form). cc -O2 test-nci-filter-prop.c
+ *   A. 2F 28, length 3: every one of the 2^24 payloads (exhaustive; none,
+ *      including the old 00 12 00).
  *   B. every GID-0xF first byte (any MT/PBF) x every OID x lengths 0..2,
- *      each with every payload (exhaustive for those lengths).
+ *      each with every payload (exhaustive for those lengths; this is where
+ *      2F 28 01 12 is the single pass).
  *   C. every GID-0xF first byte x every OID, length 3, payload 00 12 00.
- *   D. 2F 28 lengths 4..8 with the approved prefix plus padding.
+ *   D. 2F 28 lengths 2..8 starting 12, zero padding.
  */
 #include <stdio.h>
 #include "nci-filter.h"
@@ -57,12 +59,12 @@ int main(void)
 			check(p, 6);
 		}
 	/* D */
-	for (len = 4; len <= 8; len++) {
+	for (len = 2; len <= 8; len++) {
 		unsigned int i;
 
 		p[0] = 0x2F; p[1] = 0x28; p[2] = len;
-		p[3] = 0x00; p[4] = 0x12; p[5] = 0x00;
-		for (i = 3; i < len; i++)
+		p[3] = 0x12;
+		for (i = 1; i < len; i++)
 			p[3 + i] = 0;
 		check(p, 3 + len);
 	}

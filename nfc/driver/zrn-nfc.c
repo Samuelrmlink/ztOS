@@ -10,7 +10,7 @@
  *            VEN held off (FIRM low) for SUPPLY_SETTLE_MS, then SCL/SDA must
  *            read high; VEN on 150 ms, WAKE high 20 ms (stage 1c);
  *            gpa1-2 IRQ (rising) requested; CLK_REQ (gpa2-6) sampled only.
- *   first RF_DISCOVER: PMU CLKOUT1 (0x14060A0C, OSC_NFC) must read
+ *   open, before VEN on (was: first RF_DISCOVER): PMU CLKOUT1 (0x14060A0C, OSC_NFC) must read
  *            0x00000001; write 0x00000000 (enable, SEL = TCXO), read back.
  *            The host interface runs without it (stage 1c), and stock also
  *            turns it on only when the chip asks for it.
@@ -279,6 +279,16 @@ static int nfc_open(struct inode *ino, struct file *f)
 		ret = -EIO;
 		goto fail;
 	}
+
+	/*
+	 * Reference clock before VEN on (owner-approved 2026-11-22 21:27): stock
+	 * has it ready whenever the chip raises CLK_REQ, and FW_CFG may check
+	 * it ("Clock Mismatch"). Restored to gated in session_end().
+	 */
+	pr_info("zrn-nfc: CLK_REQ before clock/VEN: %d\n", gpiod_get_value(g_clkreq));
+	ret = clk_on();
+	if (ret)
+		goto fail;
 
 	/* power-up, NCI mode (never bootloader): the stage-1c sequence */
 	gpiod_set_value_cansleep(g_ven, 0);

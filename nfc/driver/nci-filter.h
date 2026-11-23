@@ -27,8 +27,9 @@
  *     READ (30, block).
  *     Refused: WRITE (A0/A2), value ops (C0/C1/C2 decr/incr/restore,
  *       B0 transfer), HALT (50 00), and the Gen1a magic frames (40/43).
- *   NCI_PROP_FW_CFG: exactly 2F 28 03 00 12 00 (clock type 0, speed 0x12,
- *     req 0 - the stock value for this board; owner-approved 2026-11-22).
+ *   NCI_PROP_FW_CFG: exactly 2F 28 01 12 (1-byte form, CLK_SPEED 0x12 - what
+ *     the stock HAL sends to an S3NRN82, product code >= 0x70; owner-approved
+ *     2026-11-22 21:27, replacing the rejected 3-byte 2F 28 03 00 12 00).
  *     No other byte, length or 0x2F opcode (rfreg 26/22/27 stay refused).
  * Never: NFCEE (GID 2), other proprietary (GID 0xF), listen modes, writes.
  */
@@ -148,8 +149,7 @@ static inline const char *zrn_nci_check(const unsigned char *p, unsigned int len
 
 	/* the one approved proprietary packet: FW_CFG with the board's values */
 	if ((p[0] & 0x0f) == 0x0f) {
-		if (p[0] == 0x2f && p[1] == 0x28 && plen == 3 &&
-		    q[0] == 0x00 && q[1] == 0x12 && q[2] == 0x00)
+		if (p[0] == 0x2f && p[1] == 0x28 && plen == 1 && q[0] == 0x12)
 			return 0;
 		return "proprietary command not allowed";
 	}
