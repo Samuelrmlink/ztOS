@@ -65,6 +65,7 @@ static const struct csi_path path_front_full = {
 static const struct csi_path *pth;
 
 #define PMU_SIZE	0x5000
+#define PMU_DSIM0_ISO	0x70c	/* the rear CSIS0 PHY's isolation, shared with the panel's DSI */
 #define PMU_ISPPRE_STATUS 0x404c
 
 #define CSIS_VERSION	0x000
@@ -435,8 +436,15 @@ static void csis_off(void)
 	writel(0, csis + CSIS_MSK1);
 	writel(0, csis_vc + CMN_MASK);
 	rmw(sys_phy, BIT(pth->rst_bit), 0);
-	/* both PHYs back into isolation, as phy_power_off; the rear's since 2026-11-12 */
-	rmw(pmu + pth->iso, BIT(0), 0);
+	/*
+	 * The front PHY back into isolation, as phy_power_off. The rear's never:
+	 * PMU 0x70c is also the panel's. CSIS0's M4S4 PHY at 0x16160000 is
+	 * shared with DSIM0 (stock DT mipi_phy_dsim, owner 0, isolation 0x70c),
+	 * and clearing it at rear stop (item (b), 12-22 Nov) isolated the DSI PHY:
+	 * the panel lost vblanks and the shell froze (22 Nov, 21:56 CST).
+	 */
+	if (pth->iso != PMU_DSIM0_ISO)
+		rmw(pmu + pth->iso, BIT(0), 0);
 }
 
 static void dma_prepare(void)

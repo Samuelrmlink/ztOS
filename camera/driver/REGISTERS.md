@@ -63,7 +63,7 @@ its own approval first.
 
 **D. PMU 0x14060000.**
 - Bit 0 of +0x70C (rear PHY) or +0x730 (front PHY): set at stream start (Oct).
-- **(b)** Cleared at stop on both cameras. Oct cleared it on the front only. Approved 2026-11-12.
+- **(b) withdrawn 2026-11-22.** Clearing the rear bit (+0x70C) at stop isolated the panel's DSI PHY, because the rear CSIS0 PHY at 0x16160000 is shared with DSIM0 (stock DT `mipi_phy_dsim`, isolation 0x70c). The panel lost vblanks and the shell froze. Back to October's behaviour: only the front bit (+0x730) is cleared at stop. +0x70C is set at a rear stream start; it is already set while the panel runs.
 - Read only: +0x404C (ISPPRE status). The driver refuses to start if the domain is not 0xF.
 
 **E. SYSREG ISPPRE 0x16210500. (Oct)**
