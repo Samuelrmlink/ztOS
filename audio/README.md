@@ -294,6 +294,59 @@ used before. The remote's buttons come as a HID keyboard (`KEY_VOLUMEUP`,
 `KEY_VOLUMEDOWN`, `KEY_PLAYPAUSE`), which the shell takes as it takes the
 jack's: play/pause to `playerctl`, and volume to the active output.
 
+## The equalizer: ztos-soundd (ROADMAP 8.67)
+
+The Sound app (and Settings > Sound) only edits settings. It sends one line
+per change to `$XDG_RUNTIME_DIR/ztos-sound.sock`. `ztos-soundd` keeps them
+in `~/.config/ztmetro/sound.json` and runs the filter chain as its own
+`pipewire -c` client:
+
+    app streams -> ztos-eq (the default sink) -> ztos-eq.out -> the output
+
+The output is ztos-speaker on the speaker (its crossover and limiter follow,
+then the ABOX sink), the AirPods' or another Bluetooth sink, or the USB
+sink. The chain is rebuilt when the output changes. A band change goes
+into the running graph with `pw-cli set-param <ztos-eq> Props`, with no
+rebuild. Each output kind has its own profile (speaker, headphones for USB
+and the jack, bluetooth).
+
+- **It was never on.** The unit was installed but never enabled (the
+  installer enabled audiod and the others, but not this one), so no
+  `ztos-eq` existed, the app's lines went to a socket nobody read, and
+  streams played straight into ztos-speaker. Measured on the phone with
+  `audio/tests/eq-measure.py` (1 kHz + 4 kHz at -36 dBFS each, band 6,
+  1 kHz, set to -12 dB, ztos-speaker's monitor): 0.00 dB change before; after,
+  1 kHz -12.00 dB and 4 kHz -0.96 dB.
+- **Which streams.** Every stream that follows the default goes through it,
+  on every output, including system sounds, ring and alarm. An app sent to
+  its own output on the apps page (`ztos-audiod`) goes straight there and
+  skips the equalizer.
+- **Its outputs.** A sink behind a fixed filter chain (the ABOX sink behind
+  ztos-speaker) is never one of them, the same rule as ztos-audiod's. Playing
+  into it would skip the speaker's limiter at the 100 % that 8.61 holds it at.
+  When the output goes, the chain plays into the newest output chosen before
+  that is still there (`"recent"` in sound.json), as WirePlumber would;
+  if none is left, into the one with the highest priority.
+- **Its limiter** (-1 dBFS) guards Bluetooth and USB. In front of ztos-speaker
+  it is bypassed (`lim:Bypass`). ztos-audiod gives a ring or alarm stream a
+  gain above 1 on the speaker, and that only comes down at ztos-speaker's
+  volume, after this chain. The speaker's own limiter, after its volume,
+  stays the protection.
+- **Auto headroom** (on by default): a boost takes its peak off the preamp,
+  so the boosted band stays at the level it was and everything else gets
+  quieter, with nothing clipped. Measured: band 6 +12 dB gave 1 kHz +0.00 dB
+  and 4 kHz -11.04 dB. On the speaker, bass under about 150 Hz is cut by the
+  speaker's guard high-pass, so a big bass boost mostly sounds quieter.
+- **The sliders** are vertical, one band per gesture (`ztmetro/sound/eq-drag.h`).
+  A touch takes the band whose column is nearest. The first 8 points of
+  movement fix the gesture's axis: up or down moves that band's gain, from
+  where it was; sideways does nothing. The frequency is fixed: Reset band puts
+  back one moved by the old two-way drag.
+
+Tests: `make -C ztmetro check-eq-drag check-soundd` on the host; on the
+phone, `audio/tests/eq-measure.py [--band N] [--gain dB]` (quiet, and it
+puts the band back).
+
 ## Not done
 
 - **Speaker protection.** On the stock system the DSP runs Maxim's DSM

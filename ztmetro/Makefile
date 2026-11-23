@@ -173,7 +173,7 @@ passcoded/zrn-passcode: passcoded/zrn-passcode.c passcoded/passcode-proto.h
 
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
 EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
-EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
+EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h sound/eq-drag.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
 settings/ztsettings: settings/ztsettings.c shade-edit.h settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h settings/wifi-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c mms/apnconf.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
@@ -182,7 +182,7 @@ devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest
 
 # Devices and Services: what is running, crashed or missing
 # ztSound: the equalizer and effects (the engine, ztos-soundd, ships in rootfs/overlay/usr/local/bin)
-sound/ztsound: sound/ztsound.c sound/sound-pages.c sound/sound-pages.h audio-apps.h audio-state.h audio-sync.h $(CORE_DEPS)
+sound/ztsound: sound/ztsound.c sound/sound-pages.c sound/sound-pages.h sound/eq-drag.h audio-apps.h audio-state.h audio-sync.h $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -o $@ sound/ztsound.c sound/sound-pages.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devices/ztdevices: devices/ztdevices.c $(CORE_DEPS)
@@ -721,6 +721,15 @@ check-volume-streams:
 .PHONY: check-audiod-live
 check-audiod-live:
 	python3 tests/audiod_live.py
+
+# the equalizer's bands as vertical sliders, one band per gesture, and its
+# engine ztos-soundd: outputs, target, limiter, graph (8.67)
+.PHONY: check-eq-drag check-soundd
+check-eq-drag:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-eq-drag-test tests/eq-drag.c -lm
+	/tmp/ztmetro-eq-drag-test
+check-soundd:
+	python3 ../audio/tests/soundd-test.py
 
 .PHONY: check-audio-apps
 check-audio-apps:

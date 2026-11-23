@@ -31,6 +31,7 @@
 
 #include "zrnmetrocore.h"
 #include "sound-pages.h"
+#include "eq-drag.h"
 #include "../audio-apps.h"
 
 #define MARGIN ZMC_MARGIN
@@ -411,10 +412,6 @@ static double xf(double x) {
 	return F_MIN * pow(F_MAX / F_MIN, t);
 }
 static double gy(double g) { return plot_top() + PLOT_H / 2 - g / DB_RANGE * (PLOT_H / 2); }
-static double yg(double y) {
-	double g = (plot_top() + PLOT_H / 2 - y) / (PLOT_H / 2) * DB_RANGE;
-	return g < -DB_RANGE ? -DB_RANGE : g > DB_RANGE ? DB_RANGE : g;
-}
 
 /* a filled rectangle, in page points, on the GPU or (for a file) in Cairo */
 static cairo_t *png_cr;
@@ -633,8 +630,14 @@ static double draw_eq(cairo_t *cr) {
 	readout_y = top + PLOT_H + 26;
 	y = readout_y + READOUT_H + 6;
 	cairo_set_source_rgb(cr, 0.55, 0.55, 0.55);
-	y += zmc_text(cr, "Drag a square: up and down is gain, sideways is frequency. "
-		"Drag the empty plot to change Q.", FONT_REGULAR, 12, MARGIN, y, zmc.width - 2 * MARGIN);
+	y += zmc_text(cr, "Drag a band up or down to set its gain. Q - widens it, "
+		"Q + narrows it.", FONT_REGULAR, 12, MARGIN, y, zmc.width - 2 * MARGIN);
+	if (!S.chain) {
+		/* (ztos-soundd not running: nothing here is heard, ROADMAP 8.67) */
+		zmc_accent(cr);
+		y += 4 + zmc_text(cr, "The sound engine isn't running, so the equalizer isn't heard.",
+			FONT_REGULAR, 12, MARGIN, y + 4, zmc.width - 2 * MARGIN);
+	}
 	y += 8;
 	if (S.png) {
 		png_cr = cr;
@@ -857,11 +860,12 @@ double sound_render(cairo_t *cr, int page) {
 	return 0;
 }
 
-/* ---- touch on the plot ------------------------------------------------------ */
+/* ---- touch on the plot: each band a vertical slider (eq-drag.h) ------------- */
 static struct {
-	bool down, q_mode, moved;
+	bool down;
+	enum eq_drag_axis axis;
 	int band;
-	double x0, y0, q0;
+	double x0, y0, g0;
 	uint32_t sent;
 } T;
 
@@ -879,68 +883,46 @@ static bool in_plot(double x, double py) {
 }
 
 bool sound_touch(int phase, int id, double x, double y, uint32_t time) {
+	(void)id;
+	(void)time;
 	if (tab_of(zmc.page) != P_EQ) return false;
 	double py = y + zmc.scroll;
 	if (phase == 0) {
 		if (y < zmc_header_h() || !in_plot(x, py)) return false;
-		int best = -1;
-		double bd = 34 * 34;
-		for (int i = 0; i < N_BANDS; i++) {
-			double dx = x - fx(cur()->b[i].f), dy = py - gy(cur()->b[i].g), d = dx * dx + dy * dy;
-			if (d < bd) { bd = d; best = i; }
-		}
+		double cols[N_BANDS];
+		for (int i = 0; i < N_BANDS; i++) cols[i] = fx(cur()->b[i].f);
+		int band = eq_band_at(cols, N_BANDS, x);
+		if (S.sel != band) zmc_haptic("tick");
+		S.sel = band;
 		T.down = true;
-		T.moved = false;
+		T.axis = EQ_AXIS_UNDECIDED;
+		T.band = band;
 		T.x0 = x;
 		T.y0 = py;
-		if (best >= 0) {
-			if (S.sel != best) zmc_haptic("tick");
-			S.sel = best;
-			T.band = best;
-			T.q_mode = false;
-		} else {
-			T.q_mode = true;
-			T.band = S.sel;
-			T.q0 = cur()->b[S.sel].q;
-		}
+		T.g0 = cur()->b[band].g;
 		zmc_present();
 		return true;
 	}
 	if (!T.down) return false;
 	if (phase == 1) {
-		struct band *b = &cur()->b[T.band];
-		if (fabs(x - T.x0) + fabs(py - T.y0) > 6) T.moved = true;
-		if (T.q_mode) {
-			if (T.moved) {
-				b->q = T.q0 * exp((T.y0 - py) / 70.0);
-				b->q = b->q < 0.3 ? 0.3 : b->q > 10 ? 10 : b->q;
-				send_band(T.band, false);
-			}
-		} else {
-			b->f = xf(x);
-			b->g = yg(py);
-			if (fabs(b->g) < 0.4) b->g = 0;
-			send_band(T.band, false);
+		if (T.axis == EQ_AXIS_UNDECIDED) {
+			T.axis = eq_drag_axis_of(x - T.x0, py - T.y0);
+			/* the gain follows the finger from here, not from the slop */
+			if (T.axis == EQ_AXIS_GAIN) T.y0 = py;
 		}
-		zmc_present();
+		if (T.axis == EQ_AXIS_GAIN) {
+			struct band *b = &cur()->b[T.band];
+			b->g = eq_drag_gain(T.g0, T.y0, py, PLOT_H / 2, DB_RANGE);
+			send_band(T.band, false);
+			zmc_present();
+		}
 		return true;
 	}
 	/* up or cancel */
 	T.down = false;
-	if (phase == 2) {
-		if (T.q_mode && !T.moved) {
-			/* a tap on the empty plot picks the nearest handle sideways */
-			int best = 0;
-			double bd = 1e9;
-			for (int i = 0; i < N_BANDS; i++) {
-				double d = fabs(T.x0 - fx(cur()->b[i].f));
-				if (d < bd) { bd = d; best = i; }
-			}
-			S.sel = best;
-			zmc_haptic("tick");
-		} else {
-			send_band(T.band, true);
-		}
+	if (T.axis == EQ_AXIS_GAIN) {
+		if (phase != 2) cur()->b[T.band].g = T.g0;	/* cancelled: as it was */
+		send_band(T.band, true);
 	}
 	zmc_redraw();
 	return true;
