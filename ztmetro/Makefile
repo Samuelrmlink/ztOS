@@ -690,6 +690,7 @@ check-audio-state:
 .PHONY: check-audiod
 check-audiod:
 	python3 tests/audiod.py
+	python3 tests/audiod_usb.py
 
 # ztos-bt-reconnect (ROADMAP 8.52): which Bluetooth device is called back after it
 # drops, from pretend BlueZ signals and pw-dump data through ztos-audiod's own code;
