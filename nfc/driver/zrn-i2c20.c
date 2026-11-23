@@ -74,10 +74,15 @@ static struct i2c_adapter bus = {
 
 static DEFINE_MUTEX(lock);
 static unsigned int users;
-static bool we_switched_on;
 static u8 ldo_before;
 
-static int ldo_on(void)
+/*
+ * Turn LDO38 on. If it was already on (the boot chain leaves it at 0xac after
+ * some reboots; nothing in ztOS needs it between sessions) and cycle_ms > 0,
+ * first switch it off and hold it off for cycle_ms, so the chip on this rail
+ * starts from a real power-up rather than an unknown state.
+ */
+static int ldo_on(unsigned int cycle_ms)
 {
 	u8 v = 0;
 	int ret = s9p_acpm_pmic_read(S2MPS18_L38CTRL, &v);
@@ -86,9 +91,17 @@ static int ldo_on(void)
 		return ret;
 	ldo_before = v;
 	if (v & LDO_MODE_MASK) {
-		pr_info("zrn-i2c20: LDO38 already on (%#04x)\n", v);
-		we_switched_on = false;
-		return 0;
+		if (!cycle_ms) {
+			pr_info("zrn-i2c20: LDO38 already on (%#04x)\n", v);
+			return 0;
+		}
+		ret = s9p_acpm_pmic_update(S2MPS18_L38CTRL, 0, LDO_MODE_MASK);
+		if (ret)
+			return ret;
+		s9p_acpm_pmic_read(S2MPS18_L38CTRL, &v);
+		pr_info("zrn-i2c20: LDO38 was on (%#04x): off (%#04x) for %u ms\n",
+			ldo_before, v, cycle_ms);
+		msleep(cycle_ms);
 	}
 	ret = s9p_acpm_pmic_update(S2MPS18_L38CTRL, LDO_MODE_ON_PWREN, LDO_MODE_MASK);
 	if (ret)
@@ -98,35 +111,39 @@ static int ldo_on(void)
 		return ret;
 	if ((v & LDO_MODE_MASK) != LDO_MODE_ON_PWREN) {
 		pr_err("zrn-i2c20: LDO38 reads %#04x after the update\n", v);
-		s9p_acpm_pmic_write(S2MPS18_L38CTRL, ldo_before);
+		s9p_acpm_pmic_update(S2MPS18_L38CTRL, 0, LDO_MODE_MASK);
 		return -EIO;
 	}
-	we_switched_on = true;
 	usleep_range(5000, 6000);	/* ramp: 12 mV/us, plus margin */
 	pr_info("zrn-i2c20: LDO38 %#04x -> %#04x\n", ldo_before, v);
 	return 0;
 }
 
-static void ldo_restore(void)
+/*
+ * The last user leaves: LDO38 goes OFF (mode bits 0, voltage code kept, i.e.
+ * 0x2c), whatever the boot chain left it at. Nothing in ztOS uses this rail
+ * between sessions, and leaving it on costs power. leave_on=1 skips this.
+ */
+static void ldo_off(void)
 {
 	u8 v = 0;
 
-	if (!we_switched_on || leave_on)
+	if (leave_on)
 		return;
-	s9p_acpm_pmic_write(S2MPS18_L38CTRL, ldo_before);
+	s9p_acpm_pmic_update(S2MPS18_L38CTRL, 0, LDO_MODE_MASK);
 	s9p_acpm_pmic_read(S2MPS18_L38CTRL, &v);
-	pr_info("zrn-i2c20: LDO38 restored to %#04x (reads %#04x)\n", ldo_before, v);
-	we_switched_on = false;
+	pr_info("zrn-i2c20: LDO38 off (reads %#04x; was %#04x at the session start)\n",
+		v, ldo_before);
 }
 
-struct i2c_adapter *zrn_i2c20_get(void)
+struct i2c_adapter *zrn_i2c20_get_cycled(unsigned int cycle_ms)
 {
 	struct i2c_adapter *adap;
 	int ret = 0;
 
 	mutex_lock(&lock);
 	if (!users)
-		ret = ldo_on();
+		ret = ldo_on(cycle_ms);
 	if (ret) {
 		mutex_unlock(&lock);
 		return ERR_PTR(ret);
@@ -134,13 +151,19 @@ struct i2c_adapter *zrn_i2c20_get(void)
 	adap = i2c_get_adapter(ZRN_I2C20_BUS);
 	if (!adap) {
 		if (!users)
-			ldo_restore();
+			ldo_off();
 		mutex_unlock(&lock);
 		return ERR_PTR(-ENODEV);
 	}
 	users++;
 	mutex_unlock(&lock);
 	return adap;
+}
+EXPORT_SYMBOL_GPL(zrn_i2c20_get_cycled);
+
+struct i2c_adapter *zrn_i2c20_get(void)
+{
+	return zrn_i2c20_get_cycled(0);
 }
 EXPORT_SYMBOL_GPL(zrn_i2c20_get);
 
@@ -151,7 +174,7 @@ void zrn_i2c20_put(struct i2c_adapter *adap)
 	i2c_put_adapter(adap);
 	mutex_lock(&lock);
 	if (!WARN_ON(!users) && !--users)
-		ldo_restore();
+		ldo_off();
 	mutex_unlock(&lock);
 }
 EXPORT_SYMBOL_GPL(zrn_i2c20_put);
@@ -212,7 +235,8 @@ static void __exit zrn_i2c20_exit(void)
 {
 	/* clients hold module references through the symbols, so users is 0 */
 	mutex_lock(&lock);
-	ldo_restore();
+	if (users)
+		ldo_off();
 	mutex_unlock(&lock);
 	i2c_del_adapter(&bus);
 	gpiod_put(sda);

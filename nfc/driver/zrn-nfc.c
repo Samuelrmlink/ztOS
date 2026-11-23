@@ -60,6 +60,7 @@
  * chip off on a settled supply first, as stock does (LDO on at probe).
  */
 #define SUPPLY_SETTLE_MS	1000
+#define CYCLE_OFF_MS		200	/* chip (and LDO38, if it was on) off first */
 
 static struct gpiod_lookup_table ctl_gpios = {
 	.dev_id = "zrn-nfc-ctl",
@@ -256,9 +257,15 @@ static int nfc_open(struct inode *ino, struct file *f)
 	r_head = r_tail = 0;
 	active_proto = NCI_PROTO_NONE;
 
-	gpiod_set_value_cansleep(g_ven, 1);	/* off while the supply comes up */
+	/*
+	 * Full power-cycle: chip off (VEN high, FIRM low) for at least
+	 * CYCLE_OFF_MS; if LDO38 was left on (by the boot chain), it is switched
+	 * off for that time too; then LDO38 on and SUPPLY_SETTLE_MS before VEN.
+	 */
+	gpiod_set_value_cansleep(g_ven, 1);
 	gpiod_set_value_cansleep(g_firm, 0);
-	adap = zrn_i2c20_get();
+	msleep(CYCLE_OFF_MS);
+	adap = zrn_i2c20_get_cycled(CYCLE_OFF_MS);
 	if (IS_ERR(adap)) {
 		ret = PTR_ERR(adap);
 		adap = NULL;
