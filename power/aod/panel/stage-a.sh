@@ -24,24 +24,45 @@ say() { echo "$(date '+%T') $*" | tee -a "$OUT/stage-a.log"; }
 lit() { grep -q '^enabled' /sys/class/drm/card*-DSI-*/enabled; }
 state() { grep -E '^(screen|aod|aod_frames) ' $RT/ztmetro.state | tr '\n' ' '; }
 ctl() { echo "$1" > $RT/ztmetro.ctl; }
-in_lpm=0
+CHG=/sys/class/power_supply/max77705-charger
+in_lpm=0 inhibited=0
 leave() {
 	if [ $in_lpm = 1 ]; then
 		echo "$EXIT" > $DEV/panel_cmd; echo "$CLOSE" > $DEV/panel_cmd
 		say "exit sent"; in_lpm=0
 	fi
 }
-trap 'say "interrupted"; leave; exit 1' INT TERM
+# on a charger: no charging for the window (charge_behaviour, the path
+# zrn-charge itself uses; approved for this measurement), zrn-charge stopped
+# so it does not undo it; both back on every way out
+restore_charge() {
+	if [ $inhibited = 1 ]; then
+		echo auto > $CHG/charge_behaviour
+		systemctl start zrn-charge
+		say "charging restored: $(cat $CHG/charge_behaviour), zrn-charge $(systemctl is-active zrn-charge)"
+		inhibited=0
+	fi
+}
+trap 'say "interrupted"; leave; restore_charge; exit 1' INT TERM
+trap 'leave; restore_charge' EXIT
 sample() {	# label: 60 s settle, then MIN*60-60 readings
 	sleep 60
 	local n=$(( MIN * 60 - 60 )) i
 	for ((i = 0; i < n; i++)); do
 		echo "$1 $(date +%s) $(cat $BAT/current_now) $(cat $BAT/voltage_now) $(cat $BAT/current_avg)" >> "$OUT/samples.txt"
 		[ -e /var/tmp/aodp/tripped ] && { say "watcher tripped"; return 1; }
+		[ "$(cat $BAT/capacity)" -lt 16 ] && { say "battery at 15 %: stopping"; return 1; }
 		sleep 1
 	done
 }
 rm -f /var/tmp/aodp/tripped
+if [ "$(cat $CHG/online)" = 1 ]; then
+	systemctl stop zrn-charge
+	echo inhibit-charge > $CHG/charge_behaviour
+	inhibited=1
+	say "charging inhibited for the window"
+	sleep 20
+fi
 say "start row $ROW ($MIN min a block); charger $(cat /sys/class/power_supply/max77705-charger/online); battery $(cat $BAT/capacity) %; $(state)"
 grep -q '^screen off' $RT/ztmetro.state && grep -q '^aod on' $RT/ztmetro.state && lit ||
 	{ say "the shell's AOD is not showing: nothing sent"; exit 1; }
