@@ -256,4 +256,67 @@ assert a.takeover_target({"sp"}, {"sp": SP, a.JACK_SINK: JK}) == a.JACK_SINK
 assert a.takeover_target({"sp", "b1"}, {"sp": SP, "b1": BTS("b1"), a.JACK_SINK: JK}) is None  # AirPods on: the user's choice
 assert a.takeover_target({"sp", a.JACK_SINK}, {"sp": SP, a.JACK_SINK: JK}) is None        # already there
 
+
+# the speakers' ALSA sink (8.61): marked pinned by WirePlumber, held at 100 % behind
+# the chain whatever WirePlumber's 40 % default or saved state says
+def pinned_world(chain=True, vol=0.064, mute=False):
+    d = [meta("ztos-speaker" if chain else ALSA),
+         node(10, {"node.name": ALSA, "media.class": "Audio/Sink", "node.description": "Built-in",
+                   "ztos.volume.pinned": "true"}, vols=[vol], mute=mute)]
+    if chain:
+        d += [node(42, {"node.name": "ztos-speaker", "media.class": "Audio/Sink", "node.description": "Speaker",
+                        "node.link-group": "fc-1"}, vols=[0.512]),
+              node(43, {"node.name": "ztos-speaker.out", "media.class": "Stream/Output/Audio",
+                        "node.link-group": "fc-1", "target.object": ALSA})]
+    return d
+
+
+gp = a.read_graph(pinned_world())
+assert gp["pinned"] == [{"id": 10, "name": ALSA, "protected": True, "percent": 40, "mute": False}], gp["pinned"]
+assert ALSA not in gp["sinks"]                                  # still not an output
+assert a.pin_actions(gp["pinned"]) == [(10, 100, False)]
+assert a.pin_actions(a.read_graph(pinned_world(vol=1.0))["pinned"]) == []                 # already right
+assert a.pin_actions(a.read_graph(pinned_world(vol=1.0, mute=True))["pinned"]) == [(10, 100, True)]
+assert a.pin_actions(a.read_graph(pinned_world(vol=8.0))["pinned"]) == [(10, 100, False)]  # never above unity
+# no chain in front (no limiter): an ordinary output, never above 40 %
+gu = a.read_graph(pinned_world(chain=False, vol=1.0))
+assert ALSA in gu["sinks"] and gu["pinned"][0]["protected"] is False
+assert a.pin_actions(gu["pinned"]) == [(10, 40, False)]
+assert a.pin_actions(a.read_graph(pinned_world(chain=False, vol=0.027))["pinned"]) == []    # 30 %: the user's
+assert a.pin_actions(a.read_graph(pinned_world(chain=False, vol=0.064, mute=True))["pinned"]) == []  # mute kept
+assert a.pin_actions([{"id": 1, "name": "x", "protected": True, "percent": None, "mute": False}]) == []
+# an unmarked ALSA sink behind a chain (the world above) is left alone
+assert a.read_graph(world())["pinned"] == []
+
+
+# the daemon's side: it reads the level as wpctl has it, sets it once, and says so
+class FakeTool:
+    def __init__(self, vol):
+        self.vol, self.calls = vol, []
+
+    def __call__(self, *argv, out=False):
+        self.calls.append(argv)
+        if argv[:2] == ("wpctl", "get-volume"):
+            return self.vol
+        return True
+
+
+d = a.Daemon.__new__(a.Daemon)
+d.tool = FakeTool("Volume: 0.40\n")
+g2 = a.read_graph(pinned_world(vol=1.0))      # pw-dump said 100 %, wpctl says 40 %: wpctl wins
+d.pin(g2)
+assert ("wpctl", "set-volume", "10", "100%") in d.tool.calls, d.tool.calls
+assert g2["pinned"][0]["percent"] == 100
+d.tool = FakeTool("Volume: 1.00\n")
+d.pin(a.read_graph(pinned_world(vol=1.0)))
+assert [c for c in d.tool.calls if c[1] != "get-volume"] == [], d.tool.calls
+d.tool = FakeTool("Volume: 1.00 [MUTED]\n")
+d.pin(a.read_graph(pinned_world(vol=1.0)))
+assert ("wpctl", "set-mute", "10", "0") in d.tool.calls, d.tool.calls
+# no chain, 100 %: down to the cap, and the output's entry shows it
+d.tool = FakeTool("Volume: 1.00\n")
+g3 = a.read_graph(pinned_world(chain=False, vol=1.0))
+d.pin(g3)
+assert ("wpctl", "set-volume", "10", "40%") in d.tool.calls and g3["sinks"][ALSA]["percent"] == 40
+
 print("audiod: ok")

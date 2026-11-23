@@ -22,6 +22,11 @@ This daemon adds what WirePlumber doesn't do:
     WirePlumber restores a target only if it exists as the stream starts;
   - holds changes for apps that aren't running, because WirePlumber only saves
     what it sees on a live stream. They apply when the app next plays;
+  - holds a device marked ztos.volume.pinned (a WirePlumber rule: the phone
+    speaker's ALSA sink) at 100 % and unmuted while a filter chain stands in
+    front of it, so the chain's volume, the one people see, is the only one.
+    WirePlumber's default for a new route is 40 % (-24 dB), unseen. Without
+    the chain (no limiter) it is an ordinary output, capped at 40 %;
   - names apps. WirePlumber's key is whatever the app calls itself, and Grayjay
     (CEF, in a flatpak) calls itself Chromium, so the name shown comes from the
     flatpak id or the binary, and is remembered for when the app isn't running.
@@ -128,6 +133,10 @@ JACK_SINK = "ztos-headphones"  # ztos-headsetd's sink for the 3.5 mm jack
 GAIN_TOLERANCE = 0.03          # closer than this is right already
 BOOST_HOLD = 3.0               # the alarm's loop starts a new pw-play each time round
 ROLE_STREAMS = ("ring", "alarm")
+# A pinned device behind its chain plays at unity; on its own, unprotected, never
+# above WirePlumber's default for a new route (wpctl percent)
+PIN_PERCENT = 100
+PIN_UNPROTECTED_MAX = 40
 
 
 def log(*a):
@@ -317,7 +326,8 @@ def is_app_stream(props):
 
 def read_graph(dump):
     """pw-dump's objects as what this daemon needs."""
-    g = {"sinks": {}, "default": None, "streams": [], "targets": {}, "links": [], "chains": {}, "roles": []}
+    g = {"sinks": {}, "default": None, "streams": [], "targets": {}, "links": [], "chains": {}, "roles": [],
+         "pinned": []}
     routes, nodes = {}, []
     for o in dump:
         t = o.get("type", "")
@@ -355,6 +365,11 @@ def read_graph(dump):
         info = o.get("info") or {}
         p = info.get("props") or {}
         name = p.get("node.name", "")
+        if p.get("media.class") == "Audio/Sink" and prop_bool(p.get("ztos.volume.pinned")):
+            vols = _props_of(info).get("channelVolumes") or []
+            g["pinned"].append({"id": o["id"], "name": name, "protected": name in hidden,
+                                "percent": percent_of_gain(vols[0]) if vols else None,
+                                "mute": bool(_props_of(info).get("mute", False))})
         if p.get("media.class") == "Audio/Sink":
             if name.startswith(EQ_SINK) or name in hidden:
                 continue
@@ -384,6 +399,20 @@ def read_graph(dump):
                 "mute": bool(_props_of(info).get("mute", False)),
             })
     return g
+
+
+def pin_actions(pinned):
+    """What to do to the pinned devices: [(node id, percent, unmute)]."""
+    acts = []
+    for s in pinned:
+        if s.get("percent") is None:
+            continue
+        if s["protected"]:
+            if s["percent"] != PIN_PERCENT or s["mute"]:
+                acts.append((s["id"], PIN_PERCENT, bool(s["mute"])))
+        elif s["percent"] > PIN_UNPROTECTED_MAX:
+            acts.append((s["id"], PIN_UNPROTECTED_MAX, False))
+    return acts
 
 
 def _props_of(info):
@@ -754,6 +783,7 @@ class Daemon:
             got = parse_wpctl_volume(self.tool("wpctl", "get-volume", str(s["id"]), out=True) or "")
             if got:
                 s["percent"], s["mute"] = got
+        self.pin(g)
         self.stored = read_stream_state()
         self.apply_intents(g)
         self.graph = g
@@ -772,6 +802,24 @@ class Daemon:
         self.publish(g)
         self.apply_roles(g)
         return True
+
+    def pin(self, g):
+        for s in g["pinned"]:
+            got = parse_wpctl_volume(self.tool("wpctl", "get-volume", str(s["id"]), out=True) or "")
+            if got:
+                s["percent"], s["mute"] = got
+        for sid, percent, unmute in pin_actions(g["pinned"]):
+            s = next(x for x in g["pinned"] if x["id"] == sid)
+            if not self.tool("wpctl", "set-volume", str(sid), "%d%%" % percent):
+                continue
+            if unmute:
+                self.tool("wpctl", "set-mute", str(sid), "0")
+            log("%s from %s%%%s to %d%%: %s" % (s["name"], s["percent"], " muted" if s["mute"] else "", percent,
+                "behind its chain, the chain's volume is the one" if s["protected"]
+                else "no chain in front of it, so no limiter"))
+            s["percent"], s["mute"] = percent, False
+            if s["name"] in g["sinks"]:
+                g["sinks"][s["name"]]["percent"], g["sinks"][s["name"]]["mute"] = percent, False
 
     # ---- the ring's and the alarm's sounds
     def read_levels(self, force=False):

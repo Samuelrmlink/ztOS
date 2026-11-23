@@ -81,6 +81,52 @@ limits, silences them; and changing the audio bus or DSP core clock dividers
 while the DSP runs hangs the phone (`audio/probe/rate.sh` measures the
 playback rate against 48 kHz; 1.00 is right).
 
+## Speaker gain (8.61)
+
+The volume panel's Media slider is the `ztos-speaker` chain's volume, and that
+is the only volume between an app and the amplifiers that anyone should move.
+Every stage, in dB, for the bottom speaker (right amplifier, 0x3a) and the
+earpiece (left, 0x39, the tweeter above 800 Hz):
+
+| Stage | Before (2026-11-22) | After |
+|---|---|---|
+| App stream (Grayjay = `application.name:Chromium`, Waydroid) | 100 % = 0 | the same |
+| Waydroid's Android music volume | 15/15 | the same |
+| `ztos-speaker` (the panel; wpctl's cubic scale) | 11-13 % = -57.5 to -53 | the same, the owner's to set |
+| Chain: crossover (LR4 800 Hz), 150 Hz high-pass (bottom), limiter (-1 dBFS, LSP, 5 ms lookahead) | 0 in the passband; no pre-gain | the same |
+| `ztos-speaker.out` | 100 % = 0 | the same |
+| ALSA sink `alsa_output.platform-snd-zrn-abox.stereo-fallback` | **40 % = -23.9**: unseen, WirePlumber's default for a route never saved (`device.routes.default-sink-volume` 0.064) | **100 % = 0**, held by ztos-audiod |
+| of which in software | -7.9 (both speakers) | 0 |
+| of which in hardware: `Speaker Playback Volume`, the bottom amplifier's digital volume (0x35) | 0 of 64 = 0x00 = **-16** | 64 = 0x40 = **0** (Samsung's `digital_gain` default 0x40) |
+| DSP (SPUS -> SIFS0 -> UAIF1) | no gain | the same |
+| Bottom amplifier analogue (0x3a) | 0x04 = +12 (stock 0x05 = +15) | the same |
+| Earpiece amplifier (0x35, 0x3a) | 0x34 = -3, 0x01 = +3 (stock's receiver values) | the same |
+
+So the panel had 23.9 dB under it on the bottom speaker, which carries all the
+bass, and 7.9 dB on the earpiece: quiet, and thin. The `Speaker Playback
+Volume` at -16 dB was not a separate stage but the hardware part of the
+sink's 40 % (PipeWire uses it as the sink's hardware volume, 0 dB at its top).
+
+The fix: WirePlumber marks the sink `ztos.volume.pinned`
+(`devices/samsung-starlte/overlay/etc/wireplumber/wireplumber.conf.d/53-s9-speaker-pin.conf`)
+and ztos-audiod sets a marked sink to 100 % and unmutes it whenever it finds it
+otherwise while a filter chain is in front of it. WirePlumber then saves that
+route at 100 % in `default-routes`, so the two agree from then on. Without a chain in front (no
+limiter) the sink is an ordinary output, and ztos-audiod keeps it at 40 % or
+under. Nothing changes in the driver or the amplifiers' registers: the mixer's
+top is the driver's existing limit (`AMP_VOL_MAX` 0x40).
+
+The panel's curve is wpctl's: percent cubed is the linear gain, so
+dB = 60 log10(percent/100): 100 % 0 dB, 75 % -7.5, 50 % -18, 30 % -31,
+20 % -42, 10 % -60. With nothing unseen below it, the top half of the slider
+covers the 18 dB in which most listening happens.
+
+Also through the same sink, so also 23.9 dB (bottom speaker) louder at the
+same levels: the ring, the alarm, system sounds and key taps. The 3.5 mm jack
+plays through it too; there the amplifiers are off, so it gains the 7.9 dB
+that was in software. That stays under the driver's -20 dB cap
+(`HS_HP_CEIL_DB`), which was set for a full-scale signal.
+
 ## Music visualizer capture
 
 The Music app's original Cava capture kept the speaker sink active even
@@ -267,10 +313,12 @@ with a caret that opens all three; it goes 3 s after the last touch or key.
 ## Not done
 
 - **Speaker protection.** On the stock system the DSP runs Maxim's DSM
-  against the current and voltage the amplifiers report. Not here: so the
-  volume control stops at -4 dB, the analogue gain is +9 dB (stock +15) and
-  the boost output about half way to stock's. It will be quieter than stock.
-  Do not raise those without protection.
+  against the current and voltage the amplifiers report. Not here (the
+  driver's DSM path is off without calibration): so the bottom speaker's
+  analogue gain is +12 dB (stock +15), its digital volume stops at 0 dB
+  (stock's own setting), the boost output is 0x18 (stock 0x1c), and the
+  ztos-speaker chain's high-pass and limiter stand in. It is about 3 dB
+  quieter than stock at full scale. Do not raise those without protection.
 - **Earpiece**: the second MAX98512 (U8002), on the same amplifier I2S and
   I2C as the speaker's, not on the codec (service manual, troubleshooting p3
   and p29).
