@@ -50,7 +50,7 @@ ZTENV_CODE = core/zt-environment-v1-protocol.c core/xdg-shell-protocol.c
 desktop/zt-environment-v1-protocol.h: $(ZTENV)
 	wayland-scanner server-header $< $@
 
-ztmetro: ztmetro.c sleep-toggle.h shade-edit.h shade-edit.c lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+ztmetro: ztmetro.c core/zt-anim.h sleep-toggle.h shade-edit.h shade-edit.c lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
 		-o $@ ztmetro.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
@@ -72,7 +72,7 @@ VIEWPORTER := $(WP)/stable/viewporter/viewporter.xml
 CORE = core/zrnmetrocore.c core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c \
 	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c \
 	retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
-CORE_DEPS = $(CORE) core/zt-clock.h core/zrnboard.h retro/dotmatrix.h retro/dm-chrome.h retro/dm-glyphs.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h \
+CORE_DEPS = $(CORE) core/zt-clock.h core/zt-anim.h core/zrnboard.h retro/dotmatrix.h retro/dm-chrome.h retro/dm-glyphs.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h \
 	core/zt-environment-v1-client-protocol.h core/xdg-decoration-unstable-v1-client-protocol.h
 APP_BUILD = $(CC) $(CFLAGS) $(WARN) -Icore $(shell pkg-config --cflags $(APP_PKGS)) $(IAL_FLAGS)
 APP_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(APP_PKGS)) $(IAL_LIBS) -lm
@@ -623,6 +623,11 @@ check-wifi-list:
 check-clock:
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-clock-test tests/zt-clock.c
 	/tmp/ztmetro-clock-test
+
+.PHONY: check-anim-speed
+check-anim-speed:
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-anim-speed-test tests/anim-speed.c
+	/tmp/ztmetro-anim-speed-test
 
 .PHONY: check-settings-config
 check-settings-config:
