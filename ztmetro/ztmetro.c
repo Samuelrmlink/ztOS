@@ -36,6 +36,7 @@
 #endif
 #include "background-apps.h"
 #include "appearance.h"
+#include "statusbar.h"	/* the status bar's order and colours (8.77) */
 #include "wall-blur.h"
 #include "demoloop/stop-key.h"
 #include "power/power-key.h"
@@ -741,7 +742,7 @@ struct zt_server {
 	float lf_src[4];
 	/* the status bar's glyphs, each turned about its own middle while the
 	 * screen is turned (see status_bar_draw): their boxes in the status layer */
-	struct { float x0, y0, x1, y1; bool on; } st_cell[6];
+	struct { float x0, y0, x1, y1; bool on; } st_cell[7];
 	bool st_recording;		/* status_row is drawing the status bar's own row */
 	struct zt_layer status_clock2;	/* the clock as two lines (hours over minutes), for landscape */
 	char st_clock2_key[24];		/* what it shows, and in which ink */
@@ -812,6 +813,18 @@ struct zt_server {
 	 * (`look KEY VALUE`). Start's photo blurred for them on the CPU, once per
 	 * photo and strength (wall-blur.h): nothing of it is blurred per frame */
 	struct zt_look look;
+	/* the status bar's icons: order, which show, their colours in each state
+	 * (statusbar.h, ROADMAP 8.77); from the config, and live from Settings */
+	struct zt_statusbar sb;
+	/* Bluetooth's pulse while sound streams (statusbar_bt_stream = pulse):
+	 * the rune as a small picture of its own, left out of the row and laid
+	 * over it with a breathing opacity, so a step of it is a quad, not the
+	 * row painted again; a timer asks for a frame every SB_PULSE_TICK_MS */
+	struct zt_layer bt_pulse_layer;
+	bool bt_pulse_on;		/* the last status bar drew it so */
+	float bt_pulse_x, bt_pulse_y;	/* its top left on the bar (burn-in shift in) */
+	struct wl_event_source *bt_pulse_timer;
+	bool bt_pulse_armed;		/* its timer is set */
 	cairo_surface_t *wall_small;	/* the photo, WALL_BLUR_W pixels across: what is blurred */
 	struct zt_layer wall_frost;	/* blurred for the tiles' windows (tile_frost) */
 	struct zt_layer wall_soft;	/* blurred for behind the tiles (background_blur) */
@@ -3390,7 +3403,8 @@ __attribute__((noinline)) static void zt_buffer_show(struct zt_server *server, s
 		frame_uploads++;
 		if (layer != &server->status_layer && layer != &server->nav_layer &&
 				layer != &server->peek_layer && layer != &server->plug_layer &&
-				layer != &server->shade_layer && layer != &server->status_clock2) {
+				layer != &server->shade_layer && layer != &server->status_clock2 &&
+				layer != &server->bt_pulse_layer) {
 			layer_gen++;	/* (the bars' own rows are drawn over the frost, not under it) */
 		}
 		frame_upload_bytes += (double)layer->tw * layer->th * 4;
@@ -5014,6 +5028,7 @@ static void load_config(struct zt_server *server) {
 	server->n_quick = 8;
 	server->frost_off = false;	/* `frost = 0`: plain bars, no blur work */
 	look_defaults(&server->look);	/* every key: the look from before 8.70 */
+	sb_defaults(&server->sb);	/* the status bar from before 8.77 */
 	server->quad_reveal = 1.0f;
 	/* screen rotation: off until the sensor's axes are confirmed on the phone */
 	server->rotation_enabled = false;
@@ -5059,6 +5074,8 @@ static void load_config(struct zt_server *server) {
 			server->accent = parse_color(server, value);
 		} else if (look_parse(&server->look, key, value)) {
 			/* the tiles', background's, switcher's and search's look (appearance.h) */
+		} else if (sb_parse(&server->sb, key, value)) {
+			/* the status bar's icons (statusbar.h) */
 		} else if (strcmp(key, "frost") == 0) {
 			/* the frosted diffusion of the bars, system-wide; live on SIGHUP */
 			server->frost_off = strcmp(value, "0") == 0 || strcmp(value, "off") == 0;
@@ -8055,6 +8072,12 @@ static double draw_status_bt(cairo_t *cr, double x, double base, double h) {
 	return 0.85 * u + lw;
 }
 
+/* draw_status_bt's width, without drawing it */
+static double status_bt_width(double h) {
+	double lw = fmax(1.0, round(h * 0.115 * 2) / 2);
+	return 0.85 * (h - lw) / 1.8 + lw;
+}
+
 static void draw_wifi(cairo_t *cr, double x, double base, double s, int bars,
 		double fr, double fg, double fb) {
 	/* A quarter fan whose corner is the glyph's bottom right. Measured off
@@ -8272,7 +8295,7 @@ static void ink_box(const char *text, const char *font, double size, double *hei
 /* The status bar's glyph groups, each turned about its own middle while the
  * screen is turned (status_bar_draw): their boxes in the status layer,
  * noted as draw_status draws its row (st_recording). */
-enum { ST_SIGNAL, ST_TECH, ST_WIFI, ST_BT, ST_BATTERY, ST_CLOCK, ST_CELLS };
+enum { ST_SIGNAL, ST_TECH, ST_WIFI, ST_BT, ST_BATTERY, ST_CLOCK, ST_LOC, ST_CELLS };
 static void st_cell_put(struct zt_server *server, int k, double x0, double y0, double x1, double y1) {
 	if (!server->st_recording) {
 		return;
@@ -8328,101 +8351,9 @@ static void status_row_drawn(struct zt_server *server, cairo_t *cr, bool details
 	/* 1.15 times the clock's digits (the user's choice, 2026-11-08) */
 	const double icon_h = round(ink_height("0", FONT_REGULAR, cell * 1.3) * STATUS_ICON_K * 2) / 2;
 	const double icon_gap = round(icon_h * 0.5);
-	double bt_right = x;	/* where Bluetooth's own mark ends */
-	if (server->cell_airplane) {
-		double aw = status_glyph(cr, "airplane", x, base, icon_h);
-		st_cell_put(server, ST_SIGNAL, x, base - icon_h, x + aw, base);
-		x += aw + icon_gap;
-	} else {
-		bool there = server->cell_known && cell_registered(server);
-		bool searching = cell_searching(server);
-		double bars_w = round(icon_h * 1.5);
-		draw_signal(cr, x, base, bars_w, icon_h, there ? bars_lit(server) : 0,
-			searching ? server->signal_sweep % 5 : -1, fgr, fgg, fgb);
-		if (searching) signal_sweep_kick(server);
-		st_cell_put(server, ST_SIGNAL, x, base - icon_h, x + bars_w, base);	/* (its arrow is inside) */
-		if (server->st_arrow_at == 1 && server->st_arrow > 0.001f) {
-			status_pop(cr, x + arrow / 2, base - icon_h + arrow / 2, server->st_arrow);
-			draw_data_arrow(cr, x, base - icon_h, arrow, fgr, fgg, fgb);
-			status_pop_end(cr, server->st_arrow);
-		}
-		x += bars_w;
-		/* the kind of data beside them (4G, H+...), its capitals the icons' height */
-		double size = icon_h * icon_h / ink_height("H", FONT_SEMIBOLD, icon_h);
-		double tw = text_width(server->st_tech_text, FONT_SEMIBOLD, size);
-		if (server->st_tech > 0.001f) {
-			double tx = x + icon_gap * 0.5;
-			status_pop(cr, tx + tw / 2, base - icon_h / 2, server->st_tech);
-			cairo_set_source_rgb(cr, fgr, fgg, fgb);
-			/* its capitals' bottom on the baseline, measured */
-			draw_text(cr, server->st_tech_text, FONT_SEMIBOLD, size, tx, base - ink_bottom("H", FONT_SEMIBOLD, size), 0, 0, false);
-			status_pop_end(cr, server->st_tech);
-			st_cell_put(server, ST_TECH, tx, base - icon_h, tx + tw, base);
-		}
-		/* what stands to the right of it moves over as it comes and goes */
-		x += (icon_gap * 0.5 + tw) * server->st_tech + icon_gap;
-	}
-	if (server->st_wifi > 0.001f) {
-		double s = icon_h;
-		status_pop(cr, x + s / 2, base - s / 2, server->st_wifi);
-		cairo_set_source_rgb(cr, fgr, fgg, fgb);
-		draw_wifi(cr, x, base, s, server->st_wifi_bars, fgr, fgg, fgb);
-		st_cell_put(server, ST_WIFI, x - s * 0.1, base - s * 1.1, x + s, base);	/* (and its arrow, out at the top left) */
-		cairo_set_source_rgb(cr, fgr, fgg, fgb);
-		if (server->st_arrow_at == 2 && server->st_arrow > 0.001f) {
-			/* the fan's corner is its bottom right: its top left is free */
-			/* and it stands a little out from that corner, clear of the
-			 * outermost band */
-			double as = s * 0.3, out = s * 0.1;
-			status_pop(cr, x - out + as / 2, base - s - out + as / 2, server->st_arrow);
-			draw_data_arrow(cr, x - out, base - s - out, as, fgr, fgg, fgb);
-			status_pop_end(cr, server->st_arrow);
-		}
-		status_pop_end(cr, server->st_wifi);
-		/* (it comes and goes: what follows slides with it) */
-		x += (s + icon_gap) * server->st_wifi;
-	}
-	/* Location in use: the GNSS engine is on for some reader (the
-	 * Location tile's mark, small); gone when it stops */
-	if (server->loc_active) {
-		double r = icon_h * 0.36;
-		cairo_save(cr);
-		cairo_set_source_rgb(cr, fgr, fgg, fgb);
-		cairo_set_line_width(cr, fmax(1.0, round(icon_h * 0.11)));
-		cairo_new_sub_path(cr);
-		cairo_arc(cr, x + r, base - icon_h / 2, r, 0, 2 * M_PI);
-		cairo_stroke(cr);
-		cairo_arc(cr, x + r, base - icon_h / 2, r * 0.45, 0, 2 * M_PI);
-		cairo_fill(cr);
-		cairo_restore(cr);
-		x += 2 * r + icon_gap;
-	}
-	/* Bluetooth: white with a device connected, dimmed when only on. While
-	 * sound streams to the device, a small dot in the accent colour sits at
-	 * its top right (it used to blink, which read as something broken). */
-	if (server->bt_on) {
-		if (server->bt_name[0]) {
-			cairo_set_source_rgb(cr, fgr, fgg, fgb);
-		} else {
-			cairo_set_source_rgb(cr, dmr, dmg, dmb);
-		}
-		/* a little more room than the other gaps: the fan's dot sits
-		 * in its bottom right corner, hard against what follows */
-		x += round(icon_gap * 0.4);
-		double bt_h = icon_h * 1.08;
-		bt_right = x + draw_status_bt(cr, x, base, bt_h);
-		st_cell_put(server, ST_BT, x, base - bt_h, bt_right, base);
-		if (server->bt_streaming) {
-			double dot_r = fmax(1.5, icon_h * 0.16);
-			set_rgb(cr, server->accent);
-			cairo_new_sub_path(cr);
-			cairo_arc(cr, bt_right + dot_r * 0.6, base - bt_h + dot_r, dot_r, 0, 2 * M_PI);
-			cairo_fill(cr);
-			bt_right += dot_r * 1.6;	/* room for it before what follows */
-		}
-	}
-	cairo_set_source_rgb(cr, fgr, fgg, fgb);
-
+	/* The clock's width and the battery's place first: the icons on the left
+	 * stop short of them (a Bluetooth device's meter is left out rather than
+	 * run into the battery) */
 	char text[16], date[16];
 	time_t now = time(NULL);
 	struct tm tm;
@@ -8453,28 +8384,202 @@ static void status_row_drawn(struct zt_server *server, cairo_t *cr, bool details
 	double nub_w = round(cell * 0.16);
 	double nub_h = round(cell * 0.38);
 	double bx = right - clock_w - cell * 0.9 - (bw + gap + nub_w);
-	/* the connected device's charge, if it tells: one thin bar hard against the
-	 * icon, filling from the bottom, and steady while the icon beside it blinks.
-	 * Left out rather than run into the battery on a screen too narrow for it. */
-	if (server->bt_on && server->bt_name[0] && server->pods_bar.link) {
-		/* its own icon: clear of Bluetooth's, not hard against it as the meter below is */
-		pods_bar_draw(cr, &server->pods_bar, bt_right + icon_gap, base, cell, bx - cell * 0.5);
-	} else if (server->bt_on && server->bt_name[0] && !server->bt_apple &&
-	    server->bt_battery >= 0 && server->bt_battery <= 100) {
-		double bar_w = cell * 0.2, bar_h = icon_h;
-		double bar_x = bt_right + round(cell * 0.2), bar_y = base - bar_h;
-		if (bar_x + bar_w < bx - cell * 0.5) {
-			double fill = bar_h * server->bt_battery / 100.0;
-			if (server->bt_battery > 0 && fill < 1.0) fill = 1.0;	/* some charge is never an empty bar */
-			cairo_set_source_rgba(cr, fgr, fgg, fgb, 0.28);
-			cairo_rectangle(cr, bar_x, bar_y, bar_w, bar_h);
-			cairo_fill(cr);
-			if (server->bt_battery <= 15) cairo_set_source_rgb(cr, 0.9, 0.16, 0.16);
-			else cairo_set_source_rgb(cr, fgr, fgg, fgb);
-			cairo_rectangle(cr, bar_x, base - fill, bar_w, fill);
-			cairo_fill(cr);
+	const double limit = bx - cell * 0.5;	/* where the left-hand icons must end */
+	(void)nub_h;
+
+	/* The left-hand icons, in the order chosen in Settings > customization >
+	 * status bar (statusbar.h); one hidden there is simply not drawn. The
+	 * default order is the row as it was: signal, data type, Wi-Fi,
+	 * location, Bluetooth. */
+	const uint32_t ink = (uint32_t)lround(fgr * 255) << 16 | (uint32_t)lround(fgg * 255) << 8 |
+		(uint32_t)lround(fgb * 255);
+	const uint32_t dim = (uint32_t)lround(dmr * 255) << 16 | (uint32_t)lround(dmg * 255) << 8 |
+		(uint32_t)lround(dmb * 255);
+	bool pulse_now = false;
+	int prev = -1;	/* the icon drawn just before: the data type hugs the bars */
+	for (int place = 0; place < SB_N_MOVABLE; place++) {
+		int icon = server->sb.order[place];
+		if (!server->sb.shown[icon]) {
+			continue;
+		}
+		switch (icon) {
+		case SB_SIGNAL:
+			/* an aeroplane with the radio off, else the bars; with the data
+			 * over the mobile network, a small arrow at their top */
+			if (server->cell_airplane) {
+				double aw = status_glyph(cr, "airplane", x, base, icon_h);
+				st_cell_put(server, ST_SIGNAL, x, base - icon_h, x + aw, base);
+				x += aw + icon_gap;
+			} else {
+				bool there = server->cell_known && cell_registered(server);
+				bool searching = cell_searching(server);
+				double bars_w = round(icon_h * 1.5);
+				draw_signal(cr, x, base, bars_w, icon_h, there ? bars_lit(server) : 0,
+					searching ? server->signal_sweep % 5 : -1, fgr, fgg, fgb);
+				if (searching) signal_sweep_kick(server);
+				st_cell_put(server, ST_SIGNAL, x, base - icon_h, x + bars_w, base);	/* (its arrow is inside) */
+				if (server->st_arrow_at == 1 && server->st_arrow > 0.001f) {
+					status_pop(cr, x + arrow / 2, base - icon_h + arrow / 2, server->st_arrow);
+					draw_data_arrow(cr, x, base - icon_h, arrow, fgr, fgg, fgb);
+					status_pop_end(cr, server->st_arrow);
+				}
+				x += bars_w + icon_gap;
+			}
+			prev = SB_SIGNAL;
+			break;
+		case SB_DATA: {
+			/* the kind of data (4G, H+...), its capitals the icons' height;
+			 * right after the bars it stands half a gap from them, as before */
+			if (server->cell_airplane || server->st_tech <= 0.001f) {
+				break;
+			}
+			double size = icon_h * icon_h / ink_height("H", FONT_SEMIBOLD, icon_h);
+			double tw = text_width(server->st_tech_text, FONT_SEMIBOLD, size);
+			bool hug = prev == SB_SIGNAL && !server->cell_airplane;
+			double tx = hug ? x - icon_gap * 0.5 : x;
+			status_pop(cr, tx + tw / 2, base - icon_h / 2, server->st_tech);
+			cairo_set_source_rgb(cr, fgr, fgg, fgb);
+			/* its capitals' bottom on the baseline, measured */
+			draw_text(cr, server->st_tech_text, FONT_SEMIBOLD, size, tx, base - ink_bottom("H", FONT_SEMIBOLD, size), 0, 0, false);
+			status_pop_end(cr, server->st_tech);
+			st_cell_put(server, ST_TECH, tx, base - icon_h, tx + tw, base);
+			/* what stands to the right of it moves over as it comes and goes */
+			x += (hug ? icon_gap * 0.5 + tw : tw + icon_gap) * server->st_tech;
+			prev = SB_DATA;
+			break;
+		}
+		case SB_WIFI:
+			if (server->st_wifi > 0.001f) {
+				double s = icon_h;
+				status_pop(cr, x + s / 2, base - s / 2, server->st_wifi);
+				cairo_set_source_rgb(cr, fgr, fgg, fgb);
+				draw_wifi(cr, x, base, s, server->st_wifi_bars, fgr, fgg, fgb);
+				st_cell_put(server, ST_WIFI, x - s * 0.1, base - s * 1.1, x + s, base);	/* (and its arrow, out at the top left) */
+				cairo_set_source_rgb(cr, fgr, fgg, fgb);
+				if (server->st_arrow_at == 2 && server->st_arrow > 0.001f) {
+					/* the fan's corner is its bottom right: its top left is free */
+					/* and it stands a little out from that corner, clear of the
+					 * outermost band */
+					double as = s * 0.3, out = s * 0.1;
+					status_pop(cr, x - out + as / 2, base - s - out + as / 2, server->st_arrow);
+					draw_data_arrow(cr, x - out, base - s - out, as, fgr, fgg, fgb);
+					status_pop_end(cr, server->st_arrow);
+				}
+				status_pop_end(cr, server->st_wifi);
+				/* (it comes and goes: what follows slides with it) */
+				x += (s + icon_gap) * server->st_wifi;
+				prev = SB_WIFI;
+			}
+			break;
+		case SB_LOCATION:
+			/* Location in use: the GNSS engine is on for some reader (the
+			 * Location tile's mark, small); gone when it stops */
+			if (server->loc_active) {
+				double r = icon_h * 0.36;
+				cairo_save(cr);
+				cairo_set_source_rgb(cr, fgr, fgg, fgb);
+				cairo_set_line_width(cr, fmax(1.0, round(icon_h * 0.11)));
+				cairo_new_sub_path(cr);
+				cairo_arc(cr, x + r, base - icon_h / 2, r, 0, 2 * M_PI);
+				cairo_stroke(cr);
+				cairo_arc(cr, x + r, base - icon_h / 2, r * 0.45, 0, 2 * M_PI);
+				cairo_fill(cr);
+				cairo_restore(cr);
+				st_cell_put(server, ST_LOC, x, base - icon_h, x + 2 * r, base);
+				x += 2 * r + icon_gap;
+				prev = SB_LOCATION;
+			}
+			break;
+		case SB_BT: {
+			/* Bluetooth, in its state's colour (statusbar.h; by default white
+			 * with a device connected, dimmed when only on, not drawn when
+			 * off). While sound streams: a dot beside it (the accent's, by
+			 * default), only its colour, or a slow pulse of its opacity */
+			int state = sb_bt_state(server->bt_on, server->bt_name[0] != 0, server->bt_streaming);
+			uint32_t colour;
+			if (!sb_resolve(&server->sb, SB_COLOURED_BT, state, ink, dim, server->accent, &colour)) {
+				break;
+			}
+			bool streaming = state == SB_BT_STREAMING;
+			/* the pulse only on the bar itself, and only while its motion is
+			 * on: the lock's row, the held row and the action centre's, or
+			 * animations off, have the colour steady */
+			bool pulse = streaming && server->sb.bt_stream == SB_STREAM_PULSE && server->st_recording &&
+				live && !anim_off(server, ZT_ANIM_BARS);
+			/* a little more room than the other gaps: the fan's dot sits
+			 * in its bottom right corner, hard against what follows */
+			x += round(icon_gap * 0.4);
+			double bt_h = icon_h * 1.08;
+			double bt_w = status_bt_width(bt_h);
+			if (pulse) {
+				/* its own small picture, laid over the row (bt_pulse_draw) */
+				double pw = ceil(bt_w) + 2, ph = ceil(bt_h) + 2;
+				cairo_t *pc;
+				struct zt_buffer *pb = zt_buffer_create(server, pw, ph, &pc);
+				cairo_set_operator(pc, CAIRO_OPERATOR_CLEAR);
+				cairo_paint(pc);
+				cairo_set_operator(pc, CAIRO_OPERATOR_OVER);
+				set_rgb(pc, colour);
+				draw_status_bt(pc, 1, ph - 1, bt_h);
+				zt_buffer_show(server, &server->bt_pulse_layer, pb, pc, pw, ph);
+				/* where it goes on the bar: this row's place, with the
+				 * burn-in shift the row is drawn with */
+				cairo_matrix_t m;
+				cairo_get_matrix(cr, &m);
+				server->bt_pulse_x = (float)(x - 1 + m.x0 / m.xx);
+				server->bt_pulse_y = (float)(base - bt_h - 1 + m.y0 / m.yy);
+				pulse_now = true;
+			} else {
+				set_rgb(cr, colour);
+				draw_status_bt(cr, x, base, bt_h);
+			}
+			double bt_right = x + bt_w;
+			st_cell_put(server, ST_BT, x, base - bt_h, bt_right, base);
+			if (streaming && server->sb.bt_stream == SB_STREAM_DOT) {
+				uint32_t dot;
+				if (sb_colour_rgb(server->sb.bt_dot, ink, dim, server->accent, server->accent, &dot)) {
+					double dot_r = fmax(1.5, icon_h * 0.16);
+					set_rgb(cr, dot);
+					cairo_new_sub_path(cr);
+					cairo_arc(cr, bt_right + dot_r * 0.6, base - bt_h + dot_r, dot_r, 0, 2 * M_PI);
+					cairo_fill(cr);
+					bt_right += dot_r * 1.6;	/* room for it before what follows */
+				}
+			}
+			double end = bt_right;
+			/* the connected device's charge, if it tells: one thin bar hard
+			 * against the icon, filling from the bottom. Left out rather than
+			 * run into the battery on a screen too narrow for it. */
+			if (server->bt_on && server->bt_name[0] && server->pods_bar.link) {
+				/* its own icon: clear of Bluetooth's, not hard against it as the meter below is */
+				end = fmax(end, pods_bar_draw(cr, &server->pods_bar, bt_right + icon_gap, base, cell, limit));
+			} else if (server->bt_on && server->bt_name[0] && !server->bt_apple &&
+			    server->bt_battery >= 0 && server->bt_battery <= 100) {
+				double bar_w = cell * 0.2, bar_h = icon_h;
+				double bar_x = bt_right + round(cell * 0.2), bar_y = base - bar_h;
+				if (bar_x + bar_w < limit) {
+					double fill = bar_h * server->bt_battery / 100.0;
+					if (server->bt_battery > 0 && fill < 1.0) fill = 1.0;	/* some charge is never an empty bar */
+					cairo_set_source_rgba(cr, fgr, fgg, fgb, 0.28);
+					cairo_rectangle(cr, bar_x, bar_y, bar_w, bar_h);
+					cairo_fill(cr);
+					if (server->bt_battery <= 15) cairo_set_source_rgb(cr, 0.9, 0.16, 0.16);
+					else cairo_set_source_rgb(cr, fgr, fgg, fgb);
+					cairo_rectangle(cr, bar_x, base - fill, bar_w, fill);
+					cairo_fill(cr);
+					end = bar_x + bar_w;
+				}
+			}
+			x = end + icon_gap;
+			prev = SB_BT;
+			break;
+		}
 		}
 	}
+	if (server->st_recording) {
+		server->bt_pulse_on = pulse_now;
+	}
+	cairo_set_source_rgb(cr, fgr, fgg, fgb);
 	if (battery >= 0) {
 		double cx = bx + bw / 2.0;
 		double cy = base - cell / 2.0;
@@ -8889,6 +8994,36 @@ static void draw_status(struct zt_server *server) {
 			server->shade_later = wl_event_loop_add_timer(server->loop, shade_later_fired, server);
 		}
 		if (server->shade_later) wl_event_source_timer_update(server->shade_later, 600);
+	}
+}
+
+/* Bluetooth's pulse (statusbar_bt_stream = pulse): while the bar drew the
+ * rune as its own picture, a frame every SB_PULSE_TICK_MS steps its opacity
+ * (bt_pulse_draw), a quad over the row; nothing is painted with Cairo. It
+ * waits while the screen is off, the lock is over it or a full-screen app
+ * has the bar away, and the next frame drawn starts it again. */
+static float fs_status_y(struct zt_server *server);
+static int bt_pulse_fired(void *data) {
+	struct zt_server *server = data;
+	server->bt_pulse_armed = false;
+	if (!server->bt_pulse_on || !server->screen_on || server->aod || server->locked ||
+			fs_status_y(server) <= -(float)STATUS_H + 0.5f) {
+		return 0;
+	}
+	damage(server);
+	return 0;
+}
+
+static void bt_pulse_arm(struct zt_server *server) {
+	if (!server->bt_pulse_on || server->bt_pulse_armed) {
+		return;
+	}
+	if (!server->bt_pulse_timer) {
+		server->bt_pulse_timer = wl_event_loop_add_timer(server->loop, bt_pulse_fired, server);
+	}
+	if (server->bt_pulse_timer) {
+		wl_event_source_timer_update(server->bt_pulse_timer, SB_PULSE_TICK_MS);
+		server->bt_pulse_armed = true;
 	}
 }
 
@@ -21385,9 +21520,17 @@ static void ctl_command(struct zt_server *server, char *line) {
 		}
 		if (k >= 0) {
 			damage(server);
+		} else if (sb_line(&server->sb, line + 5)) {
+			/* the status bar's order or colours (statusbar.h): the row again */
+			draw_status(server);
+			damage(server);
 		}
 	} else if (strcmp(line, "anim-reload") == 0) {
 		anim_reload(server);	/* Settings' animation page: the speeds only */
+		if (server->sb.bt_stream == SB_STREAM_PULSE && server->bt_streaming) {
+			draw_status(server);	/* Bluetooth pulses, or steady with the bar's motion off */
+			damage(server);
+		}
 	} else if (sscanf(line, "brightness-fine %d", &id) == 1) {
 		/* the settings slider under a finger: tenths of a percent */
 		server->shade_brightness = id < 20 ? 2 : id > 1000 ? 100 : (id + 5) / 10;
@@ -25359,6 +25502,27 @@ static void plug_draw(struct zt_server *server, float angle) {
 		(float)pl->pw / pl->tw, (float)pl->ph / pl->th);
 }
 
+/* Bluetooth's rune over the bar, breathing (statusbar.h's pulse): its
+ * opacity from the clock, at the status bar's animation speed. Turned, it
+ * turns with Bluetooth's cell. Called wherever the bar's layer is drawn. */
+static void bt_pulse_draw(struct zt_server *server, float angle) {
+	struct zt_layer *l = &server->bt_pulse_layer;
+	if (!server->bt_pulse_on || !l->tex) {
+		return;
+	}
+	double rate = zt_anim_rate(&server->anim, ZT_ANIM_BARS);
+	double period = SB_PULSE_MS / (rate > 0.05 ? rate : 0.05);
+	float alpha = (float)sb_pulse_alpha((double)now_ms(), period);
+	if (fabsf(angle) < 0.01f) {
+		layer_draw(server, l, server->bt_pulse_x, server->bt_pulse_y + fs_status_y(server), alpha);
+	} else if (server->st_cell[ST_BT].on) {
+		float cx = (server->st_cell[ST_BT].x0 + server->st_cell[ST_BT].x1) / 2;
+		float cy = (server->st_cell[ST_BT].y0 + server->st_cell[ST_BT].y1) / 2;
+		bar_cell_quad(server, l, 0, 0, (float)l->w, (float)l->h, cx, cy, angle, alpha);
+	}
+	bt_pulse_arm(server);	/* (the next step, if it was waiting) */
+}
+
 /* The nav bar: its three buttons each turned about its own middle, a square
  * as tall as the bar round each (a wider glyph is cut: the "ZRN" word). */
 static void nav_bar_draw(struct zt_server *server, float angle) {
@@ -26213,6 +26377,7 @@ static void render_frame(struct zt_server *server) {
 		bar_back_mix(server, 0, scan.hit[0], frosted[0], diffuse, false);
 	}
 	status_bar_draw(server, bar_angle);	/* (its glyphs turned in place when turned; it goes with fs_status_y) */
+	bt_pulse_draw(server, bar_angle);	/* (Bluetooth breathing over it, if it does) */
 	if (server->charging && server->plug_layer.tex) {
 		float a = server->battery_full ? 1.0f : server->st_plug;
 		float bar_y = fs_status_y(server);	/* it goes with the bar it sits on */
@@ -26425,6 +26590,7 @@ static void render_frame(struct zt_server *server) {
 		server->quad_key[3] = 0.0f;
 		/* The call fills the margins; status glyphs still belong above it. */
 		layer_draw(server, &server->status_layer, 0, fs_status_y(server), 1.0f);
+		bt_pulse_draw(server, 0.0f);
 	}
 	if (server->splash && !animating(server, &server->lock_y) && server->lock_y >= 0.0f) {
 		server->splash = false;
@@ -26472,6 +26638,7 @@ static void render_frame(struct zt_server *server) {
 	    (server->level_y > 1.0f - (float)server->level_h && server->level_layer.tex) ||
 	    (server->dialog_y > 1.0f - (float)server->dialog_h && server->dialog_layer.tex)) {
 		layer_draw(server, &server->status_layer, 0, fs_status_y(server), 1.0f);
+		bt_pulse_draw(server, 0.0f);
 	}
 	if (server->show_touches) {
 		for (int i = 0; i < MAX_TOUCH; i++) {
@@ -27434,9 +27601,10 @@ static void render_status_states(struct zt_server *server) {
 		int bars;		/* the mobile network's, 0..5 */
 		const char *tech;	/* "" none */
 		int wifi;		/* -1 off, 0..3 */
-		int bt;			/* 0 off, 1 on, 2 connected */
+		int bt;			/* 0 off, 1 on, 2 connected, 3 streaming */
 		int battery;
 		bool charging, h24;
+		const char *sb;		/* statusbar.h lines, ";" between; NULL the defaults */
 	} STATES[] = {
 		{ "wifi3-bt-on", true, false, 0, "", 3, 1, 48, true, false },
 		{ "airplane-only", true, false, 0, "", -1, 0, 80, false, true },
@@ -27452,8 +27620,25 @@ static void render_status_states(struct zt_server *server) {
 		{ "no-service", false, false, 0, "", -1, 1, 20, false, true },
 		{ "battery-10", false, true, 3, "", 3, 0, 10, false, true },
 		{ "battery-100-charging", false, true, 3, "", 3, 0, 100, true, true },
-		{ "battery-50-charging-12h", true, false, 0, "", 2, 2, 50, true, false },
+		{ "battery-50-charging-12h", true, false, 0, "", 2, 2, 50, true, false, NULL },
+		/* 8.77: the icons' order and Bluetooth's colours */
+		{ "bt-streaming-dot", false, true, 5, "", 3, 3, 62, false, true, NULL },
+		{ "bt-streaming-colour-green", false, true, 5, "", 3, 3, 62, false, true,
+			"statusbar_bt_streaming green;statusbar_bt_stream colour" },
+		{ "bt-streaming-pulse-steady", false, true, 5, "", 3, 3, 62, false, true,
+			"statusbar_bt_streaming cyan;statusbar_bt_stream pulse" },
+		{ "bt-connected-green-dot-red", false, true, 5, "", 3, 3, 62, false, true,
+			"statusbar_bt_connected green;statusbar_bt_dot red" },
+		{ "bt-off-shown-dim", false, true, 5, "", 3, 0, 62, false, true, "statusbar_bt_off dim" },
+		{ "bt-on-hidden", false, true, 5, "", 3, 1, 62, false, true, "statusbar_bt_on hidden" },
+		{ "reordered-bt-first", false, true, 4, "4G", -1, 2, 62, false, true,
+			"statusbar_icons bluetooth,wifi,signal,data,location" },
+		{ "reordered-data-apart", false, true, 4, "4G", -1, 2, 62, false, true,
+			"statusbar_icons data,bluetooth,signal" },
+		{ "hidden-signal-wifi", false, true, 4, "", 3, 2, 62, false, true,
+			"statusbar_icons -signal,-wifi" },
 	};
+	struct zt_statusbar sb_was = server->sb;
 	bool h24 = server->clock_24h;
 	for (size_t i = 0; i < sizeof(STATES) / sizeof(STATES[0]); i++) {
 		server->cell_airplane = STATES[i].airplane;
@@ -27467,9 +27652,17 @@ static void render_status_states(struct zt_server *server) {
 		server->st_wifi_bars = STATES[i].wifi < 0 ? 0 : STATES[i].wifi;
 		server->st_arrow = 0;
 		server->bt_on = STATES[i].bt > 0;
-		snprintf(server->bt_name, sizeof(server->bt_name), "%s", STATES[i].bt == 2 ? "Headphones" : "");
-		server->bt_streaming = false;
+		snprintf(server->bt_name, sizeof(server->bt_name), "%s", STATES[i].bt >= 2 ? "Headphones" : "");
+		server->bt_streaming = STATES[i].bt == 3;
 		server->bt_battery = -1;
+		sb_defaults(&server->sb);
+		if (STATES[i].sb) {
+			char lines[256];
+			snprintf(lines, sizeof(lines), "%s", STATES[i].sb);
+			for (char *save = NULL, *l = strtok_r(lines, ";", &save); l; l = strtok_r(NULL, ";", &save)) {
+				sb_line(&server->sb, l);
+			}
+		}
 		server->pods_bar.link = 0;
 		server->aod_test_battery = STATES[i].battery;
 		server->charging = STATES[i].charging;
@@ -27487,6 +27680,8 @@ static void render_status_states(struct zt_server *server) {
 	server->clock_24h = h24;
 	server->aod_test_battery = -1;
 	server->charging = false;
+	server->bt_streaming = false;
+	server->sb = sb_was;
 }
 
 static int render_to_files(struct zt_server *server, const char *dir) {

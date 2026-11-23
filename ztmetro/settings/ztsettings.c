@@ -52,6 +52,7 @@
 #include "../clock-theme-ids.h"
 #include "../background-apps.h"
 #include "../appearance.h"
+#include "../statusbar.h"	/* the status bar's icons, their order and colours (8.77) */
 #include "config-merge.h"
 #include "page-tree.h"
 #include "../ledd/led-policy.h"
@@ -317,6 +318,7 @@ static struct {
 	int force_rel_strength;	/* and strength, % of the heavy pulse, 0 none */
 	int haptic_group[N_HAPTIC_GROUPS];	/* percent of the strength; 0 off */
 	struct zt_look look;	/* the tiles', background's, switcher's and search's (appearance.h) */
+	struct zt_statusbar sb;	/* the status bar's icons (statusbar.h) */
 	int quick[SE_MAX];	/* indexes into QUICK_IDS: the first n_quick are the places */
 	int n_quick;
 } app = {
@@ -435,6 +437,7 @@ static void config_load(void) {
 	app.burnin_shift = true;
 	app.android_bt_remove_bond = true;
 	look_defaults(&app.look);
+	sb_defaults(&app.sb);
 	zt_anim_defaults(&app.anim);
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
@@ -444,6 +447,8 @@ static void config_load(void) {
 		char *key = trim(line), *val = trim(eq + 1);
 		if (look_parse(&app.look, key, val)) {
 			/* the appearance keys: appearance.h */
+		} else if (sb_parse(&app.sb, key, val)) {
+			/* the status bar's: statusbar.h */
 		} else if (strcmp(key, "start_wallpaper") == 0) {
 			snprintf(app.start_wall, sizeof(app.start_wall), "%s", val);
 		} else if (strcmp(key, "lock_wallpaper") == 0) {
@@ -743,7 +748,8 @@ static void auto_load(void) {
 /* Every key Settings can write, as it would write it now. */
 /* room, not a count (config_n is the count): an exact number fell behind twice
  * as settings were added, and config_save dropped the last keys (the LEDs) */
-enum { N_CONFIG_KEYS = 64 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS + 2 + ZT_ANIM_N + N_LOOK };
+enum { N_CONFIG_KEYS = 64 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS + 2 + ZT_ANIM_N + N_LOOK +
+	3 + SB_N_COLOURED * SB_MAX_STATES };
 static struct config_key config_keys[N_CONFIG_KEYS];
 static int config_n;	/* how many config_format filled in: N_CONFIG_KEYS is only the room */
 
@@ -840,6 +846,11 @@ static void config_format(void) {
 		char v[16];
 		look_format(&app.look, k, v, sizeof(v));
 		KEY(LOOK_DEFS[k].key, "%s", v);
+	}
+	for (int k = 0; k < sb_n_keys(); k++) {
+		char v[CONFIG_VALUE_MAX];
+		sb_format(&app.sb, k, v, sizeof(v));
+		KEY(sb_key_name(k), "%s", v);
 	}
 	static const int fs_bars_secs[] = { 2, 3, 5, 10 };
 	KEY("fullscreen_bars_secs", "%d", fs_bars_secs[app.fs_bars_idx]);
@@ -2096,7 +2107,7 @@ static void look_tell(int k) {
 }
 
 static bool look_key_live(const char *key) {
-	return look_index(key) >= 0;
+	return look_index(key) >= 0 || sb_key_index(key) >= 0;	/* (and the status bar's, 8.77) */
 }
 
 /* the file, when only appearance keys changed: no SIGHUP (the shell has them) */
@@ -2124,6 +2135,8 @@ static double look_heading(cairo_t *cr, double y, const char *title) {
 	zmc_text(cr, title, FONT_SEMIBOLD, 15, MARGIN, y + 6, 0);
 	return y + 34;
 }
+
+#include "statusbar-page.h"	/* customization > status bar, and its Bluetooth page (8.77) */
 
 static const char *home_summary(char *out, size_t size) {
 	const struct zt_look *l = &app.look;
@@ -2236,6 +2249,7 @@ static double draw_theme(cairo_t *cr) {
 	y = zmc_entry(cr, y, "lock screen", app.dev_lock ? "Locks when the screen wakes" : "Wakes without locking",
 		ACT_OPEN_PAGE, PAGE_LOCK);
 	y = zmc_entry(cr, y, "navigation bar", "Choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
+	y = zmc_entry(cr, y, "status bar", sb_summary(detail, sizeof(detail)), ACT_OPEN_PAGE, PAGE_STATUSBAR);
 	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
 		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
 	y = zmc_entry(cr, y, "quick tiles", detail, ACT_OPEN_PAGE, PAGE_QUICK);
@@ -4266,6 +4280,8 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_THEME: return draw_theme(cr);
 	case PAGE_TILES: return draw_tiles(cr);
 	case PAGE_OVERLAYS: return draw_overlays(cr);
+	case PAGE_STATUSBAR: return draw_statusbar(cr);
+	case PAGE_STATUSBAR_BT: return draw_statusbar_bt(cr);
 	case PAGE_LOCK: return draw_lock(cr);
 	case PAGE_AOD: return draw_aod(cr);
 	case PAGE_DESKTOP: return desktop_page_render(cr);
@@ -4360,6 +4376,7 @@ static void activate(int action, int arg) {
 	if (action >= DEVTEST_ACTIONS && action < DEVTEST_ACTIONS_END) { devtest_activate(action, arg); return; }
 	if (action >= DESKTOP_ACTIONS && action < DESKTOP_ACTIONS_END) { desktop_page_activate(action, arg); return; }
 	if (action == ACT_THERM_RETRY) { therm_retry(); return; }
+	if (sb_activate(action, arg)) return;	/* the status bar's pages */
 	if (action >= LOOK_ACTIONS && action < LOOK_ACTIONS_END) {
 		/* an appearance switch (the photo behind the tiles): live, then the file */
 		int k = action - LOOK_ACTIONS;
@@ -5491,6 +5508,7 @@ static bool held(int action, int arg) {
 }
 
 static bool settings_touch(int phase, int id, double x, double y, uint32_t time) {
+	if (zmc.page == PAGE_STATUSBAR) return sb_touch(phase, id, x, y, time);	/* a handle dragged */
 	return zmc.page == PAGE_SOUND_EQ && sound_touch(phase, id, x, y, time);
 }
 

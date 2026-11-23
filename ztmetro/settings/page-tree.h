@@ -42,6 +42,8 @@ enum page {
 	PAGE_ANIMATION,	/* animation speeds */
 	PAGE_TILES,	/* home screen: how Start's tiles and its background photo look */
 	PAGE_OVERLAYS,	/* app switcher + search: their backdrops' opacity, frost, brightness */
+	PAGE_STATUSBAR,	/* status bar: its icons' order and which show (8.77) */
+	PAGE_STATUSBAR_BT,	/* the Bluetooth icon: a colour for each state, the streaming style */
 	PAGE_LOCK,	/* Lock Screen: its photo, and whether waking shows it */
 	PAGE_APP_SCALE,	/* app scaling: a size for each app */
 	PAGE_LED,	/* the front LED: what lights it, and in what colour */
@@ -107,6 +109,8 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_ANIMATION] = PAGE_DISPLAY,
 	[PAGE_NAVIGATION] = PAGE_THEME,
 	[PAGE_OVERLAYS] = PAGE_THEME,
+	[PAGE_STATUSBAR] = PAGE_THEME,
+	[PAGE_STATUSBAR_BT] = PAGE_STATUSBAR,
 	[PAGE_BOOST] = PAGE_POWER,
 	[PAGE_SOUND_EQ] = PAGE_AUDIO,
 	[PAGE_SOUND_FX] = PAGE_AUDIO,
@@ -148,6 +152,8 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "animations", PAGE_ANIMATION },
 	{ "tiles", PAGE_TILES },	/* its old name (Tiles Shell) */
 	{ "switcher-search", PAGE_OVERLAYS },
+	{ "status-bar", PAGE_STATUSBAR },
+	{ "status-bar-bluetooth", PAGE_STATUSBAR_BT },
 	{ "lock", PAGE_LOCK },
 	{ "passcode", PAGE_PASSCODE },
 	{ "passcode-entry", PAGE_PASSCODE_ENTRY },
