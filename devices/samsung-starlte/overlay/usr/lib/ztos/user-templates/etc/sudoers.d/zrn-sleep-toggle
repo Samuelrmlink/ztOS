@@ -1,0 +1,3 @@
+# The quick menu's Sleep tile (ztmetro, ROADMAP 8.47): SoC sleep on or off.
+# These two commands, and nothing else, without a password.
+@USER@ ALL=(root) NOPASSWD: /usr/local/sbin/zrn-sleepd enable, /usr/local/sbin/zrn-sleepd disable
