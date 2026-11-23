@@ -51,7 +51,8 @@ STATE: $XDG_RUNTIME_DIR/ztos-audio-state.json, replaced whole on any change:
     {"version": 1,
      "active": {"name", "desc", "kind", "percent", "mute"} or null,
      "outputs": [{"name", "desc", "kind", "percent", "mute", "current", "playing",
-                  "address" (Bluetooth only), "detail" (only "hdmi" yet)}],
+                  "address" (Bluetooth only), "detail" (only "hdmi" yet),
+                  "mic" (USB only: its microphone's source node, if it has one)}],
      "apps": [{"key", "name", "running", "streams": [node ids], "percent", "mute",
                "output": "default" or OUTPUT,
                "output_desc": its name for people, known even while it's away,
@@ -62,7 +63,10 @@ Also "streams": {"ring": {"percent", "playing"}, "alarm": {"percent", "playing"}
 "boost": bool}: the two levels of ztmetro/volume-streams.h and how many sounds play
 at each, and whether the output is turned up for one just now.
 
-kind is speaker, headphones or bluetooth. detail "hdmi": it goes to a screen
+kind is speaker, headphones or bluetooth. A USB audio device (USB-C headphones,
+a dongle) is headphones, named by its product ("EarPods"), else "USB headphones".
+Plugged in, it takes the audio as the jack does, and its microphone becomes the
+default source. detail "hdmi": it goes to a screen
 (the dock's HDMI or DisplayPort); absent otherwise. desc is the name for people
 (a Bluetooth device's own, as BlueZ has it), with no escapes or control
 characters. playing: an app's stream is running
@@ -284,16 +288,44 @@ def classify(props, route=""):
     return "speaker"
 
 
+USB_DESC = "USB headphones"
+# what a USB audio device calls itself that says nothing for people
+GENERIC_USB_NAMES = {"usb audio", "usb audio device", "usb2.0 device", "usb-audio", "usb sound device",
+                     "usb pnp sound device", "usb headset", "generic usb audio"}
+
+
+def is_usb(props):
+    return "usb" in props.get("node.name", "").lower() or props.get("device.bus") == "usb"
+
+
+def usb_desc(props):
+    """A USB audio device's name for people: its product ("EarPods"), not
+    PipeWire's "EarPods Analog Stereo"; a generic one is "USB headphones"."""
+    for k in ("device.product.name", "alsa.card_name", "node.nick", "alsa.name"):
+        n = clean_name(props.get(k))
+        if n and n.lower() not in GENERIC_USB_NAMES and not n.lower().startswith("usb audio"):
+            return n
+    return USB_DESC
+
+
+def mic_of(sink, sources):
+    """The microphone that belongs to a USB output: a source on the same device."""
+    if not sink or not sink.get("usb") or sink.get("device") is None:
+        return None
+    mics = sorted(n for n, m in sources.items() if m.get("device") == sink["device"])
+    return mics[0] if mics else None
+
+
 def takeover_target(known, sinks):
     """A Bluetooth output that has just connected, or headphones just plugged into
-    the jack, take the audio, unless another Bluetooth or USB output is there
-    already: choosing then is the user's.
+    the jack or USB, take the audio, unless another Bluetooth or USB output is
+    there already: choosing then is the user's.
     known: the output names last seen, None before the first look. Everything
     being new (a PipeWire restart, say) is not a device connecting."""
     if known is None:
         return None
     new = [s for name, s in sinks.items() if name not in known
-           and (s["kind"] == "bluetooth" or s.get("name") == JACK_SINK)]
+           and (s["kind"] == "bluetooth" or s.get("name") == JACK_SINK or (s.get("usb") and not s.get("hdmi")))]
     if len(new) != 1 or not known & set(sinks):
         return None
     for name, s in sinks.items():
@@ -325,6 +357,8 @@ def read_graph(dump):
             for m in o.get("metadata") or []:
                 if m.get("key") == "default.audio.sink" and isinstance(m.get("value"), dict):
                     g["default"] = m["value"].get("name")
+                elif m.get("key") == "default.audio.source" and isinstance(m.get("value"), dict):
+                    g["default_source"] = m["value"].get("name")
                 elif m.get("key") in ("target.object", "target.node"):
                     g["targets"].setdefault(m.get("subject"), {})[m["key"]] = m.get("value")
         elif t.endswith(":Device"):
@@ -362,14 +396,19 @@ def read_graph(dump):
             route = routes.get(p.get("device.id"), "")
             g["sinks"][name] = {
                 "id": o["id"], "serial": p.get("object.serial"), "name": name,
-                "desc": clean_name(p.get("node.description")) or clean_name(p.get("node.nick")) or name,
+                "desc": (usb_desc(p) if is_usb(p) and not is_hdmi(p, route) else None)
+                or clean_name(p.get("node.description")) or clean_name(p.get("node.nick")) or name,
                 "kind": classify(p, route),
                 "hdmi": is_hdmi(p, route),
-                "usb": "usb" in name.lower() or p.get("device.bus") == "usb",
+                "usb": is_usb(p),
+                "device": p.get("device.id"),
                 "address": p.get("api.bluez5.address"),
                 "percent": percent_of_gain(vols[0]) if vols else None,
                 "mute": bool(_props_of(info).get("mute", False)),
             }
+        elif p.get("media.class") == "Audio/Source" and is_usb(p):
+            # a USB headset's microphone (a monitor is Audio/Sink's, not a source here)
+            g.setdefault("sources", {})[name] = {"id": o["id"], "name": name, "device": p.get("device.id")}
         elif p.get("media.class") == "Stream/Output/Audio" and p.get("ztos.stream") in ROLE_STREAMS:
             r = role_stream(o["id"], p, _props_of(info))
             if r:
@@ -533,9 +572,10 @@ def playing_outputs(streams, on):
     return {on.get(s["id"]) for s in streams if s.get("state") == "running" and on.get(s["id"])}
 
 
-def output_entries(sinks, cur, playing):
+def output_entries(sinks, cur, playing, sources=None):
     """The state file's "outputs". A Bluetooth output also says its device's
-    address, so the device it belongs to is known when it has gone."""
+    address, so the device it belongs to is known when it has gone; a USB one
+    its microphone."""
     outputs = []
     for s in sinks.values():
         o = {"name": s["name"], "desc": s["desc"], "kind": s["kind"], "percent": s["percent"],
@@ -544,6 +584,9 @@ def output_entries(sinks, cur, playing):
             o["address"] = s["address"]
         if s.get("hdmi"):
             o["detail"] = "hdmi"
+        mic = mic_of(s, sources or {})
+        if mic:
+            o["mic"] = mic
         outputs.append(o)
     outputs.sort(key=lambda o: o["name"])
     return outputs
@@ -769,6 +812,8 @@ class Daemon:
         if arrived and arrived != g["default"]:
             log("%s connected: it takes the audio" % arrived)
             self.cmd_output(arrived)
+        if arrived:
+            self.follow_mic(g, arrived)
         self.publish(g)
         self.apply_roles(g)
         return True
@@ -917,7 +962,7 @@ class Daemon:
         cur = real_output(g["default"], g["sinks"], self.sound_state() if g["default"] == EQ_SINK else None)
         sink_ids = {s["id"]: s["name"] for s in g["sinks"].values()}
         on = {s["id"]: playing_on(s["id"], g["links"], sink_ids, g["chains"]) for s in g["streams"]}
-        outputs = output_entries(g["sinks"], cur, playing_outputs(g["streams"], on))
+        outputs = output_entries(g["sinks"], cur, playing_outputs(g["streams"], on), g.get("sources"))
         active = next((o for o in outputs if o["current"]), None)
         changed = remember_names(self.names, build_apps(g["streams"], {}, {}, g["sinks"], on))
         for s in g["sinks"].values():
@@ -1049,6 +1094,17 @@ class Daemon:
         # to its own output stays there
         if not self.tool("wpctl", "set-default", str(s["id"])):
             raise ValueError("wpctl failed")
+        self.follow_mic(self.graph, s["name"])
+
+    def follow_mic(self, g, name):
+        """A USB headset's microphone is the input while it is the output (plugged
+        in or chosen). Unplugged, WirePlumber goes back to the one before; another
+        output chosen leaves the input as it is."""
+        mic = mic_of(g["sinks"].get(name), g.get("sources", {}))
+        if mic and mic != g.get("default_source"):
+            log("%s: its microphone %s is the input" % (name, mic))
+            if self.tool("wpctl", "set-default", str(g["sources"][mic]["id"])):
+                g["default_source"] = mic
 
     def streams_of(self, key):
         return [s for s in (self.graph or {"streams": []})["streams"] if s["key"] == key]
