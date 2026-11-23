@@ -45,7 +45,14 @@ int main(void) {
 			assert((row[x] & 0xffffff) == (y % 2 ? 0xfefefe : 0));
 		}
 	}
-	for (int i = 0; i < 4; i++) capture_photo();
+	/* a photo saves on a thread and the next waits for it, as a person would */
+	for (int i = 0; i < 4; i++) {
+		capture_photo();
+		while (save.busy && !__atomic_load_n(&save.done, __ATOMIC_ACQUIRE)) {
+			usleep(1000);
+		}
+		save_finish();
+	}
 	roll_scan();
 	assert(roll_count == 4); /* repeated shots must never replace earlier ones */
 

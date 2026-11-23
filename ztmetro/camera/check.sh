@@ -4,12 +4,10 @@ set -eu
 make camera/ztcamera
 check_dir=$(mktemp -d /tmp/ztcamera-check-build-XXXXXX)
 trap 'rm -rf "$check_dir"' EXIT HUP INT TERM
-app_pkgs='xkbcommon wayland-client wayland-egl egl glesv2 cairo pangocairo gdk-pixbuf-2.0'
-${CC:-cc} -O1 -g -std=c11 -Wall -Wextra -Wno-unused-parameter -Icore \
-    $(pkg-config --cflags $app_pkgs) -o "$check_dir/test-camera" \
-    camera/test-camera.c core/zrnmetrocore.c core/zrnmetrogpu.c \
-    core/xdg-shell-protocol.c core/viewporter-protocol.c \
-    $(pkg-config --libs $app_pkgs) -lm
+# the Makefile's own compiler line, core sources and libraries for the apps,
+# so this keeps building when the core gains a protocol or a library
+mk() { make -s --no-print-directory --eval "pv-$1:; @echo \$($1)" "pv-$1"; }
+$(mk APP_BUILD) -Wextra -o "$check_dir/test-camera" camera/test-camera.c $(mk CORE) $(mk APP_LIBS)
 "$check_dir/test-camera"
 # Isolate render-mode camera-roll directories from the real user's captures.
 mkdir -p "$check_dir/home"
