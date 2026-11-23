@@ -2,22 +2,31 @@
 /*
  * The real cameras, from /dev/zrn-cam (camera/driver/zrn-cam-live.h): 16-bit
  * Bayer with no ISP. The GPU reads the driver's memory directly as a DMA-BUF and
- * does all of it, once per sensor frame, into a texture of the frame's own size:
- * black level, lens shading, demosaic (Malvar-He-Cutler), white balance, colour
- * matrix, sRGB. The screen then draws that texture. The CPU reads only a thin grid
- * of pixels for exposure, white balance and focus.
+ * does all of it, once per sensor frame, in two passes at the frame's own size:
+ *
+ *   develop: black level, lens shading, demosaic (Malvar-He-Cutler), white
+ *            balance, colour matrix, saturation, sRGB and tone curve; for stills
+ *            it also merges frames (an average for noise, or exposure fusion for
+ *            HDR) with the result of the frame before;
+ *   finish:  edge-aware noise reduction (luma and chroma) and sharpening, with
+ *            strength by the sensor gain.
+ *
+ * The screen draws the finished texture, and a photo reads it back. The CPU reads
+ * only a thin grid of pixels for metering, white balance and focus.
  *
  * Numbers from Samsung's stock firmware (see camera/README.md): black 64 and white
  * 1023 (libexynoscamera3.so), sensor orientation rear 90, front 270 (the same), rear
  * colour from its forward matrices; front colour from a matrix in setfile_3h1.bin.
  * Included by ztcamera.c, inside its GL frame.
  */
+#include <dlfcn.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 
 #define RAW_DEV		"/dev/zrn-cam"
+#define RAW_TORCH	"/sys/class/leds/white:torch/brightness"
 #define RAW_BUFS	4
 #define RAW_FULL_AREA	(4032u * 2 * 3024)
 #define RAW_POOL	(2 * (size_t)RAW_FULL_AREA)
@@ -28,6 +37,17 @@
 #define AF_SETTLE	3		/* frames at a lens position before it is scored */
 #define AF_STEP		40
 #define AF_FINE		12
+/* preview line times: 25456 and 1266 lines a frame at 30 fps (the vendor's mode tables) */
+#define LINE_S_REAR	(1.0 / 30 / 25456)
+#define LINE_S_FRONT	(1.0 / 30 / 1266)
+/* gain code 32 is 1x. ISO 50 at 1x is inferred: stock's widest analog sensitivity
+ * is 640 (rear) at the 16x the driver allows, which puts 1x at 40, and stock's app
+ * starts at ISO 50. */
+#define ISO_AT_1X	50.0
+/* auto aperture, by the scene's EV100 at the lens: F2.4 above, F1.5 below */
+#define AP_EV_UP	11.0
+#define AP_EV_DOWN	9.0
+#define AP_MIN_S	4.0		/* between automatic moves */
 #define RAW_DMABUF	_IO('Z', 1)
 #define FOURCC(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
 
@@ -37,6 +57,8 @@ struct zrn_cam_frame {
 
 enum raw_cam { RAW_REAR, RAW_FRONT, RAW_IR, RAW_N };
 enum af_state { AF_IDLE, AF_WAIT_AE, AF_SWEEP, AF_REFINE, AF_HOLD };
+enum raw_still { STILL_ONE, STILL_NR, STILL_HDR };
+enum wb_preset { WB_AUTO, WB_CLOUDY, WB_DAYLIGHT, WB_FLUORESCENT, WB_INCANDESCENT };
 
 static struct {
 	int fd, dmabuf;
@@ -50,11 +72,14 @@ static struct {
 	float unpack[4];
 	bool zero_copy;
 	unsigned upload_tex;
-	/* what the frame becomes */
-	unsigned out_tex, fbo;
+	/* what the frame becomes: develop ping-pongs between two, finish writes the third */
+	unsigned dev_tex[2], dev_fbo[2], fin_tex, fin_fbo;
+	int cur;
 	int out_w, out_h;
-	int prog, u_size, u_unpack, u_first, u_gain, u_ccm, u_black, u_shade;
-	int disp, d_step;
+	int prog, u_size, u_unpack, u_first, u_gain, u_ccm, u_black, u_shade, u_sat, u_acc,
+		u_mode, u_start;
+	int fin, f_step, f_nr, f_sharp;
+	int disp;
 	/* the loops */
 	float gain[3];
 	float ccm[9];
@@ -63,11 +88,24 @@ static struct {
 	bool wb_set;
 	int af_pos, af_best, af_wait, af_lo, af_hi;
 	double af_score, af_held;
-	uint32_t af_seq;
 	enum af_state af;
 	double af_low_since, af_asked;
 	bool ae_settled;
-} raw = { .fd = -1, .dmabuf = -1, .gain = { 1, 1, 1 }, .coarse = 8000, .again = 64 };
+	double scene_ev;	/* EV100 of the metered scene, at the lens */
+	double luma;		/* the metered mean, of AE_TARGET */
+	double clipped;		/* the weighted share of the grid at white */
+	/* what the app asks for */
+	double ev;		/* exposure compensation, stops */
+	int man_iso;		/* 0 auto */
+	double man_shutter;	/* seconds, 0 auto */
+	enum wb_preset man_wb;
+	int man_focus;		/* lens position, -1 auto */
+	double spot_u, spot_v;	/* the tapped point in the frame, 0-1; spot_until 0 for none */
+	double spot_until;
+	bool ap_auto;
+	double ap_moved;
+} raw = { .fd = -1, .dmabuf = -1, .gain = { 1, 1, 1 }, .coarse = 8000, .again = 64,
+	.man_focus = -1, .ap_auto = true };
 
 static const char *const raw_stop_why[] = { "running", "stopped", "idle", "time limit",
 	"too warm", "receiver errors", "failed" };
@@ -80,10 +118,23 @@ static const float rear_fm_d[9] = { 1.546f, -0.498f, -0.046f, -0.244f, 1.424f, -
 static const float front_ccm[9] = { 330 / 256.f, -80 / 256.f, 6 / 256.f, -72 / 256.f, 346 / 256.f, -18 / 256.f,
 	-12 / 256.f, -119 / 256.f, 387 / 256.f };
 
+/*
+ * White balance presets as red and blue gains over green. Not from stock: these
+ * are starting points for Bayer sensors of this kind (daylight near R 1.9 B 1.6,
+ * tungsten near R 1.3 B 2.5), to be tuned against the owner's photos.
+ */
+static const float wb_preset_gain[5][2] = {
+	{ 0, 0 }, { 2.05f, 1.45f }, { 1.90f, 1.60f }, { 1.65f, 2.05f }, { 1.30f, 2.50f },
+};
+
 static double raw_now(void) {
 	struct timespec t;
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static double raw_line_s(void) {
+	return raw.cam == RAW_FRONT ? LINE_S_FRONT : LINE_S_REAR;
 }
 
 static void raw_images_free(void) {
@@ -99,7 +150,33 @@ static void raw_images_free(void) {
 	}
 }
 
+static void raw_torch(int level) {
+	static int was = -1;
+	if (level == was) {
+		return;
+	}
+	int fd = open(RAW_TORCH, O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return;
+	}
+	char b[8];
+	int n = snprintf(b, sizeof(b), "%d", level);
+	if (write(fd, b, n) == n) {
+		was = level;
+	}
+	close(fd);
+}
+
+static bool raw_say(const char *cmd);
+
 static void raw_close(void) {
+	/* the iris holds where it was left: back to F1.5, stock's closing value, so the next open knows */
+	if (raw.fd >= 0 && raw.cam == RAW_REAR && raw.f24 && raw_say("ap15")) {
+		raw.f24 = false;
+	}
+	if (raw.fd >= 0) {
+		raw_torch(0);	/* a torch never outlives its camera */
+	}
 	raw_images_free();
 	if (raw.map) {
 		munmap(raw.map, RAW_POOL);
@@ -133,6 +210,11 @@ static void raw_set_focus(int pos) {
 
 /* Focus waits for exposure: a dark frame's noise scores as sharp at any lens position. */
 static void raw_focus_start(void) {
+	if (raw.man_focus >= 0) {
+		raw.af = AF_IDLE;
+		raw_set_focus(raw.man_focus);
+		return;
+	}
 	raw.af = AF_WAIT_AE;
 	raw.af_asked = raw_now();
 	raw.ae_settled = false;
@@ -277,31 +359,74 @@ static void raw_open_ready(enum raw_cam cam) {
 	raw.again = 64;
 	raw.wb_set = false;
 	raw.gain[0] = raw.gain[1] = raw.gain[2] = 1;
+	raw.spot_until = 0;
 	memcpy(raw.ccm, cam == RAW_FRONT ? front_ccm : rear_fm_d, sizeof(raw.ccm));
 	raw_set_exposure(raw.coarse, raw.again);
 	raw_focus_start();
 }
 
-/* Exposure towards the target, gain only once exposure is at its limit. */
+/* ---- exposure ------------------------------------------------------------- */
+
+static int raw_iso(void) {
+	return (int)(raw.again / 32.0 * ISO_AT_1X + 0.5);
+}
+
+static double raw_shutter_s(void) {
+	return raw.coarse * raw_line_s();
+}
+
+/*
+ * Exposure towards the target (with the compensation the app asks for), gain only
+ * once exposure is at its limit. A manual ISO or shutter holds that half and
+ * leaves the other automatic; both manual is fully manual.
+ */
 static void raw_expose(double green, double clipped) {
-	double target = AE_TARGET;
-	if (clipped > 0.03) {
+	double target = AE_TARGET * pow(2, raw.ev);
+	if (clipped > 0.03 && raw.ev <= 0) {
 		target *= 0.75;		/* hold the highlights */
 	}
+	target = fmin(target, 700);
+	raw.luma = green / AE_TARGET;
+	raw.clipped = clipped;
 	double r = green > 1 ? target / green : 2;
-	if (r > 0.92 && r < 1.08) {
+	/* the scene's EV100: what the exposure was, and how far from mid grey it came out */
+	double n = raw.cam == RAW_REAR ? (raw.f24 ? 2.4 : 1.5) : 1.7;
+	double t = raw_shutter_s(), iso = raw.again / 32.0 * ISO_AT_1X;
+	raw.scene_ev = log2(n * n / t) - log2(iso / 100) + log2(fmax(green, 1) / AE_TARGET);
+
+	int g_man = raw.man_iso ? (int)fmin(512, fmax(32, raw.man_iso / ISO_AT_1X * 32)) : 0;
+	int c_man = raw.man_shutter > 0 ? (int)fmin(raw.coarse_max, fmax(4, raw.man_shutter / raw_line_s())) : 0;
+	if (g_man && c_man) {
 		raw.ae_settled = true;
+		if (g_man != raw.again || c_man != raw.coarse) {
+			raw.again = g_man;
+			raw.coarse = c_man;
+			raw_set_exposure(c_man, g_man);
+		}
 		return;
 	}
-	if (r > 1 && raw.coarse >= raw.coarse_max && raw.again >= 512) {
-		raw.ae_settled = true;	/* as bright as it goes */
+	if (r > 0.92 && r < 1.08 && (!g_man || g_man == raw.again) && (!c_man || c_man == raw.coarse)) {
+		raw.ae_settled = true;
 		return;
 	}
 	raw.ae_settled = false;
 	r = fmin(1.5, fmax(0.6, r));
 	double want = (double)raw.coarse * raw.again / 32 * r;
-	int c = (int)fmin(raw.coarse_max, fmax(4, want));
-	int g = (int)fmin(512, fmax(32, want / c * 32));
+	int c, g;
+	if (g_man) {
+		g = g_man;
+		c = (int)fmin(raw.coarse_max, fmax(4, want * 32 / g));
+	} else if (c_man) {
+		c = c_man;
+		g = (int)fmin(512, fmax(32, want / c * 32));
+	} else {
+		c = (int)fmin(raw.coarse_max, fmax(4, want));
+		g = (int)fmin(512, fmax(32, want / c * 32));
+	}
+	if (r > 1 && c == raw.coarse && g == raw.again) {
+		raw.ae_settled = true;	/* as bright as it goes */
+		return;
+	}
 	if (c != raw.coarse || g != raw.again) {
 		raw.coarse = c;
 		raw.again = g;
@@ -309,27 +434,130 @@ static void raw_expose(double green, double clipped) {
 	}
 }
 
-/* A thin grid across the frame, centre counted twice. */
+/* The aperture, rear only. The exposure follows at once: 1.36 stops between them. */
+static bool raw_aperture(bool f24) {
+	if (raw.cam != RAW_REAR || raw.f24 == f24) {
+		return raw.cam == RAW_REAR;
+	}
+	if (!raw_say(f24 ? "ap24" : "ap15")) {
+		return false;
+	}
+	raw.f24 = f24;
+	raw.ap_moved = raw_now();
+	double k = f24 ? 2.56 : 1 / 2.56;
+	double want = (double)raw.coarse * raw.again / 32 * k;
+	int c = (int)fmin(raw.coarse_max, fmax(4, want));
+	int g = (int)fmin(512, fmax(32, want / c * 32));
+	raw.coarse = c;
+	raw.again = g;
+	raw_set_exposure(c, g);
+	return true;
+}
+
+/* Samsung's rule of thumb: bright scenes at F2.4 for depth and sharpness, dim ones at F1.5. */
+static void raw_aperture_auto(void) {
+	if (!raw.ap_auto || raw.cam != RAW_REAR || !raw.ae_settled || raw.man_iso || raw.man_shutter > 0) {
+		return;
+	}
+	if (raw_now() - raw.ap_moved < AP_MIN_S) {
+		return;
+	}
+	bool want = raw.f24 ? raw.scene_ev > AP_EV_DOWN : raw.scene_ev > AP_EV_UP;
+	if (want != raw.f24) {
+		if (!raw_aperture(want)) {
+			/* the driver said no (its move limit): ask again in a minute */
+			raw.ap_moved = raw_now() + 60 - AP_MIN_S;
+			fprintf(stderr, "ztcamera: aperture move refused (%s)\n", strerror(errno));
+		} else {
+			note("aperture F%s (EV %.1f)", want ? "2.4" : "1.5", raw.scene_ev);
+		}
+	}
+}
+
+/* ---- statistics: metering, white balance ---------------------------------- */
+
+/* How much a point of the frame counts: centre-weighted, or round a tapped spot. */
+static double raw_meter_weight(double u, double v) {
+	if (raw.spot_until > raw_now()) {
+		double du = u - raw.spot_u, dv = v - raw.spot_v;
+		return 0.4 + 8 * exp(-(du * du + dv * dv) / (2 * 0.09 * 0.09));
+	}
+	double du = u - 0.5, dv = v - 0.5;
+	return 1 + 2 * exp(-(du * du + dv * dv) / (2 * 0.22 * 0.22));
+}
+
+static void raw_wb_from(double kr, double kb, double m) {
+	kr = fmin(3.4, fmax(0.9, kr));
+	kb = fmin(3.4, fmax(0.9, kb));
+	raw.gain[0] += (kr - raw.gain[0]) * m;
+	raw.gain[2] += (kb - raw.gain[2]) * m;
+	raw.gain[1] = 1;
+	raw.wb_set = true;
+	if (raw.cam == RAW_REAR) {
+		/* warm light has the larger red-to-blue ratio low: A's matrix there, D65's in daylight */
+		double ratio = raw.gain[2] / raw.gain[0];	/* about 0.85 in daylight, 1.9 under tungsten */
+		double t = fmin(1, fmax(0, (ratio - 0.9) / 1.0));
+		for (int i = 0; i < 9; i++) {
+			raw.ccm[i] = (float)(rear_fm_d[i] + (rear_fm_a[i] - rear_fm_d[i]) * t);
+		}
+	}
+}
+
+/*
+ * A grid across the frame. Exposure from the weighted green mean. White balance
+ * from three estimates: grey world over the whole frame; the grey pixels (those
+ * near neutral under the current gains, which steadies on the real neutrals and
+ * ignores a frame full of one colour); and the brightest unclipped patches (white
+ * patch). Moved gently, and sane in the dark.
+ */
 static void raw_stats(const uint8_t *base) {
 	int w = raw.info.w, h = raw.info.h, st = raw.info.stride;
 	double sum[3] = { 0, 0, 0 }, n = 0, seen = 0, clip = 0;
-	for (int y = h / 64 & ~1; y < h - 1; y += h / 32 & ~1) {
+	double grey[3] = { 0, 0, 0 }, ng = 0, top[3] = { 0, 0, 0 }, nt = 0, gmax = 0;
+	int sx = (w / 48) & ~1, sy = (h / 40) & ~1;
+	/* first pass: brightest unclipped green, for the white patch threshold */
+	for (int y = sy / 2 & ~1; y < h - 1; y += sy) {
+		const uint16_t *a = (const uint16_t *)(base + (size_t)y * st);
+		for (int x = sx / 2 & ~1; x < w - 1; x += sx) {
+			if (a[x] < 980 && a[x] > gmax) {
+				gmax = a[x];
+			}
+		}
+	}
+	gmax -= RAW_BLACK;
+	for (int y = sy / 2 & ~1; y < h - 1; y += sy) {
 		const uint16_t *a = (const uint16_t *)(base + (size_t)y * st);
 		const uint16_t *b = (const uint16_t *)(base + (size_t)(y + 1) * st);
-		bool ymid = y > h / 4 && y < h * 3 / 4;
-		for (int x = w / 64 & ~1; x < w - 1; x += w / 32 & ~1) {
+		for (int x = sx / 2 & ~1; x < w - 1; x += sx) {
 			int g1 = a[x], one = a[x + 1], other = b[x], g2 = b[x + 1];
-			int r = raw.info.bayer ? one : other, bl = raw.info.bayer ? other : one;
-			double wt = ymid && x > w / 4 && x < w * 3 / 4 ? 2 : 1;
+			int ri = raw.info.bayer ? one : other, bi = raw.info.bayer ? other : one;
+			double wt = raw_meter_weight((double)x / w, (double)y / h);
 			seen += wt;
-			if (g1 >= 990 || g2 >= 990 || r >= 990 || bl >= 990) {
+			if (g1 >= 980 || g2 >= 980 || ri >= 980 || bi >= 980) {
 				clip += wt;
 				continue;
 			}
-			sum[0] += wt * (r - RAW_BLACK);
-			sum[1] += wt * ((g1 + g2) / 2.0 - RAW_BLACK);
-			sum[2] += wt * (bl - RAW_BLACK);
+			double r = ri - RAW_BLACK, g = (g1 + g2) / 2.0 - RAW_BLACK, bl = bi - RAW_BLACK;
+			sum[0] += wt * r;
+			sum[1] += wt * g;
+			sum[2] += wt * bl;
 			n += wt;
+			if (g < 8 || r < 2 || bl < 2) {
+				continue;	/* noise, not colour */
+			}
+			double lr = log(r * raw.gain[0] / g), lb = log(bl * raw.gain[2] / g);
+			if (lr * lr + lb * lb < 0.30 * 0.30) {
+				grey[0] += r;
+				grey[1] += g;
+				grey[2] += bl;
+				ng++;
+			}
+			if (g > gmax * 0.7) {
+				top[0] += r;
+				top[1] += g;
+				top[2] += bl;
+				nt++;
+			}
 		}
 	}
 	if (!n) {
@@ -339,32 +567,46 @@ static void raw_stats(const uint8_t *base) {
 	double r = sum[0] / n, g = sum[1] / n, bl = sum[2] / n;
 	if (raw.af != AF_SWEEP && raw.af != AF_REFINE) {	/* a steady picture to score */
 		raw_expose(g, clip / seen);
+		raw_aperture_auto();
 	}
-	/* grey world, moved gently, sane in the dark */
-	if (g > 6 && r > 2 && bl > 2) {
-		double kr = fmin(4, fmax(0.8, g / r)), kb = fmin(4, fmax(0.8, g / bl));
-		double m = raw.wb_set ? 0.2 : 1;
-		raw.gain[0] += (kr - raw.gain[0]) * m;
-		raw.gain[2] += (kb - raw.gain[2]) * m;
-		raw.gain[1] = 1;
-		raw.wb_set = true;
-		if (raw.cam == RAW_REAR) {
-			/* warm light has the larger red gain: A's matrix there, D65's in daylight */
-			double t = fmin(1, fmax(0, (raw.gain[0] - 1.5) / 0.8));
-			for (int i = 0; i < 9; i++) {
-				raw.ccm[i] = (float)(rear_fm_d[i] + (rear_fm_a[i] - rear_fm_d[i]) * t);
-			}
-		}
+	if (raw.man_wb != WB_AUTO) {
+		raw_wb_from(wb_preset_gain[raw.man_wb][0], wb_preset_gain[raw.man_wb][1], 1);
+		return;
 	}
+	if (g <= 6 || r <= 2 || bl <= 2) {
+		return;
+	}
+	double kr = g / r, kb = g / bl;	/* grey world */
+	int samples = (h / sy) * (w / sx);
+	if (ng > samples * 0.04 && raw.wb_set) {
+		/* grey pixels lead, the rest of the frame keeps them honest */
+		kr = 0.75 * grey[1] / grey[0] + 0.25 * kr;
+		kb = 0.75 * grey[1] / grey[2] + 0.25 * kb;
+	}
+	if (nt > 4 && top[0] > 0 && top[2] > 0) {
+		kr = 0.7 * kr + 0.3 * top[1] / top[0];
+		kb = 0.7 * kb + 0.3 * top[1] / top[2];
+	}
+	/* Samsung's look keeps a touch of the light's warmth rather than neutralising it */
+	kr *= 0.98;
+	kb *= 0.96;
+	raw_wb_from(kr, kb, raw.wb_set ? 0.15 : 1);
 }
 
-/* Green differences in the middle of the frame, over its brightness. */
+/* Green differences round the focus point (the tapped spot or the middle), over its brightness. */
 static double raw_sharpness(const uint8_t *base) {
 	int w = raw.info.w, h = raw.info.h, st = raw.info.stride;
+	double cu = 0.5, cv = 0.5;
+	if (raw.spot_until > raw_now()) {
+		cu = fmin(0.85, fmax(0.15, raw.spot_u));
+		cv = fmin(0.85, fmax(0.15, raw.spot_v));
+	}
+	int x0 = (int)((cu - 0.125) * w) & ~1, x1 = (int)((cu + 0.125) * w);
+	int y0 = (int)((cv - 0.125) * h) & ~1, y1 = (int)((cv + 0.125) * h);
 	double d = 0, s = 1;
-	for (int y = (h * 3 / 8) & ~1; y < h * 5 / 8; y += 8) {
+	for (int y = y0; y < y1; y += 8) {
 		const uint16_t *a = (const uint16_t *)(base + (size_t)y * st);
-		for (int x = (w * 3 / 8) & ~1; x < w * 5 / 8; x += 8) {
+		for (int x = x0; x < x1 && x + 10 < w; x += 8) {
 			/* pairs of green pixels against the next pair: less noise than one against one */
 			int v = (int)a[x] + a[x + 2] - 2 * RAW_BLACK, u = (int)a[x + 4] + a[x + 6] - 2 * RAW_BLACK;
 			int m = (int)a[x + 8] + a[x + 10] - 2 * RAW_BLACK;
@@ -433,6 +675,16 @@ static void raw_focus(const uint8_t *base) {
 	raw.af_wait = AF_SETTLE;
 }
 
+/* Tap to focus and expose: u, v in the frame, 0-1. Held for 8 seconds of metering. */
+static void raw_focus_at(double u, double v) {
+	raw.spot_u = fmin(1, fmax(0, u));
+	raw.spot_v = fmin(1, fmax(0, v));
+	raw.spot_until = raw_now() + 8;
+	if (raw.man_focus < 0) {
+		raw_focus_start();
+	}
+}
+
 /* Newest frame's statistics; a stopped camera returns its reason. */
 static const char *raw_poll(void) {
 	if (raw.fd < 0 || read(raw.fd, &raw.info, sizeof(raw.info)) != sizeof(raw.info)) {
@@ -453,6 +705,129 @@ static const char *raw_poll(void) {
 	raw_focus(base);
 	return NULL;
 }
+
+/* ---- QR codes, through zbar if the phone has it ---------------------------- */
+
+static struct {
+	void *lib, *scanner;
+	void *(*scanner_create)(void);
+	int (*set_config)(void *, int, int, int);
+	void *(*image_create)(void);
+	void (*image_set_format)(void *, unsigned long);
+	void (*image_set_size)(void *, unsigned, unsigned);
+	void (*image_set_data)(void *, const void *, unsigned long, void (*)(void *));
+	int (*scan)(void *, void *);
+	const void *(*first)(const void *);
+	const char *(*data)(const void *);
+	void (*image_destroy)(void *);
+	bool tried, busy, done;
+	uint8_t *grey;
+	int gw, gh;
+	char found[256];
+	double last;
+} qr;
+
+static bool qr_load(void) {
+	if (qr.tried) {
+		return qr.lib != NULL;
+	}
+	qr.tried = true;
+	qr.lib = dlopen("libzbar.so.0", RTLD_NOW | RTLD_LOCAL);
+	if (!qr.lib) {
+		return false;
+	}
+	qr.scanner_create = (void *(*)(void))dlsym(qr.lib, "zbar_image_scanner_create");
+	qr.set_config = (int (*)(void *, int, int, int))dlsym(qr.lib, "zbar_image_scanner_set_config");
+	qr.image_create = (void *(*)(void))dlsym(qr.lib, "zbar_image_create");
+	qr.image_set_format = (void (*)(void *, unsigned long))dlsym(qr.lib, "zbar_image_set_format");
+	qr.image_set_size = (void (*)(void *, unsigned, unsigned))dlsym(qr.lib, "zbar_image_set_size");
+	qr.image_set_data = (void (*)(void *, const void *, unsigned long, void (*)(void *)))
+		dlsym(qr.lib, "zbar_image_set_data");
+	qr.scan = (int (*)(void *, void *))dlsym(qr.lib, "zbar_scan_image");
+	qr.first = (const void *(*)(const void *))dlsym(qr.lib, "zbar_image_first_symbol");
+	qr.data = (const char *(*)(const void *))dlsym(qr.lib, "zbar_symbol_get_data");
+	qr.image_destroy = (void (*)(void *))dlsym(qr.lib, "zbar_image_destroy");
+	if (!qr.scanner_create || !qr.set_config || !qr.image_create || !qr.image_set_format ||
+			!qr.image_set_size || !qr.image_set_data || !qr.scan || !qr.first || !qr.data ||
+			!qr.image_destroy) {
+		dlclose(qr.lib);
+		qr.lib = NULL;
+		return false;
+	}
+	qr.scanner = qr.scanner_create();
+	/* ZBAR_NONE, ZBAR_CFG_ENABLE: off for all, then ZBAR_QRCODE (64) on */
+	qr.set_config(qr.scanner, 0, 0, 0);
+	qr.set_config(qr.scanner, 64, 0, 1);
+	return qr.scanner != NULL;
+}
+
+static void *qr_thread(void *arg) {
+	(void)arg;
+	void *im = qr.image_create();
+	qr.image_set_format(im, FOURCC('Y', '8', '0', '0'));
+	qr.image_set_size(im, qr.gw, qr.gh);
+	qr.image_set_data(im, qr.grey, (unsigned long)qr.gw * qr.gh, NULL);
+	qr.found[0] = 0;
+	if (qr.scan(qr.scanner, im) > 0) {
+		const void *s = qr.first(im);
+		if (s && qr.data(s)) {
+			snprintf(qr.found, sizeof(qr.found), "%s", qr.data(s));
+		}
+	}
+	qr.image_destroy(im);
+	__atomic_store_n(&qr.done, true, __ATOMIC_RELEASE);
+	return NULL;
+}
+
+/* Green at half size, from the newest frame, to a thread; its answer next time. NULL until one is read. */
+static const char *qr_step(void) {
+	static char said[256];
+	if (qr.busy) {
+		if (!__atomic_load_n(&qr.done, __ATOMIC_ACQUIRE)) {
+			return NULL;
+		}
+		qr.busy = false;
+		if (qr.found[0] && strcmp(qr.found, said)) {
+			snprintf(said, sizeof(said), "%s", qr.found);
+			return said;
+		}
+	}
+	if (raw.fd < 0 || !raw.seq || raw_now() - qr.last < 0.4 || !qr_load()) {
+		return NULL;
+	}
+	qr.last = raw_now();
+	int w = raw.info.w / 2, h = raw.info.h / 2;
+	if (w != qr.gw || h != qr.gh) {
+		free(qr.grey);
+		qr.grey = malloc((size_t)w * h);
+		qr.gw = w;
+		qr.gh = h;
+	}
+	if (!qr.grey) {
+		return NULL;
+	}
+	const uint8_t *base = (const uint8_t *)raw.map + raw.info.index * (size_t)raw.info.area;
+	for (int y = 0; y < h; y++) {
+		const uint16_t *a = (const uint16_t *)(base + (size_t)(2 * y) * raw.info.stride);
+		uint8_t *o = qr.grey + (size_t)y * w;
+		/* green sits at x 0 of even rows in both orders (GB/RG, GR/BG) */
+		for (int x = 0; x < w; x++) {
+			int v = (a[2 * x] - RAW_BLACK) * 255 / 400;
+			o[x] = v < 0 ? 0 : v > 255 ? 255 : v;
+		}
+	}
+	qr.done = false;
+	qr.busy = true;
+	pthread_t t;
+	if (pthread_create(&t, NULL, qr_thread, NULL) != 0) {
+		qr.busy = false;
+	} else {
+		pthread_detach(t);
+	}
+	return NULL;
+}
+
+/* ---- the GPU pipeline ------------------------------------------------------- */
 
 static GLuint raw_shader(GLenum type, const char *text) {
 	GLuint s = glCreateShader(type);
@@ -487,11 +862,18 @@ static bool raw_gl(void) {
 	static const char vs[] =
 		"attribute vec2 position; attribute vec2 texcoord; varying vec2 uv;"
 		"void main(){ uv=texcoord; gl_Position=vec4(position,0.0,1.0); }";
-	/* Malvar, He and Cutler's 5x5 filters. first: where in the 2x2 cell red is. */
+	/*
+	 * Malvar, He and Cutler's 5x5 filters. first: where in the 2x2 cell red is.
+	 * mode 0: the developed frame. 1: averaged with acc (per-pixel count in alpha,
+	 * over 8), a pixel that moved left out. 2: exposure fusion with acc (weight sum
+	 * in alpha, over 4), each pixel weighted by how well exposed it is.
+	 * start: 1 for the first frame of a merge, which ignores acc.
+	 */
 	static const char fs[] =
-		"precision highp float; varying vec2 uv; uniform sampler2D bayer;"
+		"precision highp float; varying vec2 uv; uniform sampler2D bayer; uniform sampler2D acc;"
 		"uniform vec2 size; uniform vec4 unpack; uniform vec2 first; uniform vec3 gain;"
-		"uniform mat3 ccm; uniform float black; uniform float shade;"
+		"uniform mat3 ccm; uniform float black; uniform vec3 shade; uniform float sat;"
+		"uniform float mode; uniform float start;"
 		"float px(float x,float y){ return dot(texture2D(bayer,uv+vec2(x,y)/size),unpack); }"
 		"void main(){"
 		" float c=px(0.,0.);"
@@ -509,24 +891,55 @@ static bool raw_gl(void) {
 		" else if(p.y<.5) v=vec3(rowh,c,rowv);"		/* green on red's row */
 		" else v=vec3(rowv,c,rowh);"			/* green on blue's row */
 		" v=(v-black)/(1.-black);"
-		" vec2 q=uv-.5; float r2=dot(q,q)*shade;"
-		" v*=1.+r2*(1.+r2);"
+		/* lens shading: radial, a little more for red, whose falloff is widest */
+		" vec2 q=uv-.5; float r2=dot(q,q);"
+		" v*=1.+r2*shade*(1.+r2*shade.g);"
 		" v=clamp(v*gain,0.,1.);"
 		" v=clamp(ccm*v,0.,1.);"
+		" float l=dot(v,vec3(.2126,.7152,.0722));"
+		" v=clamp(mix(vec3(l),v,sat),0.,1.);"
 		" v=mix(v*12.92,1.055*pow(v,vec3(.41667))-.055,step(.0031308,v));"
-		" v=mix(v,v*v*(3.-2.*v),.35);"		/* the light S curve a phone's tone map gives */
-		" gl_FragColor=vec4(v,1.); }";
-	/* the finished frame on the screen: a light unsharp mask */
-	static const char fd[] =
+		/* tone: lifted shadows, an S through the middle, highlights rolled off */
+		" v=v+.10*v*(1.-v)*(1.-v);"
+		" v=mix(v,v*v*(3.-2.*v),.30);"
+		" if(mode<.5){ gl_FragColor=vec4(v,1.); return; }"
+		" vec4 a=texture2D(acc,uv);"
+		" if(mode<1.5){"
+		"  float n=start>.5?0.:a.a*8.;"
+		"  float keep=n>0.&&abs(dot(v-a.rgb,vec3(.3,.5,.2)))>.10?0.:1.;"
+		"  gl_FragColor=vec4((a.rgb*n+v*keep)/max(n+keep,1.),(n+keep)/8.);"
+		" } else {"
+		"  float y=dot(v,vec3(.299,.587,.114));"
+		"  float wt=exp(-(y-.5)*(y-.5)*12.5)*(.2+length(v-vec3(y)))+.002;"
+		"  float W=start>.5?0.:a.a*4.;"
+		"  gl_FragColor=vec4((a.rgb*W+v*wt)/(W+wt),min(1.,(W+wt)/4.));"
+		" } }";
+	/*
+	 * Finish: a 3x3 bilateral on luma and chroma (chroma smoothed harder), then an
+	 * unsharp mask on luma with a coring threshold so noise is not sharpened.
+	 * nr: the bilateral's luma sigma, larger with gain; sharp: the mask's amount.
+	 */
+	static const char ff[] =
 		"precision highp float; varying vec2 uv; uniform sampler2D frame;"
-		"uniform vec2 step1;"
+		"uniform vec2 step1; uniform float nr; uniform float sharp;"
 		"void main(){"
 		"  vec3 c=texture2D(frame,uv).rgb;"
-		"  vec3 b=texture2D(frame,uv+vec2(step1.x,0.)).rgb+texture2D(frame,uv-vec2(step1.x,0.)).rgb"
-		"    +texture2D(frame,uv+vec2(0.,step1.y)).rgb+texture2D(frame,uv-vec2(0.,step1.y)).rgb;"
-		"  gl_FragColor=vec4(clamp(c+(c-b*.25)*.5,0.,1.),1.); }";
-	GLuint p = raw_program(vs, fs), d = raw_program(vs, fd);
-	if (!p || !d) {
+		"  float yc=dot(c,vec3(.299,.587,.114));"
+		"  vec3 cs=vec3(0.); float ys=0.,wsum=0.,yb=0.;"
+		"  for(int j=-1;j<=1;j++) for(int i=-1;i<=1;i++){"
+		"    vec3 s=texture2D(frame,uv+vec2(float(i),float(j))*step1).rgb;"
+		"    float y=dot(s,vec3(.299,.587,.114));"
+		"    float w=exp(-(y-yc)*(y-yc)/(2.*nr*nr));"
+		"    cs+=(s-y)*w; ys+=y*w; wsum+=w; yb+=y; }"
+		"  vec3 chroma=cs/wsum; float yn=mix(yc,ys/wsum,.6);"
+		"  float dt=yc-yb/9.; dt=sign(dt)*max(abs(dt)-nr*.35,0.);"
+		"  float y=yn+sharp*dt;"
+		"  gl_FragColor=vec4(clamp(vec3(y)+chroma,0.,1.),1.); }";
+	static const char fd[] =
+		"precision mediump float; varying vec2 uv; uniform sampler2D frame;"
+		"void main(){ gl_FragColor=vec4(texture2D(frame,uv).rgb,1.); }";
+	GLuint p = raw_program(vs, fs), f = raw_program(vs, ff), d = raw_program(vs, fd);
+	if (!p || !f || !d) {
 		raw.prog = -1;
 		return false;
 	}
@@ -538,8 +951,18 @@ static bool raw_gl(void) {
 	raw.u_ccm = glGetUniformLocation(p, "ccm");
 	raw.u_black = glGetUniformLocation(p, "black");
 	raw.u_shade = glGetUniformLocation(p, "shade");
+	raw.u_sat = glGetUniformLocation(p, "sat");
+	raw.u_acc = glGetUniformLocation(p, "acc");
+	raw.u_mode = glGetUniformLocation(p, "mode");
+	raw.u_start = glGetUniformLocation(p, "start");
+	glUseProgram(p);
+	glUniform1i(glGetUniformLocation(p, "bayer"), 0);
+	glUniform1i(raw.u_acc, 1);
+	raw.fin = f;
+	raw.f_step = glGetUniformLocation(f, "step1");
+	raw.f_nr = glGetUniformLocation(f, "nr");
+	raw.f_sharp = glGetUniformLocation(f, "sharp");
 	raw.disp = d;
-	raw.d_step = glGetUniformLocation(d, "step1");
 	return true;
 }
 
@@ -628,45 +1051,69 @@ static void raw_upload(const uint8_t *base) {
 	raw.zero_copy = false;
 }
 
-/* The newest frame through the whole pipeline into the output texture. */
-static void raw_develop(void) {
+static void raw_target(unsigned *tex, unsigned *fbo, int w, int h) {
+	if (!*tex) {
+		GLuint t;
+		glGenTextures(1, &t);
+		*tex = t;
+	}
+	if (!*fbo) {
+		GLuint f;
+		glGenFramebuffers(1, &f);
+		*fbo = f;
+	}
+	glBindTexture(GL_TEXTURE_2D, *tex);
+	raw_tex_params(GL_LINEAR);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
+}
+
+static void raw_quad(void) {
+	static const float q[16] = { -1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1 };
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), q);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), q + 2);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+/*
+ * The newest frame through develop, into the other of the two develop targets
+ * (merging with the one before when mode is not 0), then finish. Restores the
+ * caller's frame buffer, viewport and blend state.
+ */
+static void raw_develop_ex(int mode, bool start, bool finish) {
 	unsigned i = raw.info.index;
 	const uint8_t *base = (const uint8_t *)raw.map + i * (size_t)raw.info.area;
+	int w = raw.info.w, h = raw.info.h;
+	GLint old_fbo = 0, vp[4], held = 0;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &old_fbo);
+	glGetIntegerv(GL_VIEWPORT, vp);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &held);
+	GLboolean blend = glIsEnabled(GL_BLEND), scissor = glIsEnabled(GL_SCISSOR_TEST);
+	glDisable(GL_BLEND);
+	glDisable(GL_SCISSOR_TEST);
+	if (raw.out_w != w || raw.out_h != h) {
+		raw_target(&raw.dev_tex[0], &raw.dev_fbo[0], w, h);
+		raw_target(&raw.dev_tex[1], &raw.dev_fbo[1], w, h);
+		raw_target(&raw.fin_tex, &raw.fin_fbo, w, h);
+		raw.out_w = w;
+		raw.out_h = h;
+	}
+	if (mode < 0) {
+		goto finish;	/* only the finishing pass, over what is merged so far */
+	}
+	int dst = mode ? 1 - raw.cur : raw.cur;
+	/* the accumulation only while merging: never the texture being drawn into */
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, mode ? raw.dev_tex[raw.cur] : 0);
 	glActiveTexture(GL_TEXTURE0);
 	if (i < RAW_BUFS && raw_import(i)) {
 		glBindTexture(GL_TEXTURE_2D, raw.tex[i]);
 	} else {
 		raw_upload(base);
 	}
-	int w = raw.info.w, h = raw.info.h;
-	GLint old_fbo = 0, vp[4];
-	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &old_fbo);
-	glGetIntegerv(GL_VIEWPORT, vp);
-	GLboolean blend = glIsEnabled(GL_BLEND), scissor = glIsEnabled(GL_SCISSOR_TEST);
-	glDisable(GL_BLEND);
-	glDisable(GL_SCISSOR_TEST);
-	if (!raw.fbo) {
-		GLuint f;
-		glGenFramebuffers(1, &f);
-		raw.fbo = f;
-	}
-	if (raw.out_w != w || raw.out_h != h) {
-		GLint held;
-		glGetIntegerv(GL_TEXTURE_BINDING_2D, &held);
-		if (!raw.out_tex) {
-			GLuint t;
-			glGenTextures(1, &t);
-			raw.out_tex = t;
-		}
-		glBindTexture(GL_TEXTURE_2D, raw.out_tex);
-		raw_tex_params(GL_LINEAR);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-		raw.out_w = w;
-		raw.out_h = h;
-		glBindTexture(GL_TEXTURE_2D, held);
-	}
-	glBindFramebuffer(GL_FRAMEBUFFER, raw.fbo);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, raw.out_tex, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, raw.dev_fbo[dst]);
 	glViewport(0, 0, w, h);
 	glUseProgram(raw.prog);
 	glUniform2f(raw.u_size, (float)w, (float)h);
@@ -684,21 +1131,60 @@ static void raw_develop(void) {
 		raw.ccm[2], raw.ccm[5], raw.ccm[8] };	/* GL is column first */
 	glUniformMatrix3fv(raw.u_ccm, 1, GL_FALSE, m);
 	glUniform1f(raw.u_black, RAW_BLACK / (float)RAW_WHITE);
-	/* no calibration read from the module's memory: a mild fall-off for this lens size */
-	glUniform1f(raw.u_shade, raw.cam == RAW_FRONT ? 1.2f : 1.4f);
-	static const float q[16] = { -1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1 };
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), q);
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), q + 2);
-	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	/* no calibration read from the module's memory: a fall-off for this lens size, red widest.
+	 * x: red, y: green (also the quadratic term), z: blue */
+	if (raw.cam == RAW_FRONT) {
+		glUniform3f(raw.u_shade, 1.35f, 1.2f, 1.2f);
+	} else {
+		glUniform3f(raw.u_shade, 1.6f, 1.4f, 1.45f);
+	}
+	/* Samsung's colour is a little richer than the matrices alone; less in the dark, where it is noise */
+	glUniform1f(raw.u_sat, raw.again > 256 ? 1.05f : 1.18f);
+	glUniform1f(raw.u_mode, (float)mode);
+	glUniform1f(raw.u_start, start ? 1.f : 0.f);
+	raw_quad();
+	raw.cur = dst;
+finish:
+	if (finish) {
+		glBindFramebuffer(GL_FRAMEBUFFER, raw.fin_fbo);
+		glUseProgram(raw.fin);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, raw.dev_tex[raw.cur]);
+		glUniform2f(raw.f_step, 1.0f / w, 1.0f / h);
+		/* noise grows with gain: smooth more, sharpen less; merged stills need less */
+		double gx = raw.again / 32.0;
+		float nr = (float)fmin(0.12, 0.018 + 0.010 * gx);
+		if (mode < 0) {
+			nr *= 0.6f;	/* a merged still: the average took most of it already */
+		}
+		glUniform1f(raw.f_nr, nr);
+		glUniform1f(raw.f_sharp, (float)fmax(0.35, 1.1 - 0.06 * gx));
+		raw_quad();
+	}
 	glBindFramebuffer(GL_FRAMEBUFFER, old_fbo);
 	glViewport(vp[0], vp[1], vp[2], vp[3]);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, held);
 	if (blend) {
 		glEnable(GL_BLEND);
 	}
 	if (scissor) {
 		glEnable(GL_SCISSOR_TEST);
 	}
+}
+
+static void raw_develop(void) {
+	raw_develop_ex(0, true, true);
+}
+
+/* Screen point (0-1 across and down) to the frame's u, v: raw_draw's mapping backwards. */
+static void raw_screen_to_frame(double sx, double sy, double *u, double *v) {
+	double span = fmin(1, ((double)zmc.width / zmc.height) * ((double)raw.info.w / raw.info.h));
+	double v0 = 0.5 - span / 2, v1 = 0.5 + span / 2;
+	bool front = raw.cam == RAW_FRONT;
+	double top = front ? 1 : 0, bottom = front ? 0 : 1;
+	*u = top + sy * (bottom - top);
+	*v = v1 - sx * (v1 - v0);
 }
 
 /*
@@ -721,7 +1207,7 @@ static void raw_draw(void) {
 	}
 	glUseProgram(raw.disp);
 	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, raw.out_tex);
+	glBindTexture(GL_TEXTURE_2D, raw.fin_tex);
 	double span = fmin(1, ((double)zmc.width / zmc.height) * ((double)raw.info.w / raw.info.h));
 	float v0 = 0.5f - span / 2, v1 = 0.5f + span / 2;
 	bool front = raw.cam == RAW_FRONT;
@@ -733,7 +1219,6 @@ static void raw_draw(void) {
 		-1, -1, bottom, v1,
 		 1, -1, bottom, v0,
 	};
-	glUniform2f(raw.d_step, 1.0f / raw.info.w, 1.0f / raw.info.h);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), q);
 	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), q + 2);
@@ -741,64 +1226,108 @@ static void raw_draw(void) {
 	glUseProgram(old);
 }
 
+/* ---- stills ------------------------------------------------------------------ */
+
+/* Waits for a frame at least `after` past seq `from`; false if the camera stopped or 3 s passed. */
+static bool raw_wait_frame(uint32_t from, uint32_t after) {
+	double until = raw_now() + 3;
+	while (raw_now() < until) {
+		if (read(raw.fd, &raw.info, sizeof(raw.info)) != sizeof(raw.info) || raw.info.stopped) {
+			return false;
+		}
+		if (raw.info.seq >= from + after) {
+			return true;
+		}
+		struct timespec nap = { 0, 8000000 };
+		nanosleep(&nap, NULL);
+	}
+	return false;
+}
+
 /*
  * A photo: the sensor at full size for a moment, developed by the same shaders,
- * upright, the front mirrored as in the viewfinder. Falls back to the preview's size if the full mode gives no frame. Returns a new
- * surface or NULL.
+ * upright, the front mirrored as in the viewfinder. Falls back to the preview's
+ * size if the full mode gives no frame. Returns a new surface or NULL.
+ *
+ * STILL_NR averages four frames on the GPU (a pixel that moved between them is
+ * left out), which takes most of the noise out of a dim room. STILL_HDR brackets
+ * three exposures (as metered, 2 stops under, 1.5 over) and fuses them, each
+ * pixel weighted by how well exposed and how colourful it is in each.
  */
-static cairo_surface_t *raw_capture(void) {
+static cairo_surface_t *raw_capture(enum raw_still kind) {
 	if (!raw_gl() || raw.fd < 0) {
 		return NULL;
 	}
 	bool front = raw.cam == RAW_FRONT;
-	int c = raw.coarse, g = raw.again, focus = raw.af_best;
+	int c = raw.coarse, g = raw.again, focus = raw.man_focus >= 0 ? raw.man_focus : raw.af_best;
 	bool full = raw_say(front ? "frontfull" : "rearfull");
 	raw_images_free();
-	if (full) {
-		/* the same time in lines: preview's line length over the full mode's */
-		double k = front ? (double)0x2970 / 0x13D0 : (double)0x0528 / 0x0A50;
-		int cf = (int)(c * k);
-		(void)read(raw.fd, &raw.info, sizeof(raw.info));
-		raw_set_exposure(cf < 2 ? 2 : cf, g);
-		raw_set_focus(focus);
-		double until = raw_now() + 4;
-		uint32_t first = raw.info.seq;
-		full = false;
-		while (raw_now() < until) {
-			struct timespec nap = { 0, 15000000 };
-			nanosleep(&nap, NULL);
-			if (read(raw.fd, &raw.info, sizeof(raw.info)) != sizeof(raw.info) || raw.info.stopped) {
-				break;
-			}
-			if (raw.info.seq >= first + 5) {
-				full = true;
-				break;
-			}
-		}
+	/* the same time in lines: preview's line length over the full mode's */
+	double k = full ? (front ? (double)0x2970 / 0x13D0 : (double)0x0528 / 0x0A50) : 1;
+	int cf = (int)(c * k);
+	if (cf < 2) {
+		cf = 2;
 	}
-	if (!full) {
-		fprintf(stderr, "ztcamera: no full-size frame (stopped %u, errors %u)\n", raw.info.stopped, raw.info.errors);
+	if (full) {
+		(void)read(raw.fd, &raw.info, sizeof(raw.info));
+		raw_set_exposure(cf, g);
+		raw_set_focus(focus);
+		full = raw_wait_frame(raw.info.seq, 5);
+		if (!full) {
+			fprintf(stderr, "ztcamera: no full-size frame (stopped %u, errors %u)\n",
+				raw.info.stopped, raw.info.errors);
+		}
 	}
 	if (!full) {	/* back to preview, then its next frame */
 		raw_say(front ? "front" : "rear");
 		raw_images_free();
-		struct timespec nap = { 0, 300000000 };
-		nanosleep(&nap, NULL);
-		if (read(raw.fd, &raw.info, sizeof(raw.info)) != sizeof(raw.info) || !raw.info.seq) {
-			return NULL;
-		}
+		cf = c;
+		(void)read(raw.fd, &raw.info, sizeof(raw.info));
 		raw_set_exposure(c, g);
 		raw_set_focus(focus);
+		if (!raw_wait_frame(raw.info.seq, 3)) {
+			return NULL;
+		}
 	}
-	raw_develop();
-	raw.drawn = 0;
+	if (kind == STILL_ONE) {
+		raw_develop_ex(0, true, true);
+	} else if (kind == STILL_NR) {
+		for (int f = 0; f < 4; f++) {
+			if (f && !raw_wait_frame(raw.info.seq, 1)) {
+				break;
+			}
+			raw_develop_ex(1, f == 0, false);
+		}
+		raw_develop_ex(-1, false, true);
+	} else {
+		/* metered, under, over: shorter lines for under, more gain (then lines) for over */
+		static const double stops[3] = { 0, -2, 1.5 };
+		for (int f = 0; f < 3; f++) {
+			double mul = pow(2, stops[f]);
+			int ce = cf, ge = g;
+			if (mul < 1) {
+				ce = (int)fmax(2, cf * mul);
+			} else if (mul > 1) {
+				ge = (int)fmin(512, g * mul);
+				ce = (int)(cf * mul * g / ge);
+			}
+			if (f) {
+				raw_set_exposure(ce, ge);
+				if (!raw_wait_frame(raw.info.seq, 3)) {
+					break;
+				}
+			}
+			raw_develop_ex(2, f == 0, false);
+		}
+		raw_develop_ex(-1, false, true);
+	}
 	int w = raw.info.w, h = raw.info.h;
 	uint8_t *px = malloc((size_t)w * h * 4);
 	cairo_surface_t *sf = px ? cairo_image_surface_create(CAIRO_FORMAT_ARGB32, h, w) : NULL;
 	if (px && cairo_surface_status(sf) == CAIRO_STATUS_SUCCESS) {
 		GLint old_fbo = 0;
 		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &old_fbo);
-		glBindFramebuffer(GL_FRAMEBUFFER, raw.fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, raw.fin_fbo);
 		glPixelStorei(GL_PACK_ALIGNMENT, 4);
 		glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
 		glBindFramebuffer(GL_FRAMEBUFFER, old_fbo);
@@ -820,16 +1349,18 @@ static cairo_surface_t *raw_capture(void) {
 		sf = NULL;
 	}
 	free(px);
-	if (full) {	/* back to the viewfinder */
+	/* back to the viewfinder */
+	if (full) {
 		raw_say(front ? "front" : "rear");
 		raw_images_free();
-		raw.seq = 0;
-		if (read(raw.fd, &raw.info, sizeof(raw.info)) == sizeof(raw.info)) {
-			raw_set_exposure(c, g);
-			raw_set_focus(focus);
-			raw.coarse = c;
-			raw.again = g;
-		}
+	}
+	raw.seq = 0;
+	raw.drawn = 0;
+	if (read(raw.fd, &raw.info, sizeof(raw.info)) == sizeof(raw.info)) {
+		raw_set_exposure(c, g);
+		raw_set_focus(focus);
+		raw.coarse = c;
+		raw.again = g;
 	}
 	return sf;
 }

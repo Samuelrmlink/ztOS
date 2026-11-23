@@ -116,9 +116,15 @@ static struct {
 	char rec_path[384];
 	uint32_t frames, fps_clock;
 	int fps;
-	char note[130];		/* the last thing worth a line at the bottom */
+	char note[300];		/* the last thing worth a line at the bottom */
 	uint32_t note_until;
-} ui = { .mode = MODE_PHOTO, .dial = -1, .timer_left = -1, .ctl = { 0, 0, 0, 0, 6 } };
+	/* Samsung's settings, in the menu */
+	int flash;		/* 0 off, 1 auto, 2 on, 3 torch */
+	int hdr;		/* 0 off, 1 auto (a scene with both ends clipped), 2 on */
+	bool qr;		/* scan for QR codes in the viewfinder */
+	double tap_x, tap_y;	/* where a tap asked for focus, points; tap_until 0 for the middle */
+	uint32_t tap_until;
+} ui = { .mode = MODE_PHOTO, .dial = -1, .timer_left = -1, .ctl = { 0, 0, 0, 0, 6 }, .hdr = 1 };
 
 static cairo_surface_t *chrome, *dial_sf, *scratch, *prev, *white;
 static unsigned chrome_rev, dial_rev;
@@ -146,7 +152,7 @@ static double dial_cy(void) { return zmc.height / 2; }
 static double thumb_y(void) { return zmc.height - 92; }
 #define THUMB_W	88
 #define THUMB_H	66
-#define MENU_ITEMS	6
+#define MENU_ITEMS	10
 
 static void chrome_redraw_mark(void) { chrome_stale = true; }
 
@@ -699,8 +705,32 @@ static void capture_photo(void) {
 			note("no frame yet");
 			return;
 		}
-		note("taking a photo");
-		shot = raw_capture();
+		/* Samsung's choices, made the same way: flash when dark (auto) or asked; HDR when
+		 * asked, or (auto) when bright with highlights clipping; several frames averaged
+		 * in dim light */
+		bool flash = raw.cam == RAW_REAR && (ui.flash == 2 || (ui.flash == 1 && raw.scene_ev < 5));
+		enum raw_still kind = STILL_ONE;
+		if (ui.hdr == 2 || (ui.hdr == 1 && !flash && raw.scene_ev > 8 && raw.clipped > 0.02)) {
+			kind = STILL_HDR;
+		} else if (!flash && raw.again >= 128) {
+			kind = STILL_NR;
+		}
+		note(kind == STILL_HDR ? "HDR photo" : kind == STILL_NR ? "night photo: hold still" :
+			flash ? "flash" : "taking a photo");
+		if (flash) {
+			/* the torch at its top current as a long flash; exposure settles on it first */
+			raw_torch(15);
+			double until = raw_now() + 0.9;
+			while (raw_now() < until) {
+				raw_poll();
+				struct timespec nap = { 0, 20000000 };
+				nanosleep(&nap, NULL);
+			}
+		}
+		shot = raw_capture(kind);
+		if (flash) {
+			raw_torch(ui.flash == 3 ? 9 : 0);
+		}
 		if (!shot) {
 			note("could not take a photo");
 			return;
@@ -1067,8 +1097,10 @@ static void chrome_draw(cairo_t *cr) {
 
 	/* focus: the brackets come in while the shutter is held, and take the
 	 * accent when they lock */
-	if (ui.focusing || ui.focused) {
-		double cx = zmc.width / 2, cy = zmc.height / 2, s = ui.focused ? 46 : 58;
+	bool tapped = ui.tap_until > zmc_now_ms();
+	if (ui.focusing || ui.focused || tapped) {
+		double cx = tapped ? ui.tap_x : zmc.width / 2, cy = tapped ? ui.tap_y : zmc.height / 2;
+		double s = ui.focused ? 46 : tapped ? 34 : 58;
 		zmc_set_rgb(cr, ui.focused ? zmc.accent : 0xffffff);
 		cairo_set_line_width(cr, 2.4);
 		for (int i = 0; i < 4; i++) {
@@ -1218,17 +1250,29 @@ static void chrome_draw(cairo_t *cr) {
 	char line[160];
 	const char *what = src.kind == SRC_SCENE ? "test scene" :
 		src.kind == SRC_REPLAY ? "file replay" : "camera";
-	snprintf(line, sizeof(line), "%s%s · %s · %d fps", ui.front ? "front " : "",
-		what, src.name, ui.fps);
+	if (src.kind == SRC_RAW && raw.seq) {
+		/* what Samsung's Pro mode shows: aperture, ISO, shutter, EV */
+		double t = raw_shutter_s();
+		snprintf(line, sizeof(line), "%s · F%s%s · ISO %d · 1/%.0f s · EV %+.1f · %d fps",
+			raw.cam == RAW_FRONT ? "front" : "rear", raw.cam == RAW_FRONT ? "1.7" : raw.f24 ? "2.4" : "1.5",
+			raw.cam == RAW_REAR && raw.ap_auto ? " auto" : "", raw_iso(), t > 0 ? 1 / t : 0,
+			raw.ev, ui.fps);
+	} else {
+		snprintf(line, sizeof(line), "%s%s · %s · %d fps", ui.front ? "front " : "",
+			what, src.name, ui.fps);
+	}
 	zmc_text(cr, line, FONT_REGULAR, 9.5, 16, thumb_y() - 18, zmc.width - 32);
 	if (ui.note_until > zmc_now_ms()) {
 		cairo_set_source_rgba(cr, 0, 0, 0, 0.72);
 		int w = zmc_text_width(ui.note, FONT_REGULAR, 10.5) + 24;
+		if (w > zmc.width - 32) {
+			w = zmc.width - 32;	/* a long QR code's text: cut at the edge */
+		}
 		double y = zmc.height - 118;
 		cairo_rectangle(cr, 16, y, w, 26);
 		cairo_fill(cr);
 		cairo_set_source_rgb(cr, 1, 1, 1);
-		zmc_text(cr, ui.note, FONT_REGULAR, 10.5, 28, y + 6, 0);
+		zmc_text(cr, ui.note, FONT_REGULAR, 10.5, 28, y + 6, w - 24);
 	}
 
 	/* the "..." menu, as Windows Phone opens one */
@@ -1249,6 +1293,12 @@ static void chrome_draw(cairo_t *cr) {
 		snprintf(buf[3], 40, "source: %s", src_label);
 		snprintf(buf[4], 40, "camera roll (%d)", roll_count);
 		snprintf(buf[5], 40, "about");
+		static const char *const flash_l[] = { "off", "auto", "on", "torch" };
+		static const char *const hdr_l[] = { "off", "auto", "on" };
+		snprintf(buf[6], 40, "flash: %s", flash_l[ui.flash]);
+		snprintf(buf[7], 40, "HDR: %s", hdr_l[ui.hdr]);
+		snprintf(buf[8], 40, "QR scanner: %s", ui.qr ? "on" : "off");
+		snprintf(buf[9], 40, "aperture: %s", raw.ap_auto ? "auto" : raw.f24 ? "F2.4" : "F1.5");
 		for (int i = 0; i < MENU_ITEMS; i++) {
 			labels[i] = buf[i];
 		}
@@ -1534,13 +1584,60 @@ static void aperture_toggle(void) {
 		note("only the rear camera has an aperture");
 		return;
 	}
-	bool to24 = !raw.f24;
-	if (raw_say(to24 ? "ap24" : "ap15")) {
-		raw.f24 = to24;
-		note("aperture F%s", to24 ? "2.4" : "1.5");
+	/* auto, then F1.5, then F2.4, then auto again (Pro mode's manual aperture) */
+	if (raw.ap_auto) {
+		raw.ap_auto = false;
+		if (raw_aperture(false)) {
+			note("aperture F1.5");
+		} else {
+			note("the aperture did not move");
+		}
+	} else if (!raw.f24) {
+		if (raw_aperture(true)) {
+			note("aperture F2.4");
+		} else {
+			note("the aperture did not move");
+		}
 	} else {
-		note("the aperture did not move");
+		raw.ap_auto = true;
+		raw.ap_moved = 0;
+		note("aperture: auto, by the light");
 	}
+	chrome_redraw_mark();
+}
+
+/*
+ * The five dials drive the real camera too (Pro mode): white balance, focus,
+ * ISO, shutter speed and exposure compensation. The sensor's preview frame is
+ * 1/30 s long and the driver keeps its frame length, so a longer shutter is held
+ * at 1/30.
+ */
+static void raw_controls_apply(void) {
+	static int was[N_CONTROLS] = { -1, -1, -1, -1, -1 };
+	static const int iso[] = { 0, 100, 200, 400, 800, 1600, 3200 };
+	static const double shutter[] = { 0, 4, 1, 1 / 4.0, 1 / 15.0, 1 / 30.0, 1 / 125.0, 1 / 500.0,
+		1 / 2000.0, 1 / 8000.0 };
+	static const int focus[] = { -1, 450, 200, 40 };	/* macro, about a metre, infinity: inferred */
+	if (!memcmp(was, ui.ctl, sizeof(was))) {
+		return;
+	}
+	raw.man_wb = (enum wb_preset)ui.ctl[0];
+	raw.man_iso = iso[ui.ctl[2]];
+	raw.man_shutter = shutter[ui.ctl[3]];
+	raw.ev = (ui.ctl[4] - 6) * 0.5;
+	if (raw.man_shutter > 1 / 30.0 && ui.ctl[3] != was[3] && src.kind == SRC_RAW) {
+		note("longest shutter here is 1/30 s");
+	}
+	if (ui.ctl[1] != was[1]) {
+		raw.man_focus = focus[ui.ctl[1]];
+		if (raw.fd >= 0) {
+			raw_focus_start();
+		}
+	}
+	if (ui.ctl[0] != was[0]) {
+		raw.wb_set = false;	/* back to auto: settle at once */
+	}
+	memcpy(was, ui.ctl, sizeof(was));
 }
 
 /*
@@ -1784,6 +1881,13 @@ static bool touch(int phase, int id, double x, double y, uint32_t time) {
 			case 3: source_cycle(); break;
 			case 4: ui.menu = false; review_open(); return true;
 			case 5: ui.about = true; break;
+			case 6:
+				ui.flash = (ui.flash + 1) % 4;
+				raw_torch(ui.flash == 3 && src.kind == SRC_RAW && raw.cam == RAW_REAR ? 9 : 0);
+				break;
+			case 7: ui.hdr = (ui.hdr + 1) % 3; break;
+			case 8: ui.qr = !ui.qr; break;
+			case 9: aperture_toggle(); break;
 			}
 			ui.menu = false;
 			zmc_haptic("tap");
@@ -1801,6 +1905,16 @@ static bool touch(int phase, int id, double x, double y, uint32_t time) {
 			dial_close();
 		} else if (ui.timer_left > 0) {
 			ui.timer_left = -1;	/* a tap cancels the self-timer */
+			chrome_redraw_mark();
+		} else if (src.kind == SRC_RAW && raw.seq && !moved && !ui.reviewing) {
+			/* tap to focus and expose there, as Samsung's app does */
+			double u, v;
+			raw_screen_to_frame(x / zmc.width, y / zmc.height, &u, &v);
+			raw_focus_at(u, v);
+			ui.tap_x = x;
+			ui.tap_y = y;
+			ui.tap_until = zmc_now_ms() + 2500;
+			zmc_haptic("tick");
 			chrome_redraw_mark();
 		}
 		break;
@@ -1828,12 +1942,74 @@ static void on_sig(int s) {
 }
 
 static void facing_toggle(void);
+static bool touch(int phase, int id, double x, double y, uint32_t time);
+
+/*
+ * SIGRTMIN reads one line from $XDG_RUNTIME_DIR/ztcamera.cmd, for tests without a
+ * finger: "tap X Y" (points), "menu N", "dial C V", "photo".
+ */
+static volatile sig_atomic_t sig_cmd;
+static void on_cmd(int s) {
+	(void)s;
+	sig_cmd = 1;
+}
+
+static void test_command(void) {
+	char path[256], line[128] = "";
+	const char *rt = getenv("XDG_RUNTIME_DIR");
+	snprintf(path, sizeof(path), "%s/ztcamera.cmd", rt ? rt : "/tmp");
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		return;
+	}
+	if (!fgets(line, sizeof(line), f)) {
+		line[0] = 0;
+	}
+	fclose(f);
+	double x, y;
+	int a, b;
+	if (sscanf(line, "tap %lf %lf", &x, &y) == 2) {
+		uint32_t t = zmc_now_ms();
+		touch(0, 0, x, y, t);
+		touch(2, 0, x, y, t + 50);
+	} else if (sscanf(line, "menu %d", &a) == 1 && a >= 0 && a < MENU_ITEMS) {
+		ui.menu = true;
+		uint32_t t = zmc_now_ms();
+		double mx = zmc.width - 188 - 8 + 40, my = 58 + 6 + a * 44 + 20;
+		touch(0, 0, mx, my, t);
+		touch(2, 0, mx, my, t + 50);
+	} else if (sscanf(line, "dial %d %d", &a, &b) == 2 && a >= 0 && a < N_CONTROLS &&
+			b >= 0 && b < ctl_n[a]) {
+		ui.ctl[a] = b;
+		chrome_redraw_mark();
+	} else if (!strncmp(line, "photo", 5)) {
+		capture_photo();
+	}
+}
 
 static void tick(void) {
 	uint32_t now = zmc_now_ms();
 	if (sig_facing) {
 		sig_facing = 0;
 		facing_toggle();
+	}
+	if (sig_cmd) {
+		sig_cmd = 0;
+		test_command();
+	}
+	raw_controls_apply();
+	if (ui.tap_until && now > ui.tap_until) {
+		ui.tap_until = 0;
+		chrome_redraw_mark();
+	}
+	if (ui.qr && src.kind == SRC_RAW && !raw_switching()) {
+		const char *code = qr_step();
+		if (code) {
+			note("QR: %s", code);
+			ui.note_until = now + 10000;
+			zmc_haptic("click");
+			fprintf(stderr, "ztcamera: QR %s\n", code);
+		}
 	}
 	if (sig_shutter) {
 		sig_shutter = 0;
@@ -2081,6 +2257,7 @@ int main(int argc, char **argv) {
 	}
 	signal(SIGUSR1, on_sig);
 	signal(SIGUSR2, on_sig);
+	signal(SIGRTMIN, on_cmd);
 	int status = zmc_run(&camera, 0);
 	record_stop(NULL);
 	source_stop();
