@@ -34,6 +34,43 @@ Tools used to find this, in the scratchpad of the session: raw register
 pokes over /dev/mem, a loopback test, and reading the UART pins as GPIO
 inputs with pull-downs (the chip drives its TX high once powered).
 
+## Reconnecting (ROADMAP 8.52, 2026-11-22)
+
+ztOS connects a device only when something asks for it by address: Settings, an
+Android app through the bridge, a daemon such as cubridge (the Chameleon). It
+doesn't call devices back by itself. The one exception: an audio device that
+drops while an app is playing through it (out of range, switched off or put
+away mid-song) is called back for up to 5 minutes by `ztos-bt-reconnect`. It
+has to be the device carrying that sound, not the speaker or another headset,
+and the disconnect must not have come from the phone (Settings' "disconnect",
+Bluetooth off). Once the device is back, `ztos-audiod` gives it the sound.
+
+What used to call devices back, and what stops it now:
+
+| Who | What it did | Now |
+|---|---|---|
+| PipeWire (`bluez5.auto-connect` in `52-ztos-bluetooth.conf`) | `ConnectProfile()` on every paired, trusted audio device 2 s after it first saw it, at every boot and every WirePlumber or bluetoothd start. The journal at each boot shows `Unable to get Hands-Free Voice gateway SDP record: Host is down` about 9 s after bluetoothd starts, then the AirPods connected | `bluez5.auto-connect = [ ]` |
+| bluetoothd's policy plugin | after a link loss, A2DP/HFP devices called back 7 times over about 2 minutes; after a suspend, called back on resume (`policy.c:reconnect_timeout()`, 22 Nov), whether anything was playing or not | `[Policy] ReconnectAttempts = 0` in `main.conf` |
+| `ztos-bt-reconnect` | (new) | calls back only the audio device that was playing as it dropped |
+
+Still as BlueZ does it, and not the phone's own doing:
+
+* A trusted device may connect to the phone by itself: AirPods taken out of
+  their case, a speaker switched on. The controller accepts pages from bonded
+  devices (`device_list` in debugfs), and the agent allows a trusted device's
+  services without asking.
+* A bonded LE device with an auto-connect profile (HID over GATT, LE Audio)
+  goes on the kernel's accept list, and the controller connects when that
+  device advertises. None is paired now. The Chameleon has no such profile.
+  Its entry, `auto_connect 5`, is cubridge's pending `Connect()`.
+* A classic HID device that wants the host to reconnect it is paged for 3
+  minutes by the input plugin. None is paired now, and `input.conf` has no
+  switch for it.
+
+To check: `journalctl --user -u ztos-bt-reconnect` says what it decided for each
+audio device that dropped. Tests: `make -C ztmetro check-bt-reconnect
+check-bt-reconnect-e2e check-audiod`.
+
 ## The original plan (2026-10-18, morning)
 
 The BCM4361 is one chip for Wi-Fi and Bluetooth. Wi-Fi works over PCIe

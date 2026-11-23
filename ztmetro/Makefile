@@ -691,6 +691,15 @@ check-audio-state:
 check-audiod:
 	python3 tests/audiod.py
 
+# ztos-bt-reconnect (ROADMAP 8.52): which Bluetooth device is called back after it
+# drops, from pretend BlueZ signals and pw-dump data through ztos-audiod's own code;
+# then the daemon itself against a pretend bluetoothd on a private bus (about 20 s)
+.PHONY: check-bt-reconnect check-bt-reconnect-e2e
+check-bt-reconnect:
+	python3 tests/bt-reconnect.py
+check-bt-reconnect-e2e:
+	python3 tests/bt-reconnect-e2e.py
+
 # the three volumes (volume-streams.h): the keys' choice, media playing, the gains,
 # the levels' files; and ztos-audiod's side of them
 .PHONY: check-volume-streams
