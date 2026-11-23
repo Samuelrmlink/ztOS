@@ -1,0 +1,17 @@
+#!/bin/sh
+# A bluetoothctl that answers from files in $FAKE_BT (tests/bt-fake): what
+# BlueZ 5.88's prints, recorded on the phone. Only reads; every call is
+# logged to $FAKE_BT_LOG when that is set.
+D=${FAKE_BT:?}
+[ -n "$FAKE_BT_LOG" ] && echo "$*" >> "$FAKE_BT_LOG"
+case $1 in
+show) cat "$D/show" ;;
+devices)
+	if [ "$2" = Connected ]; then
+		cat "$D/connected" 2>/dev/null
+	else
+		cat "$D/devices"
+	fi ;;
+info) cat "$D/info-$(echo "$2" | tr : _)" 2>/dev/null || { echo "Device $2 not available"; exit 1; } ;;
+*) echo "fake bluetoothctl: $* is not a read" >&2; exit 1 ;;
+esac

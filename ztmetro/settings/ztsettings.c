@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/inotify.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -2398,14 +2399,7 @@ static struct {
 	char name[64];		/* this phone's, as others see it: bluetoothd takes it from the hostname */
 } bt;
 
-/* "yes|no", "name=" what others see this phone as, then "@devices" and one
- * "MAC|name|paired|connected|icon" each */
-#define BT_QUERY "s=$(bluetoothctl show 2>/dev/null); p=$(echo \"$s\" | sed -n 's/.*Powered: //p'); echo \"${p:-no}\"; " \
-	"echo \"name=$(echo \"$s\" | sed -n 's/.*Alias: //p' | head -n 1)\"; " \
-	"echo @devices; bluetoothctl devices 2>/dev/null | while read -r _ mac name; do " \
-	"i=$(bluetoothctl info \"$mac\" 2>/dev/null); " \
-	"echo \"$mac|$name|$(echo \"$i\" | sed -n 's/.*Paired: //p')|$(echo \"$i\" | sed -n 's/.*Connected: //p')|" \
-	"$(echo \"$i\" | sed -n 's/.*Icon: //p')\"; done"
+/* (BT_QUERY, what the page asks BlueZ, is bt-list.h's) */
 static FILE *bt_pipe;
 static char bt_buf[8192];
 static size_t bt_len;
@@ -2467,21 +2461,8 @@ static void bt_parse(char *text) {
 			snprintf(bt.name, sizeof(bt.name), "%s", line + 5);
 		} else if (!devices) {
 			bt.on = strncmp(line, "yes", 3) == 0;
-		} else if (n_fresh < MAX_BT) {
-			char *f[5] = { line, "", "", "", "" };
-			for (int i = 1; i < 5; i++) {
-				char *bar = strchr(f[i - 1], '|');
-				if (!bar) break;
-				*bar = 0;
-				f[i] = bar + 1;
-			}
-			struct bt_device *d = &fresh[n_fresh++];
-			memset(d, 0, sizeof(*d));
-			snprintf(d->mac, sizeof(d->mac), "%s", f[0]);
-			snprintf(d->name, sizeof(d->name), "%s", f[1][0] ? f[1] : f[0]);
-			d->paired = strncmp(f[2], "yes", 3) == 0;
-			d->connected = strncmp(f[3], "yes", 3) == 0;
-			snprintf(d->icon, sizeof(d->icon), "%s", f[4]);
+		} else if (n_fresh < MAX_BT && bt_record_parse(line, &fresh[n_fresh])) {
+			n_fresh++;
 		}
 	}
 	bt.n = bt_list_merge(bt.dev, bt.on ? bt.n : 0, fresh, n_fresh, bt_busy_mac);
@@ -2492,6 +2473,7 @@ static void bt_parse(char *text) {
  * a tap on a device is never lost. A scan is only ever skipped, not queued. */
 static char bt_pending[600];
 static char bt_drawn[MAX_BT][18];	/* each row's device, as last drawn */
+static bool bt_stale;	/* ztos-bt changed while a query ran: ask again after it */
 static void bt_refresh(const char *first);
 
 static void bt_ready(int fd, void *data) {
@@ -2526,12 +2508,15 @@ static void bt_ready(int fd, void *data) {
 		bt_pending[0] = 0;
 		bt_busy_running = bt_busy_mac[0] != 0;
 		bt_refresh(next);
+	} else if (bt_stale) {
+		bt_refresh(NULL);
 	}
 }
 
 /* Ask again, after running `first` (a shell command, or NULL). */
 static void bt_refresh(const char *first) {
 	if (bt_pipe) return;
+	bt_stale = false;	/* (bt_state_changed's: this query sees it) */
 	char command[2048];
 	snprintf(command, sizeof(command), "%s%s" BT_QUERY, first ? first : "", first ? "; " : "");
 	bt_pipe = popen(command, "r");
@@ -2556,11 +2541,7 @@ static void bt_request(const char *command) {
 
 /* A MAC address, as bluetoothctl prints it, is safe in a command: checked. */
 static bool bt_mac_ok(const char *mac) {
-	if (strlen(mac) != 17) return false;
-	for (int i = 0; i < 17; i++) {
-		if (i % 3 == 2 ? mac[i] != ':' : !isxdigit((unsigned char)mac[i])) return false;
-	}
-	return true;
+	return bt_is_mac(mac);
 }
 
 static void bt_summary(char *out, size_t size) {
@@ -2577,18 +2558,58 @@ static void bt_summary(char *out, size_t size) {
 	snprintf(out, size, "on");
 }
 
-/* The connected device's battery, as ztos-bt-state has it (-1: not said). */
-static int bt_battery(void) {
+/* The connected device's battery, as ztos-bt-state has it (-1: not said),
+ * and which device that is (mac=; "" from a ztos-bt-state that does not say). */
+static int bt_battery(char mac[18]) {
 	char path[256], line[64];
 	const char *runtime = getenv("XDG_RUNTIME_DIR");
 	snprintf(path, sizeof(path), "%s/ztos-bt", runtime ? runtime : "/tmp");
 	FILE *f = fopen(path, "r");
 	int battery = -1;
+	mac[0] = 0;
 	while (f && fgets(line, sizeof(line), f)) {
 		if (strncmp(line, "battery=", 8) == 0 && line[8] >= '0' && line[8] <= '9') battery = atoi(line + 8);
+		else if (strncmp(line, "mac=", 4) == 0) snprintf(mac, 18, "%.17s", line + 4);
 	}
 	if (f) fclose(f);
 	return battery;
+}
+
+/* ztos-bt-state rewrites $XDG_RUNTIME_DIR/ztos-bt when BlueZ says something
+ * changed (it follows PropertiesChanged), and only then: the pages that show
+ * the devices ask again on that, not on a timer. A query already running
+ * leaves it for when that one ends (bt_stale). */
+static void bt_state_changed(int fd, void *data) {
+	(void)data;
+	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+	bool ours = false;
+	ssize_t n;
+	while ((n = read(fd, buf, sizeof(buf))) > 0) {
+		for (char *p = buf; p < buf + n;) {
+			const struct inotify_event *ev = (const struct inotify_event *)p;
+			if (ev->len && strcmp(ev->name, "ztos-bt") == 0) ours = true;
+			p += sizeof(*ev) + ev->len;
+		}
+	}
+	if (!ours) return;
+	if (zmc.page != PAGE_BLUETOOTH && zmc.page != PAGE_MAIN && zmc.page != PAGE_CONNECTIONS) return;
+	if (bt_pipe) {
+		bt_stale = true;
+	} else {
+		bt_refresh(NULL);
+	}
+	zmc_redraw();	/* (the battery line reads the file as it draws) */
+}
+
+static void bt_state_watch(void) {
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (fd < 0) return;
+	if (inotify_add_watch(fd, runtime ? runtime : "/tmp", IN_MOVED_TO | IN_CLOSE_WRITE) < 0) {
+		close(fd);
+		return;
+	}
+	zmc_watch_fd(fd, bt_state_changed, NULL);
 }
 
 static int bt_menu = -1;	/* the device whose menu is open, or -1 */
@@ -2616,7 +2637,8 @@ static double draw_bluetooth(cairo_t *cr) {
 		zmc_set_rgb(cr, ACCENTS[app.accent].color);
 		y += zmc_text(cr, bt.status, FONT_REGULAR, 14, MARGIN, y, zmc.width - 2 * MARGIN) + 14;
 	}
-	int battery = bt_battery();
+	char battery_mac[18];
+	int battery = bt_battery(battery_mac);
 	/* AirPods that have connected here: ztos-podsd lists them, and their settings are pages under this one */
 	struct pods_bar pods;
 	pods_bar_read(&pods);
@@ -2639,11 +2661,13 @@ static double draw_bluetooth(cairo_t *cr) {
 		zmc_fg(cr);
 		zmc_text_line(cr, d->name, FONT_SEMILIGHT, 26, MARGIN, y, zmc.width - 2 * MARGIN - (is_pods ? BT_PODS_W + 8 : 0));
 		char line[64];
-		if (d->connected && battery >= 0 && strcmp(d->mac, bt_busy_mac)) {
-			snprintf(line, sizeof(line), "Connected, battery %d%%", battery);
+		/* the battery is the one device's ztos-bt-state names (mac=), not every connected row's */
+		if (d->connected && battery >= 0 && strcmp(d->mac, bt_busy_mac) &&
+				(!battery_mac[0] || !strcasecmp(battery_mac, d->mac))) {
+			snprintf(line, sizeof(line), "%s, battery %d%%", bt_connected_label(d), battery);
 		} else {
 			snprintf(line, sizeof(line), "%s", !strcmp(d->mac, bt_busy_mac) ? bt_busy_label :
-				d->gone ? "Not in range" : d->connected ? "Connected" :
+				d->gone ? "Not in range" : d->connected ? bt_connected_label(d) :
 				d->paired ? "Not connected" : "Tap to pair");
 		}
 		if (d->connected || !strcmp(d->mac, bt_busy_mac)) {
@@ -5370,5 +5394,6 @@ int main(int argc, char **argv) {
 	page_prepare(first);	/* (back goes through a page's list) */
 	if (first == PAGE_WIFI) wifi_load();	/* (once running, arrived() asks in the background) */
 	instance_listen();
+	bt_state_watch();
 	return zmc_run(&settings, first);
 }

@@ -1,0 +1,20 @@
+Device E3:19:D9:61:F8:3B (random)
+	Name: ChameleonUltra
+	Alias: ChameleonUltra
+	Paired: yes
+	Bonded: yes
+	Trusted: yes
+	Blocked: no
+	Connected: yes
+	LegacyPairing: no
+	CablePairing: no
+	Connectable: yes
+	AdvertisingFlags:
+  06                                               .               
+	Battery Percentage: 0x64 (100)
+DBG: cs_proxies is empty
+	LE.Paired: yes
+	LE.Bonded: yes
+	LE.Connected: yes
+	LE.Connectable: yes
+	LE.Role: peripheral

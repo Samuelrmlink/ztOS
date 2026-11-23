@@ -610,8 +610,9 @@ check-location: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
 
 .PHONY: check-bt-list
 check-bt-list:
-	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-list-test tests/bt-list.c
-	/tmp/ztmetro-bt-list-test
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-list-test tests/bt-list.c
+	FAKE_BT=$(CURDIR)/tests/bt-fake /tmp/ztmetro-bt-list-test
+	sh tests/bt-state.sh ../os/overlay/usr/local/bin/ztos-bt-state
 
 .PHONY: check-clock
 check-clock:
