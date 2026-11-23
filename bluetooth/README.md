@@ -117,6 +117,30 @@ Still as BlueZ does it, and not the phone's own doing:
   minutes by the input plugin. None is paired now, and `input.conf` has no
   switch for it.
 
+### Paused when it drops, never played again by the phone (ROADMAP 8.64)
+
+A device that drops while it carries the sound pauses the players at once, as
+Android does for "audio becoming noisy": `ztos-bt-reconnect` runs
+`playerctl --all-players pause` (MPRIS) and `ztos-waydroid-recover media pause`
+(Android's media button session: Spotify and the rest in Waydroid) as soon as
+BlueZ says `Connected=false`, whatever the reason. Before this, nothing paused
+anything: on 22 Nov Spotify's stream ran on through two drops of the AirPods
+(logcat: `AAudioStream_requestStart` at 22:17:44, no pause until the owner's
+at 22:19:45; AudioFlinger `write blocked for 947 msecs` at each drop, while
+PipeWire moved the stream to the speaker), and when the AirPods came back
+(called back, or by themselves) ztos-audiod moved the still-playing stream
+back to them. It sounded like autoplay. Nothing on the phone ever sends play:
+the players play again only for the play button, or for the device's own play
+(AVRCP). The callback itself is unchanged: a device that was playing is still
+called back, and finds the players paused.
+
+Two gaps, not this item's: AVRCP play/pause from a headset reaches only MPRIS
+players (through `mpris-proxy`). Android's apps have no MPRIS player here, and
+bluetoothd can't make its AVRCP key device (`init_uinput(): No such file or
+directory`: no `/dev/uinput`), so an AirPods tap doesn't reach Spotify. And
+`ztos-podsd` reads ear detection, but doesn't act on it: the pods' own AVRCP
+does that.
+
 To check: `journalctl --user -u ztos-bt-reconnect` says what it decided for each
 audio device that dropped. Tests: `make -C ztmetro check-bt-reconnect
 check-bt-reconnect-e2e check-audiod`.

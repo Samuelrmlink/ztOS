@@ -390,6 +390,12 @@ an app back to the front. Waking makes Waydroid's composer drop the window in fr
 and map a new one; ztMETRO waits for it behind "Loading..." and launches the app if
 none comes within 2 s.
 
+`ztos-waydroid-recover media pause` sends a pause key to Android's media button
+session (`cmd media_session dispatch pause`: the app that last played, such as
+Spotify). `ztos-bt-reconnect` runs it when the Bluetooth device carrying the sound
+drops, so the music stops instead of moving to the speaker (bluetooth/README.md,
+ROADMAP 8.64). It takes only `pause`, and does nothing to a frozen Android.
+
 Android plays no notification sound of its own: ztOS chimes for each notification
 at the ztOS ringer. `ztos-waydroid-recover settings` keeps Android's notification
 stream at 0 and its ring stream (calls) at the ztOS ringer's level (0 at vibrate),

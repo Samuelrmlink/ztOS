@@ -6,7 +6,7 @@ set -euo pipefail
 # Waydroid not set up yet (ztos-waydroid-images: no images, or no binder in
 # this kernel): no Android to freeze or set (done), none to start (3: not up).
 if [[ ! -e /var/lib/waydroid/waydroid.cfg ]]; then
-    case $1 in freeze|display|settings|audio) exit 0 ;; *) exit 3 ;; esac
+    case $1 in freeze|display|settings|audio|media) exit 0 ;; *) exit 3 ;; esac
 fi
 lxc_args=(-P /var/lib/waydroid/lxc -n waydroid)
 # Frozen, or stuck half way (FREEZING: something thawed the cgroup under a
@@ -99,6 +99,14 @@ display() {
     [[ $1 == on ]] && key=KEYCODE_WAKEUP
     android_sh '[ "$(getprop sys.boot_completed)" = 1 ] && cmd input keyevent '"$key" >/dev/null 2>&1 || true
 }
+# A media key to Android's media button session (the app that last played:
+# Spotify...), as a headset's would be. Only pause: ztos-bt-reconnect's, when
+# the Bluetooth device carrying the sound drops (ROADMAP 8.64). A frozen or
+# stopped Android plays nothing, and is left as it is.
+media() {
+    [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == RUNNING ]] || return 0
+    android_sh '[ "$(getprop sys.boot_completed)" = 1 ] && cmd media_session dispatch "$1"' sh "$1" >/dev/null 2>&1 || true
+}
 case $1 in
     audio)
         [[ $# == 1 ]] || exit 2
@@ -135,6 +143,10 @@ case $1 in
     settings)
         [[ $# == 1 ]] || exit 2
         settings
+        ;;
+    media)
+        [[ $# == 2 && $2 == pause ]] || exit 2
+        media pause
         ;;
     install)
         [[ $# == 2 ]] || exit 2

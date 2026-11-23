@@ -154,9 +154,25 @@ def main():
             json.dump({"version": 1, "outputs": out, "apps": []}, f)
         os.rename(os.path.join(run, "ztos-audio-state.json.new"), os.path.join(run, "ztos-audio-state.json"))
 
+    # the pause commands (playerctl, Android's) are recorded here, not run
+    paused_log = os.path.join(tmp, "paused")
+    wrapper = os.path.join(tmp, "pause-wrapper")
+    with open(wrapper, "w") as f:
+        f.write("#!/bin/sh\necho \"$*\" >> '%s'\n" % paused_log)
+    os.chmod(wrapper, 0o755)
+
+    def paused():
+        try:
+            return open(paused_log).read().splitlines()
+        except OSError:
+            return []
+    pause_cmds = ["playerctl --all-players pause",
+                  "sudo -n /usr/local/libexec/ztos-waydroid-recover media pause"]
+
     audio(True)
     log = open(os.path.join(tmp, "daemon.log"), "w")
-    env = dict(os.environ, DBUS_SYSTEM_BUS_ADDRESS=address, XDG_RUNTIME_DIR=run)
+    env = dict(os.environ, DBUS_SYSTEM_BUS_ADDRESS=address, XDG_RUNTIME_DIR=run,
+               ZTOS_BT_RECONNECT_TEST_PAUSE=wrapper)
     daemon = subprocess.Popen([sys.executable, DAEMON], env=env, stderr=log)
     try:
         wait_for("it to start", lambda: "started" in open(os.path.join(tmp, "daemon.log")).read(), 10)
@@ -166,20 +182,24 @@ def main():
         # the Chameleon drops (cubridge's link): never touched
         on_loop(devs[CHAM].drop, "org.bluez.Reason.Timeout")
         time.sleep(6)
-        assert calls == [], calls
+        assert calls == [] and paused() == [], (calls, paused())
 
-        # the AirPods drop while playing through them: Connect() about 3 s later, once
+        # the AirPods drop while playing through them: the players pause at once
+        # (ROADMAP 8.64), and Connect() about 3 s later, once
         on_loop(devs[PODS].drop, "org.bluez.Reason.Timeout")
+        wait_for("the players paused", lambda: len(paused()) == 2, 1.5)
+        assert sorted(paused()) == sorted(pause_cmds), paused()
         wait_for("Connect() on the AirPods", lambda: ("Connect", PODS) in calls, 8)
         time.sleep(3)
         assert calls == [("Connect", PODS)], calls
+        assert len(paused()) == 2, paused()     # back: nothing more, and never a play
 
         # paused now, and they drop again: not called back
         audio(False)
         time.sleep(0.5)
         on_loop(devs[PODS].drop, "org.bluez.Reason.Remote")
         time.sleep(6)
-        assert calls == [("Connect", PODS)], calls
+        assert calls == [("Connect", PODS)] and len(paused()) == 2, (calls, paused())
 
         # playing, but disconnected from the phone itself: not called back
         on_loop(lambda: devs[PODS].PropertiesChanged(DEVICE1, {"Connected": dbus.Boolean(True)}, []))
@@ -188,6 +208,8 @@ def main():
         on_loop(devs[PODS].drop, "org.bluez.Reason.Local")
         time.sleep(6)
         assert calls == [("Connect", PODS)], calls
+        assert len(paused()) == 4, paused()     # ...but paused all the same
+        assert set(paused()) == set(pause_cmds), paused()   # pause only, never a play
     finally:
         daemon.send_signal(signal.SIGTERM)
         try:
