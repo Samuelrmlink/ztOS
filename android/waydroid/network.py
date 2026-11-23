@@ -259,9 +259,24 @@ def launch_in_progress():
         return False
 
 
+FROZEN = pathlib.Path('/sys/fs/cgroup/lxc.payload.waydroid/cgroup.events')
+
+
+def frozen():
+    """The container's cgroup says it is frozen: read from a file, so a
+    frozen Android costs no lxc-info, nft or attach processes at all."""
+    try:
+        return 'frozen 1' in FROZEN.read_text()
+    except OSError:
+        return False
+
+
 def maintain():
     if not pathlib.Path('/sys/class/net/waydroid0').exists():
         return
+    if frozen():
+        idle.clear()
+        return  # Nothing to repair in a frozen container; never thaw it here.
     pathlib.Path('/proc/sys/net/ipv4/ip_forward').write_text('1\n')
     # Upstream waydroid-net.sh owns bridge/DHCP/DNS and its lxc tables.
     # Own a separate table so a firewall reload can be repaired without flushing it.
@@ -369,4 +384,9 @@ while True:
         maintain()
     except (OSError, subprocess.SubprocessError, RuntimeError) as error:
         print(f'Network repair: {error}', flush=True)
+    # Frozen (the screen off, no Android window): no work at all; the cgroup
+    # file is read every 5 s (no process started), and the repair runs again
+    # the moment the shell thaws it.
     time.sleep(5)
+    while frozen():
+        time.sleep(5)

@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "../settings/bt-list.h"
 
 static struct bt_device dev(const char *mac, bool paired, bool connected) {
@@ -82,5 +83,70 @@ int main(void) {
 	assert(l[0].shown == 2.5f && !strcmp(l[n - 1].mac, "Z") && l[n - 1].shown == (float)(n - 1));
 
 	puts("PASS: Bluetooth rows keep their places");
+
+	/* records: the page's own fields, and which link is up */
+	struct bt_device d;
+	char rec[160];
+	strcpy(rec, "E3:19:D9:61:F8:3B|ChameleonUltra|yes|yes||yes|");
+	assert(bt_record_parse(rec, &d) && d.paired && d.connected && d.le && !d.bredr);
+	assert(!strcmp(bt_connected_label(&d), "Connected (BLE)"));
+	strcpy(rec, "40:DA:5C:62:CA:1B|AirPods Pro|yes|yes|audio-headphones|no|yes");
+	assert(bt_record_parse(rec, &d) && d.connected && !d.le && d.bredr && !strcmp(d.icon, "audio-headphones"));
+	assert(!strcmp(bt_connected_label(&d), "Connected"));
+	strcpy(rec, "40:DA:5C:62:CA:1B|AirPods Pro|yes|yes|audio-headphones|yes|yes");	/* both links */
+	assert(bt_record_parse(rec, &d) && !strcmp(bt_connected_label(&d), "Connected"));
+	strcpy(rec, "00:0D:44:EB:50:54|UE MINI BOOM|yes|yes|audio-headset");	/* older BlueZ: no bearer fields */
+	assert(bt_record_parse(rec, &d) && d.connected && !d.le && !strcmp(bt_connected_label(&d), "Connected"));
+	strcpy(rec, "31:9D:68:1F:38:A4|PM220|yes|no|printer|yes|no");	/* not connected: no link */
+	assert(bt_record_parse(rec, &d) && !d.connected && !d.le);
+	/* what the old query's split records left: not devices */
+	strcpy(rec, "yes|yes");
+	assert(!bt_record_parse(rec, &d));
+	strcpy(rec, "no|audio-headphones");
+	assert(!bt_record_parse(rec, &d));
+	strcpy(rec, "yes");
+	assert(!bt_record_parse(rec, &d));
+	puts("PASS: Bluetooth records, LE links included");
+
+	/* the query itself, against what BlueZ 5.88's bluetoothctl prints (tests/bt-fake) */
+	const char *fake = getenv("FAKE_BT");
+	if (!fake) {
+		puts("SKIP: BT_QUERY (no FAKE_BT)");
+		return 0;
+	}
+	char path[1024];
+	snprintf(path, sizeof(path), "%s/bin:%s", fake, getenv("PATH") ? getenv("PATH") : "/usr/bin:/bin");
+	setenv("PATH", path, 1);
+	FILE *p = popen(BT_QUERY, "r");
+	assert(p);
+	char line[256];
+	int records = 0, junk = 0;
+	bool powered = false, named = false, cham = false, pods = false, boom = false;
+	bool devices = false;
+	while (fgets(line, sizeof(line), p)) {
+		line[strcspn(line, "\n")] = 0;
+		if (!strcmp(line, "@devices")) { devices = true; continue; }
+		if (!devices) {
+			if (!strcmp(line, "yes")) powered = true;
+			if (!strcmp(line, "name=ztos")) named = true;
+			continue;
+		}
+		if (!bt_record_parse(line, &d)) { junk++; continue; }
+		records++;
+		if (!strcmp(d.mac, "E3:19:D9:61:F8:3B")) {
+			cham = d.connected && d.paired && d.le && !d.bredr &&
+				!strcmp(bt_connected_label(&d), "Connected (BLE)");
+		} else if (!strcmp(d.mac, "40:DA:5C:62:CA:1B")) {
+			pods = d.paired && !d.connected && !strcmp(d.name, "AirPods Pro") &&
+				!strcmp(d.icon, "audio-headphones");
+		} else if (!strcmp(d.mac, "00:0D:44:EB:50:54")) {
+			boom = d.connected && !d.le && !strcmp(bt_connected_label(&d), "Connected");
+		}
+	}
+	assert(pclose(p) == 0);
+	assert(powered && named);
+	assert(records == 5 && junk == 0);	/* one line per device: none split */
+	assert(cham && pods && boom);
+	puts("PASS: BT_QUERY reads BlueZ 5.88's LE and BR/EDR devices");
 	return 0;
 }

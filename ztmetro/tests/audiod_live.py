@@ -358,6 +358,13 @@ def run_all(t):
     assert t.app(KEY % "AppA")["playing_on"] == BT
     print("  takeover: Default follows, the pin stays, no stream restarted")
 
+    # ---- "playing" per output, from the streams' own state (ztos-bt-reconnect reads it)
+    def out(name):
+        return next((o for o in (t.state() or {}).get("outputs", []) if o["name"] == name), {})
+    wait_for(lambda: out(BT).get("playing") is True and out(SPEAKER).get("playing") is True,
+             "both outputs playing (AppA on Bluetooth, AppB pinned to the speaker)")
+    print("  playing: running streams count, per output")
+
     # ---- pin an app to Bluetooth; it goes away and returns
     t.ctl("app-output", KEY % "AppB", BT)
     wait_for(lambda: t.sink_of("AppB") == BT, "AppB moving to Bluetooth")

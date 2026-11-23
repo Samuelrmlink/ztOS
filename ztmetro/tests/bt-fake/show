@@ -1,0 +1,13 @@
+Controller 00:B5:D0:3D:D8:44 (public)
+	Manufacturer: 0x000f (15)
+	Name: ztos
+	Alias: ztos
+	Powered: yes
+	PowerState: on
+	Discoverable: yes
+	Pairable: yes
+	Discovering: no
+	Roles: central
+	Roles: peripheral
+Advertising Features:
+	ActiveInstances: 0x00 (0)

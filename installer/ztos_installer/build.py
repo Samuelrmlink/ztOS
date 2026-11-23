@@ -288,6 +288,7 @@ cp -a "$SRC/os/overlay/." "$R/"
 cp -a "$SRC/rootfs/overlay/." "$R/"         # every phone's: USB link, session, memory and fs recovery
 ch systemctl --global enable ztos-audiod.service
 ch systemctl --global enable ztos-bt-agent.service
+ch systemctl --global enable ztos-bt-reconnect.service
 ch systemctl --global enable ztos-podsd.service
 ch systemctl --global enable ztos-ntfyd.service
 ch systemctl --global enable mpris-proxy.service

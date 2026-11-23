@@ -73,6 +73,17 @@ ids = {s["id"]: s["name"] for s in g["sinks"].values()}
 assert a.playing_on(70, g["links"], ids, g["chains"]) == "ztos-speaker"
 assert a.playing_on(71, g["links"], ids, g["chains"]) is None
 
+# what is playing where (ztos-bt-reconnect reads "playing" and "address"): a running
+# stream counts, a paused one linked to the same output doesn't
+on = {70: "ztos-speaker", 71: None}
+assert a.playing_outputs(g["streams"], on) == {"ztos-speaker"}
+paused = [dict(s, state="paused") for s in g["streams"]]
+assert a.playing_outputs(paused, on) == set()
+outs = a.output_entries(dict(g["sinks"], **{BT: dict(g["sinks"][BT], address="00:0D:44:EB:50:54")}),
+                        "ztos-speaker", {BT})
+assert [(o["name"], o["playing"], o.get("address")) for o in outs] == \
+    [(BT, True, "00:0D:44:EB:50:54"), ("ztos-speaker", False, None)], outs
+
 # WirePlumber's keys, and its state file
 KEY = "Output/Audio:application.name:Music"
 assert a.form_key({"application.id": "a", "application.name": "b"}) == "Output/Audio:application.id:a"
