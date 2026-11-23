@@ -360,4 +360,7 @@ What we do differently:
 - At that point no panel command had been sent and none of the new files had
   been used.
 - **Lesson:** `panic_on_oops` is system-wide. Set it only while holding ztlock
-  for the whole window, or not at all.
+  for the whole window, and put it back to 0 before releasing the lock.
+- aod1 stays on BOOT. The rest of stage (b) and stages (c)-(d) (install, the
+  awake check, the first `zrn-sleepd once`) are for 2026-11-23 from 07:00 CST,
+  each window under ztlock.
