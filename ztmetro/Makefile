@@ -174,7 +174,7 @@ passcoded/zrn-passcode: passcoded/zrn-passcode.c passcoded/passcode-proto.h
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
 EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
 EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
-settings/ztsettings: settings/ztsettings.c settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
+settings/ztsettings: settings/ztsettings.c settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h settings/wifi-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c mms/apnconf.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h devtest/devtest-power.c devtest/devtest-power.h power/battery-health.h $(CORE_DEPS)
@@ -613,6 +613,11 @@ check-bt-list:
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-bt-list-test tests/bt-list.c
 	FAKE_BT=$(CURDIR)/tests/bt-fake /tmp/ztmetro-bt-list-test
 	sh tests/bt-state.sh ../os/overlay/usr/local/bin/ztos-bt-state
+
+.PHONY: check-wifi-list
+check-wifi-list:
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-wifi-list-test tests/wifi-list.c
+	/tmp/ztmetro-wifi-list-test
 
 .PHONY: check-clock
 check-clock:
