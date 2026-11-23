@@ -165,12 +165,26 @@ Permanently out of scope, whatever the menu: IMEI and NV editing
 
 ## On the phone
 
-Not run on the phone yet (2026-11-12): the daemon and app are built there
-and pass host tests; the install was queued under `ztlock run servicemode`
-and paused at the coordinator's request before any message went to the CP.
+2026-11-22, 18:02 CST, no SIM, airplane on (`AT+CFUN=4`), modemd
+37782c60 (installed 2026-11-19): **[observed]**
+
+- `svc netinfo` (GETs): `080a` answered `0x0b` (LTE/WCDMA/GSM); `0833`
+  answered `00 0000 00000000` (no PCI/EARFCN lock); `0830` got no answer
+  in 3 s (neither data nor a refusal).
+- `*#0011#`, `*#2263#`, `*#197328640#`, `*#9090#`: each `0b01` was sent
+  and `0b02` 17-22 s later; **no screen came** (no `0b05`/`0b16`, no other
+  `0b` sub) and no refusal was logged (only refusals were logged then, so
+  the CP either answered `0x8000` or not at all).
+- Unasked, the CP sends `0b0d` (BigDataInfo, 107-118 bytes) about once an
+  hour.
+- `nv_data.bin` md5 39adf177cbd529b83b456db695f7472e before and after
+  (the same since 2026-11-12). Status file: the same fields, plus
+  `call_audio` (from the merged call-audio code).
+
+Open: why no screen. Next run, with the daemon that logs every `0b` answer
+(this branch after 56834c7): whether `0b01` is answered `0x8000`; then
+whether the CP wants the radio on (`AT+CFUN=1`, airplane off) or a SIM for
+these menus, which needs the owner.
+
 With no SIM, `ztoscorenetworkingd` never asks `AT+CIMI`, so neither
 `net_configure` (`080a` 0x0b) nor the telephony `AT+CRSM` reads run.
-
-To run: `~/svc-run.sh` style sequence, `svc netinfo`, then for each code
-`svc enter CODE`, wait for `screens>0`, copy the svc file, `svc end`;
-redact before anything leaves the phone.

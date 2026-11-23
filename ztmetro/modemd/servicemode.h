@@ -341,9 +341,12 @@ static bool svc_message(int main_cmd, int sub, int type, const unsigned char *da
 {
 	if (main_cmd == 0x80 && sub == 0x01 && len >= 5 && data[0] == 0x0b) {
 		int result = data[3] | data[4] << 8;
+		/* every answer, success too: whether the CP took an enter at all
+		 * is the first thing to know when no screen comes */
+		fprintf(stderr, "ztoscorenetworkingd: svc: 0b%02x answered 0x%04x\n", data[1], result);
+		svc_note("0b%02x answered 0x%04x", data[1], result);
+		svc_write();
 		if (result != 0x8000) {
-			fprintf(stderr, "ztoscorenetworkingd: svc: 0b%02x answered 0x%04x\n", data[1], result);
-			svc_note("0b%02x answered 0x%04x", data[1], result);
 			if (data[1] == 0x01 && svc.code) {
 				svc.code = NULL;	/* not entered: nothing to end */
 				svc.waiting = false;
@@ -352,6 +355,8 @@ static bool svc_message(int main_cmd, int sub, int type, const unsigned char *da
 		}
 		return true;
 	}
+	if (main_cmd == 0x80 && sub == 0x01 && len >= 5 && data[0] == 0x08 && (data[1] == 0x30 || data[1] == 0x33))
+		fprintf(stderr, "ztoscorenetworkingd: svc: 08%02x answered 0x%04x\n", data[1], data[3] | data[4] << 8);
 	if (main_cmd == 0x80 && sub == 0x01 && len >= 5 && data[0] == 0x08 &&
 	    (data[1] == 0x30 || data[1] == 0x33) && (data[3] | data[4] << 8) != 0x8000) {
 		/* a GET refused: say so (080a's answer is the daemon's own) */
@@ -392,7 +397,13 @@ static bool svc_message(int main_cmd, int sub, int type, const unsigned char *da
 		svc_note("the modem ended it");
 		svc_write();
 	} else {
-		fprintf(stderr, "ztoscorenetworkingd: svc: 0b%02x t%d, %zu bytes (not read)\n", sub, type, len);
+		/* once a sub a run: the CP sends 0b0d (big data) every hour or so */
+		static unsigned char told[256];
+		if (!told[sub & 0xff]) {
+			told[sub & 0xff] = 1;
+			fprintf(stderr, "ztoscorenetworkingd: svc: 0b%02x t%d, %zu bytes (not read; not said again)\n",
+				sub, type, len);
+		}
 	}
 	return true;
 }
