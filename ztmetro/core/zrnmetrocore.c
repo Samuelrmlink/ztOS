@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
@@ -35,6 +36,76 @@
 #include "zrnboard.h"
 #include "zrnmetrogpu.h"
 #include "zrnmetrorender.h"
+#include "zt-anim.h"
+
+/* Animation speeds (8.66, zt-anim.h): read from the config as it was at the
+ * last page turn or touch, so a change in Settings is in every app's next
+ * motion without a message to each. */
+static struct zt_anim_cfg zanim = {	/* (the defaults until the config is read) */
+	.global = ZT_ANIM_GLOBAL_DEFAULT, .kind = { [0 ... ZT_ANIM_N - 1] = ZT_ANIM_KIND_DEFAULT },
+};
+static struct timespec zanim_mtime;
+static bool zanim_read;
+int zmc_page_anim = ZT_ANIM_APP_PAGES;
+int zmc_next_anim = -1;
+
+static void zanim_refresh(void) {
+	char path[512], line[256];
+	snprintf(path, sizeof(path), "%s/.config/ztmetro/config", getenv("HOME") ? getenv("HOME") : "");
+	struct stat st;
+	bool there = stat(path, &st) == 0;
+	if (zanim_read && there && st.st_mtim.tv_sec == zanim_mtime.tv_sec && st.st_mtim.tv_nsec == zanim_mtime.tv_nsec) {
+		return;
+	}
+	if (zanim_read && !there) return;
+	zanim_read = true;
+	zt_anim_defaults(&zanim);
+	if (!there) return;
+	zanim_mtime = st.st_mtim;
+	FILE *f = fopen(path, "r");
+	while (f && fgets(line, sizeof(line), f)) {
+		char *eq = strchr(line, '=');
+		if (line[0] == '#' || !eq) continue;
+		*eq = 0;
+		char *k = line, *v = eq + 1;
+		while (*k == ' ' || *k == '\t') k++;
+		char *e = eq;
+		while (e > k && (e[-1] == ' ' || e[-1] == '\t')) *--e = 0;
+		while (*v == ' ' || *v == '\t') v++;
+		v[strcspn(v, "\r\n")] = 0;
+		for (e = v + strlen(v); e > v && (e[-1] == ' ' || e[-1] == '\t'); ) *--e = 0;
+		zt_anim_config_line(&zanim, k, v);
+	}
+	if (f) fclose(f);
+}
+
+int zmc_anim_ms(int kind, int ms) {
+	if (!zanim_read) zanim_refresh();
+	return (int)zt_anim_ms(&zanim, kind, ms > 0 ? (uint32_t)ms : 0);
+}
+
+/* `dt` ms of a clock-stepped motion (a glide, a spring) at a kind's speed;
+ * off: one long step that lands it. */
+static double zanim_dt(int kind, double dt) {
+	double rate = zt_anim_rate(&zanim, kind);
+	return rate > 0 ? dt * rate : 10000.0;
+}
+
+/* The page turn's clock: how much faster than written it runs (set as it
+ * begins; off: so fast that it ends at its next frame). */
+static double turn_rate = 1.0;
+
+static uint32_t turn_elapsed(void) {
+	int32_t since = (int32_t)(zmc_now_ms() - zmc.anim_start);
+	if (since <= 0) return 0;
+	double ms = since * turn_rate;
+	return ms > 2e9 ? 2000000000u : (uint32_t)ms;
+}
+
+/* The turn at its end now, whatever its speed. */
+static void turn_finish_now(void) {
+	zmc.anim_start = zmc_now_ms() - (uint32_t)ceil(zmc.anim_total / turn_rate) - 1;
+}
 
 #define MARGIN		ZMC_MARGIN
 #define HEADER_H	zmc_header_h()	/* the title's height now: smaller in landscape */
@@ -1872,8 +1943,9 @@ void zmc_redraw(void) {
  * What the finger is on sinks back a little as it touches, the side under
  * the finger furthest, and springs back when it lifts or starts to scroll.
  * In 2D that is a small shrink anchored on the far side from the finger. */
-#define PRESS_IN_MS	ZMC_TILT_IN_MS
-#define PRESS_OUT_MS	ZMC_TILT_OUT_MS
+/* at the press tilt's speed (zt-anim.h); off, 1 ms: there at once */
+#define PRESS_IN_MS	zt_anim_wait_ms(&zanim, ZT_ANIM_PRESS, ZMC_TILT_IN_MS)
+#define PRESS_OUT_MS	zt_anim_wait_ms(&zanim, ZT_ANIM_PRESS, ZMC_TILT_OUT_MS)
 
 /* As the shell's tiles (Windows Phone's tilt): in, linearly; out on WP's
  * Log(10) curve, fast and then slower and slower, and only once the dip has
@@ -2508,7 +2580,7 @@ static bool draw_pivot(cairo_t *cr, int scale) {
 		/* a critically damped spring, by the clock, in small steps */
 		double dt = now - zmc.slide_last;
 		zmc.slide_last = now;
-		dt = dt > 50 ? 50 : dt;
+		dt = zanim_dt(zmc_page_anim, dt > 50 ? 50 : dt);	/* (the pages' speed) */
 		double x = zmc.swipe_dx, v = zmc.slide_v, T = zmc.slide_target, k = PIVOT_SPRING_W;
 		bool arrived = false;
 		while (dt > 0 && !arrived) {
@@ -2933,17 +3005,16 @@ static void present(void) {
 	}
 	last_frame = began;
 	/* an entrance can be set to start a moment from now: black until then */
-	int32_t since = (int32_t)(now_ms() - zmc.anim_start);
-	uint32_t ms = since > 0 ? (uint32_t)since : 0;
+	uint32_t ms = turn_elapsed();	/* (on the turn's clock: its speed in Settings) */
 	if (zmc.anim_target_pending) {
 		uint32_t out = rows_duration(&zmc.out_rows, ROW_OUT_MS);
 		if (ms >= out) {
 			gpu_prepare_destination(zmc.anim_to);
-			ms = now_ms() - zmc.anim_start;
+			ms = turn_elapsed();
 			/* Expensive page content may exceed the gap. The new page still
 			 * gets its complete entrance, starting with its first row. */
 			if (ms > out + GAP_MS) {
-				zmc.anim_start += ms - (out + GAP_MS);
+				zmc.anim_start += (uint32_t)((ms - (out + GAP_MS)) / turn_rate);
 				ms = out + GAP_MS;
 			}
 			zmc.anim_total = out + GAP_MS + rows_duration(&zmc.in_rows, ROW_IN_MS);
@@ -3256,6 +3327,14 @@ static void begin_animation_(bool have_from, bool have_to, int target, double ta
 		zmc.anim_total = (have_from ? rows_duration(&zmc.out_rows, ROW_OUT_MS) + GAP_MS : 0) +
 			(in > title ? in : title);
 	}
+	/* its speed: an app closing, a page of Settings asked for from outside
+	 * (zmc_next_anim), or the app's own pages. The entrance keeps the
+	 * shell's speed, which it was started with (entrance_rate). */
+	zanim_refresh();
+	int kind = zmc.quit_after_anim ? ZT_ANIM_APP_CLOSE : zmc_next_anim >= 0 ? zmc_next_anim : zmc_page_anim;
+	zmc_next_anim = -1;
+	double rate = zt_anim_rate(&zanim, kind);
+	turn_rate = zmc.entrance ? 1.0 : rate > 0 ? rate : 1e6;	/* (off: over at the next frame) */
 	zmc.anim_frames = 0;
 	if (!zmc.anim_cache_ready && !bg.busy) zmc.n_hits = 0;	/* touch_down blocks input during the turn */
 	uint32_t now = now_ms();
@@ -3317,6 +3396,7 @@ static void fling_step(void) {
 	double dt = now - zmc.fling_last;
 	zmc.fling_last = now;
 	if (dt > 50) dt = 50;
+	dt = zanim_dt(ZT_ANIM_SCROLL, dt);	/* scrolling's speed; off: it lands now */
 	if (vl_frozen) {
 		zmc.fling = false;
 		return;
@@ -3375,12 +3455,13 @@ static bool hit_under(double x, double page_y_at, struct zmc_hit *out) {
 
 static void touch_down(void *data, struct wl_touch *touch, uint32_t serial, uint32_t time,
 		struct wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y) {
+	zanim_refresh();	/* (the speeds as Settings left them: one stat) */
 	if (board_touch_down(id, wl_fixed_to_double(x), wl_fixed_to_double(y))) {
 		return;
 	}
 	if (zmc.anim_active && zmc.entrance && (int32_t)(now_ms() - zmc.anim_start) > ENTER_HOLD_MS) {
 		/* a finger does not wait for the page to finish gliding in */
-		zmc.anim_start = now_ms() - zmc.anim_total;
+		turn_finish_now();
 		present();
 	}
 	/* a finger more on the app's territory: the app's too (a pinch) */
@@ -4081,7 +4162,10 @@ static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, u
 		if (speed_env) {
 			speed = atoi(speed_env);
 		}
-		if (speed < 50 || speed > 200) {
+		/* the shell's speed for how it was opened, the master's included
+		 * (zt-anim.h); 0: that animation is off */
+		bool entrance_off = speed_env && speed == 0 && speed_env[0] == '0';
+		if (speed < 1 || speed > 10000) {
 			speed = 100;
 		}
 		zmc.entrance_rate = 100.0 / speed;
@@ -4091,7 +4175,7 @@ static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, u
 		}
 		/* ZTMETRO_NO_ENTRANCE: the shell brings the window in itself (a
 		 * call's Readerboard swivel): the page is drawn settled at once */
-		if (getenv("ZTMETRO_NO_ENTRANCE")) {
+		if (getenv("ZTMETRO_NO_ENTRANCE") || entrance_off) {
 			zmc.entrance = false;
 			zmc_redraw();
 			return;
@@ -4113,7 +4197,7 @@ static void xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, u
 			}
 			if (zmc.anim_active) {
 				if (zmc.anim_target_pending) gpu_prepare_destination(zmc.anim_to);
-				zmc.anim_start = now_ms() - zmc.anim_total;
+				turn_finish_now();
 			}
 			/* (gpu_prepare_destination has waited for the turn's thread) */
 			zmc_apply_resize();
@@ -4539,7 +4623,7 @@ static bool zmc_apply_resize(void) {
 		zmc.anim_target_pending = false;
 		zmc.anim_prepared = false;
 		zmc.anim_cache_ready = false;
-		zmc.anim_start = now_ms() - zmc.anim_total;
+		turn_finish_now();
 	}
 	board_drop();
 	/* the size itself; the rows' thread reads it while it draws a row */
@@ -5066,7 +5150,9 @@ static double board_ms(void) {
 	}
 	slow = read;
 #endif
-	return (double)(uint32_t)(zmc_now_ms() - bd.start) / slow;
+	/* at the app's pages' speed; off: far past its end */
+	double rate = zt_anim_rate(&zanim, zmc_page_anim);
+	return rate > 0 ? (double)(uint32_t)(zmc_now_ms() - bd.start) * rate / slow : 1e9;
 }
 
 void zmc_board_close(void) {
@@ -5587,8 +5673,8 @@ double zmc_choice(cairo_t *cr, double y, const char *title, const char *value, i
  * the chosen value, the other options sliding out from behind it as the box
  * turns from an outline into the white edit background and the chosen one
  * takes the accent colour; it closes the same way backwards. */
-#define PICKER_OPEN_MS	250
-#define PICKER_CLOSE_MS	200
+#define PICKER_OPEN_MS	zt_anim_wait_ms(&zanim, zmc_page_anim, 250)	/* (the app's pages' speed) */
+#define PICKER_CLOSE_MS	zt_anim_wait_ms(&zanim, zmc_page_anim, 200)
 double zmc_picker(cairo_t *cr, double y, const char *caption, const char *const *options,
 		int count, int selected, bool open, int action) {
 	static int moving;		/* the picker that is open, opening or closing */

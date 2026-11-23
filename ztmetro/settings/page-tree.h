@@ -104,7 +104,7 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_AOD] = PAGE_DISPLAY,
 	[PAGE_DESKTOP] = PAGE_DISPLAY,
 	[PAGE_WALLS] = PAGE_TILES,	/* or Lock Screen: see page_parent */
-	[PAGE_ANIMATION] = PAGE_THEME,
+	[PAGE_ANIMATION] = PAGE_DISPLAY,
 	[PAGE_STYLE] = PAGE_THEME,
 	[PAGE_NAVIGATION] = PAGE_THEME,
 	[PAGE_BOOST] = PAGE_POWER,
@@ -144,6 +144,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "accents", PAGE_ACCENTS },
 	{ "wallpapers", PAGE_WALLS },
 	{ "animation", PAGE_ANIMATION },
+	{ "animations", PAGE_ANIMATION },
 	{ "style", PAGE_STYLE },
 	{ "tiles", PAGE_TILES },
 	{ "lock", PAGE_LOCK },

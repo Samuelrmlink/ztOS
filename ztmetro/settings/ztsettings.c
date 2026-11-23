@@ -47,6 +47,7 @@
 
 #include "zrnmetrocore.h"
 #include "zrnboard.h"
+#include "zt-anim.h"	/* the animation speeds, as the shell and every app read them (8.66) */
 #include "zt-clock.h"
 #include "../clock-theme-ids.h"
 #include "../background-apps.h"
@@ -149,7 +150,10 @@ enum action {
 	ACT_TICKLE_SAVER,
 	ACT_DEV_DEMO_TILES,
 	ACT_DEV_SLOW,
-	ACT_DEV_MENU_SPEED,
+	ACT_ANIM_GLOBAL,	/* the master speed: a picker of ZT_ANIM_STEPS */
+	ACT_ANIM_KIND,		/* then one picker for each kind (zt-anim.h) */
+	ACT_ANIM_KIND_LAST = ACT_ANIM_KIND + ZT_ANIM_N - 1,
+	ACT_ANIM_RESET,
 	ACT_DEV_TOUCHES,
 	ACT_DEV_LOCK,
 	ACT_AOD,		/* the always-on display: on or off */
@@ -291,7 +295,8 @@ static struct {
 	char tickle_now[96];	/* what zrnperfd says it is doing */
 	bool sleepd_on;		/* the SoC-sleep helper (zrn-sleepd) is switched on */
 	char sleep_status[160];	/* the live line from `zrn-sleepd status` */
-	bool dev_demo_tiles, dev_slow, dev_touches, dev_lock;
+	bool dev_demo_tiles, dev_touches, dev_lock;
+	struct zt_anim_cfg anim;	/* every kind's speed, the master and slow motion */
 	bool aod, aod_charging;	/* the always-on display ("aod": off, on, charging) */
 	bool clock_24h;		/* "clock_24h": on, or off for 12-hour time (core/zt-clock.h) */
 	bool aod_auto;		/* "aod_auto_brightness": the AOD's level from the room */
@@ -305,7 +310,6 @@ static struct {
 	int lock_awake;		/* "lock_awake": 0 off, 1 on, 2 always (config only) */
 	bool burnin_shift;	/* "burn_in_shift": the shell's burn-in.h */
 	bool about_show_repo;
-	int menu_speed_idx;	/* the UI's animation speed: an index into menu_speeds */
 	int haptic_strength;	/* percent */
 	bool force_press;	/* a hard press at the bottom centre is Start */
 	int force_ms;		/* how long it vibrates; 0 not at all */
@@ -353,7 +357,6 @@ static struct {
 	.perf_profile = 1,
 	.perf_deepsleep = true,
 	.wifi_powersave = true,
-	.menu_speed_idx = 1,
 	.tickle = { 2, 1, 3 },
 	.dev_lock = true,
 };
@@ -396,9 +399,6 @@ static const char *timeout_text(char *out, size_t size, int seconds) {
 	return out;
 }
 
-/* The whole UI's animation speed, percent of what was measured on the Lumia */
-static const int menu_speeds[] = { 50, 75, 100, 125, 150, 200 };
-#define N_MENU_SPEEDS 6
 
 static void perf_load(void);
 static void auto_load(void);
@@ -435,6 +435,7 @@ static void config_load(void) {
 	app.lock_awake = 1;
 	app.burnin_shift = true;
 	app.android_bt_remove_bond = true;
+	zt_anim_defaults(&app.anim);
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
@@ -519,13 +520,8 @@ static void config_load(void) {
 			app.brightness = atoi(val);
 		} else if (strcmp(key, "demo_tiles") == 0) {
 			app.dev_demo_tiles = strcmp(val, "on") == 0;
-		} else if (strcmp(key, "slow_motion") == 0) {
-			app.dev_slow = strcmp(val, "on") == 0;
-		} else if (strcmp(key, "menu_speed") == 0) {
-			app.menu_speed_idx = 1;
-			for (int i = 0; i < N_MENU_SPEEDS; i++) {
-				if (menu_speeds[i] == atoi(val)) app.menu_speed_idx = i;
-			}
+		} else if (zt_anim_config_line(&app.anim, key, val)) {
+			/* anim_global, anim_<kind>, slow_motion; an old menu_speed is the master */
 		} else if (strcmp(key, "show_touches") == 0) {
 			app.dev_touches = strcmp(val, "on") == 0;
 		} else if (strcmp(key, "lock") == 0) {
@@ -751,7 +747,7 @@ static void auto_load(void) {
 /* Every key Settings can write, as it would write it now. */
 /* room, not a count (config_n is the count): an exact number fell behind twice
  * as settings were added, and config_save dropped the last keys (the LEDs) */
-enum { N_CONFIG_KEYS = 64 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };
+enum { N_CONFIG_KEYS = 64 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS + 2 + ZT_ANIM_N };
 static struct config_key config_keys[N_CONFIG_KEYS];
 static int config_n;	/* how many config_format filled in: N_CONFIG_KEYS is only the room */
 
@@ -760,6 +756,23 @@ static struct config_key *config_key_named(const char *name) {
 		if (strcmp(config_keys[i].key, name) == 0) return &config_keys[i];
 	}
 	return NULL;
+}
+
+/* A speed as the config says it: "off", or per cent. */
+static const char *anim_value(int percent) {
+	static char buf[4][12];
+	static int at;
+	if (percent <= 0) return "off";
+	char *b = buf[at++ % 4];
+	snprintf(b, sizeof(buf[0]), "%d", percent);
+	return b;
+}
+
+/* anim_<kind>: the key's name, kept (config_keys holds the pointer). */
+static const char *anim_key(int kind) {
+	static char names[ZT_ANIM_N][40];
+	if (!names[kind][0]) snprintf(names[kind], sizeof(names[kind]), "anim_%s", ZT_ANIM_INFO[kind].key);
+	return names[kind];
 }
 
 static void config_format(void) {
@@ -780,10 +793,15 @@ static void config_format(void) {
 	KEY("brightness", "%d", app.brightness);
 	KEY("timeout", "%d", TIMEOUT_SECONDS[app.timeout_idx]);
 	KEY("demo_tiles", "%s", app.dev_demo_tiles ? "on" : "off");
-	KEY("slow_motion", "%s", app.dev_slow ? "on" : "off");
+	KEY("slow_motion", "%s", app.anim.slow ? "on" : "off");
 	KEY("show_touches", "%s", app.dev_touches ? "on" : "off");
 	KEY("lock", "%s", app.dev_lock ? "on" : "off");
-	KEY("menu_speed", "%d", menu_speeds[app.menu_speed_idx]);
+	/* the speeds (zt-anim.h): per cent or off. menu_speed is the master
+	 * again for an older shell or SDK app, which knew only that (off: as
+	 * fast as it went) */
+	KEY("anim_global", "%s", anim_value(app.anim.global));
+	KEY("menu_speed", "%d", app.anim.global <= 0 ? 300 : app.anim.global);
+	for (int k = 0; k < ZT_ANIM_N; k++) KEY(anim_key(k), "%s", anim_value(app.anim.kind[k]));
 	KEY("haptic_strength", "%d", app.haptic_strength);
 	KEY("force_press", "%s", app.force_press ? "on" : "off");
 	KEY("force_press_vibration", "%d", app.force_ms);
@@ -887,6 +905,32 @@ static void config_save(void) {
  * the shell reload everything (tiles, textures) before it drew another frame,
  * and a tapped slider's thumb waited behind that while the screen had already
  * changed. Any other key changed with it still gets the SIGHUP. */
+/* An animation speed changed: the file is written, and the shell reads the
+ * speeds alone again ("anim-reload" on its control pipe) instead of a SIGHUP
+ * and the whole reload for each step. Apps read them at their next turn or
+ * touch; this one has them already. Any other key changed with them still
+ * gets the SIGHUP. */
+static bool anim_key_name(const char *k) {
+	return !strncmp(k, "anim_", 5) || !strcmp(k, "menu_speed") || !strcmp(k, "slow_motion");
+}
+
+static void config_save_anim(void) {
+	config_format();
+	bool only = config_keys_changed(config_keys, config_n) > 0;
+	for (int i = 0; i < config_n; i++) {
+		if (config_keys[i].key && config_key_changed(&config_keys[i]) && !anim_key_name(config_keys[i].key)) {
+			only = false;
+		}
+	}
+	config_no_hup = only;
+	config_save();
+	config_no_hup = false;
+	if (only) {
+		char ctl[256];
+		pipe_tell(runtime_file(ctl, sizeof(ctl), "ztmetro.ctl"), "anim-reload\n");
+	}
+}
+
 static void config_save_brightness(void) {
 	config_format();
 	config_no_hup = config_only_changed(config_keys, config_n, "brightness");
@@ -2056,8 +2100,6 @@ static double draw_theme(cairo_t *cr) {
 		y += 22;
 		y = zmc_switch(cr, y, "Frosted diffusion", app.frost, ACT_FROST);
 	}
-	snprintf(detail, sizeof(detail), "%d %%%s", menu_speeds[app.menu_speed_idx], app.dev_slow ? ", slow motion" : "");
-	y = zmc_entry(cr, y, "animation speeds", detail, ACT_OPEN_PAGE, PAGE_ANIMATION);
 	y += 4;
 	static const char *const styles[] = { "Metro", "DotMatrix" };
 	y = zmc_entry(cr, y, "shell style", styles[app.style], ACT_OPEN_PAGE, PAGE_STYLE);
@@ -2307,6 +2349,25 @@ static void display_tick(void) {
 	}
 }
 
+/* The animations line on the display page: "Off", "0.75x", "0.75x, 2 off". */
+static void anim_summary(char *out, size_t size) {
+	if (app.anim.global <= 0) {
+		snprintf(out, size, "Off%s", app.anim.slow ? ", slow motion" : "");
+		return;
+	}
+	int off = 0, changed = 0;
+	for (int k = 0; k < ZT_ANIM_N; k++) {
+		off += app.anim.kind[k] <= 0;
+		changed += app.anim.kind[k] > 0 && app.anim.kind[k] != ZT_ANIM_KIND_DEFAULT;
+	}
+	char name[24];
+	snprintf(name, sizeof(name), "%s", zt_anim_step_name(app.anim.global));
+	char *paren = strchr(name, ' ');
+	if (paren) *paren = 0;	/* "0.25x (slowest)": the speed alone */
+	snprintf(out, size, "%s%s%.0d%s%s%.0d%s%s", name, off ? ", " : "", off, off ? " off" : "",
+		changed ? ", " : "", changed, changed ? " changed" : "", app.anim.slow ? ", slow motion" : "");
+}
+
 static double draw_display(cairo_t *cr) {
 	auto_load();
 	double y = zmc_header(cr, "display");
@@ -2341,6 +2402,11 @@ static double draw_display(cairo_t *cr) {
 		snprintf(detail, sizeof(detail), "%s, %s", !app.aod ? "Off" : app.aod_charging ?
 			"Only while charging" : "Always", clock_theme_name(app.aod_theme));
 		y = zmc_entry(cr, y, "always-on display", detail, ACT_OPEN_PAGE, PAGE_AOD);
+	}
+	{
+		char detail[96];
+		anim_summary(detail, sizeof(detail));
+		y = zmc_entry(cr, y, "animations", detail, ACT_OPEN_PAGE, PAGE_ANIMATION);
 	}
 	/* XFCE on a monitor, beside the phone (ztmetro/desktop) */
 	y = zmc_entry(cr, y, "desktop mode", desktop_page_summary(), ACT_OPEN_PAGE, PAGE_DESKTOP);
@@ -2714,7 +2780,9 @@ static void bt_tick(void);
 
 static void bt_anim_tick(void) {
 	uint32_t now = zmc_now_ms();
-	double k = 1.0 - exp(-(double)(now - bt_anim_last) / BT_SLIDE_TAU_MS);
+	/* (at Settings' pages' speed; off: there at once) */
+	double tau = zmc_anim_ms(ZT_ANIM_SETTINGS_PAGES, (int)BT_SLIDE_TAU_MS);
+	double k = tau > 0 ? 1.0 - exp(-(double)(now - bt_anim_last) / tau) : 1.0;
 	bt_anim_last = now;
 	bool moving = false;
 	for (int i = 0; i < bt.n; i++) {
@@ -3816,14 +3884,38 @@ static double draw_perf(cairo_t *cr) {
 	return y + 20;
 }
 
-/* The shell's motion (Start, the lock screen, the action centre) and each app's
- * opening. Pages turning inside an app keep their own time. */
+/* Every animation of the shell and the Metro apps, by kind (core/zt-anim.h,
+ * ANIMATIONS.md): a speed from 0.25x to 3x, or Off, and a master over them.
+ * A change is in the shell at once (config_save_anim) and in each app at its
+ * next turn or touch. */
+static double anim_grey_line(cairo_t *cr, double y, const char *text) {
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	y += zmc_text(cr, text, FONT_REGULAR, 12.5, MARGIN, y - 6, zmc.width - 2 * MARGIN) + 10;
+	zmc_fg(cr);
+	return y;
+}
+
 static double draw_animation(cairo_t *cr) {
-	double y = zmc_header(cr, "animation speeds");
-	static const char *const speeds[] = { "50 % (slow)", "75 %", "100 % (as on a Lumia)", "125 %",
-		"150 %", "200 % (fast)" };
-	y = picker(cr, y, "Animation speed", speeds, N_MENU_SPEEDS, app.menu_speed_idx, ACT_DEV_MENU_SPEED);
-	y = zmc_switch(cr, y, "Slow motion (5x)", app.dev_slow, ACT_DEV_SLOW);
+	double y = zmc_header(cr, "animations");
+	y = picker(cr, y, "All animations", ZT_ANIM_STEP_NAMES, ZT_ANIM_N_STEPS,
+		zt_anim_step_index(app.anim.global), ACT_ANIM_GLOBAL);
+	y = anim_grey_line(cr, y, app.anim.global <= 0 ?
+		"Off: everything is there at once, with no motion at all." :
+		"Each kind below runs at its own speed times this one. 0.75x is ztOS's usual pace.");
+	for (int g = 0; g < ZT_ANIM_G_N; g++) {
+		zmc_fg(cr);
+		zmc_text(cr, ZT_ANIM_GROUPS[g], FONT_SEMILIGHT, 24, MARGIN, y + 6, 0);
+		y += 46;
+		for (int k = 0; k < ZT_ANIM_N; k++) {
+			if (ZT_ANIM_INFO[k].group != g) continue;
+			y = picker(cr, y, ZT_ANIM_INFO[k].name, ZT_ANIM_STEP_NAMES, ZT_ANIM_N_STEPS,
+				zt_anim_step_index(app.anim.kind[k]), ACT_ANIM_KIND + k);
+			y = anim_grey_line(cr, y, ZT_ANIM_INFO[k].detail);
+		}
+	}
+	y += 6;
+	y = zmc_entry(cr, y, "reset to defaults", "Every kind at 1x, all animations at 0.75x", ACT_ANIM_RESET, 0);
+	y = zmc_switch(cr, y, "Slow motion (5x, for checking motion)", app.anim.slow, ACT_DEV_SLOW);
 	return y + 20;
 }
 
@@ -4137,11 +4229,12 @@ static bool is_picker(int action) {
 	case ACT_PERF_PROFILE: case ACT_IB_MODE: case ACT_IB_ENGINE:
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
-	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
+	case ACT_ANIM_GLOBAL: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
 	case ACT_AOD_MODE: case ACT_LOCK_TIMEOUT: case ACT_AOD_IMAGE_STRENGTH:
 		return true;
 	}
 	return (action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST) ||
+		(action >= ACT_ANIM_KIND && action <= ACT_ANIM_KIND_LAST) ||
 		(action >= ACT_APP_SCALE_SLOT && action <= ACT_APP_SCALE_LAST);
 }
 
@@ -4194,6 +4287,13 @@ static void activate(int action, int arg) {
 		if (i < app_scale_count && arg >= 0 && arg < APP_SCALE_N) {
 			app_scale[i].choice = arg;
 			app_scale_save();
+		}
+		return;
+	}
+	if (action >= ACT_ANIM_KIND && action <= ACT_ANIM_KIND_LAST) {
+		if (arg >= 0 && arg < ZT_ANIM_N_STEPS) {
+			app.anim.kind[action - ACT_ANIM_KIND] = ZT_ANIM_STEPS[arg];
+			config_save_anim();
 		}
 		return;
 	}
@@ -4657,13 +4757,23 @@ static void activate(int action, int arg) {
 		app.dev_demo_tiles = !app.dev_demo_tiles;
 		config_save();
 		break;
-	case ACT_DEV_MENU_SPEED:
-		app.menu_speed_idx = arg;
-		config_save();
+	case ACT_ANIM_GLOBAL:
+		if (arg >= 0 && arg < ZT_ANIM_N_STEPS) {
+			app.anim.global = ZT_ANIM_STEPS[arg];
+			app.anim.global_set = true;
+			config_save_anim();
+		}
 		break;
+	case ACT_ANIM_RESET: {
+		bool slow = app.anim.slow;
+		zt_anim_defaults(&app.anim);
+		app.anim.slow = slow;	/* (a developer's switch: not a speed) */
+		config_save_anim();
+		break;
+	}
 	case ACT_DEV_SLOW:
-		app.dev_slow = !app.dev_slow;
-		config_save();
+		app.anim.slow = !app.anim.slow;
+		config_save_anim();
 		break;
 	case ACT_DEV_TOUCHES:
 		app.dev_touches = !app.dev_touches;
@@ -5180,7 +5290,11 @@ static void go_to_outside_page(void) {
 	bt_animating = false;
 	zmc_keyboard(false);
 	page_prepare(page);
+	/* asked for from outside (a quick tile held, search, another app): the
+	 * Settings link's speed, not the pages' (Settings > animations) */
+	zmc_next_anim = ZT_ANIM_SETTINGS_LINK;
 	zmc_go(page, 1);
+	zmc_next_anim = -1;	/* (zmc_go may not have turned: the page was in front) */
 }
 
 static void arrived(int page) {
@@ -5402,6 +5516,7 @@ int main(int argc, char **argv) {
 		return 2;
 	}
 	int first = argc == 2 ? page_named(argv[1]) : PAGE_MAIN;
+	zmc_page_anim = ZT_ANIM_SETTINGS_PAGES;	/* its own pages' speed, apart from other apps' */
 	page_prepare(first);	/* (back goes through a page's list) */
 	if (first == PAGE_WIFI) wifi_load();	/* (once running, arrived() asks in the background) */
 	instance_listen();

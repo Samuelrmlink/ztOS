@@ -481,8 +481,8 @@ cannot be brought back without a reboot** (`CPUn: failed to come online`).
 
 **Settings**: Wi-Fi is asked of NetworkManager in the background with the
 loading dots running. *developer* has demo tiles on Start and show touches
-(config keys `demo_tiles`, `show_touches`); slow motion x5 and the animation
-speed are under customization > animation speeds (`slow_motion`, `menu_speed`),
+(config keys `demo_tiles`, `show_touches`); every animation's speed, or Off, with
+a master speed and slow motion x5, is under display > animations (`anim_global`, `anim_<kind>`, `slow_motion`; see `ztmetro/ANIMATIONS.md`),
 and lock on wake under customization > Lock Screen (`lock`).
 
 **Sound**: the speakers work, through `snd-zrn-abox` (see `audio/README.md`):

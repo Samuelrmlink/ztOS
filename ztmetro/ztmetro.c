@@ -29,6 +29,7 @@
 #define _GNU_SOURCE
 #include "core/zrnboard.h"
 #include "core/zt-clock.h"
+#include "core/zt-anim.h"	/* every animation's speed, or Off (8.66) */
 #include "passcoded/passcode-proto.h"
 #ifdef HAVE_ZTOS_IAL
 #include <ztos-ial.h>
@@ -984,8 +985,13 @@ struct zt_server {
 	struct wl_event_source *peek_timer;
 	/* developer switches, from the config */
 	bool demo_tiles;		/* stand-in tiles on Start, for trying its motion */
-	bool slow_motion;		/* every animation five times as long */
-	int menu_speed;			/* the whole UI's motion, percent of normal speed */
+	/* each kind of motion's speed and the master over them, slow motion
+	 * with them (core/zt-anim.h; Settings > animations) */
+	struct zt_anim_cfg anim;
+	/* a launch into a Settings page (a quick tile held, search, a link):
+	 * its way in is ZT_ANIM_SETTINGS_LINK's, not an app opening's, until
+	 * Settings is shown or another launch comes; 0 when none */
+	uint32_t settings_link_ms;
 	bool show_touches;
 	bool lock_enabled;
 	bool clock_24h;		/* config clock_24h: "21:41", or off: "9:41 PM" (core/zt-clock.h) */
@@ -1889,11 +1895,41 @@ static void damage(struct zt_server *server) {
 	}
 }
 
-/* A length of the UI's motion at the speed the user set in Settings
- * ("Animation speed"): it is the whole UI's, Start's and every app's. */
-static uint32_t menu_ms(struct zt_server *server, uint32_t ms) {
-	return ms * 100 / (uint32_t)(server->menu_speed > 0 ? server->menu_speed : 100);
+/* A length of one kind of motion at the speed set for it in Settings (and
+ * the master speed, and slow motion): 0 when that kind is off. Every
+ * duration the shell animates or waits for goes through this. */
+static uint32_t anim_ms(struct zt_server *server, int kind, uint32_t ms) {
+	return zt_anim_ms(&server->anim, kind, ms);
 }
+
+/* A timer waiting for such a motion: 1 ms when it is off (0 disarms a timer). */
+static uint32_t anim_wait(struct zt_server *server, int kind, uint32_t ms) {
+	return zt_anim_wait_ms(&server->anim, kind, ms);
+}
+
+static bool anim_off(struct zt_server *server, int kind) {
+	return zt_anim_off(&server->anim, kind);
+}
+
+/* `dt` ms of a motion stepped by the clock (a spring, a glide), at its
+ * kind's speed. Off: a long step, so that it lands where it was going in
+ * this one frame. */
+#define ANIM_OFF_DT	10000.0f
+static float anim_dt(struct zt_server *server, int kind, float dt) {
+	double rate = zt_anim_rate(&server->anim, kind);
+	return rate > 0 ? (float)(dt * rate) : ANIM_OFF_DT;
+}
+
+/* Time since `since` on a kind's clock (ms): stretched or shrunk as it is
+ * set; far past any end when it is off. */
+static double anim_elapsed(struct zt_server *server, int kind, uint32_t since) {
+	double rate = zt_anim_rate(&server->anim, kind);
+	double real = (double)(uint32_t)(now_ms() - since);
+	return rate > 0 ? real * rate : 1e9;
+}
+
+/* animate()'s kind for what keeps its written time exactly: a 1 ms snap */
+#define ANIM_EXACT	(-1)
 
 static void perf_tell(const char *command);
 #define MOTION_TAIL_MS	250
@@ -2006,8 +2042,16 @@ static float wp_g(float t, float b) {
 static float wp_log(float t, float w) { return wp_g(t, 1.0f / w); }
 static float wp_exp(float t, float w) { return wp_g(t, w); }
 
-static void animate(struct zt_server *server, float *value, float to, uint32_t duration,
+static void anim_stop(struct zt_server *server, float *value);
+static void animate(struct zt_server *server, int kind, float *value, float to, uint32_t duration,
 		uint32_t delay, bool linear) {
+	if (kind >= 0 && anim_off(server, kind)) {
+		/* off: there at once, no frames, and nothing left to wait for */
+		anim_stop(server, value);
+		*value = to;
+		damage(server);
+		return;
+	}
 	struct zt_anim *slot = NULL, *running = NULL, *free_slot = NULL;
 	for (int i = 0; i < MAX_ANIMS; i++) {
 		struct zt_anim *a = &server->anims[i];
@@ -2023,11 +2067,11 @@ static void animate(struct zt_server *server, float *value, float to, uint32_t d
 		damage(server);
 		return;
 	}
-	duration = menu_ms(server, duration);
-	delay = menu_ms(server, delay);
-	if (server->slow_motion && duration > 1) {
-		duration *= 5;
-		delay *= 5;
+	if (kind >= 0 && duration > 1) {
+		duration = anim_ms(server, kind, duration);
+		delay = anim_ms(server, kind, delay);
+	} else if (kind >= 0) {
+		delay = anim_ms(server, kind, delay);	/* (a 1 ms snap stays one) */
 	}
 	*slot = (struct zt_anim){
 		.active = true, .value = value, .from = *value, .to = to,
@@ -2040,9 +2084,9 @@ static void animate(struct zt_server *server, float *value, float to, uint32_t d
 
 /* Like animate(), but the value overshoots the target by `overshoot` of the
  * travel and settles: the live-tile notify flip's rock-back. */
-static void animate_spring(struct zt_server *server, float *value, float to,
+static void animate_spring(struct zt_server *server, int kind, float *value, float to,
 		uint32_t duration, float overshoot) {
-	animate(server, value, to, duration, 0, false);
+	animate(server, kind, value, to, duration, 0, false);
 	for (int i = 0; i < MAX_ANIMS; i++) {
 		if (server->anims[i].active && server->anims[i].value == value) {
 			server->anims[i].overshoot = overshoot;
@@ -2054,9 +2098,9 @@ static void animate_spring(struct zt_server *server, float *value, float to,
 /* Like animate(), on the ease-out curve played backwards in time: what an
  * eased arrival looks like run in reverse (an app closing is its opening
  * backwards, the owner, 2026-11-21). */
-static void animate_rev(struct zt_server *server, float *value, float to, uint32_t duration,
+static void animate_rev(struct zt_server *server, int kind, float *value, float to, uint32_t duration,
 		uint32_t delay) {
-	animate(server, value, to, duration, delay, false);
+	animate(server, kind, value, to, duration, delay, false);
 	for (int i = 0; i < MAX_ANIMS; i++) {
 		struct zt_anim *a = &server->anims[i];
 		if (a->active && a->value == value && a->to == to) {
@@ -2068,9 +2112,9 @@ static void animate_rev(struct zt_server *server, float *value, float to, uint32
 /* Use a timestamp shared with a client. animate() scales relative delays by
  * the menu speed, so passing an already scaled wall-clock delay through it
  * would postpone the reveal a second time. */
-static void animate_at(struct zt_server *server, float *value, float to,
+static void animate_at(struct zt_server *server, int kind, float *value, float to,
 		uint32_t duration, uint32_t at, bool linear) {
-	animate(server, value, to, duration, 0, linear);
+	animate(server, kind, value, to, duration, 0, linear);
 	for (int i = 0; i < MAX_ANIMS; i++) {
 		if (server->anims[i].active && server->anims[i].value == value) {
 			server->anims[i].start = at;
@@ -2081,9 +2125,9 @@ static void animate_at(struct zt_server *server, float *value, float to,
 
 /* Like animate(), on Windows Phone's Log(weight) curve: fast, then slower
  * and slower to a standstill (uixrender.dll; Log 10 lifts a pressed tile) */
-static void animate_wplog(struct zt_server *server, float *value, float to, uint32_t duration,
+static void animate_wplog(struct zt_server *server, int kind, float *value, float to, uint32_t duration,
 		uint32_t delay, float weight) {
-	animate(server, value, to, duration, delay, false);
+	animate(server, kind, value, to, duration, delay, false);
 	for (int i = 0; i < MAX_ANIMS; i++) {
 		if (server->anims[i].active && server->anims[i].value == value) {
 			server->anims[i].wplog = weight;
@@ -3362,7 +3406,8 @@ static void app_ready(struct zt_server *server, struct zt_toplevel *toplevel) {
  * just above, on the launch's clock (an SDK app's first frame carries them on
  * from the same place, in the same step). Each frame asks for the next. */
 static float start_out_ms(struct zt_server *server);
-static uint32_t menu_ms(struct zt_server *server, uint32_t ms);
+static uint32_t anim_ms(struct zt_server *server, int kind, uint32_t ms);
+static int open_kind(struct zt_server *server);
 static void set_rgb(cairo_t *cr, uint32_t color);
 static bool shell_light(struct zt_server *server);
 static void draw_text(cairo_t *cr, const char *text, const char *font, double size,
@@ -3425,7 +3470,7 @@ static void draw_loading(struct zt_server *server) {
 		return;
 	}
 	uint32_t since = now - server->loading_since;
-	uint32_t gone = menu_ms(server, (uint32_t)start_out_ms(server) + TURN_GAP_MS) + 150;
+	uint32_t gone = anim_ms(server, open_kind(server), (uint32_t)start_out_ms(server) + TURN_GAP_MS) + 150;
 	if (since > gone && !server->shown && server->start_t < 0.5f) {
 		/* given up on, or Start has come back after leaving: no more frames for it */
 		server->loading_since = 0;
@@ -4920,7 +4965,7 @@ static void load_config(struct zt_server *server) {
 	server->shade_scale = 0.95f;
 	server->shade_dim = 0.6f;
 	server->recede = 1.0f;
-	server->menu_speed = 75;
+	zt_anim_defaults(&server->anim);
 	server->key_height = DEFAULT_KEY_HEIGHT;
 	server->key_sound = true;
 	server->ring_volume = 21;
@@ -5098,13 +5143,8 @@ static void load_config(struct zt_server *server) {
 			server->lock_timeout = t < 0 ? 0 : t;
 		} else if (strcmp(key, "demo_tiles") == 0) {
 			server->demo_tiles = strcmp(value, "on") == 0;
-		} else if (strcmp(key, "slow_motion") == 0) {
-			server->slow_motion = strcmp(value, "on") == 0;
-		} else if (strcmp(key, "menu_speed") == 0) {
-			/* Start's tiles leaving and coming back, and the black beside
-			 * them: 100 is as measured on the Lumia, 50 half as fast */
-			int speed = atoi(value);
-			server->menu_speed = speed < 25 ? 25 : speed > 300 ? 300 : speed;
+		} else if (zt_anim_config_line(&server->anim, key, value)) {
+			/* anim_global, anim_<kind>, slow_motion and the old menu_speed */
 		} else if (strcmp(key, "show_touches") == 0) {
 			server->show_touches = strcmp(value, "on") == 0;
 		} else if (strcmp(key, "rotation") == 0) {
@@ -6303,7 +6343,7 @@ static void tile_signal_clear(struct zt_server *server, int i) {
 	t->live_badge[0] = t->live_image[0] = t->live_value[0] = 0;
 	t->live_progress = -1;
 	if (t->flip > 1.0f) {
-		animate(server, &t->flip, 0.0f, 500, 0, false);	/* back to its front */
+		animate(server, ZT_ANIM_LIVE_TILES, &t->flip, 0.0f, 500, 0, false);	/* back to its front */
 	}
 	if (server->width > 0 && !retro_on(server)) {
 		draw_tile(server, i);
@@ -6701,7 +6741,7 @@ static void tile_flip_to(struct zt_server *server, struct tile *t, bool to_back)
 	}
 	/* the Windows Phone live-tile notify flip: the face turns in and rocks
 	 * back a little (NotificationCycleShow overshoots -180 -> 35 -> -6 -> 0) */
-	animate_spring(server, &t->flip, to_back ? 180.0f : 0.0f, 520, 0.08f);
+	animate_spring(server, ZT_ANIM_LIVE_TILES, &t->flip, to_back ? 180.0f : 0.0f, 520, 0.08f);
 	/* the back stays up a while to be read; the front a random while */
 	t->next_flip_ms = now + (to_back ? 5000 + (uint32_t)(rand() % 3000) :
 		4000 + (uint32_t)(rand() % 6000));
@@ -7071,7 +7111,7 @@ static void board_go(struct zt_server *server, int i);
 static void board_close(struct zt_server *server) {
 	if (server->board_state == 1 || server->board_state == 2) {
 		/* closed on its way in: each tile goes from the angle it has */
-		server->board_came_ms = server->board_state == 1 ? (uint32_t)(now_ms() - server->board_start) : HUGE_VAL;
+		server->board_came_ms = server->board_state == 1 ? (uint32_t)anim_elapsed(server, ZT_ANIM_START, server->board_start) : HUGE_VAL;
 		server->board_state = 3;
 		motion_lease(now_ms() + (uint32_t)(zb_delay(ZB_CELLS - 1) + ZB_RB_OUT_MS));
 		server->board_start = now_ms();
@@ -7117,7 +7157,7 @@ static void board_tap(struct zt_server *server, double x, double y) {
 	}
 	if (server->board_state == 1 &&
 			(server->board_clock_waits ||
-			(uint32_t)(now_ms() - server->board_start) < zb_delay(i) + ZB_TAP_READY_MS)) {
+			(uint32_t)anim_elapsed(server, ZT_ANIM_START, server->board_start) < zb_delay(i) + ZB_TAP_READY_MS)) {
 		return;	/* not where it looks yet: a double tap must not choose */
 	}
 	board_go(server, i);
@@ -7551,13 +7591,16 @@ static bool physics_step(struct zt_server *server, uint32_t now) {
 		dt = 16;	/* the first step after a rest */
 	}
 	bool moving = false;
+	/* each motion on its own kind's clock (8.66): off, it lands in one step */
+	float real_dt = dt, dt_scroll = anim_dt(server, ZT_ANIM_SCROLL, dt),
+		dt_start = anim_dt(server, ZT_ANIM_START, dt);
 	for (int list = 0; list < 2; list++) {
 		double *pos = list ? &server->list_scroll : &server->scroll, max = scroll_max(server, list);
 		float *v = list ? &server->list_v : &server->scroll_v;
 		if (scroll_held(server, list) || (*v == 0 && *pos >= 0 && *pos <= max)) {
 			continue;
 		}
-		moving |= scroll_step(pos, v, max, dt);
+		moving |= scroll_step(pos, v, max, dt_scroll);
 	}
 	if (moving) {
 		/* a glide after the finger let go outlasts zrnperfd's touch boost
@@ -7568,15 +7611,15 @@ static bool physics_step(struct zt_server *server, uint32_t now) {
 	if (!note_held(server) && (server->note_v != 0 || server->note_scroll < 0 ||
 			server->note_scroll > server->note_max)) {
 		/* the action centre's list let go: the same glide and spring */
-		moving |= scroll_step(&server->note_scroll, &server->note_v, server->note_max, dt);
+		moving |= scroll_step(&server->note_scroll, &server->note_v, server->note_max, dt_scroll);
 	}
-	moving |= note_swipe_physics(server, dt);
+	moving |= note_swipe_physics(server, anim_dt(server, ZT_ANIM_SHADE, real_dt));
 	moving |= note_clear_physics(server);
 	if (server->switch_moving) {
 		/* the switcher's row let go: the same spring as the pages, from
 		 * the speed the finger left it with */
 		const float k = 0.014f;
-		for (float left = dt; left > 0; left -= 4) {
+		for (float left = anim_dt(server, ZT_ANIM_SWITCHER, real_dt); left > 0; left -= 4) {
 			float step = left > 4 ? 4 : left, before = server->switch_x - server->switch_to;
 			server->switch_v += (-k * k * before - 2 * k * server->switch_v) * step;
 			server->switch_x += server->switch_v * step;
@@ -7593,7 +7636,7 @@ static bool physics_step(struct zt_server *server, uint32_t now) {
 	if (server->cf_w_moving) {
 		/* the divider let go past an end: back to it, as the pages settle */
 		const float k = 0.018f;
-		for (float left = dt; left > 0; left -= 4) {
+		for (float left = dt_start; left > 0; left -= 4) {
 			float step = left > 4 ? 4 : left, before = server->cf_w - server->cf_w_to;
 			server->cf_w_v += (-k * k * before - 2 * k * server->cf_w_v) * step;
 			server->cf_w += server->cf_w_v * step;
@@ -7624,12 +7667,12 @@ static bool physics_step(struct zt_server *server, uint32_t now) {
 	if (server->cf_rail && !rail_held && (server->rail_v != 0 || server->rail_scroll < 0 ||
 			server->rail_scroll > rail_max(server))) {
 		/* the icon rail let go: the lists' glide and spring */
-		moving |= scroll_step(&server->rail_scroll, &server->rail_v, rail_max(server), dt);
+		moving |= scroll_step(&server->rail_scroll, &server->rail_v, rail_max(server), dt_scroll);
 	}
 	if (server->cf_moving) {
 		/* the cover-flow let go, or sent to a card: the same spring */
 		const float k = 0.014f;
-		for (float left = dt; left > 0; left -= 4) {
+		for (float left = dt_start; left > 0; left -= 4) {
 			float step = left > 4 ? 4 : left, before = server->cf_x - server->cf_to;
 			server->cf_v += (-k * k * before - 2 * k * server->cf_v) * step;
 			server->cf_x += server->cf_v * step;
@@ -7648,7 +7691,7 @@ static bool physics_step(struct zt_server *server, uint32_t now) {
 		 * finger's own speed, so nothing lurches as the finger leaves, and
 		 * never past where it is going */
 		const float k = 0.018f;
-		for (float left = dt; left > 0; left -= 4) {
+		for (float left = dt_start; left > 0; left -= 4) {
 			float step = left > 4 ? 4 : left, before = server->page - server->page_to;
 			server->page_v += (-k * k * before - 2 * k * server->page_v) * step;
 			server->page += server->page_v * step;
@@ -7663,7 +7706,7 @@ static bool physics_step(struct zt_server *server, uint32_t now) {
 		}
 		moving |= server->page_moving;
 	}
-	float keep = expf(-dt / 70.0f);
+	float keep = expf(-dt_start / 70.0f);
 	for (int i = 0; i < server->n_tiles; i++) {
 		struct tile *t = &server->tiles[i];
 		if (t->held || (t->off_x == 0 && t->off_y == 0)) {
@@ -8802,10 +8845,10 @@ static void peek_show(struct zt_server *server, bool show) {
 		server->peek = fmaxf(server->peek, 0.002f);
 		modem_read(server);
 		draw_status(server);
-		animate(server, &server->peek, 1.0f, 180, 0, false);
+		animate(server, ZT_ANIM_BARS, &server->peek, 1.0f, 180, 0, false);
 		wl_event_source_timer_update(server->peek_timer, 0);
 	} else {
-		animate(server, &server->peek, 0.0f, 220, 0, false);
+		animate(server, ZT_ANIM_BARS, &server->peek, 0.0f, 220, 0, false);
 	}
 }
 
@@ -9095,7 +9138,7 @@ static void draw_lock_clock_at(struct zt_server *server, time_t now);
 /* A frame of the flip clock's turn. */
 static int flip_frame(void *data) {
 	struct zt_server *server = data;
-	double t = (now_ms() - server->flip_start_ms) / (double)FLIP_MS;
+	double t = anim_elapsed(server, ZT_ANIM_LOCK, server->flip_start_ms) / (double)FLIP_MS;
 	server->flip_t = t >= 1 || !server->screen_on || !server->locked ? 1 : t;
 	draw_lock_clock_at(server, server->flip_last);
 	damage(server);
@@ -9187,11 +9230,11 @@ static void lock_lift_sync(struct zt_server *server, bool animated) {
 		return;
 	}
 	if (animated && server->screen_on && server->locked && server->lock_y > -1.0f) {
-		animate_wplog(server, &server->lock_lift, to, 300, 0, 8.0f);
+		animate_wplog(server, ZT_ANIM_LOCK, &server->lock_lift, to, 300, 0, 8.0f);
 	} else {
 		server->lock_lift = to;
 		if (animating(server, &server->lock_lift)) {
-			animate(server, &server->lock_lift, to, 1, 0, true);
+			animate(server, ZT_ANIM_LOCK, &server->lock_lift, to, 1, 0, true);
 		}
 	}
 }
@@ -9369,8 +9412,8 @@ static void lock(struct zt_server *server) {
 	apps_suspend_sync(server);
 	server->switcher = false;
 	server->switch_t = 0.0f;
-	animate(server, &server->switch_t, 0.0f, 1, 0, true);
-	animate(server, &server->lock_y, 0.0f, 1, 0, true);
+	animate(server, ANIM_EXACT, &server->switch_t, 0.0f, 1, 0, true);
+	animate(server, ANIM_EXACT, &server->lock_y, 0.0f, 1, 0, true);
 	server->lock_y = 0.0f;
 	server->pc_pad = false;
 	draw_lock(server);
@@ -10264,7 +10307,7 @@ static void shade_set_open(struct zt_server *server, bool open) {
 	if (!open) {
 		shade_edit_end(server);	/* closing ends an edit (each change is saved as made) */
 	}
-	animate(server, &server->shade_h, open ? (float)SHADE_MAX_H : 0.0f, SHADE_MS, 0, false);
+	animate(server, ZT_ANIM_SHADE, &server->shade_h, open ? (float)SHADE_MAX_H : 0.0f, SHADE_MS, 0, false);
 	server->shade_open = open;
 }
 
@@ -10397,7 +10440,7 @@ static void boot_logo_prepare(struct zt_server *server) {
 	server->boot_logo_since = 0;	/* from its first frame: a slow one must not eat the way in */
 	/* the logo and Start's tiles after it outlast the unlock swipe's touch boost */
 	char motion[32];
-	snprintf(motion, sizeof(motion), "motion %u\n", menu_ms(server, 2400) * (server->slow_motion ? 5 : 1));
+	snprintf(motion, sizeof(motion), "motion %u\n", anim_wait(server, ZT_ANIM_LOCK, 2400));
 	perf_tell(motion);
 	server->boot_logo_stage = 1;
 	server->boot_logo_done = true;
@@ -10923,12 +10966,12 @@ static void draw_sensorhub_fail(struct zt_server *server) {
 
 static void boot_anim_start(struct zt_server *server) {
 	/* 1. Hold the ztOS splash, then swipe up nav bar icons one by one from below */
-	animate(server, &server->nav_icon_y[0], 0.0f, 480, 700, false);
-	animate(server, &server->nav_icon_y[1], 0.0f, 480, 1050, false);
-	animate(server, &server->nav_icon_y[2], 0.0f, 480, 1400, false);
+	animate(server, ZT_ANIM_LOCK, &server->nav_icon_y[0], 0.0f, 480, 700, false);
+	animate(server, ZT_ANIM_LOCK, &server->nav_icon_y[1], 0.0f, 480, 1050, false);
+	animate(server, ZT_ANIM_LOCK, &server->nav_icon_y[2], 0.0f, 480, 1400, false);
 
 	/* 2. Pause to let the full nav bar settle, then gracefully drop the lockscreen from top */
-	animate(server, &server->lock_y, 0.0f, 750, 2200, false);
+	animate(server, ZT_ANIM_LOCK, &server->lock_y, 0.0f, 750, 2200, false);
 	damage(server);
 }
 
@@ -11408,7 +11451,7 @@ static double app_height(struct zt_server *server) {
 
 /* How far the app goes up while the keyboard is over it: enough for the box
  * being typed into to end above the keyboard, and no more. */
-static void animate(struct zt_server *server, float *value, float to, uint32_t duration,
+static void animate(struct zt_server *server, int kind, float *value, float to, uint32_t duration,
 		uint32_t delay, bool ease_in);
 static void osk_lift(struct zt_server *server) {
 	float lift = 0;
@@ -11421,7 +11464,7 @@ static void osk_lift(struct zt_server *server) {
 			lift = server->osk_h;
 		}
 	}
-	animate(server, &server->app_lift, lift, OSK_MS, 0, false);
+	animate(server, ZT_ANIM_KEYBOARD, &server->app_lift, lift, OSK_MS, 0, false);
 }
 
 /* Some apps will not go as narrow as the screen (a browser stops at 450
@@ -11571,7 +11614,7 @@ static void fs_sync(struct zt_server *server) {
 	float want = fs_on(server) && !server->fs_reveal ? 0.0f : 1.0f;
 	if (want != server->fs_want) {
 		server->fs_want = want;
-		animate(server, &server->fs_bars, want, 180, 0, false);
+		animate(server, ZT_ANIM_BARS, &server->fs_bars, want, 180, 0, false);
 	}
 }
 
@@ -11654,7 +11697,7 @@ static void osk_show(struct zt_server *server, bool visible) {
 		server->key_prefix[0] = 0;
 		osk_publish(server);
 	}
-	animate(server, &server->osk_slide, visible ? 1.0f : 0.0f, OSK_MS, 0, false);
+	animate(server, ZT_ANIM_KEYBOARD, &server->osk_slide, visible ? 1.0f : 0.0f, OSK_MS, 0, false);
 	if (!visible) {
 		server->osk_box_bottom = -1;
 		server->osk_app_resizes = false;
@@ -11844,7 +11887,20 @@ static float start_out_ms(struct zt_server *server) {
 		TILE_TAPPED_WAIT_MS + TILE_TAPPED_LIFE_MS;
 }
 
+/* How an app comes in now: as a launch into a Settings page (quick tile held,
+ * search, a link: ZT_ANIM_SETTINGS_LINK), or as any app opening. */
+#define SETTINGS_LINK_WAIT_MS	LAUNCH_WAIT_MS
+static int open_kind(struct zt_server *server) {
+	if (server->settings_link_ms && now_ms() - server->settings_link_ms < SETTINGS_LINK_WAIT_MS) {
+		return ZT_ANIM_SETTINGS_LINK;
+	}
+	return ZT_ANIM_APP_OPEN;
+}
+
+/* Start's tiles turning away (an app opening: open_kind's speed) or coming
+ * back (an app closing). */
 static void start_turn(struct zt_server *server, bool away, uint32_t delay) {
+	int kind = away ? open_kind(server) : ZT_ANIM_APP_CLOSE;
 	if (!away && !server->start_back) {
 		server->turn_seed = (uint32_t)rand();
 		for (int i = 0; i < server->n_tiles; i++) {
@@ -11862,7 +11918,7 @@ static void start_turn(struct zt_server *server, bool away, uint32_t delay) {
 		 * end: coming back, that tile is one of the others */
 		server->return_ms = server->out_ms - TILE_TAPPED_WAIT_MS - TILE_TAPPED_LIFE_MS;
 	}
-	animate(server, &server->start_t, away ? 1.0f : 0.0f,
+	animate(server, kind, &server->start_t, away ? 1.0f : 0.0f,
 		(uint32_t)(away ? server->out_ms : server->return_ms), delay, true);	/* animate() stretches it */
 }
 
@@ -11946,6 +12002,11 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
     bg_reload();
     if (toplevel) toplevel->background_hidden = false;
 	struct zt_toplevel *t, *previous = server->shown;
+	/* its way in: a Settings page's link, or any app opening (8.66) */
+	int way_in = open_kind(server);
+	if (toplevel && toplevel->xdg_toplevel->app_id && !strcmp(toplevel->xdg_toplevel->app_id, "ztsettings")) {
+		server->settings_link_ms = 0;	/* the link is used up as Settings comes in */
+	}
 	/* the phone coming to the front: what it covers is its call's backdrop */
 	if (toplevel && toplevel != previous && toplevel->xdg_toplevel->app_id &&
 			!strcmp(toplevel->xdg_toplevel->app_id, "ztphone")) {
@@ -12030,11 +12091,11 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 			 * 2026-11-21): the app swings back the way it came, over
 			 * APP_IN_MS on the time-reversed curve, the launch's gap,
 			 * then the tiles (start_turn, the launch's clock reversed) */
-			animate_rev(server, &server->app_angle, TURN_IN_DEG, APP_IN_MS, 0);
-			animate_rev(server, &server->app_alpha, 0.0f, APP_IN_MS, 0);
+			animate_rev(server, ZT_ANIM_APP_CLOSE, &server->app_angle, TURN_IN_DEG, APP_IN_MS, 0);
+			animate_rev(server, ZT_ANIM_APP_CLOSE, &server->app_alpha, 0.0f, APP_IN_MS, 0);
 			start_turn(server, false, APP_IN_MS + BACK_GAP_MS);	/* animate() stretches it */
 			home_flip_arm(server, previous,
-				APP_IN_MS + BACK_GAP_MS + (uint32_t)server->return_ms);
+				anim_ms(server, ZT_ANIM_APP_CLOSE, APP_IN_MS + BACK_GAP_MS + (uint32_t)server->return_ms));
 		} else {
 			/* it closed by itself: a moment of black, then Start */
 			server->leaving = NULL;
@@ -12064,12 +12125,12 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 		/* Native apps turn their own rows in, on the same clock as Start's
 		 * tiles turning away. The shell only uncovers the client at that time. */
 		uint32_t now = now_ms(), at = server->launch_ms +
-			menu_ms(server, (uint32_t)start_out_ms(server) + TURN_GAP_MS) * (server->slow_motion ? 5 : 1);
+			anim_ms(server, way_in, (uint32_t)start_out_ms(server) + TURN_GAP_MS);
 		if ((int32_t)(at - now) < 0 || at - now > 6000) {
 			at = now;
 		}
 		server->app_angle = 0.0f;
-		animate(server, &server->app_angle, 0.0f, 1, 0, true);
+		animate(server, ANIM_EXACT, &server->app_angle, 0.0f, 1, 0, true);
 		server->app_alpha = 0.0f;
 		if (strncmp(app_id, "ztos.", 5) == 0) {
 			/* an SDK app: uncovered when it says it is ready ("ready ID") */
@@ -12080,7 +12141,7 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 				server->loading_since = now;
 			}
 		} else {
-			animate_at(server, &server->app_alpha, 1.0f, 1, at, true);
+			animate_at(server, way_in, &server->app_alpha, 1.0f, 1, at, true);
 		}
 	} else {
 		/* anything else swings in whole, round the same edge */
@@ -12095,8 +12156,8 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 		}
 		server->app_angle = TURN_IN_DEG;
 		server->app_alpha = 0.0f;
-		animate(server, &server->app_angle, 0.0f, APP_IN_MS, delay, false);
-		animate(server, &server->app_alpha, 1.0f, APP_IN_MS, delay, false);
+		animate(server, way_in, &server->app_angle, 0.0f, APP_IN_MS, delay, false);
+		animate(server, way_in, &server->app_alpha, 1.0f, APP_IN_MS, delay, false);
 	}
 	toplevel->introduced = true;
 	if (!toplevel->awaiting) {
@@ -12151,6 +12212,14 @@ static void close_inherited(void) {
 
 static void launch_core(struct zt_server *server, const char *command) {
     struct zt_toplevel *existing;
+	/* a Settings page asked for ("ztsettings wifi"): its way in is the link's
+	 * (ZT_ANIM_SETTINGS_LINK). Bare "ztsettings" is what a running Settings
+	 * asks for after turning to the page, so it keeps a link waiting. */
+	if (strncmp(command, "ztsettings ", 11) == 0 && command[11]) {
+		server->settings_link_ms = now_ms() | 1;
+	} else if (strcmp(command, "ztsettings") != 0) {
+		server->settings_link_ms = 0;
+	}
     /* Settings is one window: a page of it turns the one that is open, which then
      * asks for the front ("launch ztsettings"), rather than opening a second one */
     if (strncmp(command, "ztsettings", 10) == 0 && (!command[10] || command[10] == ' ')) {
@@ -12217,7 +12286,7 @@ static void launch_core(struct zt_server *server, const char *command) {
 	if (strncmp(command, "demo:", 5) == 0) {
 		/* nothing to start: Start leaves as it would, and comes back */
 		start_turn(server, true, 0);
-		wl_event_source_timer_update(server->launch_timer, server->slow_motion ? 3500 : 900);
+		wl_event_source_timer_update(server->launch_timer, server->anim.slow ? 3500 : 900);
 		return;
 	}
 	/* Waydroid's full UI only gets a window while Android's display is on, and
@@ -12228,15 +12297,17 @@ static void launch_core(struct zt_server *server, const char *command) {
 	}
 	prepare_loading(server);
 	uint32_t launch_at = now_ms();
-	uint32_t enter_at = launch_at +
-		menu_ms(server, (uint32_t)start_out_ms(server) + TURN_GAP_MS) * (server->slow_motion ? 5 : 1);
+	int way_in = open_kind(server);
+	uint32_t enter_at = launch_at + anim_ms(server, way_in, (uint32_t)start_out_ms(server) + TURN_GAP_MS);
 	/* The client has its first row snapshot ready before the shell
 	 * uncovers it. Both sides use this monotonic deadline unchanged.
 	 * (The environment is made here, not in the child: vfork, below.) */
 	char e_enter[48], e_speed[48], e_slow[32], line[300];
 	snprintf(e_enter, sizeof(e_enter), "ZTMETRO_ENTER_MS=%u", enter_at);
-	snprintf(e_speed, sizeof(e_speed), "ZTMETRO_MENU_SPEED=%u", server->menu_speed);
-	snprintf(e_slow, sizeof(e_slow), "ZTMETRO_SLOW_MOTION=%s", server->slow_motion ? "1" : "0");
+	/* its rows' entrance at the speed of the way it is opened, the master's
+	 * included (0: off, drawn settled at once) */
+	snprintf(e_speed, sizeof(e_speed), "ZTMETRO_MENU_SPEED=%d", zt_anim_speed(&server->anim, way_in));
+	snprintf(e_slow, sizeof(e_slow), "ZTMETRO_SLOW_MOTION=%s", server->anim.slow ? "1" : "0");
 	snprintf(line, sizeof(line), "exec %s", command);	/* exec, so that the pid we remember is the app's own */
 	extern char **environ;
 	int n_env = 0;
@@ -12441,7 +12512,7 @@ static void show_next_app(struct zt_server *server) {
 /* Put a value where it should be now, whatever was moving it. */
 static void snap(struct zt_server *server, float *value, float to) {
 	*value = to;
-	animate(server, value, to, 1, 0, true);
+	animate(server, ANIM_EXACT, value, to, 1, 0, true);
 }
 
 static void switcher_close(struct zt_server *server) {
@@ -12452,10 +12523,10 @@ static void switcher_close(struct zt_server *server) {
 	for (int i = 0; i < server->n_cards; i++) {
 		if (server->cards[i] == server->shown) {
 			server->switch_moving = false;
-		animate(server, &server->switch_x, (float)i, SWITCH_MS, 0, false);
+		animate(server, ZT_ANIM_SWITCHER, &server->switch_x, (float)i, SWITCH_MS, 0, false);
 		}
 	}
-	animate(server, &server->switch_t, 0.0f, SWITCH_MS, 0, false);
+	animate(server, ZT_ANIM_SWITCHER, &server->switch_t, 0.0f, SWITCH_MS, 0, false);
 	if (server->shown && server->osk_terminal) {
 		osk_show(server, true);
 	}
@@ -12523,7 +12594,7 @@ static void switcher_open(struct zt_server *server) {
 	server->drop = 0;
 	server->switch_moving = false;
 	snap(server, &server->switch_x, 0.0f);	/* the list has the newest first */
-	animate(server, &server->switch_t, 1.0f, SWITCH_MS, 0, false);
+	animate(server, ZT_ANIM_SWITCHER, &server->switch_t, 1.0f, SWITCH_MS, 0, false);
 	wlr_log(WLR_INFO, "switcher: %d apps", server->n_cards);
 }
 
@@ -12542,8 +12613,8 @@ static void switcher_pick(struct zt_server *server, int i) {
 		osk_show(server, true);
 	}
 	server->switch_moving = false;
-		animate(server, &server->switch_x, (float)i, SWITCH_MS, 0, false);
-	animate(server, &server->switch_t, 0.0f, SWITCH_MS, 0, false);
+		animate(server, ZT_ANIM_SWITCHER, &server->switch_x, (float)i, SWITCH_MS, 0, false);
+	animate(server, ZT_ANIM_SWITCHER, &server->switch_t, 0.0f, SWITCH_MS, 0, false);
 }
 
 /* An app has gone: its card goes with it. */
@@ -12564,11 +12635,11 @@ static void switcher_forget(struct zt_server *server, struct zt_toplevel *toplev
 		float last = server->n_cards > 0 ? (float)(server->n_cards - 1) : 0.0f;
 		if (server->switch_x > last) {
 			server->switch_moving = false;
-		animate(server, &server->switch_x, last, 180, 0, false);
+		animate(server, ZT_ANIM_SWITCHER, &server->switch_x, last, 180, 0, false);
 		}
 		if (server->n_cards == 0 && server->switcher) {
 			server->switcher = false;
-			animate(server, &server->switch_t, 0.0f, SWITCH_MS, 0, false);
+			animate(server, ZT_ANIM_SWITCHER, &server->switch_t, 0.0f, SWITCH_MS, 0, false);
 		}
 		damage(server);
 		return;
@@ -13154,7 +13225,7 @@ static void wd_toast(struct zt_server *server, const char *text) {
 	return;	/* (tests/waydroid-launch.c: the words, without a screen) */
 #endif
 	draw_toast(server);
-	animate(server, &server->toast_y, 1.0f, 300, 0, false);
+	animate(server, ZT_ANIM_TOAST, &server->toast_y, 1.0f, 300, 0, false);
 	wl_event_source_timer_update(server->toast_timer, TOAST_MS);
 	damage(server);
 }
@@ -13274,7 +13345,7 @@ static void cf_rebuild(struct zt_server *server, bool snap_split) {
 		snap(server, &server->split_t, target);
 	} else if (anim_target(server, &server->split_t) != target) {
 		bool opening = target > 0.5f && anim_target(server, &server->split_t) < 0.5f;
-		animate(server, &server->split_t, target, CF_SPLIT_MS, 0, false);
+		animate(server, ZT_ANIM_START, &server->split_t, target, CF_SPLIT_MS, 0, false);
 		if (opening) {
 			cf_sweep(server);	/* (with more than one card come at once) */
 		}
@@ -13296,9 +13367,9 @@ static void cf_sweep(struct zt_server *server) {
 	anim_stop(server, &server->cf_x);
 	server->cf_moving = false;
 	server->cf_x = 0.0f;
-	animate(server, &server->cf_x, (float)(n - 1), ms, 0, false);
+	animate(server, ZT_ANIM_START, &server->cf_x, (float)(n - 1), ms, 0, false);
 	if (!CF_SWEEP_ENDS_ON_LAST) {
-		animate(server, &server->cf_x, 0.0f, ms, ms, false);	/* (queued after the first) */
+		animate(server, ZT_ANIM_START, &server->cf_x, 0.0f, ms, ms, false);	/* (queued after the first) */
 	}
 	wlr_log(WLR_INFO, "cover-flow: sweep over %d cards in %u ms", n, ms);
 }
@@ -13403,7 +13474,7 @@ static void cf_mode_update(struct zt_server *server, bool snap_it) {
 		snap(server, &server->rail_t, rail ? 1.0f : 0.0f);
 	} else if (rail != server->cf_rail) {
 		server->cf_rail = rail;
-		animate(server, &server->rail_t, rail ? 1.0f : 0.0f, CF_MODE_MS, 0, false);
+		animate(server, ZT_ANIM_START, &server->rail_t, rail ? 1.0f : 0.0f, CF_MODE_MS, 0, false);
 		wlr_log(WLR_INFO, "split: %s at %.0f points", rail ? "icon rail" : "cover-flow", server->cf_w);
 	}
 }
@@ -14229,7 +14300,7 @@ static void hyper_open(struct zt_server *server) {
 	}
 	draw_hyper(server);
 	server->hyper_t = 0;
-	animate(server, &server->hyper_t, 1.0f, 250, 0, false);
+	animate(server, ZT_ANIM_START, &server->hyper_t, 1.0f, 250, 0, false);
 	server->osk_terminal = false;
 	osk_show(server, true);
 	wlr_log(WLR_INFO, "hyperscan: open (%d files)", server->n_hyper_files);
@@ -14240,7 +14311,7 @@ static void hyper_close(struct zt_server *server) {
 		return;
 	}
 	server->hyper = false;
-	animate(server, &server->hyper_t, 0.0f, 180, 0, true);
+	animate(server, ZT_ANIM_START, &server->hyper_t, 0.0f, 180, 0, true);
 	if (!server->osk_terminal) {
 		osk_show(server, false);
 	}
@@ -15001,9 +15072,9 @@ static void tile_press(struct zt_server *server, int index, double x, double y) 
 	double fall = dist < MAGNET_RANGE ? 1.0 - dist / MAGNET_RANGE : 0.0;
 	double deg = 0.25 * (fabs(nx) + fabs(ny)) * fall * 57.29578, len = hypot(nx, ny);
 	double lx = len > 1e-6 ? nx / len : 0, ly = len > 1e-6 ? ny / len : 0;
-	animate(server, &t->tilt_y, (float)(lx * deg), 75, 0, true);
-	animate(server, &t->tilt_x, (float)(ly * deg), 75, 0, true);
-	animate(server, &t->press, (float)(1.0 - MAGNET_SINK * fall), 90, 0, true);
+	animate(server, ZT_ANIM_PRESS, &t->tilt_y, (float)(lx * deg), 75, 0, true);
+	animate(server, ZT_ANIM_PRESS, &t->tilt_x, (float)(ly * deg), 75, 0, true);
+	animate(server, ZT_ANIM_PRESS, &t->press, (float)(1.0 - MAGNET_SINK * fall), 90, 0, true);
 }
 
 /* The action centre's quick actions answer a finger the same way. `y` is in
@@ -15020,23 +15091,23 @@ static void shade_tile_press(struct zt_server *server, int index, double x, doub
 	if (fabs(fx) < 0.25 && fabs(fy) < 0.25) {
 		fx = fy = 0;
 	}
-	animate(server, &server->shade_tilt_y[index], (float)(fx * TILT_DEG), TILT_IN_MS, 0, false);
-	animate(server, &server->shade_tilt_x[index], (float)(fy * TILT_DEG), TILT_IN_MS, 0, false);
-	animate(server, &server->shade_press[index], 0.97f, TILT_IN_MS, 0, false);
+	animate(server, ZT_ANIM_PRESS, &server->shade_tilt_y[index], (float)(fx * TILT_DEG), TILT_IN_MS, 0, false);
+	animate(server, ZT_ANIM_PRESS, &server->shade_tilt_x[index], (float)(fy * TILT_DEG), TILT_IN_MS, 0, false);
+	animate(server, ZT_ANIM_PRESS, &server->shade_press[index], 0.97f, TILT_IN_MS, 0, false);
 }
 
 static void shade_tile_release(struct zt_server *server, int index) {
-	animate(server, &server->shade_tilt_y[index], 0.0f, TILT_OUT_MS, 0, false);
-	animate(server, &server->shade_tilt_x[index], 0.0f, TILT_OUT_MS, 0, false);
-	animate(server, &server->shade_press[index], 1.0f, TILT_OUT_MS, 0, false);
+	animate(server, ZT_ANIM_PRESS, &server->shade_tilt_y[index], 0.0f, TILT_OUT_MS, 0, false);
+	animate(server, ZT_ANIM_PRESS, &server->shade_tilt_x[index], 0.0f, TILT_OUT_MS, 0, false);
+	animate(server, ZT_ANIM_PRESS, &server->shade_press[index], 1.0f, TILT_OUT_MS, 0, false);
 }
 
 static void tile_release_after(struct zt_server *server, int index, uint32_t delay) {
 	struct tile *t = &server->tiles[index];
 	/* back up on Windows Phone's Log(10): fast, then slower and slower */
-	animate_wplog(server, &t->tilt_y, 0.0f, TILT_OUT_MS, delay, 10.0f);
-	animate_wplog(server, &t->tilt_x, 0.0f, TILT_OUT_MS, delay, 10.0f);
-	animate_wplog(server, &t->press, 1.0f, TILT_OUT_MS, delay, 10.0f);
+	animate_wplog(server, ZT_ANIM_PRESS, &t->tilt_y, 0.0f, TILT_OUT_MS, delay, 10.0f);
+	animate_wplog(server, ZT_ANIM_PRESS, &t->tilt_x, 0.0f, TILT_OUT_MS, delay, 10.0f);
+	animate_wplog(server, ZT_ANIM_PRESS, &t->press, 1.0f, TILT_OUT_MS, delay, 10.0f);
 }
 
 static void tile_release(struct zt_server *server, int index) {
@@ -15139,16 +15210,16 @@ static void item_press(struct zt_server *server, int index, double x, double y) 
 	double fy = (y - area_y(server) + server->list_scroll - it->y) / LIST_ICON * 2 - 1;
 	fx = fx < -1 ? -1 : fx > 1 ? 1 : fx;
 	fy = fy < -1 ? -1 : fy > 1 ? 1 : fy;
-	animate(server, &it->tilt_y, (float)(fx * TILT_DEG * 0.7), TILT_IN_MS, 0, false);
-	animate(server, &it->tilt_x, (float)(fy * TILT_DEG), TILT_IN_MS, 0, false);
-	animate(server, &it->press, 0.91f, TILT_IN_MS, 0, false);
+	animate(server, ZT_ANIM_PRESS, &it->tilt_y, (float)(fx * TILT_DEG * 0.7), TILT_IN_MS, 0, false);
+	animate(server, ZT_ANIM_PRESS, &it->tilt_x, (float)(fy * TILT_DEG), TILT_IN_MS, 0, false);
+	animate(server, ZT_ANIM_PRESS, &it->press, 0.91f, TILT_IN_MS, 0, false);
 }
 
 static void item_release_after(struct zt_server *server, int index, uint32_t delay) {
 	struct app_item *it = &server->items[index];
-	animate_wplog(server, &it->tilt_y, 0.0f, TILT_OUT_MS, delay, 10.0f);
-	animate_wplog(server, &it->tilt_x, 0.0f, TILT_OUT_MS, delay, 10.0f);
-	animate_wplog(server, &it->press, 1.0f, TILT_OUT_MS, delay, 10.0f);
+	animate_wplog(server, ZT_ANIM_PRESS, &it->tilt_y, 0.0f, TILT_OUT_MS, delay, 10.0f);
+	animate_wplog(server, ZT_ANIM_PRESS, &it->tilt_x, 0.0f, TILT_OUT_MS, delay, 10.0f);
+	animate_wplog(server, ZT_ANIM_PRESS, &it->press, 1.0f, TILT_OUT_MS, delay, 10.0f);
 }
 
 static void item_release(struct zt_server *server, int index) {
@@ -15277,13 +15348,13 @@ static void menu_show(struct zt_server *server, int index) {
 	server->menu_confirm = false;
 	menu_draw(server);
 	server->menu_open = true;
-	animate(server, &server->menu_t, 1.0f, 200, 0, false);
+	animate(server, ZT_ANIM_START, &server->menu_t, 1.0f, 200, 0, false);
 }
 
 static void menu_hide(struct zt_server *server) {
 	if (server->menu_open) {
 		server->menu_open = false;
-		animate(server, &server->menu_t, 0.0f, 140, 0, false);
+		animate(server, ZT_ANIM_START, &server->menu_t, 0.0f, 140, 0, false);
 	}
 }
 
@@ -15378,7 +15449,7 @@ static void edit_begin(struct zt_server *server, int index) {
 	menu_hide(server);
 	server->editing = true;
 	server->edit = index;
-	animate(server, &server->edit_t, 1.0f, EDIT_MS, 0, false);
+	animate(server, ZT_ANIM_START, &server->edit_t, 1.0f, EDIT_MS, 0, false);
 	wlr_log(WLR_INFO, "start: editing '%s'", server->tiles[index].label);
 }
 
@@ -15392,7 +15463,7 @@ static void edit_end(struct zt_server *server) {
 	}
 	server->drag_touch = NULL;
 	server->moving = true;
-	animate(server, &server->edit_t, 0.0f, EDIT_MS, 0, false);
+	animate(server, ZT_ANIM_START, &server->edit_t, 0.0f, EDIT_MS, 0, false);
 	wlr_log(WLR_INFO, "start: editing done");
 }
 
@@ -15524,7 +15595,7 @@ static void pin_item(struct zt_server *server, int index) {
 		save_tiles(server);
 		wlr_log(WLR_INFO, "start: pinned '%s'", it->name);
 		server->tiles[at].press = 0.4f;
-		animate(server, &server->tiles[at].press, 1.0f, 320, PAGE_MS - 80, false);
+		animate(server, ZT_ANIM_START, &server->tiles[at].press, 1.0f, 320, PAGE_MS - 80, false);
 	}
 	if (at >= 0) {
 		struct tile *t = &server->tiles[at];
@@ -15939,7 +16010,7 @@ static void draw_toast(struct zt_server *server) {
 
 static int toast_hide(void *data) {
 	struct zt_server *server = data;
-	animate(server, &server->toast_y, 0.0f, 199, 0, false);  /* swivel out */
+	animate(server, ZT_ANIM_TOAST, &server->toast_y, 0.0f, 199, 0, false);  /* swivel out */
 	return 0;
 }
 
@@ -16044,7 +16115,7 @@ static void note_add_from(struct zt_server *server, const char *who, const char 
 	}
 	g_sys_toast[0] = 0;	/* (a notification takes the banner from the shell's word) */
 	draw_toast(server);
-	animate(server, &server->toast_y, 1.0f, 300, 0, false);  /* swivel in */
+	animate(server, ZT_ANIM_TOAST, &server->toast_y, 1.0f, 300, 0, false);  /* swivel in */
 	wl_event_source_timer_update(server->toast_timer, TOAST_MS);
 	shade_notes_changed(server);
 	lock_notes_changed(server);
@@ -16258,7 +16329,7 @@ static void note_swipe_finish(struct zt_server *server) {
 		double now_h = server->n_notes ?
 			server->note_ty[server->n_notes - 1] + server->note_th[server->n_notes - 1] : height;
 		server->note_close_h = (float)(height - now_h);
-		animate(server, &server->note_close_h, 0.0f, 180, 0, false);
+		animate(server, ZT_ANIM_SHADE, &server->note_close_h, 0.0f, 180, 0, false);
 		hap(server, HAP_TICK, HG_SYSTEM);
 		draw_shade(server);
 		lock_notes_changed(server);
@@ -16343,7 +16414,7 @@ static bool note_clear_physics(struct zt_server *server) {
 	if (!server->note_clearing) {
 		return false;
 	}
-	if (now_ms() - server->note_clear_at >= (uint32_t)note_clear_total_ms(server->note_clear_rows)) {
+	if (anim_elapsed(server, ZT_ANIM_SHADE, server->note_clear_at) >= note_clear_total_ms(server->note_clear_rows)) {
 		note_clear_finish(server);
 		return false;
 	}
@@ -16532,7 +16603,7 @@ static void draw_dialog(struct zt_server *server) {
 
 static void dialog_close(struct zt_server *server) {
 	if (server->auth_active || !server->dialog_open) return;
-	animate(server, &server->dialog_y, (float)-server->dialog_h, 170, 0, false);
+	animate(server, ZT_ANIM_DIALOG, &server->dialog_y, (float)-server->dialog_h, 170, 0, false);
 	server->dialog_open = false;
 	damage(server);
 }
@@ -16587,7 +16658,7 @@ static void dialog_show(struct zt_server *server, const char *title, const char 
 	draw_dialog(server);
 	server->dialog_open = true;
 	server->dialog_y = (float)-server->dialog_h;
-	animate(server, &server->dialog_y, 0.0f, 260, 0, false);
+	animate(server, ZT_ANIM_DIALOG, &server->dialog_y, 0.0f, 260, 0, false);
 	hap(server, HAP_TAP, HG_SYSTEM);
 	damage(server);
 }
@@ -16929,14 +17000,14 @@ static void level_modal_show(struct zt_server *server, int kind) {
 	draw_level_modal(server);
 	server->level_open = true;
 	server->level_y = (float)-server->level_h;
-	animate(server, &server->level_y, 0.0f, 260, 0, false);
+	animate(server, ZT_ANIM_QUICK_PANELS, &server->level_y, 0.0f, 260, 0, false);
 	damage(server);
 }
 
 static void level_modal_close(struct zt_server *server) {
 	if (!server->level_open) return;
 	server->level_open = false;
-	animate(server, &server->level_y, (float)-server->level_h, 170, 0, false);
+	animate(server, ZT_ANIM_QUICK_PANELS, &server->level_y, (float)-server->level_h, 170, 0, false);
 	if (server->shade_open || server->shade_h > 0.1f) {
 		draw_shade(server);	/* its tile says the level */
 	}
@@ -17164,7 +17235,7 @@ static void audio_modal_show(struct zt_server *server) {
 	draw_audio_modal(server);
 	server->audio_modal_open = true;
 	server->audio_modal_y = (float)-server->audio_modal_h;
-	animate(server, &server->audio_modal_y, 0.0f, 260, 0, false);
+	animate(server, ZT_ANIM_VOLUME, &server->audio_modal_y, 0.0f, 260, 0, false);
 	media_tick_arm(server);
 	damage(server);
 }
@@ -17184,7 +17255,7 @@ static void audio_modal_close(struct zt_server *server) {
 	if (!server->audio_modal_open) return;
 	audio_slider_finish(server);
 	server->audio_modal_open = false;
-	animate(server, &server->audio_modal_y, (float)-server->audio_modal_h, 170, 0, false);
+	animate(server, ZT_ANIM_VOLUME, &server->audio_modal_y, (float)-server->audio_modal_h, 170, 0, false);
 	damage(server);
 }
 
@@ -19230,11 +19301,11 @@ static void lock_open(struct zt_server *server) {
 	}
 	hap(server, HAP_TAP, HG_SLIDE);
 	ui_sound(server, UIS_UNLOCK);
-	animate(server, &server->lock_y, (float)-server->height, 200, 0, false);
+	animate(server, ZT_ANIM_LOCK, &server->lock_y, (float)-server->height, 200, 0, false);
 	if (retro_on(server) && server->shown) {
 		/* the app that was open lights up again, dot by dot */
 		server->app_angle = TURN_IN_DEG;
-		animate(server, &server->app_angle, 0.0f, 450, 0, false);
+		animate(server, ZT_ANIM_LOCK, &server->app_angle, 0.0f, 450, 0, false);
 	}
 	const char *shown_id = server->shown ? server->shown->xdg_toplevel->app_id : NULL;
 	if (waydroid_window(shown_id)) {
@@ -19367,7 +19438,7 @@ static int pc_cb_status(int fd, uint32_t mask, void *data) {
 	if (!enabled && server->pc_pad) {
 		server->pc_pad = false;	/* turned off meanwhile: the plain lock again */
 		explicit_bzero(server->pc_typed, sizeof(server->pc_typed));
-		animate(server, &server->lock_y, 0.0f, 220, 0, false);
+		animate(server, ZT_ANIM_LOCK, &server->lock_y, 0.0f, 220, 0, false);
 		damage(server);
 	} else if (server->pc_pad && pc_wait_left(server) > 0) {
 		pc_note_wait(server);
@@ -19385,7 +19456,7 @@ static void pc_pad_open(struct zt_server *server) {
 	/* the lock settles back (the finger lifted it): only the photo shows
 	 * round the pad, never what is under the lock; the clock and the
 	 * notification row go while the pad is up */
-	animate(server, &server->lock_y, 0.0f, 220, 0, false);
+	animate(server, ZT_ANIM_LOCK, &server->lock_y, 0.0f, 220, 0, false);
 	draw_pc(server);
 	pc_status_refresh(server);	/* (a wait set meanwhile shows) */
 	wlr_log(WLR_INFO, "passcode: pad up");
@@ -19397,7 +19468,7 @@ static void pc_pad_close(struct zt_server *server) {
 	explicit_bzero(server->pc_typed, sizeof(server->pc_typed));
 	pc_drop(server, true);
 	server->pc_checking = false;
-	animate(server, &server->lock_y, 0.0f, 220, 0, false);
+	animate(server, ZT_ANIM_LOCK, &server->lock_y, 0.0f, 220, 0, false);
 	damage(server);
 }
 
@@ -19417,7 +19488,7 @@ static void pc_verdict(struct zt_server *server, const char *reply) {
 		pc_take_wait(server, reply);
 		wlr_log(WLR_INFO, "passcode wrong (%d)", server->pc_failures);
 		server->pc_shake = 1.0f;
-		animate(server, &server->pc_shake, 0.0f, 300, 0, true);
+		animate(server, ZT_ANIM_LOCK, &server->pc_shake, 0.0f, 300, 0, true);
 		hap(server, HAP_HEAVY, HG_SYSTEM);
 		server->pc_note_err = true;
 		if (!strcmp(code, "locked") || pc_wait_left(server) > 0) {
@@ -20664,14 +20735,14 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 				/* off the top at the speed it was thrown, not slower than a walk */
 				float speed = fmaxf(-p->vy, 2.2f);
 				uint32_t ms = (uint32_t)(((float)view_h(server) + server->drop) / speed);
-				animate(server, &server->drop, (float)-view_h(server), ms < 90 ? 90 : ms > 240 ? 240 : ms,
+				animate(server, ZT_ANIM_SWITCHER, &server->drop, (float)-view_h(server), ms < 90 ? 90 : ms > 240 ? 240 : ms,
 					0, true);
 			} else if (!cancelled && server->drop > 110.0f && desk_available(server) &&
 					desk_take_from_phone(server, server->cards[server->drop_card])) {
 				/* pulled down: the app goes to the desktop, and its card with it */
 				hap(server, HAP_CLICK, HG_NAV);
 			} else {
-				animate(server, &server->drop, 0.0f, 260, 0, false);
+				animate(server, ZT_ANIM_SWITCHER, &server->drop, 0.0f, 260, 0, false);
 			}
 		}
 		break;
@@ -20724,9 +20795,9 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 				if (!cancelled && (server->cf_drop < -RAIL_THROW || flung)) {
 					/* thrown off toward the outer edge: the app closes */
 					card_close(server, server->cf_cards[server->cf_drop_card]);
-					animate(server, &server->cf_drop, -(float)cf_width(server) - 40.0f, 160, 0, true);
+					animate(server, ZT_ANIM_SWITCHER, &server->cf_drop, -(float)cf_width(server) - 40.0f, 160, 0, true);
 				} else {
-					animate(server, &server->cf_drop, 0.0f, 220, 0, false);
+					animate(server, ZT_ANIM_SWITCHER, &server->cf_drop, 0.0f, 220, 0, false);
 				}
 			}
 			break;
@@ -20764,10 +20835,10 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 				/* off the top at the speed it was thrown */
 				float speed = fmaxf(-p->vy, 2.2f);
 				uint32_t ms = (uint32_t)(((float)view_h(server) + server->cf_drop) / speed);
-				animate(server, &server->cf_drop, (float)-view_h(server), ms < 90 ? 90 : ms > 240 ? 240 : ms,
+				animate(server, ZT_ANIM_SWITCHER, &server->cf_drop, (float)-view_h(server), ms < 90 ? 90 : ms > 240 ? 240 : ms,
 					0, true);
 			} else {
-				animate(server, &server->cf_drop, 0.0f, 260, 0, false);
+				animate(server, ZT_ANIM_SWITCHER, &server->cf_drop, 0.0f, 260, 0, false);
 			}
 		}
 		break;
@@ -20804,9 +20875,9 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		} else if (!p->moved) {
 			/* a tap: it lifts a little and drops, to show which way it goes */
 			server->lock_y = -26.0f;
-			animate(server, &server->lock_y, 0.0f, 320, 0, false);
+			animate(server, ZT_ANIM_LOCK, &server->lock_y, 0.0f, 320, 0, false);
 		} else {
-			animate(server, &server->lock_y, 0.0f, 220, 0, false);
+			animate(server, ZT_ANIM_LOCK, &server->lock_y, 0.0f, 220, 0, false);
 		}
 		break;
 	case ROLE_SHADE:
@@ -21274,6 +21345,7 @@ static void ctl_finger_move(struct zt_server *server, int id, double x, double y
 	damage(server);
 }
 
+static void anim_reload(struct zt_server *server);
 static void ctl_command(struct zt_server *server, char *line) {
 	int id;
 	double x, y;
@@ -21737,6 +21809,8 @@ static void ctl_command(struct zt_server *server, char *line) {
 		mkdir("/tmp/ztrec", 0755);
 		server->record_until = now_ms() + (uint32_t)id;
 		wlr_log(WLR_INFO, "recording frames for %d ms into /tmp/ztrec", id);
+	} else if (strcmp(line, "anim-reload") == 0) {
+		anim_reload(server);	/* Settings' animation page: the speeds only */
 	} else if (sscanf(line, "brightness-fine %d", &id) == 1) {
 		/* the settings slider under a finger: tenths of a percent */
 		server->shade_brightness = id < 20 ? 2 : id > 1000 ? 100 : (id + 5) / 10;
@@ -22218,7 +22292,7 @@ static void screenshot_take(struct zt_server *server) {
 static int flash_start(void *data) {
 	struct zt_server *server = data;
 	server->flash_a = 0.85f;
-	animate(server, &server->flash_a, 0.0f, SHOT_FLASH_MS, 0, false);
+	animate(server, ZT_ANIM_BARS, &server->flash_a, 0.0f, SHOT_FLASH_MS, 0, false);
 	damage(server);
 	return 0;
 }
@@ -22844,7 +22918,7 @@ static void board_frame(struct zt_server *server) {
 		server->board_clock_waits = false;
 		server->board_start = now_ms();
 	}
-	double ms = (uint32_t)(now_ms() - server->board_start);
+	double ms = anim_elapsed(server, ZT_ANIM_START, server->board_start);	/* (the letters: Start's kind) */
 	bool out = server->board_state == 3;
 	double last = zb_delay(ZB_CELLS - 1);
 	double run = last + (out ? ZB_RB_OUT_MS : ZB_RB_IN_MS);	/* Readerboard's keyframes (zrnboard.h) */
@@ -22981,7 +23055,8 @@ static float turn_place(struct zt_server *server, float m[16], float x, float y,
 struct boot_logo_times { float in_ms[2], hold_ms, out_ms, stagger, out_start, end; };
 
 static struct boot_logo_times boot_logo_times(struct zt_server *server) {
-	float speed = (float)menu_ms(server, 1000) / 1000.0f * (server->slow_motion ? 5.0f : 1.0f);
+	/* (off: a moment, not nothing: Start waits for its end) */
+	float speed = fmaxf((float)anim_ms(server, ZT_ANIM_LOCK, 1000) / 1000.0f, 0.001f);
 	struct boot_logo_times t = {
 		/* the left half comes in quicker than the right */
 		.in_ms = { 280.0f * speed, 460.0f * speed },
@@ -24115,7 +24190,7 @@ static void bar_fade_begin(struct zt_server *server, GLuint fbo, float diffuse) 
 	}
 	bar_hold_copy(server, fbo);
 	server->bar_mix = 1.0f;
-	animate(server, &server->bar_mix, 0.0f, BAR_XFADE_MS, 0, true);
+	animate(server, ZT_ANIM_BARS, &server->bar_mix, 0.0f, BAR_XFADE_MS, 0, true);
 }
 
 /* A bar's back: what it held (weight 1 through the turn, then bar_mix
@@ -24687,9 +24762,9 @@ static void rot_cancel_touches(struct zt_server *server) {
 	}
 }
 
-/* The turn itself, from the frozen picture: ROT_MS_90 or ROT_MS_180, exactly
- * (not stretched by Settings' animation speed as animate() would; only the
- * developer's slow motion still applies). */
+/* The turn itself, from the frozen picture: ROT_MS_90 or ROT_MS_180 at the
+ * speed set for the screen turning (ZT_ANIM_ROTATION: the master speed does
+ * not stretch it, only its own and slow motion). */
 static void rot_turn_start(struct zt_server *server) {
 	float span = fabsf(rot_ang(server->orient) - rot_ang(server->rot_from));
 	uint32_t ms = span > 135.0f ? ROT_MS_180 : ROT_MS_90;
@@ -24699,13 +24774,7 @@ static void rot_turn_start(struct zt_server *server) {
 	server->rot_wait = NULL;
 	server->rot_phase = ROT_TURN;
 	server->rot_t = 0.0f;
-	animate(server, &server->rot_t, 1.0f, ms, 0, true);
-	for (int i = 0; i < MAX_ANIMS; i++) {
-		if (server->anims[i].active && server->anims[i].value == &server->rot_t) {
-			server->anims[i].duration = ms * (server->slow_motion ? 5 : 1);
-			break;
-		}
-	}
+	animate(server, ZT_ANIM_ROTATION, &server->rot_t, 1.0f, ms, 0, true);
 	rot_frame_turn(server);
 }
 
@@ -24775,7 +24844,7 @@ static void rot_step(struct zt_server *server) {
 			frame_set(server);	/* exactly the orientation's own */
 			if (start_land(server) && anim_target(server, &server->cf_stage_t) < 0.999f) {
 				/* the cross-fade over: the cover-flow's field fades in */
-				animate(server, &server->cf_stage_t, 1.0f, CF_STAGE_MS, 0, false);
+				animate(server, ZT_ANIM_ROTATION, &server->cf_stage_t, 1.0f, CF_STAGE_MS, 0, false);
 			}
 			if (start_land(server) && server->rot_from % 180 == 0 && !server->shown &&
 					server->start_t < 0.5f && server->page < 0.5f) {
@@ -25338,10 +25407,10 @@ static void lf_begin(struct zt_server *server, int kind, int index, float x, flo
 	lf_adopt(server);
 	server->lf_t = 0.0f;
 	anim_stop(server, &server->lf_t);
-	animate(server, &server->lf_t, 1.0f, LAUNCH_MS, 0, true);
+	animate(server, open_kind(server), &server->lf_t, 1.0f, LAUNCH_MS, 0, true);
 	for (int i = 0; i < MAX_ANIMS; i++) {
 		if (server->anims[i].active && server->anims[i].value == &server->lf_t) {
-			server->anims[i].duration = LAUNCH_MS * (server->slow_motion ? 5 : 1);	/* (exactly) */
+			server->anims[i].duration = LAUNCH_MS * (server->anim.slow ? ZT_ANIM_SLOW_FACTOR : 1);	/* (exactly) */
 			break;
 		}
 	}
@@ -25402,7 +25471,7 @@ static void lf_step(struct zt_server *server) {
 	}
 	if (server->lf_splash > 0.003f) {
 		if (!animating(server, &server->lf_splash)) {
-			animate(server, &server->lf_splash, 0.0f, LAUNCH_XFADE_MS, 0, false);
+			animate(server, open_kind(server), &server->lf_splash, 0.0f, LAUNCH_XFADE_MS, 0, false);
 		}
 		return;
 	}
@@ -26539,7 +26608,7 @@ static void render_frame(struct zt_server *server) {
 					continue;
 				}
 				if (server->note_clearing) {
-					double x = note_clear_x(now_ms() - server->note_clear_at, clear_row++, server->width);
+					double x = note_clear_x(anim_elapsed(server, ZT_ANIM_SHADE, server->note_clear_at), clear_row++, server->width);
 					if (x < server->width) {
 						layer_draw(server, layer, (float)x, (float)y, 1.0f);
 					}
@@ -27397,6 +27466,32 @@ static void reload_config(struct zt_server *server) {
 	load_config(server);
 	server->scale = scale;
 	app_scales_load(server);
+}
+
+/* The animation speeds alone, read again from the config: Settings' animation
+ * page says "anim-reload" on the control pipe after saving, rather than a
+ * SIGHUP and the whole reload (tiles, textures) for each step (as the
+ * brightness slider's save does, 8.56). Nothing else in the file is touched. */
+static void anim_reload(struct zt_server *server) {
+	char path[512], line[256];
+	const char *home = getenv("HOME");
+	snprintf(path, sizeof(path), "%s/.config/ztmetro/config", home ? home : "");
+	struct zt_anim_cfg anim;
+	zt_anim_defaults(&anim);
+	FILE *f = fopen(path, "r");
+	while (f && fgets(line, sizeof(line), f)) {
+		char *eq = strchr(line, '=');
+		if (line[0] == '#' || !eq) {
+			continue;
+		}
+		*eq = 0;
+		zt_anim_config_line(&anim, trim(line), trim(eq + 1));
+	}
+	if (f) {
+		fclose(f);
+	}
+	server->anim = anim;
+	wlr_log(WLR_INFO, "animation speeds: master %d%%%s", anim.global, anim.slow ? ", slow motion" : "");
 }
 
 /* SIGHUP: the configuration changed (the settings app sends it). */
