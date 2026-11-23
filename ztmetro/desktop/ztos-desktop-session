@@ -30,7 +30,7 @@ echo "desktop session on ${ZT_DESKTOP_OUTPUT:-?} (WAYLAND_DISPLAY=${WAYLAND_DISP
 export ZT_DESKTOP=1 XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=xfce DESKTOP_SESSION=xfce
 export GDK_BACKEND=wayland,x11 QT_QPA_PLATFORM=wayland\;xcb MOZ_ENABLE_WAYLAND=1
 # the phone's own variables are not for desktop apps
-unset ZTMETRO_SCALE ZTRF_SHELL_STYLE
+unset ZTMETRO_SCALE
 
 # The panel's first start asks which layout to use, in a dialog: give it
 # XFCE's default instead (the user's own, once there is one, is left alone).

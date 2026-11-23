@@ -361,10 +361,6 @@ static void pc_type(const char *text)
 /* a key of the number pad: flat, filled grey, the accent while held */
 static void pc_key(cairo_t *cr, double x, double y, double w, double h, const char *label, int arg)
 {
-	if (zmc.style == ZMC_STYLE_DOTMATRIX) {	/* styles never mix: DotMatrix keys are dot frames */
-		zmc_button(cr, x, y, w, label, ACT_PC_KEY, arg);
-		return;
-	}
 	bool down = zmc.button_down && zmc.pressed.action == ACT_PC_KEY && zmc.pressed.arg == arg;
 	if (down) zmc_set_rgb(cr, ACCENTS[app.accent].color);
 	else {
@@ -406,7 +402,7 @@ static double draw_passcode_entry(cairo_t *cr)
 	y += zmc_text(cr, pc.note[0] ? pc.note : pc.fd >= 0 ? "checking..." : " ", FONT_REGULAR, 14, MARGIN, y, w) + 14;
 	if (pc_step_is_pin()) {
 		static const char *const labels[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "delete", "0", "ok" };
-		double gap = 6, kw = (w - 2 * gap) / 3, kh = zmc.style == ZMC_STYLE_DOTMATRIX ? 40 : 62;
+		double gap = 6, kw = (w - 2 * gap) / 3, kh = 62;
 		for (int i = 0; i < 12; i++) {
 			double kx = MARGIN + (i % 3) * (kw + gap), ky = y + (i / 3) * (kh + gap);
 			pc_key(cr, kx, ky, kw, kh, labels[i], i);

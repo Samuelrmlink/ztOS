@@ -88,7 +88,6 @@ splash_theme() {
 	val() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p" "$cfg" 2>/dev/null | tail -n 1; }
 	theme=dark
 	case "$(val theme)" in light|1) theme=light ;; esac
-	case "$(val style)" in dotmatrix|1) theme=dark ;; esac
 	splash_wait
 	shown=$(cat /run/zboot.splash 2>/dev/null)
 	case "$(val scale)/$(val display_size)" in

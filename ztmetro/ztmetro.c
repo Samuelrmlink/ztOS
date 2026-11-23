@@ -35,8 +35,8 @@
 #include <ztos-ial.h>
 #endif
 #include "background-apps.h"
-#include "retro/dm-launcher.h"
-#include "retro/dm-chrome.h"
+#include "appearance.h"
+#include "wall-blur.h"
 #include "demoloop/stop-key.h"
 #include "power/power-key.h"
 #include "audio-sync.h"
@@ -536,20 +536,7 @@ struct zt_pointer_device {
 	struct wl_listener motion, motion_absolute, button, destroy;
 };
 
-enum shell_style { STYLE_METRO, STYLE_DOTMATRIX };
-enum shell_theme { THEME_DARK, THEME_LIGHT };	/* Metro's light/dark (SDK Z_THEME_*); DotMatrix ignores it */
-/* The shell's style, for the drawing helpers that have no server to ask:
- * under DotMatrix their text and glyphs come out as dots. */
-static const int *g_style;
-static const int *g_palette;		/* and its palette */
-static bool dots(void) {
-	bool on = g_style && *g_style == STYLE_DOTMATRIX;
-	if (on && g_palette && *g_palette >= 0 && *g_palette < DM_PALETTES) {
-		dm_wrap_main = dm_palettes[*g_palette][0];	/* what the dots are drawn in */
-		dm_wrap_accent = dm_palettes[*g_palette][1];
-	}
-	return on;
-}
+enum shell_theme { THEME_DARK, THEME_LIGHT };	/* Metro's light/dark (SDK Z_THEME_*) */
 
 enum touch_role {
 	ROLE_NONE,
@@ -565,7 +552,6 @@ enum touch_role {
 	ROLE_MENU,	/* while the app list's menu is open */
 	ROLE_BOARD,	/* while the app list's letters are up */
 	ROLE_HYPER,	/* on Hyperscan, the search over everything */
-	ROLE_RETRO,	/* on a ztRetrofit style's home (the DotMatrix launcher) */
 	ROLE_AUDIO,	/* in the audio modal: a row (index), or the slider (index -1) */
 	ROLE_LEVEL,	/* on the slider of the flashlight's or the brightness's modal */
 	ROLE_FS_EDGE,	/* at the top (index 1) or bottom (-1) of a full-screen app, its bars away */
@@ -807,29 +793,8 @@ struct zt_server {
 	float quad_ramp[2];
 	bool sweeping;			/* a live tile's long line is moving: keep drawing */
 
-	/* ztRetrofit: the shell's style. Metro is Start and its tiles; DotMatrix
-	 * (ZrnDotMatrix) puts its own dot-matrix home where Start was, over the
-	 * same apps, status and radios (see "ztRetrofit" below) */
-	int style;			/* STYLE_*: fixed for the session (ZTRF_SHELL_STYLE) */
-	int style_config;		/* the config file's: another one restarts the session */
-	int theme;			/* THEME_*: Metro light/dark; re-read live on SIGHUP (DotMatrix ignores it) */
+	int theme;			/* THEME_*: Metro light/dark; re-read live on SIGHUP */
 	bool frost_off;		/* config `frost = 0`: the bars plain, nothing blurred; re-read live on SIGHUP */
-	struct dm_launcher *dm;
-	struct dm_renderer dm_gl;
-	bool dm_gl_ok;
-	struct dm_frame dm_last;	/* what was drawn last, drawn again when nothing changed */
-	bool dm_have_frame;
-	int dm_hidden;			/* what last covered it: 0 nothing, 1 the lock or the dark, 2 an app */
-	int dm_palette;
-	bool dm_amoled;
-	struct dm_config dm_cfg;	/* the launcher's settings sheet, kept in the config */
-	struct wl_event_source *dm_timer;
-	uint32_t dm_sample_ms, dm_frames;
-	unsigned long long dm_cpu_busy, dm_cpu_total;
-	int dm_cpu, dm_ram, dm_gpu;
-	uint32_t dm_launch_fired_ms;	/* the launcher asked for an app: when */
-	struct dm_status dm_st;		/* what it was last told */
-	bool dm_fed;
 	uint32_t boot_done_ms;		/* when the boot splash went away */
 
 	struct zt_layer osk_layer, nav_layer, status_layer, shade_layer;
@@ -842,6 +807,19 @@ struct zt_server {
 	char start_wall_path[256], lock_wall_path[256];
 	struct zt_layer wall_layer;
 	double wall_h;			/* points: the start photo's height */
+	/* how the tiles, the photo behind them, the switcher and Hyperscan look
+	 * (appearance.h, ROADMAP 8.70): from the config, and live from Settings
+	 * (`look KEY VALUE`). Start's photo blurred for them on the CPU, once per
+	 * photo and strength (wall-blur.h): nothing of it is blurred per frame */
+	struct zt_look look;
+	cairo_surface_t *wall_small;	/* the photo, WALL_BLUR_W pixels across: what is blurred */
+	struct zt_layer wall_frost;	/* blurred for the tiles' windows (tile_frost) */
+	struct zt_layer wall_soft;	/* blurred for behind the tiles (background_blur) */
+	struct zt_layer wall_over[2];	/* for the switcher's and Hyperscan's backdrops (*_photo) */
+	int wall_frost_r, wall_soft_r;	/* the radii they hold (wall-blur.h pixels); 0 none */
+	int wall_over_r[2];
+	struct frost_strip over_bd;	/* what the switcher or Hyperscan covers, blurred (over_backdrop) */
+	uint32_t over_gen;		/* one more each time either opens: blurred again */
 	cairo_surface_t *lock_wall;
 	bool locked;
 	bool call_over_lock;	/* only the phone call, or a ringing alarm, may cover the lock */
@@ -904,7 +882,6 @@ struct zt_server {
 	double power_amps;		/* its current, smoothed */
 	int power_sign;			/* 1 charging, -1 discharging, 0 neither */
 	bool power_have;
-	char power_text[16];		/* "+4.1W", for DotMatrix's charging widget */
 	unsigned long long net_bytes;
 	bool net_active, charging;
 	float st_plug;			/* the plug in the battery while it charges: it comes and goes */
@@ -1467,18 +1444,6 @@ struct zt_server {
 		new_decoration, new_text_input, new_surface, request_set_selection;
 };
 
-/* ztRetrofit (see "ztRetrofit: the shell's styles") */
-static bool retro_on(struct zt_server *server);
-static void retro_setup(struct zt_server *server);
-static void retro_apps(struct zt_server *server);
-static bool retro_home_shown(struct zt_server *server);
-static void retro_draw(struct zt_server *server, int width_px, int height_px, bool covered, bool app_covers);
-static int64_t wall_ms(void);
-static void retro_paint_status(struct zt_server *server, cairo_t *cr);
-static void retro_paint_nav(struct zt_server *server, cairo_t *cr);
-static bool retro_strip(struct zt_server *server, float h, struct dm_screen *strip, uint8_t **buf);
-static void retro_feed(struct zt_server *server);
-static void retro_signal(void *data, const char *act, char *out, size_t size);
 
 static void auth_input(struct zt_server *, uint32_t, const char *);
 static void auth_submit(struct zt_server *);
@@ -3550,9 +3515,6 @@ static void prepare_compiling(struct zt_server *server) {
 
 static void draw_loading(struct zt_server *server) {
 	uint32_t now = now_ms();
-	if (retro_on(server) && !server->android_compiling) {
-		return;	/* the DotMatrix home has its own: OPENING and the throbber */
-	}
 	if (server->shown && server->shown->awaiting && now - server->shown->awaiting_since > 4000) {
 		app_ready(server, server->shown);	/* never said: shown anyway */
 	}
@@ -3602,23 +3564,15 @@ static void draw_loading(struct zt_server *server) {
 }
 
 static void set_rgb(cairo_t *cr, uint32_t color) {
-	if (dots()) {
-		/* the palette's two colours, whatever Metro's accent is */
-		int p = g_palette && *g_palette >= 0 && *g_palette < DM_PALETTES ? *g_palette : 0;
-		color = dm_palette_colour(color, dm_palettes[p][0], dm_palettes[p][1]);
-	}
 	cairo_set_source_rgb(cr, ((color >> 16) & 0xff) / 255.0,
 		((color >> 8) & 0xff) / 255.0, (color & 0xff) / 255.0);
 }
 
 /* Metro's background and foreground for the shell's chrome, modelled on the
  * SDK's Z_THEME_DARK / Z_THEME_LIGHT. Dark (today): bg black, fg white; Light:
- * bg white, fg black. The accent is unchanged. DotMatrix draws from its own
- * palette and ignores the theme: under it these are always the dark ones,
- * whatever theme was saved. The style is asked, not retro_on(), because the
- * drawing helpers turn to dots by the style alone (dots()). */
+ * bg white, fg black. The accent is unchanged. */
 static bool shell_light(struct zt_server *server) {
-	return server->theme == THEME_LIGHT && server->style != STYLE_DOTMATRIX;
+	return server->theme == THEME_LIGHT;
 }
 static uint32_t shell_bg_color(struct zt_server *server) {
 	return shell_light(server) ? 0xffffff : 0x000000;
@@ -3638,10 +3592,6 @@ static GLuint shell_fg_tex(struct zt_server *server) {
  * box_w x box_h when centre is set. */
 static void draw_text(cairo_t *cr, const char *text, const char *font, double size,
 		double x, double y, double box_w, double box_h, bool centre) {
-	if (dots()) {
-		dm_type(cr, text, size, x, y, box_w, box_h, centre, 0);
-		return;
-	}
 	PangoLayout *layout = pango_cairo_create_layout(cr);
 	PangoFontDescription *desc = pango_font_description_from_string(font);
 	/* sizes are in points of our own coordinate space, not typographic ones */
@@ -3668,9 +3618,6 @@ static void draw_text(cairo_t *cr, const char *text, const char *font, double si
  * height. cr NULL only measures. */
 static double wrap_text(cairo_t *cr, const char *text, const char *font, double size,
 		double x, double y, double width, bool centre) {
-	if (dots()) {
-		return dm_type(cr, text, size, x, y, 0, 0, false, width);
-	}
 	cairo_surface_t *scratch = NULL;
 	cairo_t *m = cr;
 	if (!m) {
@@ -3759,19 +3706,7 @@ static bool draw_icon_symbol(cairo_t *cr, const char *name, double cx, double cy
 	return true;
 }
 
-struct icon_args { const char *name; double cx, cy, s; };
-static bool g_dotting;		/* drawing a glyph's shape for dm_dotify */
-static void icon_shape(cairo_t *cr, void *data);
-
 static void draw_icon_vector(cairo_t *cr, const char *name, double cx, double cy, double s) {
-	if (dots() && !g_dotting) {
-		/* the same glyph, as dots about nine across */
-		struct icon_args a = { name, cx, cy, s };
-		g_dotting = true;
-		dm_dotify(cr, cx - s * 0.6, cy - s * 0.6, s * 1.2, s * 1.2, s / 9, icon_shape, &a);
-		g_dotting = false;
-		return;
-	}
 	if (draw_icon_symbol(cr, name, cx, cy, s)) {
 		return;
 	}
@@ -4222,11 +4157,6 @@ static void draw_icon_vector(cairo_t *cr, const char *name, double cx, double cy
 
 /* Every glyph is drawn by draw_icon_vector(), at whatever size and scale it is
  * needed: nothing is loaded from bitmap files. */
-static void icon_shape(cairo_t *cr, void *data) {
-	const struct icon_args *a = data;
-	draw_icon_vector(cr, a->name, a->cx, a->cy, a->s);
-}
-
 static void draw_icon(cairo_t *cr, const char *name, double cx, double cy, double s) {
 	if (strcmp(name, "settings") == 0) {
 		name = "gear";
@@ -5082,16 +5012,9 @@ static void load_config(struct zt_server *server) {
 		server->quick[i] = i < 8 ? QUICK_DEFAULT[i] : Q_NONE;
 	}
 	server->n_quick = 8;
-	server->style_config = STYLE_METRO;
 	server->frost_off = false;	/* `frost = 0`: plain bars, no blur work */
-	g_style = &server->style;
-	g_palette = &server->dm_palette;
+	look_defaults(&server->look);	/* every key: the look from before 8.70 */
 	server->quad_reveal = 1.0f;
-	dm_wrap_active = dots;		/* the shell's own fills and strokes as dots in the style */
-	dm_wrap_pitch = 2.3;
-	server->dm_palette = 0;
-	server->dm_amoled = false;
-	server->dm_cfg = (struct dm_config){ .launch_delay = 800, .sys_stats = true, .event_banners = true };
 	/* screen rotation: off until the sensor's axes are confirmed on the phone */
 	server->rotation_enabled = false;
 	server->rotation_lock = false;
@@ -5102,7 +5025,6 @@ static void load_config(struct zt_server *server) {
 	}
 	char line[256];
 	bool quick_audio_done = false;
-	bool clock_24h_set = false;
 	while (fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
 		if (line[0] == '#' || !eq) {
@@ -5135,6 +5057,8 @@ static void load_config(struct zt_server *server) {
 			server->nav_center_icon = n < 0 ? 0 : n > 4 ? 4 : n;
 		} else if (strcmp(key, "accent") == 0) {
 			server->accent = parse_color(server, value);
+		} else if (look_parse(&server->look, key, value)) {
+			/* the tiles', background's, switcher's and search's look (appearance.h) */
 		} else if (strcmp(key, "frost") == 0) {
 			/* the frosted diffusion of the bars, system-wide; live on SIGHUP */
 			server->frost_off = strcmp(value, "0") == 0 || strcmp(value, "off") == 0;
@@ -5263,41 +5187,12 @@ static void load_config(struct zt_server *server) {
 				strcmp(value, "on") == 0 || strcmp(value, "1") == 0 ? AOD_ON : AOD_OFF;
 		} else if (strcmp(key, "wifi_suspend") == 0) {
 			server->wifi_suspend = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
-		} else if (strcmp(key, "style") == 0) {
-			/* ztRetrofit's look: metro (Start), dotmatrix (ZrnDotMatrix).
-			 * The session runs in one; this is the one the next starts in */
-			server->style_config = strcmp(value, "dotmatrix") == 0 || strcmp(value, "1") == 0 ?
-				STYLE_DOTMATRIX : STYLE_METRO;
-		} else if (strcmp(key, "dotmatrix_palette") == 0) {
-			int n = isdigit((unsigned char)value[0]) ? atoi(value) : dm_palette_index(value);
-			server->dm_palette = n < 0 || n >= DM_PALETTES ? 0 : n;
-		} else if (strcmp(key, "dotmatrix_amoled") == 0) {
-			server->dm_amoled = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
-		} else if (strcmp(key, "dotmatrix_stats") == 0) {
-			server->dm_cfg.sys_stats = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
-		} else if (strcmp(key, "dotmatrix_banners") == 0) {
-			server->dm_cfg.event_banners = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
-		} else if (strcmp(key, "dotmatrix_h24") == 0) {
-			server->dm_cfg.h24 = strcmp(value, "on") == 0 || strcmp(value, "1") == 0;
 		} else if (strcmp(key, "clock_24h") == 0) {
 			/* Settings' "24-hour time", for every clock */
 			server->clock_24h = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
-			clock_24h_set = true;
-		} else if (strcmp(key, "dotmatrix_launch_delay") == 0) {
-			int ms = atoi(value);
-			server->dm_cfg.launch_delay = ms < 0 ? 0 : ms > 3000 ? 3000 : ms;
-		} else if (strncmp(key, "dotmatrix_dock", 14) == 0 && key[14] >= '1' && key[14] <= '5' && !key[15]) {
-			/* a dock slot's app: its command, or "auto" */
-			char *slot = server->dm_cfg.dock[key[14] - '1'];
-			snprintf(slot, sizeof(server->dm_cfg.dock[0]), "%s", strcmp(value, "auto") == 0 ? "" : value);
 		}
 	}
 	fclose(f);
-	if (clock_24h_set) {
-		/* one setting for both styles; DotMatrix's own key (12-hour when
-		 * absent) only counts until Settings has written clock_24h */
-		server->dm_cfg.h24 = server->clock_24h;
-	}
 	if (!quick_audio_done) {
 		quick_add_audio(server);
 	}
@@ -5816,10 +5711,6 @@ static const char *app_symbol_name(const char *label) {
 static void draw_glyph(struct zt_server *server, cairo_t *cr, const char *icon,
 		const char *label, double cx, double cy, double s) {
 	const char *sym = label ? app_symbol_name(label) : NULL;
-	if (sym && dots()) {
-		draw_icon_vector(cr, sym, cx, cy, s);	/* the same glyph, dotted */
-		return;
-	}
 	if (sym && draw_icon_symbol(cr, sym, cx, cy, s)) {
 		return;	/* a known Windows Phone app: its real tile glyph */
 	}
@@ -5943,6 +5834,95 @@ static void lock_wall_ink(struct zt_server *server) {
 
 /* Read the two photos again (at start, on SIGHUP, when the screen size is
  * known). */
+/* ---- Start's photo blurred (appearance.h, wall-blur.h) ------------------------ */
+
+/* The photo, decoded at the screen's size, kept small for its blurs */
+static void wall_small_make(struct zt_server *server, cairo_surface_t *img) {
+	if (server->wall_small) {
+		cairo_surface_destroy(server->wall_small);
+		server->wall_small = NULL;
+	}
+	int iw = cairo_image_surface_get_width(img), ih = cairo_image_surface_get_height(img);
+	if (iw <= 0 || ih <= 0) {
+		return;
+	}
+	int sw = iw < WALL_BLUR_W ? iw : WALL_BLUR_W, sh = (int)lround((double)ih * sw / iw);
+	cairo_surface_t *small = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, sw, sh > 0 ? sh : 1);
+	cairo_t *cr = cairo_create(small);
+	cairo_scale(cr, (double)sw / iw, (double)sw / iw);
+	cairo_set_source_surface(cr, img, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	server->wall_small = small;
+}
+
+static void layer_drop(struct zt_server *server, struct zt_layer *layer) {
+	if (layer->tex && gl_begin(server)) {
+		glDeleteTextures(1, &layer->tex);
+		gl_end(server);
+	}
+	memset(layer, 0, sizeof(*layer));
+}
+
+/* One blur of the small photo into `layer`, the photo's size in points (its
+ * pixels fewer: wall_under and wall_back scale by pw / w). Only when the radius
+ * is not the one it holds. The texture's padding gets the edge's pixels, so
+ * its filtering never reaches past the photo. */
+static void wall_blur_layer(struct zt_server *server, struct zt_layer *layer, int *held, int r,
+		const char *name) {
+	if (r == *held && (r == 0 || layer->tex)) {
+		return;
+	}
+	*held = 0;
+	if (r <= 0 || !server->wall_small || server->wall_h <= 0) {
+		layer_drop(server, layer);
+		return;
+	}
+	double t0 = ftrace_clock();
+	int sw = cairo_image_surface_get_width(server->wall_small), sh = cairo_image_surface_get_height(server->wall_small);
+	struct zt_buffer *buffer = calloc(1, sizeof(*buffer));
+	if (!buffer) {
+		return;
+	}
+	buffer->pw = sw;
+	buffer->ph = sh;
+	buffer->t0 = t0;
+	buffer->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (sw + 63) / 64 * 64, (sh + 63) / 64 * 64);
+	cairo_t *cr = cairo_create(buffer->surface);
+	cairo_pattern_t *p = cairo_pattern_create_for_surface(server->wall_small);
+	cairo_pattern_set_extend(p, CAIRO_EXTEND_PAD);
+	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+	cairo_set_source(cr, p);
+	cairo_paint(cr);
+	cairo_pattern_destroy(p);
+	cairo_surface_flush(buffer->surface);
+	wall_blur((uint32_t *)cairo_image_surface_get_data(buffer->surface),
+		cairo_image_surface_get_width(buffer->surface), cairo_image_surface_get_height(buffer->surface),
+		cairo_image_surface_get_stride(buffer->surface) / 4, r);
+	cairo_surface_mark_dirty(buffer->surface);
+	g_dump_name = name;
+	zt_buffer_show(server, layer, buffer, cr, server->width, server->wall_h);
+	*held = r;
+	wlr_log(WLR_DEBUG, "wall blur: %s, radius %d, %dx%d, %.1f ms", name, r, sw, sh, (ftrace_clock() - t0) * 1000.0);
+}
+
+/* The blurs the look asks for, and no others; `again`: the photo is new */
+static void walls_blur(struct zt_server *server, bool again) {
+	if (again) {
+		server->wall_frost_r = server->wall_soft_r = server->wall_over_r[0] = server->wall_over_r[1] = -1;
+	}
+	const struct zt_look *l = &server->look;
+	wall_blur_layer(server, &server->wall_frost, &server->wall_frost_r,
+		look_blur_radius(l->v[LOOK_TILE_FROST]), "start-wallpaper-frost");
+	wall_blur_layer(server, &server->wall_soft, &server->wall_soft_r,
+		l->v[LOOK_BG_SHOW] ? look_blur_radius(l->v[LOOK_BG_BLUR]) : 0, "start-wallpaper-soft");
+	wall_blur_layer(server, &server->wall_over[0], &server->wall_over_r[0],
+		l->v[LOOK_SWITCHER_PHOTO] ? look_blur_radius(l->v[LOOK_SWITCHER_FROST]) : 0, "start-wallpaper-switcher");
+	wall_blur_layer(server, &server->wall_over[1], &server->wall_over_r[1],
+		l->v[LOOK_SEARCH_PHOTO] ? look_blur_radius(l->v[LOOK_SEARCH_FROST]) : 0, "start-wallpaper-search");
+}
+
 static void walls_load(struct zt_server *server) {
 	if (server->width == 0) {
 		return;
@@ -5964,6 +5944,7 @@ static void walls_load(struct zt_server *server) {
 		cairo_surface_t *img = image_cover(server->start_wall_path,
 			(int)ceil(server->width * server->scale), (int)ceil(h * server->scale));
 		if (img) {
+			wall_small_make(server, img);
 			cairo_t *cr;
 			struct zt_buffer *buffer = zt_buffer_create(server, server->width, h, &cr);
 			cairo_scale(cr, 1.0 / server->scale, 1.0 / server->scale);
@@ -5975,6 +5956,7 @@ static void walls_load(struct zt_server *server) {
 			server->wall_h = h;
 		}
 	}
+	walls_blur(server, true);
 }
 
 /* Start's photo for landscape: the view's height tall, and WALL_TALL of
@@ -6022,6 +6004,11 @@ static void wall_under(struct zt_server *server, const float model[16], double t
 		return;
 	}
 	struct zt_layer *w = &server->wall_layer;
+	double s = server->scale;
+	if (server->look.v[LOOK_TILE_FROST] > 0 && server->wall_frost.tex && server->wall_frost.w > 0) {
+		w = &server->wall_frost;	/* frosted: the blurred photo, fewer pixels a point */
+		s = w->pw / w->w;
+	}
 	if (server->wall_h <= 0 || !w->tex || !w->tw || !w->th) {
 		return;
 	}
@@ -6037,12 +6024,52 @@ static void wall_under(struct zt_server *server, const float model[16], double t
 	double py = STATUS_H + ty - server->scroll + margin + travel;
 	double max = server->wall_h - th;
 	py = py < 0 ? 0 : py > max ? max : py;
-	double s = server->scale;
 	server->uv_off[0] = (float)(tx * s / w->tw);
 	server->uv_off[1] = (float)(py * s / w->th);
 	quad(server, GL_TEXTURE_2D, w->tex, model, alpha, true, true,
 		(float)(tw * s / w->tw), (float)(th * s / w->th));
 	server->uv_off[0] = server->uv_off[1] = 0;
+}
+
+/* Start's photo behind the tiles (background_show), over the view through
+ * `model`: the part of it the screen is over, at the same parallax as the
+ * tiles' windows onto it (wall_under), so a frosted tile is glass over the
+ * same picture. Blurred by background_blur, dimmed by background_brightness
+ * (in the tint: no quad more). Upright only: turned, the theme's background,
+ * as before. */
+/* The part of Start's photo (`blurred` when it is made, else the sharp one)
+ * under the screen's rect (x, y, w, h), points, at Start's parallax, drawn
+ * through `model`, dimmed to `k` in the tint. */
+static void wall_photo_rect(struct zt_server *server, const float model[16], float alpha,
+		struct zt_layer *blurred, float k, double x, double y, double w, double h) {
+	struct zt_layer *l = &server->wall_layer;
+	double s = server->scale;
+	if (blurred && blurred->tex && blurred->w > 0) {
+		l = blurred;
+		s = l->pw / l->w;
+	}
+	if (server->wall_h <= 0 || !l->tex || !l->tw || !l->th) {
+		return;
+	}
+	double margin = server->height * WALL_MARGIN;
+	double travel = server->scroll * WALL_PARALLAX, most = server->wall_h - server->height - margin;
+	travel = travel < 0 ? 0 : travel > most ? (most > 0 ? most : 0) : travel;
+	double py = margin + travel, max = server->wall_h - server->height;
+	py = py < 0 ? 0 : py > max ? (max > 0 ? max : 0) : py;
+	float tint[3];
+	memcpy(tint, server->tint, sizeof(tint));
+	for (int i = 0; i < 3; i++) server->tint[i] *= k;
+	server->uv_off[0] = (float)(x * s / l->tw);
+	server->uv_off[1] = (float)((py + y) * s / l->th);
+	quad(server, GL_TEXTURE_2D, l->tex, model, alpha, true, true,
+		(float)(w * s / l->tw), (float)(h * s / l->th));
+	server->uv_off[0] = server->uv_off[1] = 0;
+	memcpy(server->tint, tint, sizeof(tint));
+}
+
+static void wall_back(struct zt_server *server, const float model[16], float alpha) {
+	wall_photo_rect(server, model, alpha, server->look.v[LOOK_BG_BLUR] > 0 ? &server->wall_soft : NULL,
+		look_f(&server->look, LOOK_BG_BRIGHTNESS), 0, 0, server->width, server->height);
 }
 
 static double text_width(const char *text, const char *font, double size);
@@ -6243,12 +6270,9 @@ static void draw_tile(struct zt_server *server, int i) {
  * off the screen is drawn when the tile comes back, not before.
  *
  * Power Management's tile is fed by the shell itself (power_sample): the
- * battery's draw in watts, read every 2 s while that tile (or, under
- * DotMatrix, the home that shows it) is on the screen and the screen is on,
- * and when the kernel says a supply changed. Nothing is read otherwise.
- *
- * DotMatrix has no tiles: the same signals show in its app list (a short
- * text at the row's end) and on the dock, through the launcher's host.
+ * battery's draw in watts, read every 2 s while that tile is on the screen
+ * and the screen is on, and when the kernel says a supply changed. Nothing is
+ * read otherwise.
  */
 static void command_key(const char *command, char *out, size_t size) {
 	char word[256], pkg[160];
@@ -6287,8 +6311,6 @@ static int tile_for_key(struct zt_server *server, const char *key) {
 	}
 	return -1;
 }
-
-static bool retro_on(struct zt_server *server);
 
 /* where back line k sits on a tile, points */
 #define BACK_LINE_SIZE(t)	((t)->size == TILE_WIDE ? 17.0 : (t)->live_value[0] ? 12.5 : 15.0)
@@ -6375,7 +6397,7 @@ static void draw_tile_back(struct zt_server *server, int i) {
  * tile within the part of Start that shows. */
 static bool tile_on_screen(struct zt_server *server, const struct tile *t) {
 	if (server->width <= 0 || !server->screen_on || server->locked || server->shown ||
-			server->hyper || server->page > 0.5f || retro_on(server)) {
+			server->hyper || server->page > 0.5f) {
 		return false;
 	}
 	if (server->orient % 180) {
@@ -6389,19 +6411,11 @@ static bool tile_on_screen(struct zt_server *server, const struct tile *t) {
 
 /* A tile's faces drawn again after its signal changed, if it is looked at;
  * if not, they are remembered as out of date (and the first back is always
- * made, for the tile to turn to). Under DotMatrix there are no tiles to draw. */
+ * made, for the tile to turn to). */
 static bool shell_in_motion(struct zt_server *server);
 static void tile_faces(struct zt_server *server, int i) {
 	struct tile *t = &server->tiles[i];
 	if (server->width <= 0) {
-		return;
-	}
-	if (retro_on(server)) {
-		/* no tiles in DotMatrix: the launcher shows it in its list */
-		if (server->dm) {
-			dm_launcher_dirty(server->dm);
-		}
-		damage(server);
 		return;
 	}
 	/* while Start moves or turns it waits, stale, for the next tick at rest
@@ -6436,7 +6450,7 @@ static void tile_signal_clear(struct zt_server *server, int i) {
 	if (t->flip > 1.0f) {
 		animate(server, ZT_ANIM_LIVE_TILES, &t->flip, 0.0f, 500, 0, false);	/* back to its front */
 	}
-	if (server->width > 0 && !retro_on(server)) {
+	if (server->width > 0) {
 		draw_tile(server, i);
 	}
 }
@@ -6652,8 +6666,7 @@ static long power_read(const char *dir, const char *name, long missing) {
 	return value;
 }
 
-/* Whether the draw is wanted now: Power Management's tile is looked at, or
- * under DotMatrix the home (its charging widget, its app list). */
+/* Whether the draw is wanted now: Power Management's tile is looked at. */
 static int power_tile(struct zt_server *server) {
 	for (int i = 0; i < server->n_tiles; i++) {
 		char key[128];
@@ -6742,13 +6755,8 @@ static void power_sample(struct zt_server *server) {
 			snprintf(l2, sizeof(l2), "%s%.0f%%/h %dh%02dm", sign > 0 ? "+" : "-", rate, mins / 60, mins % 60);
 		}
 	}
-	bool text_changed = strcmp(server->power_text, badge) != 0;
-	snprintf(server->power_text, sizeof(server->power_text), "%s", badge);
 	int i = power_tile(server);
 	if (i < 0) {
-		if (text_changed && retro_on(server)) {
-			damage(server);		/* its charging widget shows it */
-		}
 		return;
 	}
 	struct tile *t = &server->tiles[i];
@@ -6774,16 +6782,11 @@ static void power_sample(struct zt_server *server) {
 }
 
 /* Whether to read the battery now, and so at what moment: only with the
- * tile (or the DotMatrix home) in view, the screen on, and not more than
+ * tile in view, the screen on, and not more than
  * every 2 s. `force`: a supply has just said it changed. */
 static void power_tick(struct zt_server *server, bool force) {
-	bool wanted;
 	int i = power_tile(server);
-	if (retro_on(server)) {
-		wanted = server->screen_on && !server->locked && !server->shown && server->width > 0;
-	} else {
-		wanted = i >= 0 && tile_on_screen(server, &server->tiles[i]);
-	}
+	bool wanted = i >= 0 && tile_on_screen(server, &server->tiles[i]);
 	uint32_t now = now_ms();
 	if (!wanted) {
 		server->power_ms = 0;		/* the next time it is wanted: at once */
@@ -6796,26 +6799,6 @@ static void power_tick(struct zt_server *server, bool force) {
 	}
 	server->power_ms = now ? now : 1;
 	power_sample(server);
-}
-
-/* a signal's short text for DotMatrix, by the app's command: the badge, else
- * the value, else the count; "" when it has none */
-static const char *signal_short(struct zt_server *server, const char *command, char *out, size_t size) {
-	char key[128];
-	out[0] = 0;
-	command_key(command, key, sizeof(key));
-	int i = tile_for_key(server, key);
-	if (i >= 0 && server->tiles[i].live) {
-		struct tile *t = &server->tiles[i];
-		if (t->live_count > 0) {
-			snprintf(out, size, "%d", t->live_count);
-		} else if (t->live_badge[0]) {
-			snprintf(out, size, "%s", t->live_badge);
-		} else if (t->live_value[0]) {
-			snprintf(out, size, "%s", t->live_value);
-		}
-	}
-	return out;
 }
 
 /* a live tile turns to its back (or its front) */
@@ -6868,7 +6851,7 @@ static void live_tick(struct zt_server *server) {
 	uint32_t now = now_ms();
 	for (int i = 0; i < server->n_tiles; i++) {
 		struct tile *t = &server->tiles[i];
-		if ((t->front_stale || t->back_stale) && !retro_on(server) && tile_on_screen(server, t)) {
+		if ((t->front_stale || t->back_stale) && tile_on_screen(server, t)) {
 			if (t->back_stale && t->flip > 90.0f) {
 				draw_tile_back(server, i);
 			}
@@ -7020,8 +7003,7 @@ static void draw_start(struct zt_server *server) {
 	for (int i = 0; i < server->n_tiles; i++) {
 		draw_tile(server, i);
 		/* a signal that came before the screen was known: its back too */
-		if (server->tiles[i].live && server->tiles[i].size != TILE_SMALL && !server->tiles[i].back_layer.tex &&
-				!retro_on(server)) {
+		if (server->tiles[i].live && server->tiles[i].size != TILE_SMALL && !server->tiles[i].back_layer.tex) {
 			draw_tile_back(server, i);
 		}
 	}
@@ -7030,9 +7012,6 @@ static void draw_start(struct zt_server *server) {
 /* ---- the app list ----------------------------------------------------------- */
 
 static double text_width(const char *text, const char *font, double size) {
-	if (dots()) {
-		return dm_type_width(text, size);
-	}
 	static cairo_surface_t *surface;
 	static cairo_t *cr;
 	if (!cr) {
@@ -7103,8 +7082,7 @@ static double scroll_max(struct zt_server *server, bool list);
 /* ---- the app list's letters: Swivel over the list ----------------------------
  * The same numbers and motion as ZrnMetroCore's (core/zrnboard.h), on the
  * shell's own quads: one texture, kept until the letters or accent change, so
- * opening again is nothing but the motion. Metro only:
- * DotMatrix's launcher has its own letter index, in dots. */
+ * opening again is nothing but the motion. */
 
 static double board_side(struct zt_server *server) {
 	return (server->width - 2 * BOARD_MARGIN - (ZB_COLS - 1) * ZB_GAP) / ZB_COLS;
@@ -7451,8 +7429,6 @@ static void load_apps(struct zt_server *server) {
 		server->moving = true;	/* the rows near the screen are drawn over the next frames */
 		damage(server);
 	}
-	retro_setup(server);
-	retro_apps(server);
 }
 
 /* The letter pinned at the top of the app list while its rows pass: which item
@@ -8312,11 +8288,10 @@ static bool call_backdrop_on(struct zt_server *server);
 static void status_row_drawn(struct zt_server *server, cairo_t *cr, bool details, bool live, bool themed,
 		int lock_ink) {
 	/* White ink on the lock screen (over the wallpaper/accent) and while a call
-	 * rings; on the status bar, peek and shade it follows the shell theme.
-	 * DotMatrix paints its own row, so themed is ignored under it. `lock_ink`
+	 * rings; on the status bar, peek and shade it follows the shell theme. `lock_ink`
 	 * (>= 0 only for the lock) overrides that white with ink chosen from the
 	 * wallpaper's brightness: 1 bright -> black ink, 0 dark -> white ink. */
-	bool theme = themed && !retro_on(server);
+	bool theme = themed;
 	double fgr = 1, fgg = 1, fgb = 1;	/* the row's ink */
 	double hbr = 0, hbg = 0, hbb = 0;	/* the charger plug's halo, behind the ink */
 	if (theme) {
@@ -8861,7 +8836,7 @@ static void draw_status(struct zt_server *server) {
 	 * under it as the frame is drawn (bar_back), opaque over an app and
 	 * frosted over Start and the list */
 	/* (the call's look from the frame its window is in front, as its backdrop) */
-	server->status_clear = !call_front(server) && !retro_on(server);
+	server->status_clear = !call_front(server);
 	bool call_frosted = call_backdrop_on(server);
 	if (call_front(server) && !call_frosted) {
 		/* a call rings over the lock: dimmed; in light the theme's background,
@@ -8872,25 +8847,17 @@ static void draw_status(struct zt_server *server) {
 			cairo_set_source_rgb(cr, 0.10, 0.10, 0.10);
 		}
 		cairo_paint(cr);
-	} else if (retro_on(server)) {
-		cairo_set_source_rgb(cr, 0, 0, 0);		/* DotMatrix repaints the whole strip */
-		cairo_paint(cr);
 	}
-	if (retro_on(server)) {
-		retro_paint_status(server, cr);	/* the DotMatrix style's row */
-		signal_sweep_kick(server);
-	} else {
-		/* (its glyphs' boxes noted, for turning each in place) */
-		for (int k = 0; k < ST_CELLS; k++) {
-			server->st_cell[k].on = false;
-		}
-		server->st_recording = true;
-		/* over the call's dark frost: white, as on the lock */
-		status_row(server, cr, false, true, !call_frosted, -1);
-		server->st_recording = false;
+	/* (its glyphs' boxes noted, for turning each in place) */
+	for (int k = 0; k < ST_CELLS; k++) {
+		server->st_cell[k].on = false;
 	}
+	server->st_recording = true;
+	/* over the call's dark frost: white, as on the lock */
+	status_row(server, cr, false, true, !call_frosted, -1);
+	server->st_recording = false;
 	zt_buffer_show(server, &server->status_layer, buffer, cr, server->width, STATUS_H);
-	if (!retro_on(server) && (server->orient != 0 || server->rot_phase != ROT_IDLE)) {
+	if (server->orient != 0 || server->rot_phase != ROT_IDLE) {
 		status_clock2_bake(server);	/* turned: the clock as two lines */
 	}
 	bool in_shade = server->shade_open || server->shade_h > 0.1f;
@@ -8899,19 +8866,15 @@ static void draw_status(struct zt_server *server) {
 		 * top is the same thing: while an icon moves, it is drawn from here,
 		 * not by drawing the whole panel again every frame */
 		/* (the same row the panel's would be: kept over it, if it was) */
-		server->shade_row = in_shade || (server->shade_row && !retro_on(server));
+		server->shade_row = in_shade || server->shade_row;
 		server->peek_sig = shade_panel_sig(server);
 		buffer = zt_buffer_create(server, server->width, PEEK_H, &cr);
-		if (retro_on(server)) {
-			cairo_set_source_rgb(cr, 0, 0, 0);
-		} else {
-			set_rgb(cr, shell_bg_color(server));		/* peek follows the theme */
-		}
+		set_rgb(cr, shell_bg_color(server));		/* peek follows the theme */
 		cairo_paint(cr);
 		status_row(server, cr, true, false, true, -1);
 		zt_buffer_show(server, &server->peek_layer, buffer, cr, server->width, PEEK_H);
 	}
-	if (!in_shade && server->shade_layer.tex && !retro_on(server) && server->shade_sig != shade_panel_sig(server) &&
+	if (!in_shade && server->shade_layer.tex && server->shade_sig != shade_panel_sig(server) &&
 			(!server->shade_row || server->peek_sig != shade_panel_sig(server))) {
 		/* the action centre's row painted again too, a while after, while
 		 * it is shut and nothing is touched (shade_later_fired): painted at
@@ -8981,9 +8944,6 @@ static int peek_timed_out(void *data) {
  * same once-a-second toggle as the status bar's. With `lock` the white-on-black
  * plug is used instead of the themed one, so it shows over the wallpaper. */
 static void plug_over(struct zt_server *server, float oy, bool lock) {
-	if (retro_on(server)) {
-		return;		/* the DotMatrix rows show charging in their own battery */
-	}
 	struct zt_layer *plug = lock ? &server->lock_plug_layer : &server->plug_layer;
 	if (server->charging && !server->battery_full && plug->tex &&
 	    server->st_plug > 0.5f) {
@@ -9127,33 +9087,6 @@ static const char *note_who(struct zt_server *server, const char *app) {
 		}
 	}
 	return "";
-}
-
-/* The DotMatrix style's lock screen: dots on black, the clock in the middle
- * with the status icons over it and the waiting apps under the date. */
-static void retro_paint_lock(struct zt_server *server, cairo_t *cr) {
-	struct dm_screen field;
-	uint8_t *buf;
-	if (!retro_strip(server, server->height, &field, &buf)) {
-		return;
-	}
-	retro_feed(server);
-	const char *names[DM_LOCK_APPS];
-	int counts[DM_LOCK_APPS];
-	int n = note_apps(server, names, counts, DM_LOCK_APPS);
-	struct dm_lock_app apps[DM_LOCK_APPS];
-	for (int i = 0; i < n; i++) {
-		apps[i].name = names[i];
-		apps[i].count = counts[i];
-	}
-	struct dm_grid g;
-	dm_grid_init(&g, &field, buf);
-	struct dm_config cfg;
-	dm_launcher_get_config(server->dm, &cfg);
-	dm_chrome_lock(&g, &server->dm_st, wall_ms(), cfg.h24, apps, n);
-	dm_cairo_paint(cr, &g, server->dm_palette, server->dm_amoled ? 0 : 0.09f, 0.7f);
-	free(buf);
-	dm_screen_finish(&field);
 }
 
 #define AOD_WHITE	0.92	/* the always-on display: the time */
@@ -9391,7 +9324,7 @@ static void led_notes_sync(struct zt_server *server) {
 
 static void lock_notes_changed(struct zt_server *server) {
 	led_notes_sync(server);
-	if (server->width == 0 || retro_on(server) || !server->lock_layer.tex) {
+	if (server->width == 0 || !server->lock_layer.tex) {
 		return;
 	}
 	draw_lock_notes(server);
@@ -9407,25 +9340,14 @@ static void draw_lock_status(struct zt_server *server) {
 	zt_buffer_show(server, &server->lock_status_layer, buffer, cr, server->width, STATUS_H);
 }
 
-/* the lock's status row changed: under DotMatrix the lock is one picture */
+/* the lock's status row changed */
 static void lock_status_redraw(struct zt_server *server) {
-	if (retro_on(server)) {
-		draw_lock(server);
-	} else {
-		draw_lock_status(server);
-	}
+	draw_lock_status(server);
 }
 
 static void draw_lock(struct zt_server *server) {
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, server->height, &cr);
-	if (retro_on(server)) {
-		cairo_set_source_rgb(cr, 0, 0, 0);
-		cairo_paint(cr);
-		retro_paint_lock(server, cr);
-		zt_buffer_show(server, &server->lock_layer, buffer, cr, server->width, server->height);
-		return;
-	}
 	double r = ((server->accent >> 16) & 0xff) / 255.0, g = ((server->accent >> 8) & 0xff) / 255.0,
 		b = (server->accent & 0xff) / 255.0;
 	cairo_pattern_t *fade = cairo_pattern_create_linear(0, 0, 0, server->height);
@@ -9778,7 +9700,7 @@ static void burnin_minute(struct zt_server *server) {
 	}
 	/* the nav bar is not drawn on the minute: only when its place changed,
 	 * in the minute's frame, and only where it can be seen */
-	if (server->width > 0 && server->screen_on && NAV_H > 0 && !retro_on(server) &&
+	if (server->width > 0 && server->screen_on && NAV_H > 0 &&
 			g_burnin.place_nav != g_burnin.place) {
 		draw_nav(server);
 	}
@@ -10028,11 +9950,10 @@ static void note_draw(struct zt_server *server, cairo_t *cr, int slot) {
 	double y = 0;
 	if (server->note_head[slot]) {
 		/* the app: a square in the accent colour with its glyph (its initial
-		 * under DotMatrix, where a mask would not come out as dots, and when it
-		 * has none), and its name */
+		 * when it has none), and its name */
 		const char *app = server->notes[i].app;
 		char initial[2] = { (char)toupper((unsigned char)app[0]), 0 };
-		const char *key = dots() ? NULL : note_key(server, app, server->notes[i].who);
+		const char *key = note_key(server, app, server->notes[i].who);
 		set_rgb(cr, server->accent);
 		cairo_rectangle(cr, 14, 0, 28, 28);
 		cairo_fill(cr);
@@ -10041,9 +9962,9 @@ static void note_draw(struct zt_server *server, cairo_t *cr, int slot) {
 			char icon[80];
 			snprintf(icon, sizeof(icon), "@%s", key);
 			draw_glyph(server, cr, icon, NULL, 28, 14, 22);
-		} else if (!dots() && note_is_ztos(app, server->notes[i].who)) {
+		} else if (note_is_ztos(app, server->notes[i].who)) {
 			draw_ztos_logo(cr, 28, 14, 20);
-		} else if (!dots() && note_glyph(app)) {
+		} else if (note_glyph(app)) {
 			draw_icon(cr, note_glyph(app), 28, 14, 20);
 		} else {
 			draw_text(cr, initial, FONT_SEMIBOLD, 17, 14, 0, 28, 28, true);
@@ -10209,7 +10130,6 @@ static uint64_t shade_tile_sig(struct zt_server *server, int i, double w, double
 	s = s * 31 + (uint64_t)shell_light(server);
 	s = s * 31 + (uint64_t)shell_bg_color(server);
 	s = s * 31 + (uint64_t)server->accent;
-	s = s * 31 + (uint64_t)dots() * 2 + (uint64_t)retro_on(server);
 	s = s * 31 + (uint64_t)(w * 64) * 7 + (uint64_t)(h * 64);
 	s = s * 31 + (uint64_t)(server->scale * 1000);
 	return s | 1;
@@ -10281,7 +10201,7 @@ static int shade_later_fired(void *data) {
 		wl_event_source_timer_update(server->shade_later, 500);
 		return 0;
 	}
-	if (server->shade_sig_rest == shade_panel_sig_gen(server, 0) && server->shade_layer.tex && !retro_on(server)) {
+	if (server->shade_sig_rest == shade_panel_sig_gen(server, 0) && server->shade_layer.tex) {
 		/* only its row out of date: the row over it (peek_layer) stays,
 		 * and the panel is not drawn again at all. Drawn whole here, a pull
 		 * begun as it ran took 33-112 ms for its first frame (round 9,
@@ -10300,8 +10220,7 @@ static int shade_later_fired(void *data) {
 /* The panel brought up to date: when only its status row has changed,
  * that row alone (shade_row_paint) and the panel whole later, at rest */
 static void shade_refresh(struct zt_server *server) {
-	if (server->shade_sig_rest == shade_panel_sig_gen(server, 0) && server->shade_layer.tex &&
-			!retro_on(server) && (shell_in_motion(server) || server->moving || server->shade_row_only ||
+	if (server->shade_sig_rest == shade_panel_sig_gen(server, 0) && server->shade_layer.tex && (shell_in_motion(server) || server->moving || server->shade_row_only ||
 			(server->shade_h > 0.1f && !server->shade_open))) {
 		shade_row_paint(server);
 		server->shade_row_only = true;
@@ -10316,7 +10235,7 @@ static void shade_refresh(struct zt_server *server) {
 
 static void draw_shade(struct zt_server *server) {
 	const double height = shade_panel_h(server);
-	if (!g_dump_dir && server->shade_layer.tex && !retro_on(server) &&
+	if (!g_dump_dir && server->shade_layer.tex &&
 			(server->shade_open || server->shade_h > 0.1f) &&
 			server->shade_sig_rest == shade_panel_sig_gen(server, 0)) {
 		/* On screen, with nothing of the panel changed but perhaps its
@@ -10469,15 +10388,8 @@ static void draw_nav(struct zt_server *server) {
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, NAV_H, &cr);
 	/* the buttons on nothing, as the status row is: bar_back puts the
-	 * background under them. DotMatrix keeps its own. */
-	server->nav_clear = !retro_on(server);
-	if (retro_on(server)) {
-		set_rgb(cr, shell_bg_color(server));
-		cairo_paint(cr);
-		retro_paint_nav(server, cr);	/* the DotMatrix style's: the dot field goes on under it */
-		zt_buffer_show(server, &server->nav_layer, buffer, cr, server->width, NAV_H);
-		return;
-	}
+	 * background under them */
+	server->nav_clear = true;
 	double third = server->width / 3.0;
 	for (int i = 0; i < 3; i++) {
 		double cx = third * i + third / 2, cy = NAV_H / 2.0;
@@ -10571,28 +10483,11 @@ static void boot_logo_prepare(struct zt_server *server) {
 static void draw_splash(struct zt_server *server) {
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, server->height, &cr);
-	if (retro_on(server)) {
-		cairo_set_source_rgb(cr, 0, 0, 0);	/* DotMatrix has its own palette */
-	} else {
-		set_rgb(cr, shell_bg_color(server));	/* Metro: white in light, black in dark */
-	}
+	set_rgb(cr, shell_bg_color(server));	/* white in light, black in dark */
 	cairo_paint(cr);
-
-	struct dm_screen field;
-	uint8_t *buf;
-	if (retro_on(server) && retro_strip(server, server->height, &field, &buf)) {
-		/* the DotMatrix style's: the mark in dots on the home's lattice */
-		struct dm_grid g;
-		dm_grid_init(&g, &field, buf);
-		dm_chrome_logo(&g, "ALPHA");	/* the DotMatrix style is still an alpha */
-		dm_cairo_paint(cr, &g, server->dm_palette, server->dm_amoled ? 0 : 0.09f, 0.7f);
-		free(buf);
-		dm_screen_finish(&field);
-	} else {
-		/* Plain ztOS logo: thin text in the theme's ink on its background */
-		set_rgb(cr, shell_fg_color(server));
-		draw_text(cr, "ztOS", FONT_LIGHT, 56.0, 0, 0, server->width, server->height, true);
-	}
+	/* Plain ztOS logo: thin text in the theme's ink on its background */
+	set_rgb(cr, shell_fg_color(server));
+	draw_text(cr, "ztOS", FONT_LIGHT, 56.0, 0, 0, server->width, server->height, true);
 
 	zt_buffer_show(server, &server->splash_layer, buffer, cr, server->width, server->height);
 }
@@ -10708,7 +10603,7 @@ static PangoLayout *splash_tree_text(cairo_t *cr, const struct splash_tree *t, c
 static void splash_tree_bake(struct zt_server *server) {
 	const struct splash_tree *t = &g_tree;
 	server->tree_shown = false;
-	if (!g_tree_ok || t->n <= 0 || server->width <= 0 || retro_on(server)) {
+	if (!g_tree_ok || t->n <= 0 || server->width <= 0) {
 		return;
 	}
 	double s = server->scale;
@@ -10989,7 +10884,7 @@ static bool splash_first_frame(struct zt_server *server, struct wlr_output *wlr_
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 	frame_tint(server);
 	server->frame_on = false;
-	uint32_t clear = retro_on(server) ? 0 : shell_bg_color(server);
+	uint32_t clear = shell_bg_color(server);
 	glClearColor(((clear >> 16) & 0xff) / 255.0f * server->tint[0], ((clear >> 8) & 0xff) / 255.0f * server->tint[1],
 		(clear & 0xff) / 255.0f * server->tint[2], 1);
 	glClear(GL_COLOR_BUFFER_BIT);
@@ -12158,7 +12053,7 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 		perf_focus(toplevel);
 	}
 	if (toplevel && server->call_over_lock && toplevel->xdg_toplevel->app_id &&
-			!strcmp(toplevel->xdg_toplevel->app_id, "ztphone") && !retro_on(server)) {
+			!strcmp(toplevel->xdg_toplevel->app_id, "ztphone")) {
 		/* A call: Start (or the app) stays where it is, under the call's
 		 * backdrop, and the call's window is shown flat over it: its panels
 		 * flip in by themselves (the owner, 2026-11-21: not Start's
@@ -12738,6 +12633,7 @@ static void switcher_open(struct zt_server *server) {
 		zt_buffer_show(server, &server->card_title[i], buffer, cr, w, 24);
 	}
 	server->switcher = true;
+	server->over_gen++;	/* what it covers is blurred again (over_backdrop) */
 	server->drop_card = -1;
 	server->drop = 0;
 	server->switch_moving = false;
@@ -14112,10 +14008,10 @@ struct hyper_hit {
 #define HYPER_BEST_H	68
 
 static const struct { const char *page, *title, *words; } HYPER_SETTINGS[] = {
-	{ "theme", "customization", "accent colour color personalize" },
+	{ "theme", "customization", "accent colour color personalize columns background wallpaper" },
 	{ "animation", "animation speeds", "motion slow fast" },
-	{ "style", "shell style", "metro dotmatrix look" },
-	{ "tiles", "Tiles Shell", "start screen columns home" },
+	{ "home-screen", "home screen", "start tiles opacity transparency frost blur brightness background" },
+	{ "switcher-search", "app switcher + search", "recents task opacity transparency frost blur brightness" },
 	{ "lock", "Lock Screen", "wake locked" },
 	{ "wallpapers", "background photo", "wallpaper picture start" },
 	{ "navigation", "navigation bar", "centre center icon logo" },
@@ -14329,8 +14225,10 @@ static void draw_hyper(struct zt_server *server) {
 	 * its greys a darker grey in light */
 	bool light = shell_light(server);
 	double ink = light ? 0 : 1, grey = light ? 0.40 : 0.6;
-	cairo_set_source_rgb(cr, 1 - ink, 1 - ink, 1 - ink);
-	cairo_paint(cr);
+	if (server->look.v[LOOK_SEARCH_OPACITY] >= 100) {
+		cairo_set_source_rgb(cr, 1 - ink, 1 - ink, 1 - ink);
+		cairo_paint(cr);
+	}	/* (else clear: over_backdrop is under it, search_opacity) */
 	/* the ring, and the name */
 	set_rgb(cr, server->accent);
 	cairo_set_line_width(cr, 3);
@@ -14447,6 +14345,7 @@ static void hyper_open(struct zt_server *server) {
 		hyper_files_read(server, dir, 0);
 	}
 	draw_hyper(server);
+	server->over_gen++;	/* what it covers is blurred again (over_backdrop) */
 	server->hyper_t = 0;
 	animate(server, ZT_ANIM_START, &server->hyper_t, 1.0f, 250, 0, false);
 	server->osk_terminal = false;
@@ -15875,9 +15774,6 @@ static void nav_activate(struct zt_server *server, int index) {
 		wlr_log(WLR_INFO, "nav: start");
 		if (server->shown) {
 			show_toplevel(server, NULL);
-		} else if (retro_on(server)) {
-			dm_launcher_home(server->dm, wall_ms());
-			damage(server);
 		} else if (!closed_hyper && !server->menu_open && !server->editing && !server->board_state &&
 				!server->shade_open && server->page <= 0.5f && server->scroll <= 1) {
 			switcher_open(server);	/* already home, at the top of the tiles */
@@ -15897,9 +15793,6 @@ static void nav_activate(struct zt_server *server, int index) {
 		}
 		if (server->shown) {
 			app_back(server);
-		} else if (retro_on(server)) {
-			dm_launcher_back(server->dm, wall_ms());
-			damage(server);
 		} else if (server->menu_open) {
 			menu_hide(server);
 		} else if (server->board_state) {
@@ -16551,7 +16444,7 @@ static void note_clear_start(struct zt_server *server) {
 		}
 	}
 	/* (the style without note textures has nothing to slide; nor a panel not in view) */
-	if (!server->note_clear_rows || retro_on(server) || !(server->shade_open || server->shade_h > 0.1f)) {
+	if (!server->note_clear_rows || !(server->shade_open || server->shade_h > 0.1f)) {
 		note_clear_finish(server);
 		return;
 	}
@@ -18671,7 +18564,6 @@ static void aod_sync(struct zt_server *server) {
 
 static void screen_set(struct zt_server *server, bool on) {
 	if (!on) {
-		server->dm_hidden = 1;	/* the DotMatrix home boots again when it is next seen */
 		server->prox_blank = false;	/* dark already, or about to be: a proper off now */
 	}
 	if (!server->output || server->screen_on == on) {
@@ -18954,447 +18846,6 @@ static int idle_fired(void *data) {
 	return 0;
 }
 
-/* ---- ztRetrofit: the shell's styles ---------------------------------------- */
-
-/*
- * ztRetrofit is this shell; Metro, DotMatrix and (to come) zXperia are its
- * styles. A style is how the shell looks and moves, never what it does: the
- * DotMatrix home (retro/dm-launcher.c, a port of ZrnDotMatrix) launches the
- * same apps through launch(), turns the same radios through the action
- * centre's code, and shows the same battery, network and media state the
- * status bar does. It is drawn where Start was, with the GPU, as point
- * sprites, between the top of the screen and the nav bar.
- */
-
-static bool retro_on(struct zt_server *server) {
-	return server->style == STYLE_DOTMATRIX && server->dm;
-}
-
-static int64_t wall_ms(void) {
-	struct timespec ts;
-	clock_gettime(CLOCK_REALTIME, &ts);
-	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
-static bool word_in(const char *text, const char *word) {
-	return text && strcasestr(text, word);
-}
-
-/* the first app, in the order of `words`, whose name or command has the word */
-static const struct app_item *retro_find(struct zt_server *server, const char *const *words) {
-	for (int w = 0; words[w]; w++) {
-		for (int i = 0; i < server->n_items; i++) {
-			const struct app_item *it = &server->items[i];
-			if (!it->header && it->command[0] && (word_in(it->name, words[w]) || word_in(it->command, words[w]))) {
-				return it;
-			}
-		}
-	}
-	return NULL;
-}
-
-static const char *const RETRO_PHONE[] = { "ztphone", "phone", "dialer", NULL };
-
-/* the app list and the dock, from the same list the Metro app list shows */
-static void retro_apps(struct zt_server *server) {
-	if (!server->dm) {
-		return;
-	}
-	struct dm_app *apps = calloc(server->n_items + 1, sizeof(*apps));
-	int n = 0;
-	for (int i = 0; apps && i < server->n_items; i++) {
-		const struct app_item *it = &server->items[i];
-		if (it->header || !it->command[0]) {
-			continue;
-		}
-		snprintf(apps[n].label, sizeof(apps[n].label), "%s", it->name);
-		snprintf(apps[n].act, sizeof(apps[n].act), "%s", it->command);
-		n++;
-	}
-	dm_launcher_apps(server->dm, apps, n);	/* (the dock picks its apps from these) */
-	free(apps);
-}
-
-static void retro_launch(void *data, const char *act, const char *name) {
-	struct zt_server *server = data;
-	if (strcmp(act, "dial") == 0) {
-		const struct app_item *it = retro_find(server, RETRO_PHONE);
-		if (!it) {
-			dm_launcher_launch_failed(server->dm, wall_ms());
-			return;
-		}
-		act = it->command;
-	}
-	wlr_log(WLR_INFO, "dotmatrix: opening %s (%s)", name, act);
-	server->tapped = -1;
-	server->tapped_item = -1;
-	server->dm_launch_fired_ms = now_ms();
-	launch(server, act);
-}
-
-static void retro_media(void *data, int cmd) {
-	run_detached("playerctl", cmd < 0 ? "previous" : cmd > 0 ? "next" : "play-pause", NULL, NULL);
-}
-
-/* the action centre's own toggles: the same code, another face */
-static bool retro_radio(void *data, const char *id) {
-	struct zt_server *server = data;
-	server->shade_wifi = wifi_up();
-	server->shade_bt = server->bt_on;
-	if (!strcmp(id, "wifi")) {
-		shade_activate(server, 100 + Q_WIFI);
-	} else if (!strcmp(id, "bt")) {
-		shade_activate(server, 100 + Q_BLUETOOTH);
-	} else if (!strcmp(id, "data")) {
-		shade_activate(server, 100 + Q_DATA);
-	} else {
-		shade_activate(server, 100 + Q_LOCATION);
-	}
-	return true;
-}
-
-static void retro_saved(void *data) {
-	struct zt_server *server = data;
-	server->dm_palette = dm_launcher_palette(server->dm);
-	server->dm_amoled = dm_launcher_amoled(server->dm);
-	config_keep("dotmatrix_palette", server->dm_palette);
-	config_keep("dotmatrix_amoled", server->dm_amoled);
-	struct dm_config c;
-	dm_launcher_get_config(server->dm, &c);
-	if (memcmp(&c, &server->dm_cfg, sizeof(c))) {
-		bool h24_was = server->dm_cfg.h24;
-		server->dm_cfg = c;
-		config_keep_text("dotmatrix_stats", c.sys_stats ? "on" : "off");
-		config_keep_text("dotmatrix_banners", c.event_banners ? "on" : "off");
-		config_keep_text("dotmatrix_h24", c.h24 ? "on" : "off");
-		if (c.h24 != h24_was) {
-			/* DotMatrix's CLOCK switch is the same setting as Settings' */
-			server->clock_24h = c.h24;
-			config_keep_text("clock_24h", c.h24 ? "on" : "off");
-		}
-		config_keep("dotmatrix_launch_delay", c.launch_delay);
-		for (int i = 0; i < 5; i++) {
-			char key[24];
-			snprintf(key, sizeof(key), "dotmatrix_dock%d", i + 1);
-			config_keep_text(key, c.dock[i][0] ? c.dock[i] : "auto");
-		}
-	}
-	draw_status(server);
-	draw_nav(server);
-}
-
-static void retro_haptic(void *data, int kind, int ms) {
-	struct zt_server *server = data;
-	switch (kind) {
-	case DM_HAPTIC_RIPPLE:
-		hap(server, HAP_TICK, HG_TILES);
-		break;
-	case DM_HAPTIC_TRANSITION:
-		hap(server, HAP_TAP, HG_SLIDE);
-		break;
-	default:
-		hap(server, HAP_CLICK, HG_SYSTEM);
-		break;
-	}
-}
-
-static void retro_setup(struct zt_server *server);
-
-/* The settings sheet asked for Metro. Not from inside the launcher's own
- * call: it is freed on the way, so the change waits for the loop to idle. */
-/* Another style: kept for the next session, and the session started again
- * in it (greetd runs ztmetro-session anew, which exports ZTRF_SHELL_STYLE;
- * the apps go with the display and come back in the new style). */
-static void style_restart_idle(void *data) {
-	struct zt_server *server = data;
-	wlr_log(WLR_INFO, "ztRetrofit: the session starts again in the %s style",
-		server->style_config == STYLE_DOTMATRIX ? "DotMatrix" : "Metro");
-	wl_display_terminate(server->wl_display);
-}
-
-static void style_switch(struct zt_server *server, int style) {
-	server->style_config = style;
-	config_keep_text("style", style == STYLE_DOTMATRIX ? "dotmatrix" : "metro");
-	if (style != server->style) {
-		wl_event_loop_add_idle(server->loop, style_restart_idle, server);
-	}
-}
-
-static void retro_style(void *data, const char *name) {
-	style_switch(data, strcmp(name, "dotmatrix") == 0 ? STYLE_DOTMATRIX : STYLE_METRO);
-}
-
-static int retro_timer_fired(void *data) {
-	damage(data);
-	return 0;
-}
-
-static void retro_free(struct zt_server *server) {
-	if (server->dm_gl_ok && gl_begin(server)) {
-		dm_gl_finish(&server->dm_gl);
-		gl_end(server);
-	}
-	server->dm_gl_ok = false;
-	dm_launcher_free(server->dm);
-	server->dm = NULL;
-	server->dm_have_frame = false;
-}
-
-/* Made when the style is DotMatrix and the screen's size is known; the GL
- * side waits for the first frame, which has the context current. */
-static void retro_setup(struct zt_server *server) {
-	if (server->style != STYLE_DOTMATRIX) {
-		if (server->dm) {
-			retro_free(server);
-			draw_status(server);	/* Metro's own again */
-			draw_nav(server);
-			if (server->splash) draw_splash(server);
-			if (server->locked) draw_lock(server);
-		}
-		return;
-	}
-	float w = server->width, h = server->height - NAV_H;
-	if (w <= 0 || h <= 0) {
-		return;
-	}
-	if (server->dm && dm_launcher_screen(server->dm)->w == w && dm_launcher_screen(server->dm)->h == h) {
-		return;
-	}
-	retro_free(server);
-	struct dm_host host = {
-		.data = server, .launch = retro_launch, .media = retro_media, .toggle_radio = retro_radio,
-		.saved = retro_saved, .haptic = retro_haptic, .style = retro_style, .signal = retro_signal,
-		.version = "ztRetrofit",
-	};
-	server->dm = dm_launcher_new(&host, w, h);
-	server->dm_fed = false;
-	if (!server->dm) {
-		wlr_log(WLR_ERROR, "dotmatrix: no launcher (%.0fx%.0f points)", w, h);
-		return;
-	}
-	dm_launcher_set_palette(server->dm, server->dm_palette, server->dm_amoled);
-	retro_apps(server);
-	dm_launcher_set_config(server->dm, &server->dm_cfg);
-	if (!server->dm_timer && server->loop) {	/* (none when only rendering to files) */
-		server->dm_timer = wl_event_loop_add_timer(server->loop, retro_timer_fired, server);
-	}
-	const struct dm_screen *s = dm_launcher_screen(server->dm);
-	wlr_log(WLR_INFO, "dotmatrix: %dx%d dots, pitch %.2f points", s->cols, s->rows, s->pitch);
-	draw_status(server);
-	draw_nav(server);
-	if (server->splash) draw_splash(server);	/* the mark in dots */
-}
-
-/* CPU and memory once a second for the load meters; the GPU's is how much
- * of the last second the shell spent drawing frames */
-static void retro_sample(struct zt_server *server) {
-	uint32_t now = now_ms();
-	if (server->dm_sample_ms && now - server->dm_sample_ms < 1000) {
-		return;
-	}
-	uint32_t span = server->dm_sample_ms ? now - server->dm_sample_ms : 1000;
-	server->dm_sample_ms = now;
-	FILE *f = fopen("/proc/stat", "r");
-	unsigned long long v[8] = { 0 };
-	if (f && fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
-			&v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) == 8) {
-		unsigned long long total = 0, idle = v[3] + v[4];
-		for (int i = 0; i < 8; i++) total += v[i];
-		unsigned long long busy = total - idle;
-		if (server->dm_cpu_total && total > server->dm_cpu_total) {
-			server->dm_cpu = (int)(100 * (busy - server->dm_cpu_busy) / (total - server->dm_cpu_total));
-		}
-		server->dm_cpu_busy = busy;
-		server->dm_cpu_total = total;
-	}
-	if (f) fclose(f);
-	f = fopen("/proc/meminfo", "r");
-	if (f) {
-		char line[128];
-		long total = 0, avail = 0;
-		while (fgets(line, sizeof(line), f)) {
-			sscanf(line, "MemTotal: %ld", &total);
-			sscanf(line, "MemAvailable: %ld", &avail);
-		}
-		fclose(f);
-		if (total > 0) server->dm_ram = (int)(100 - 100 * avail / total);
-	}
-	int gpu = (int)(server->dm_frames * 1667 / (span ? span : 1000) / 10);
-	server->dm_gpu = gpu > 100 ? 100 : gpu;
-	server->dm_frames = 0;
-}
-
-/* what the launcher shows, from what the status bar shows */
-/* a tile signal for the launcher's app list and dock (see "live tiles") */
-static void retro_signal(void *data, const char *act, char *out, size_t size) {
-	signal_short(data, act, out, size);
-}
-
-static void retro_feed(struct zt_server *server) {
-	struct dm_status st = { 0 };
-	if (server->charging) {
-		snprintf(st.power, sizeof(st.power), "%s", server->power_text);
-	}
-	st.batt = server->battery_level;
-	st.charging = server->charging;
-	st.wifi = wifi_bars(server) >= 0;
-	st.data = server->cell_data;
-	st.signal = server->cell_known && !server->cell_airplane ? (server->cell_bars * 4 + 2) / 5 : 0;
-	st.searching = cell_searching(server) ? server->signal_sweep % 4 + 1 : 0;
-	st.bt = server->bt_on;
-	st.bt_audio = server->bt_streaming;
-	st.playing = server->media && server->media_playing;
-	snprintf(st.track, sizeof(st.track), "%s", server->media_title);
-	snprintf(st.artist, sizeof(st.artist), "%s", server->media_artist);
-	st.loc = server->shade_location;
-	st.cpu = server->dm_cpu;
-	st.ram = server->dm_ram;
-	st.gpu = server->dm_gpu;
-	/* the apps with notifications waiting: their dock icons pulse */
-	for (int k = 0; k < server->n_notes && st.n_notif < DM_MAX_NOTIF; k++) {
-		const char *app = server->notes[k].app[0] ? server->notes[k].app : "System";
-		int i = 0;
-		while (i < st.n_notif && strcasecmp(st.notif[i], app) != 0) i++;
-		if (i < st.n_notif) {
-			st.notif_count[i]++;
-		} else {
-			st.notif_count[st.n_notif] = 1;
-			snprintf(st.notif[st.n_notif++], sizeof(st.notif[0]), "%s", app);
-		}
-	}
-	if (!server->dm_fed || memcmp(&st, &server->dm_st, sizeof(st))) {
-		server->dm_st = st;
-		server->dm_fed = true;
-		/* the radios report in during the first seconds after the shell
-		 * starts: those are not events */
-		if (server->splash || !server->boot_done_ms || now_ms() - server->boot_done_ms < 20000) {
-			dm_launcher_seed(server->dm, &st);
-		} else {
-			dm_launcher_status(server->dm, &st);
-		}
-	}
-}
-
-/* The DotMatrix home in this frame. `covered`: the lock screen, the boot
- * screens or the dark are over it; `app_covers`: an app at rest is. */
-static void retro_draw(struct zt_server *server, int width_px, int height_px, bool covered, bool app_covers) {
-	if (!retro_on(server)) {
-		return;
-	}
-	if (covered || !server->screen_on) {
-		server->dm_hidden = 1;
-		return;
-	}
-	if (app_covers) {
-		if (server->dm_hidden != 1) server->dm_hidden = 2;
-		return;
-	}
-	struct dm_launcher *L = server->dm;
-	int64_t now = wall_ms();
-	if (!server->dm_gl_ok) {
-		server->dm_gl_ok = dm_gl_init(&server->dm_gl, dm_launcher_screen(L)) &&
-			dm_gl_screen2(&server->dm_gl, dm_launcher_screen2(L));
-		if (!server->dm_gl_ok) {
-			/* no dots to draw with: the session starts again in Metro,
-			 * rather than one style half over the other */
-			wlr_log(WLR_ERROR, "dotmatrix: the dot shader did not build");
-			if (server->style_config != STYLE_METRO) style_switch(server, STYLE_METRO);
-			return;
-		}
-		server->dm_gl.top_down = true;
-	}
-	/* uncovered: from the dark (or the lock) the boot plays, from an app
-	 * the launch runs backwards into home */
-	if (server->dm_hidden == 1) {
-		dm_launcher_wake(L, now);
-	} else if (server->dm_hidden == 2) {
-		dm_launcher_resume(L, now);
-	}
-	server->dm_hidden = 0;
-	if (dm_launcher_locked(L) != server->locked) {
-		dm_launcher_lock(L, server->locked, now);	/* the dots rearrange */
-	}
-	if (dm_launcher_waiting(L) && !server->shown && !loading_active(server) &&
-			now_ms() - server->dm_launch_fired_ms > 1500) {
-		dm_launcher_launch_failed(L, now);	/* nothing came */
-	}
-	retro_sample(server);
-	retro_feed(server);
-	struct dm_frame f;
-	if (dm_launcher_frame(L, now, &f)) {
-		server->dm_last = f;
-		server->dm_have_frame = true;
-	}
-	if (server->dm_have_frame) {
-		/* the output's first row is the top: the field ends above the nav bar */
-		int nav_px = (int)lroundf(NAV_H * server->scale);
-		glViewport(0, 0, width_px, height_px - nav_px);
-		dm_gl_draw(&server->dm_gl, &server->dm_last, dm_launcher_palette(L), server->scale, server->tint, 0);
-		glViewport(0, 0, width_px, height_px);
-	}
-	server->dm_frames++;
-	int wake = dm_launcher_next_wake(L, now);
-	if (wake <= 0) {
-		server->sweeping = true;	/* animating: the next frame straight away */
-	} else {
-		wl_event_source_timer_update(server->dm_timer, wake);
-	}
-}
-
-/* A strip of the DotMatrix home's dot field, `h` points tall, for the status
- * row and the nav bar: the same pitch, so their dots line up with home's. */
-static bool retro_strip(struct zt_server *server, float h, struct dm_screen *strip, uint8_t **buf) {
-	float pitch = dm_launcher_screen(server->dm)->pitch;
-	if (!dm_screen_init(strip, server->width, h, pitch, 0)) {
-		return false;
-	}
-	*buf = calloc((size_t)strip->cols * strip->rows, 1);
-	if (!*buf) {
-		dm_screen_finish(strip);
-		return false;
-	}
-	return true;
-}
-
-static void retro_paint_status(struct zt_server *server, cairo_t *cr) {
-	struct dm_screen strip;
-	uint8_t *buf;
-	if (!retro_strip(server, STATUS_H, &strip, &buf)) {
-		return;
-	}
-	retro_feed(server);
-	struct dm_grid g;
-	dm_grid_init(&g, &strip, buf);
-	dm_chrome_status(&g, &server->dm_st, wall_ms(), false);
-	dm_cairo_paint(cr, &g, server->dm_palette, server->dm_amoled ? 0 : 0.09f, 0.7f);
-	free(buf);
-	dm_screen_finish(&strip);
-}
-
-static void retro_paint_nav(struct zt_server *server, cairo_t *cr) {
-	struct dm_screen strip;
-	uint8_t *buf;
-	if (!retro_strip(server, NAV_H, &strip, &buf)) {
-		return;
-	}
-	struct dm_grid g;
-	dm_grid_init(&g, &strip, buf);
-	float centres[3];
-	for (int i = 0; i < 3; i++) {
-		float x = server->width / 3.0f * (i + 0.5f);
-		centres[i] = (x - strip.ox) / strip.pitch;
-	}
-	dm_chrome_nav(&g, centres, server->nav_pressed, server->osk_visible);
-	dm_cairo_paint(cr, &g, server->dm_palette, server->dm_amoled ? 0 : 0.09f, 0.7f);
-	free(buf);
-	dm_screen_finish(&strip);
-}
-
-/* the DotMatrix home is up and nothing of the shell's own is over it */
-static bool retro_home_shown(struct zt_server *server) {
-	return retro_on(server) && !server->shown && !server->leaving && !server->locked &&
-		server->switch_t <= 0.001f && server->shade_h < 0.5f && !server->hyper && server->screen_on;
-}
 
 /* A card thrown off the top (the switcher's, the cover-flow's): its app
  * asked to close, and its process told to end, so that nothing of it is left
@@ -19446,16 +18897,11 @@ static void lock_open(struct zt_server *server) {
 	if (!server->boot_logo_done) {
 		char marker[256];
 		if (access(runtime_file(marker, sizeof(marker), "ztmetro-logo-unlocked"), F_OK) == 0) server->boot_logo_done = true;
-		else if (!retro_on(server)) boot_logo_prepare(server);	/* (DotMatrix: its home's own) */
+		else boot_logo_prepare(server);
 	}
 	hap(server, HAP_TAP, HG_SLIDE);
 	ui_sound(server, UIS_UNLOCK);
 	animate(server, ZT_ANIM_LOCK, &server->lock_y, (float)-server->height, 200, 0, false);
-	if (retro_on(server) && server->shown) {
-		/* the app that was open lights up again, dot by dot */
-		server->app_angle = TURN_IN_DEG;
-		animate(server, ZT_ANIM_LOCK, &server->app_angle, 0.0f, 450, 0, false);
-	}
 	const char *shown_id = server->shown ? server->shown->xdg_toplevel->app_id : NULL;
 	if (waydroid_window(shown_id)) {
 		/* the Android app that was open is in front again */
@@ -20052,19 +19498,13 @@ static void touch_begin(struct zt_server *server, int32_t id, double px, double 
 	if (server->locked) {
 		/* (the lock is upright on the glass in every orientation) */
 		p->role = ROLE_LOCK;	/* nothing under it can be reached */
-		p->index = retro_on(server) ? -1 : lock_awake_hit(server, x, y);
-		if (server->pc_pad && !retro_on(server)) {
+		p->index = lock_awake_hit(server, x, y);
+		if (server->pc_pad) {
 			p->index = -1;
 			pc_touch_down(server, p, px, py);
 			return;
 		}
-		if (!retro_on(server)) pc_status_refresh(server);	/* fresh by the time the swipe ends */
-		if (retro_on(server)) {
-			/* the DotMatrix lock: only its box unlocks, swiped across */
-			float x0, y0, x1, y1;
-			dm_launcher_unlock_box(server->dm, &x0, &y0, &x1, &y1);
-			if (px >= x0 - 12 && px <= x1 && py >= y0 - 16 && py <= y1 + 16) p->index = 1;
-		}
+		pc_status_refresh(server);	/* fresh by the time the swipe ends */
 		return;
 	}
 
@@ -20174,13 +19614,12 @@ static void touch_begin(struct zt_server *server, int32_t id, double px, double 
 		 * last drawn (every change draws it at once anyway): painting it
 		 * here made the pull's first frame 44-99 ms (2026-11-22) */
 		if (server->shade_layer.tex && (server->shade_sig == shade_panel_sig(server) ||
-				(server->shade_row && server->peek_sig == shade_panel_sig(server) && !retro_on(server) &&
+				(server->shade_row && server->peek_sig == shade_panel_sig(server) &&
 				server->shade_sig_rest == shade_panel_sig_gen(server, 0)))) {
 			/* (or the panel with the row over it, both as they are now) */
 			draw_shade_tiles(server);
 			notes_build(server);
-		} else if (server->shade_sig_rest == shade_panel_sig_gen(server, 0) && server->shade_layer.tex &&
-				!retro_on(server)) {
+		} else if (server->shade_sig_rest == shade_panel_sig_gen(server, 0) && server->shade_layer.tex) {
 			/* only the status row has changed (the data arrows come and go
 			 * all through a chat's traffic): that row alone, over the
 			 * panel's, as while an icon moves (shade_row); the panel
@@ -20254,18 +19693,6 @@ static void touch_begin(struct zt_server *server, int32_t id, double px, double 
 	if (server->hyper) {
 		p->role = ROLE_HYPER;
 		server->hyper_scroll0 = server->hyper_scroll;
-		return;
-	}
-	if (!server->shown && retro_on(server)) {
-		p->role = ROLE_RETRO;
-		int fingers = 0;
-		for (int i = 0; i < MAX_TOUCH; i++) {
-			fingers += server->touches[i].used && server->touches[i].role == ROLE_RETRO;
-		}
-		/* one finger is the launcher's; more are a gesture (three up: its settings) */
-		/* (DotMatrix is never turned: the glass's points) */
-		dm_launcher_touch(server->dm, fingers == 1 ? DM_TOUCH_DOWN : DM_TOUCH_CANCEL, (float)px, (float)py, wall_ms());
-		damage(server);
 		return;
 	}
 	if (!server->shown) {
@@ -20458,31 +19885,6 @@ static void touch_update(struct zt_server *server, int32_t id, double px, double
 	case ROLE_AUDIO:
 		audio_modal_touch_move(server, p, x);
 		break;
-	case ROLE_RETRO:
-		if (server->dm) {
-			/* three fingers pushed up together: the launcher's settings */
-			int fingers = 0;
-			double rise = 0;
-			for (int i = 0; i < MAX_TOUCH; i++) {
-				struct touch_point *q = &server->touches[i];
-				if (q->used && q->role == ROLE_RETRO) {
-					fingers++;
-					rise += q->py0 - q->py;	/* (DotMatrix: on the glass) */
-				}
-			}
-			if (fingers == 3 && rise / 3 > 50) {
-				for (int i = 0; i < MAX_TOUCH; i++) {
-					if (server->touches[i].used && server->touches[i].role == ROLE_RETRO) {
-						server->touches[i].role = ROLE_NONE;
-					}
-				}
-				dm_launcher_three_up(server->dm, wall_ms());
-			} else if (fingers == 1) {
-				dm_launcher_touch(server->dm, DM_TOUCH_MOVE, (float)px, (float)py, wall_ms());
-			}
-			damage(server);
-		}
-		break;
 	case ROLE_SWITCH:
 		{
 			/* how fast the finger is going, evened out, for when it lets go */
@@ -20578,15 +19980,6 @@ static void touch_update(struct zt_server *server, int32_t id, double px, double
 		break;
 	}
 	case ROLE_LOCK:
-		if (retro_on(server)) {
-			if (p->index == 1 && server->locked) {
-				float x0, y0, x1, y1;
-				dm_launcher_unlock_box(server->dm, &x0, &y0, &x1, &y1);
-				dm_launcher_unlock_drag(server->dm, (float)((px - p->px0) / (x1 - x0)));
-				damage(server);
-			}
-			break;
-		}
 		if (p->moved && server->locked && server->pc_pad) {
 			if (server->pc_pressed >= 0) {	/* a key slid off: not pressed */
 				server->pc_pressed = -1;
@@ -20839,13 +20232,6 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 	case ROLE_AUDIO:
 		audio_modal_touch_end(server, p, cancelled);
 		break;
-	case ROLE_RETRO:
-		if (server->dm) {
-			dm_launcher_touch(server->dm, cancelled ? DM_TOUCH_CANCEL : DM_TOUCH_UP,
-				(float)p->px, (float)p->py, wall_ms());
-			damage(server);
-		}
-		break;
 	case ROLE_SWITCH:
 		if (!server->switcher) {
 			break;
@@ -20995,27 +20381,16 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 		if (!server->locked) {
 			break;
 		}
-		if (server->pc_pad && !retro_on(server)) {
+		if (server->pc_pad) {
 			pc_touch_up(server, p, cancelled);
 			break;
 		}
-		bool dm_swiped = false;
-		if (retro_on(server)) {
-			float x0, y0, x1, y1;
-			dm_launcher_unlock_box(server->dm, &x0, &y0, &x1, &y1);
-			dm_swiped = p->index == 1 && !cancelled && p->px - p->px0 > (x1 - x0) * 0.6;
-			if (!dm_swiped) {
-				dm_launcher_unlock_drag(server->dm, 0);	/* the thumb goes back */
-				damage(server);
-				break;
-			}
-		}
 		/* the awake line or its sheet tapped (a read-only look) */
-		if (!retro_on(server) && !cancelled && !p->moved && lock_awake_tap(server, p->index, p->x, p->y)) {
+		if (!cancelled && !p->moved && lock_awake_tap(server, p->index, p->x, p->y)) {
 			break;
 		}
-		if (dm_swiped || (!retro_on(server) && !cancelled && p->py - p->py0 < -server->height / 5.0)) {
-			if (pc_needed(server) && !retro_on(server)) {
+		if (!cancelled && p->py - p->py0 < -server->height / 5.0) {
+			if (pc_needed(server)) {
 				pc_pad_open(server);	/* the lock rises and the pad comes up */
 				break;
 			}
@@ -21753,9 +21128,6 @@ static void ctl_command(struct zt_server *server, char *line) {
 		ctl_mark_key(server, KEY_HOMEPAGE);
 		if (server->shown) show_toplevel(server, NULL);
 		home_reset(server);
-	} else if (strncmp(line, "style ", 6) == 0) {
-		/* ztRetrofit's look: style metro | style dotmatrix (the session restarts) */
-		style_switch(server, strcmp(line + 6, "dotmatrix") == 0 ? STYLE_DOTMATRIX : STYLE_METRO);
 	} else if (strcmp(line, "applist") == 0) {
 		if (!server->shown && !server->locked) page_go(server, 1.0f, 0.0f);
 	} else if (strcmp(line, "close_front") == 0) {
@@ -22001,6 +21373,20 @@ static void ctl_command(struct zt_server *server, char *line) {
 		mkdir("/tmp/ztrec", 0755);
 		server->record_until = now_ms() + (uint32_t)id;
 		wlr_log(WLR_INFO, "recording frames for %d ms into /tmp/ztrec", id);
+	} else if (strncmp(line, "look ", 5) == 0) {
+		/* look KEY VALUE: an appearance slider in Settings, live (appearance.h);
+		 * the file is written when it is let go, without a SIGHUP */
+		int k = look_line(&server->look, line + 5);
+		if (k == LOOK_TILE_FROST || k == LOOK_BG_BLUR || k == LOOK_BG_SHOW || k == LOOK_SWITCHER_PHOTO ||
+				k == LOOK_SEARCH_PHOTO || k == LOOK_SWITCHER_FROST || k == LOOK_SEARCH_FROST) {
+			walls_blur(server, false);	/* (a few ms on the small photo) */
+		}
+		if (k == LOOK_SEARCH_OPACITY && server->hyper) {
+			draw_hyper(server);	/* its panel is painted clear below 100 % */
+		}
+		if (k >= 0) {
+			damage(server);
+		}
 	} else if (strcmp(line, "anim-reload") == 0) {
 		anim_reload(server);	/* Settings' animation page: the speeds only */
 	} else if (sscanf(line, "brightness-fine %d", &id) == 1) {
@@ -24121,7 +23507,7 @@ static void bar_layer(struct zt_server *server, int k, bool hit, bool frosted, G
 static struct zt_toplevel *call_front(struct zt_server *server) {
 	struct zt_toplevel *t = server->shown;
 	if (server->call_over_lock && t && t->mapped && t->xdg_toplevel->app_id &&
-			!strcmp(t->xdg_toplevel->app_id, "ztphone") && !retro_on(server)) {
+			!strcmp(t->xdg_toplevel->app_id, "ztphone")) {
 		return t;
 	}
 	return NULL;
@@ -24176,7 +23562,7 @@ static void call_end_begin(struct zt_server *server, bool close_after) {
 static bool call_backdrop_on(struct zt_server *server) {
 	struct zt_toplevel *t = server->shown;
 	return server->bd_app[0] && server->call_over_lock && t && t->mapped && t->xdg_toplevel->app_id &&
-		!strcmp(t->xdg_toplevel->app_id, server->bd_app) && !retro_on(server) &&
+		!strcmp(t->xdg_toplevel->app_id, server->bd_app) &&
 		server->prog_backdrop && server->grain_tex && !server->frost_failed;
 }
 
@@ -24197,13 +23583,13 @@ static uint32_t call_backdrop_sig(struct zt_server *server) {
 	return h ? h : 1;
 }
 
-/* The call's backdrop over the whole screen: the frame as it is now (the
- * lock, or Start) copied out, brought down to a quarter and blurred, when
- * `fresh`; else the blur kept from last time. Then drawn under the key
- * colour as a veil, with grain. False: there is no blur to show. */
-static bool call_backdrop_draw(struct zt_server *server, struct wlr_output *output, GLuint fbo, bool fresh, float alpha) {
+/* The frame as it is now copied out of `fbo` into `s`, brought down to a
+ * quarter and blurred into s->tex[0], when `fresh` (or it holds nothing yet);
+ * else the blur kept from last time. The call's backdrop's, and the app
+ * switcher's and Hyperscan's (over_backdrop). False: there is no blur. */
+static bool screen_blur(struct zt_server *server, struct wlr_output *output, GLuint fbo,
+		struct frost_strip *s, bool fresh) {
 	static const GLfloat corners[8] = { 0, 0, 1, 0, 0, 1, 1, 1 };
-	struct frost_strip *s = &server->call_bd;
 	int h = output->height / 4 * 4;
 	if (h < 4 || !frost_strip_alloc(server, s, output->width, h, fbo)) {
 		return false;
@@ -24259,7 +23645,19 @@ static bool call_backdrop_draw(struct zt_server *server, struct wlr_output *outp
 		frame_quads += 5;
 		frame_px += (double)s->qw * s->qh * 5;
 		s->valid = true;
-		wlr_log(WLR_DEBUG, "call backdrop: blurred again");
+		wlr_log(WLR_DEBUG, "screen blur: made again");
+	}
+	return true;
+}
+
+/* The call's backdrop over the whole screen: the frame as it is now (the
+ * lock, or Start) blurred (screen_blur), drawn under the key colour as a
+ * veil, with grain. False: there is no blur to show. */
+static bool call_backdrop_draw(struct zt_server *server, struct wlr_output *output, GLuint fbo, bool fresh, float alpha) {
+	static const GLfloat corners[8] = { 0, 0, 1, 0, 0, 1, 1, 1 };
+	struct frost_strip *s = &server->call_bd;
+	if (!screen_blur(server, output, fbo, s, fresh)) {
+		return false;
 	}
 	float m[16], mvp[16];
 	mat_identity(m);
@@ -24296,6 +23694,81 @@ static bool call_backdrop_draw(struct zt_server *server, struct wlr_output *outp
 	frame_quads++;
 	frame_px += (double)output->width * output->height;
 	return true;
+}
+
+/* The app switcher's or Hyperscan's backdrop (appearance.h), over the rect
+ * (x, y, w, h) in points, `t` of the way in: what it covers blurred by its
+ * frost (screen_blur, once each time it opens), or with *_photo Start's photo
+ * blurred by it (on the CPU, once: wall_over), dimmed to its brightness, and
+ * the theme's background over that at its opacity. At full opacity (the
+ * default) only the background, as before: nothing is blurred. */
+enum { OVER_SWITCHER, OVER_SEARCH };
+static void over_backdrop(struct zt_server *server, struct wlr_output *output, GLuint fbo, int which,
+		float x, float y, float w, float h, float t) {
+	static const GLfloat corners[8] = { 0, 0, 1, 0, 0, 1, 1, 1 };
+	const struct zt_look *l = &server->look;
+	float o = look_f(l, which == OVER_SEARCH ? LOOK_SEARCH_OPACITY : LOOK_SWITCHER_OPACITY);
+	float f = look_f(l, which == OVER_SEARCH ? LOOK_SEARCH_FROST : LOOK_SWITCHER_FROST);
+	float k = look_f(l, which == OVER_SEARCH ? LOOK_SEARCH_BRIGHTNESS : LOOK_SWITCHER_BRIGHTNESS);
+	float m[16];
+	mat_identity(m);
+	mat_translate(m, x, y);
+	mat_scale(m, w, h);
+	bool photo = l->v[which == OVER_SEARCH ? LOOK_SEARCH_PHOTO : LOOK_SWITCHER_PHOTO] && server->wall_h > 0 &&
+		server->orient % 180 == 0;
+	if (o < 0.999f && t > 0.003f && photo) {
+		/* Start's photo, its blur made already, its brightness in the tint */
+		wall_photo_rect(server, m, t, f > 0.003f ? &server->wall_over[which == OVER_SEARCH] : NULL, k,
+			x, y, w, h);
+	} else if (o < 0.999f && t > 0.003f) {
+		struct frost_strip *s = &server->over_bd;
+		uint32_t sig = 2166136261u;
+		uint32_t parts[6] = { (uint32_t)which, server->over_gen, (uint32_t)server->width,
+			(uint32_t)server->height, (uint32_t)server->theme, (uint32_t)server->orient };
+		frost_mix(&sig, parts, sizeof(parts));
+		if (f > 0.003f && server->prog_backdrop && server->grain_tex && !server->frost_failed &&
+				screen_blur(server, output, fbo, s, !s->valid || s->sig != sig)) {
+			s->sig = sig;
+			/* the blur over the rect it is under, at `f` over the sharp */
+			float mvp[16];
+			quad_mvp(server, m, mvp);
+			GLuint p = server->prog_backdrop;
+			uint32_t bg = shell_bg_color(server);
+			float u = (float)s->w / (4.0f * s->qw), sx = server->scale / (float)s->w, sy = server->scale / (float)s->h;
+			glUseProgram(p);
+			glUniformMatrix4fv(glGetUniformLocation(p, "mvp"), 1, GL_FALSE, mvp);
+			glUniform4f(glGetUniformLocation(p, "uv_rect"), x * sx * u,
+				y * sy, w * sx * u, h * sy);
+			glUniform1f(glGetUniformLocation(p, "flip"), 0.0f);
+			glUniform3f(glGetUniformLocation(p, "bg"), ((bg >> 16) & 0xff) / 255.0f * server->tint[0],
+				((bg >> 8) & 0xff) / 255.0f * server->tint[1], (bg & 0xff) / 255.0f * server->tint[2]);
+			glUniform1f(glGetUniformLocation(p, "veil"), 0.0f);
+			glUniform1f(glGetUniformLocation(p, "grain_amt"), FROST_GRAIN);
+			glUniform1f(glGetUniformLocation(p, "grain_px"), fmaxf(1.0f, roundf(server->scale)));
+			glUniform1f(glGetUniformLocation(p, "alpha"), f * t);
+			glUniform1i(glGetUniformLocation(p, "tex"), 0);
+			glUniform1i(glGetUniformLocation(p, "grain"), 1);
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_2D, server->grain_tex);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, s->tex[0]);
+			glBindBuffer(GL_ARRAY_BUFFER, 0);
+			glEnableVertexAttribArray(0);
+			glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, corners);
+			glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+			glDisableVertexAttribArray(0);
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_2D, 0);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, 0);
+			frame_quads++;
+			frame_px += (double)w * h * server->scale * server->scale;
+		}
+		if (k < 0.999f) {
+			quad(server, GL_TEXTURE_2D, server->black_tex, m, (1.0f - k) * t, false, false, 1.0f, 1.0f);
+		}
+	}
+	quad(server, GL_TEXTURE_2D, shell_bg_tex(server), m, o * t, false, false, 1.0f, 1.0f);
 }
 
 /* the opaque part: the theme's background at 1 - diffuse */
@@ -24735,7 +24208,7 @@ static int rot_target_urgent(struct zt_server *server, bool *urgent) {
 	}
 	if (want != 0 && (server->width <= 0 || !server->screen_on || server->locked ||
 			server->lock_y > 1.0f - server->height || server->splash || !server->boot_logo_done ||
-			server->boot_logo_stage || server->sensorhub_fail_screen || retro_on(server) ||
+			server->boot_logo_stage || server->sensorhub_fail_screen ||
 			server->call_over_lock || server->switcher || server->switch_t > 0.001f)) {
 		want = 0;	/* (the portrait switcher only opens upright) */
 	}
@@ -25842,7 +25315,7 @@ static void bar_cell_quad(struct zt_server *server, struct zt_layer *layer, floa
 }
 
 static void status_bar_draw(struct zt_server *server, float angle) {
-	if (fabsf(angle) < 0.01f || retro_on(server)) {
+	if (fabsf(angle) < 0.01f) {
 		layer_draw(server, &server->status_layer, 0, fs_status_y(server), 1.0f);
 		return;
 	}
@@ -25891,7 +25364,7 @@ static void plug_draw(struct zt_server *server, float angle) {
  * as tall as the bar round each (a wider glyph is cut: the "ZRN" word). */
 static void nav_bar_draw(struct zt_server *server, float angle) {
 	float top = (float)server->height - NAV_H * fs_bars_t(server);	/* (away with a full-screen app's) */
-	bool rising = !retro_on(server) && NAV_H > 0 &&
+	bool rising = NAV_H > 0 &&
 		(server->nav_icon_y[0] > 0.01f || server->nav_icon_y[1] > 0.01f || server->nav_icon_y[2] > 0.01f);
 	if (rising && fabsf(angle) < 0.01f) {
 		/* the boot's buttons rising one by one: the bar's three cells of
@@ -25919,7 +25392,7 @@ static void nav_bar_draw(struct zt_server *server, float angle) {
 		}
 		return;
 	}
-	if (fabsf(angle) < 0.01f || retro_on(server) || NAV_H <= 0) {
+	if (fabsf(angle) < 0.01f || NAV_H <= 0) {
 		layer_draw(server, &server->nav_layer, 0, top, 1.0f);
 		return;
 	}
@@ -25969,8 +25442,7 @@ static void render_frame(struct zt_server *server) {
 	 * frame missed every other vblank whenever the data arrow came and went
 	 * (as it does all through a chat's traffic). Drawn as it ends up once
 	 * things are still. */
-	if (server->shade_layer.tex && !server->shade_open && server->shade_h <= 0.1f && !server->shade_row_only &&
-			!retro_on(server) && server->shade_sig_rest != shade_panel_sig_gen(server, 0)) {
+	if (server->shade_layer.tex && !server->shade_open && server->shade_h <= 0.1f && !server->shade_row_only && server->shade_sig_rest != shade_panel_sig_gen(server, 0)) {
 		/* the action centre's panel out of date in more than its row (a
 		 * notification come or gone, a turn, the accent): drawn again out
 		 * of sight once things are still, not in the next pull's first
@@ -26019,9 +25491,7 @@ static void render_frame(struct zt_server *server) {
 		}
 	}
 	running = running || server->moving;
-	if (!retro_on(server)) {
-		veil_bake(server);	/* (only when the theme has changed: it makes a texture) */
-	}
+	veil_bake(server);	/* (only when the theme has changed: it makes a texture) */
 	if (server->leaving && !animating(server, &server->app_alpha)) {
 		server->leaving = NULL;	/* it has swung out of sight */
 	}
@@ -26137,9 +25607,7 @@ static void render_frame(struct zt_server *server) {
 	 * slides up only the strip below it is. Each screen of pixels costs the
 	 * J5's Adreno 306 about 3 ms, and Start, an app and the panel under a
 	 * resting lock screen were 4.5 screens a frame. */
-	/* (the DotMatrix style's lock is a screen of its home, not this picture) */
-	bool lock_shown = server->lock_layer.tex && (server->locked || server->lock_y > 1.0f - server->height) &&
-		!retro_on(server);
+	bool lock_shown = server->lock_layer.tex && (server->locked || server->lock_y > 1.0f - server->height);
 	float under = lock_shown ? server->lock_y + server->height : 0.0f;	/* the first row it leaves */
 	bool lock_covers = lock_shown && under >= server->height - 0.5f;
 	int under_top = lock_shown && under > 0.5f ? (int)floorf(under * server->scale) : 0;
@@ -26165,9 +25633,9 @@ static void render_frame(struct zt_server *server) {
 	 * through, frosted (bar_back). It follows the animations that take Start
 	 * away or bring an app, the switcher, the lock, the action centre, the
 	 * keyboard, Hyperscan or a row's menu in, so the bars fade from one to
-	 * the other with them. Never in DotMatrix, a call or the boot splash. */
+	 * the other with them. Never in a call or the boot splash. */
 	float diffuse = 0.0f;
-	if (!retro_on(server) && !server->splash && !server->sensorhub_fail_screen &&
+	if (!server->splash && !server->sensorhub_fail_screen &&
 			!call_front(server) && server->veil_tex && !server->frost_off &&
 			!server->rot.applied && !(server->shown && server->shown->fullscreen)) {
 		/* (turned by auto-rotation the panel's rows are not the bars'; a
@@ -26223,10 +25691,6 @@ static void render_frame(struct zt_server *server) {
 		glEnable(GL_SCISSOR_TEST);
 		zt_scissor(server, 0, under_top, lpw, under_bottom - under_top);	/* row 0 is the top */
 	}
-	/* The opaque boot splash covers these layers; avoid drawing them underneath. */
-	if (server->splash || lock_covers) {
-		retro_draw(server, lpw, lph, true, false);	/* only notes it is covered */
-	}
 	/* the call with its frosted backdrop: the call is drawn last, over the
 	 * lock (call_backdrop_draw); what is behind it is blurred again only when
 	 * it changes, and only then is Start drawn under it, at rest */
@@ -26250,13 +25714,11 @@ static void render_frame(struct zt_server *server) {
 	/* An app at rest in front covers them as the lock screen does: Superscan
 	 * scrolling over a Start left in place drew 3.5 screens a frame, and the
 	 * GPU (about 3 ms a screen) ran out of frame before WebKit did */
-	/* (the DotMatrix lock is the home's screen: what is under it is not drawn) */
-	bool dm_lock = retro_on(server) && server->locked;
 	bool app_covers = app && app->mapped && !server->leaving && server->switch_t <= 0.001f &&
-		draw.alpha >= 0.999f && fabsf(draw.angle) < 0.01f && server->app_lift == 0 && !dm_lock &&
+		draw.alpha >= 0.999f && fabsf(draw.angle) < 0.01f && server->app_lift == 0 &&
 		!server->lf_on && !bd_start;	/* (opening with the flip, Start shows round it) */
 	server->plane_surface = NULL;
-	if (app && app->mapped && !dm_lock) {
+	if (app && app->mapped) {
 		app_origin(app, &draw.ox, &draw.oy);
 		double gdx;
 		draw.fit = app_draw_fit(server, app, &gdx);
@@ -26291,15 +25753,12 @@ static void render_frame(struct zt_server *server) {
 	}
 	float lf_saved_frame[16];	/* (Start under a launch flip: its frame, put back after) */
 	bool lf_saved_ident = false, lf_recede = false;
-	/* Start and the app list beside it, unless they have swung away completely;
-	 * or, in the DotMatrix style, its home in their place */
+	/* Start and the app list beside it, unless they have swung away completely */
 	float bd_start_t = server->start_t;
 	if (bd_start) {
 		server->start_t = 0.0f;	/* (Start at rest, for the call's backdrop) */
 	}
-	if (retro_on(server)) {
-		retro_draw(server, lpw, lph, server->boot_logo_stage != 0, app_covers);
-	} else if (server->start_t < 0.999f && !app_covers) {
+	if (server->start_t < 0.999f && !app_covers) {
 		/* (Start and the list are laid out in the view frame) */
 		view_begin(server);
 		float page_dx = -server->page * (float)view_w(server);
@@ -26321,6 +25780,21 @@ static void render_frame(struct zt_server *server) {
 		if (start_land(server)) {
 			/* the cover-flow's black stage, under it all on its side */
 			cf_stage_draw(server, page_dx);
+		} else if (server->look.v[LOOK_BG_SHOW] && server->wall_h > 0) {
+			/* Start's photo behind the tiles (appearance.h): it goes with
+			 * Start, across to the list and away with a launch */
+			float bm[16], ba = 1.0f - server->start_t;
+			mat_identity(bm);
+			mat_translate(bm, page_dx, 0);
+			mat_scale(bm, (float)view_w(server), (float)view_h(server));
+			if (diffuse > 0.0f) {
+				/* (its brightness, blur and parallax in what the bars' blur is of) */
+				float key[3] = { ba * look_f(&server->look, LOOK_BG_BRIGHTNESS), (float)server->wall_soft_r,
+					(float)server->scroll };
+				frost_note(server, &scan, bm, key[0], server->wall_layer.tex, 0.0f, false);
+				for (int k = 0; k < 2; k++) frost_mix(&scan.sig[k], key, sizeof(key));
+			}
+			wall_back(server, bm, ba);
 		}
 		/* landscape beside the cover-flow: the tiles keep to their side
 		 * (not while turning: a band is then no upright rectangle) */
@@ -26358,6 +25832,11 @@ static void render_frame(struct zt_server *server) {
 			}
 			draw_order[n - 1] = server->edit;
 		}
+		/* the tiles' opacity over what is behind them, and their brightness
+		 * (in the tint: no quad more); both 1 by default (appearance.h) */
+		float tile_op = look_f(&server->look, LOOK_TILE_OPACITY), tile_tint[3];
+		memcpy(tile_tint, server->tint, sizeof(tile_tint));
+		for (int k = 0; k < 3; k++) server->tint[k] *= look_f(&server->look, LOOK_TILE_BRIGHTNESS);
 		quad_batch_begin(server);
 		for (int d = 0; d < n; d++) {
 			int i = draw_order[d];
@@ -26378,7 +25857,7 @@ static void render_frame(struct zt_server *server) {
 			if (y > view_h(server) || y + t->h < 0 || x > view_w(server) || x + t->w < 0) {
 				continue;
 			}
-			float m[16], grow = 1.0f, dim = 1.0f;
+			float m[16], grow = 1.0f, dim = tile_op;
 			float alpha = turn_place(server, m, x, y, (float)t->w, (float)t->h, (float)t->w, turn,
 				t->jit_travel, hinge_right);
 			if (server->edit_t > 0.001f) {
@@ -26387,7 +25866,7 @@ static void render_frame(struct zt_server *server) {
 					grow = 1.0f + 0.06f * server->edit_t;
 				} else {
 					grow = 1.0f - 0.08f * server->edit_t;
-					dim = 1.0f - 0.45f * server->edit_t;
+					dim = tile_op * (1.0f - 0.45f * server->edit_t);
 				}
 			}
 			mat_rotate_x(m, t->tilt_x);			/* lean, about the tile's centre */
@@ -26407,7 +25886,8 @@ static void render_frame(struct zt_server *server) {
 			mat_scale(m, (float)t->w, (float)t->h);
 			/* (a tile wholly behind the cover-flow is cut away: it reaches no bar) */
 			if (diffuse > 0.0f && !(tiles_clip && x + (float)t->w <= (float)land_start_x(server) + page_dx)) {
-				frost_note(server, &scan, m, alpha * dim, face->tex, 0.0f, face == &t->back_layer &&
+				/* (the brightness folded into what is noted: the bars' blur changes with it) */
+				frost_note(server, &scan, m, alpha * dim * server->tint[0], face->tex, 0.0f, face == &t->back_layer &&
 					(t->sweep_w[0] > 0 || t->sweep_w[1] > 0 || t->sweep_w[2] > 0));
 			}
 			wall_under(server, m, t->x, t->y, t->w, t->h, alpha * dim);
@@ -26418,6 +25898,7 @@ static void render_frame(struct zt_server *server) {
 			}
 		}
 		quad_batch_end(server);
+		memcpy(server->tint, tile_tint, sizeof(tile_tint));
 		if (server->edit_t > 0.3f && server->edit >= 0 && server->edit < n && server->badge_unpin.tex) {
 			/* its two buttons, on its right-hand corners */
 			struct tile *t = &server->tiles[server->edit];
@@ -26650,10 +26131,8 @@ static void render_frame(struct zt_server *server) {
 	} else if (server->switch_t > 0.001f && server->n_cards > 0) {
 		/* the switcher: the theme's background (black in dark) over whatever
 		 * was there, and the apps as cards */
-		float t = server->switch_t, m[16];
-		mat_identity(m);
-		mat_scale(m, view_w(server), view_h(server));
-		quad(server, GL_TEXTURE_2D, shell_bg_tex(server), m, t, false, false, 1.0f, 1.0f);
+		float t = server->switch_t;
+		over_backdrop(server, output, fbo, OVER_SWITCHER, 0, 0, view_w(server), view_h(server), t);
 		for (int i = 0; i < server->n_cards; i++) {
 			struct zt_toplevel *card = server->cards[i];
 			if (!card->mapped || !card->commit_ms) {
@@ -26689,24 +26168,21 @@ static void render_frame(struct zt_server *server) {
 		bdraw.fit = app_draw_fit(server, bd_behind, &gdx);
 		bdraw.x += (float)gdx;
 		wlr_xdg_surface_for_each_surface(bd_behind->xdg_toplevel->base, draw_app_surface, &bdraw);
-	} else if (app && app->mapped && !dm_lock && !bd && app != over_app) {
+	} else if (app && app->mapped && !bd && app != over_app) {
 		app_origin(app, &draw.ox, &draw.oy);
 		double gdx;
 		draw.fit = app_draw_fit(server, app, &gdx);
 		draw.x = area_x(server) + (float)gdx;
-		if (retro_on(server)) {
-			/* no turn in this style: the app lights up dot by dot as it
-			 * arrives and goes out the same way, on the turn's clock */
-			server->quad_reveal = 1.0f - fminf(1.0f, fabsf(server->app_angle) / TURN_IN_DEG);
-			server->quad_dpitch = dm_launcher_screen(server->dm)->pitch * server->scale;
-			draw.angle = 0;
-			draw.alpha = server->app_alpha > 0.001f ? 1.0f : 0.0f;
-		}
 		wlr_xdg_surface_for_each_surface(app->xdg_toplevel->base, draw_app_surface, &draw);
-		server->quad_reveal = 1.0f;
 	}
 	draw_loading(server);
 
+	if (server->hyper_t > 0.003f && server->hyper_layer.tex && server->look.v[LOOK_SEARCH_OPACITY] < 100) {
+		/* its panel is clear: the backdrop under it (search_opacity) */
+		over_backdrop(server, output, fbo, OVER_SEARCH, (float)area_x(server),
+			(float)area_y(server) + (1.0f - server->hyper_t) * 40.0f, (float)area_w(server),
+			(float)area_h(server), server->hyper_t);
+	}
 	if (server->hyper_t > 0.003f && server->hyper_layer.tex) {
 		/* Hyperscan, rising into place and fading in */
 		layer_draw(server, &server->hyper_layer, area_x(server),
@@ -26734,15 +26210,11 @@ static void render_frame(struct zt_server *server) {
 		frost_prepare(server, output, fbo, &scan, frosted);
 	}
 	boot_logo_draw(server, now);
-	bool retro_home = (retro_home_shown(server) && !lock_shown) ||
-		(retro_on(server) && server->locked);	/* it has its own status column, as its lock has */
-	if (!retro_home) {
-		if (server->status_clear) {
-			bar_back_mix(server, 0, scan.hit[0], frosted[0], diffuse, false);
-		}
-		status_bar_draw(server, bar_angle);	/* (its glyphs turned in place when turned; it goes with fs_status_y) */
+	if (server->status_clear) {
+		bar_back_mix(server, 0, scan.hit[0], frosted[0], diffuse, false);
 	}
-	if (server->charging && server->plug_layer.tex && !retro_on(server)) {
+	status_bar_draw(server, bar_angle);	/* (its glyphs turned in place when turned; it goes with fs_status_y) */
+	if (server->charging && server->plug_layer.tex) {
 		float a = server->battery_full ? 1.0f : server->st_plug;
 		float bar_y = fs_status_y(server);	/* it goes with the bar it sits on */
 		if (a > 0.5f && bar_y > -(float)STATUS_H + 0.5f) {
@@ -26821,11 +26293,6 @@ static void render_frame(struct zt_server *server) {
 				bool swiped = server->note_swipe_uid &&
 					server->notes[server->note_slot[k]].uid == server->note_swipe_uid;
 				double sx = swiped ? server->note_swipe_x : 0;
-				if (dots()) {
-					/* on the dots' own lattice, so they do not shimmer as it moves */
-					y = round(y / dm_wrap_pitch) * dm_wrap_pitch;
-					sx = round(sx / dm_wrap_pitch) * dm_wrap_pitch;
-				}
 				if (swiped && server->note_head[k]) {
 					/* the app's name above it stays: others may be under it */
 					double split = fmax(win_top, fmin(win_end, y + NOTE_HEAD_H));
@@ -26872,7 +26339,7 @@ static void render_frame(struct zt_server *server) {
 		layer_draw(server, &server->sensorhub_fail_layer, 0, 0, 1.0f);
 	}
 	/* the nav bar stays on top: the panel comes down behind it */
-	if (!server->sensorhub_fail_screen && !(retro_on(server) && server->locked)) {
+	if (!server->sensorhub_fail_screen) {
 		float bars = fs_bars_t(server);
 		if (bars > 0.001f) {
 			if (server->nav_clear) {
@@ -26901,7 +26368,7 @@ static void render_frame(struct zt_server *server) {
 		layer_draw(server, &server->keypop_layer, server->keypop_x, server->keypop_y, 1.0f);
 		view_end(server);
 	}
-	if (server->lock_layer.tex && (server->locked || server->lock_y > 1.0f - server->height) && !retro_on(server)) {
+	if (server->lock_layer.tex && (server->locked || server->lock_y > 1.0f - server->height)) {
 		layer_draw(server, &server->lock_layer, 0, server->lock_y, 1.0f);
 		if (server->lock_status_layer.tex) {
 			layer_draw(server, &server->lock_status_layer, 0, server->lock_y, 1.0f);
@@ -27292,7 +26759,7 @@ static struct rot_ctx rotation_ctx(struct zt_server *server) {
 		.aod = server->aod,
 		.locked = lock_seen && server->lock_enabled,
 		.call_screen = server->call_over_lock,
-		.special = server->splash || server->sensorhub_fail_screen || retro_on(server) ||
+		.special = server->splash || server->sensorhub_fail_screen ||
 			server->boot_logo_stage != 0,
 		.app_opts_out = rot_app_opts_out(id),
 	};
@@ -27744,22 +27211,11 @@ static int reload(int signal_number, void *data) {
 			}
 		}
 	}
-	if (server->style_config != server->style) {
-		/* the settings app chose the other style: the session starts again */
-		style_switch(server, server->style_config);
-		return 0;
-	}
 	rot_tell_sensor(server);	/* `rotation` or `rotation_lock` may have changed */
 	if (ring_before > 0 && server->ring_volume == 0) hap(server, HAP_TAP, HG_SYSTEM);
 	if (ring_before != server->ring_volume) {
 		waydroid_ringer();
 		audio_tell("levels");
-	}
-	retro_setup(server);
-	retro_apps(server);
-	if (server->dm) {
-		dm_launcher_set_palette(server->dm, server->dm_palette, server->dm_amoled);
-		dm_launcher_set_config(server->dm, &server->dm_cfg);
 	}
 	if (strength != server->haptic_strength) {
 		hap(server, HAP_CLICK, HG_SYSTEM);	/* this is how it feels now */
@@ -28344,13 +27800,7 @@ int main(int argc, char *argv[]) {
 	}
 	server.rot.sensor = server.rot.test = -1;	/* no orientation yet */
 	load_config(&server);
-	/* The style, once for the whole session: ztmetro-session exports it from
-	 * the config as ZTRF_SHELL_STYLE; every app started from here inherits it.
-	 * The two styles never meet: changing it starts the session again. */
-	const char *style = getenv("ZTRF_SHELL_STYLE");
-	server.style = style ? (strcmp(style, "dotmatrix") == 0 ? STYLE_DOTMATRIX : STYLE_METRO) : server.style_config;
-	setenv("ZTRF_SHELL_STYLE", server.style == STYLE_DOTMATRIX ? "dotmatrix" : "metro", 1);
-	wlr_log(WLR_INFO, "ztRetrofit: the %s style", server.style == STYLE_DOTMATRIX ? "DotMatrix" : "Metro");
+	unsetenv("ZTRF_SHELL_STYLE");	/* (an older session's: DotMatrix is gone, nothing reads it) */
 	const char *scale = getenv("ZTMETRO_SCALE");
 	if (scale) {
 		server.scale = strtof(scale, NULL);

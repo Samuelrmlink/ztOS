@@ -635,27 +635,17 @@ static void sms_size(const char *text, int *used, int *of, int *parts) {
 
 static void draw_compose(cairo_t *cr, double y, int page) {
 	const double strip = box_h + 94, box_w = zmc.width - 2 * MARGIN;
-	bool dots = zmc.style == ZMC_STYLE_DOTMATRIX;
-	/* the strip is the page's own background (black in dots, as it was) */
-	if (dots) cairo_set_source_rgb(cr, 0, 0, 0);
-	else zmc_bg(cr);
+	/* the strip is the page's own background */
+	zmc_bg(cr);
 	cairo_rectangle(cr, 0, y, zmc.width, strip + (more ? 88 : 0));
 	cairo_fill(cr);
-	/* Metro's box is pale with dark text; in dots a pale fill would drown
-	 * the text, so there it is an outline */
+	/* Metro's box is pale with dark text */
 	cairo_rectangle(cr, MARGIN, y + 8, box_w, box_h);
-	if (dots) {
-		cairo_set_source_rgb(cr, 1, 1, 1);
-		cairo_set_line_width(cr, 1);
-		cairo_stroke(cr);
-	} else {
-		if (focus == 0) cairo_set_source_rgb(cr, 1, 1, 1);
-		else cairo_set_source_rgb(cr, 0.82, 0.82, 0.82);
-		cairo_fill(cr);
-	}
+	if (focus == 0) cairo_set_source_rgb(cr, 1, 1, 1);
+	else cairo_set_source_rgb(cr, 0.82, 0.82, 0.82);
+	cairo_fill(cr);
 	cairo_new_path(cr);
-	if (dots) cairo_set_source_rgb(cr, draft[0] || focus == 0 ? 1 : 0.6, draft[0] || focus == 0 ? 1 : 0.6, draft[0] || focus == 0 ? 1 : 0.6);
-	else if (draft[0] || focus == 0) cairo_set_source_rgb(cr, 0, 0, 0);
+	if (draft[0] || focus == 0) cairo_set_source_rgb(cr, 0, 0, 0);
 	else cairo_set_source_rgb(cr, 0.35, 0.35, 0.35);
 	if (draft[0] || focus == 0) {
 		const char *text = box_text();
@@ -676,20 +666,18 @@ static void draw_compose(cairo_t *cr, double y, int page) {
 	double row = y + box_h + 18;
 	double dim = draft[0] || attach[0] ? 1 : 0.45;
 	/* the buttons in the page's ink (white on a light strip was nothing) */
-	if ((draft[0] || attach[0]) && !dots) zmc_fg(cr);
+	if (draft[0] || attach[0]) zmc_fg(cr);
 	else cairo_set_source_rgb(cr, dim, dim, dim);
 	zmc_round_button(cr, 46, row, "send", "send", ACT_SEND, 0);
 	cairo_new_path(cr);
-	if (dots) cairo_set_source_rgb(cr, 1, 1, 1);
-	else zmc_fg(cr);
+	zmc_fg(cr);
 	if (page == P_THREAD && !has_letters(with)) {
 		zmc_round_button(cr, 118, row, "call", "call", ACT_CALL, 0);
 		cairo_new_path(cr);
 	}
 	zmc_text(cr, "...", FONT_SEMIBOLD, 24, zmc.width - 40, row + 1, 0);
 	if (more) {
-		if (dots) cairo_set_source_rgb(cr, 1, 1, 1);
-		else zmc_fg(cr);
+		zmc_fg(cr);
 		zmc_text(cr, page == P_THREAD ? "delete conversation" : "discard draft", FONT_REGULAR,
 			18, MARGIN, y + strip + 8, zmc.width - 2 * MARGIN);
 		zmc_text(cr, attach[0] ? "another picture" : "attach a picture", FONT_REGULAR,
@@ -767,12 +755,11 @@ static void overlay(int page) {
 static void bubble(cairo_t *cr, const struct message *m, double x, double y, double w, double h,
 		const char *stamp, bool stamp_on_right) {
 	const double pad = 10;
-	bool in = m->state == M_IN, dots = zmc.style == ZMC_STYLE_DOTMATRIX;
+	bool in = m->state == M_IN;
 	/* theirs in the accent colour with its tail at the top left; ours
-	 * darker, the tail at the bottom right. Filled dots would drown the
-	 * text: in that style a bubble is its outline, theirs the accent's */
-	if (in || dots) {
-		if (in) zmc_accent(cr); else cairo_set_source_rgb(cr, 1, 1, 1);
+	 * darker, the tail at the bottom right */
+	if (in) {
+		zmc_accent(cr);
 	} else {
 		zmc_set_rgb(cr, ((zmc.accent & 0xfefefe) >> 1));
 	}
@@ -789,12 +776,7 @@ static void bubble(cairo_t *cr, const struct message *m, double x, double y, dou
 	cairo_close_path(cr);
 	cairo_fill(cr);
 	cairo_rectangle(cr, x, y + 8, w, h);
-	if (dots) {
-		cairo_set_line_width(cr, 1);
-		cairo_stroke(cr);
-	} else {
-		cairo_fill(cr);
-	}
+	cairo_fill(cr);
 	cairo_new_path(cr);
 	double tw = 0, th = 0, top = 0;
 	cairo_surface_t *pic = m->pic[0] ? thumb(m->pic, &tw, &th) : NULL;
@@ -813,8 +795,7 @@ static void bubble(cairo_t *cr, const struct message *m, double x, double y, dou
 	cairo_new_path(cr);
 	/* when, and what became of it, in the foot of the bubble */
 	double sw = zmc_text_width(stamp, FONT_REGULAR, 11.5);
-	if (m->state == M_FAILED && dots) zmc_accent(cr);
-	else if (m->state == M_FAILED) cairo_set_source_rgb(cr, 1, 1, 1);
+	if (m->state == M_FAILED) cairo_set_source_rgb(cr, 1, 1, 1);
 	else cairo_set_source_rgb(cr, 0.82, 0.82, 0.82);
 	zmc_text(cr, stamp, FONT_REGULAR, 11.5, stamp_on_right ? x + w - pad - sw : x + pad, y + 8 + pad + used + 3, 0);
 }
@@ -1440,7 +1421,6 @@ int main(int argc, char **argv) {
 		}
 		qsort(messages, (size_t)n_messages, sizeof(messages[0]), by_time);
 		group();
-		zmc_config_style();	/* for what the app itself draws differently */
 		snprintf(with, sizeof(with), "0771234567");
 		/* "draft": the conversation with a long message being typed */
 		if (!strcmp(argv[2], "draft")) {

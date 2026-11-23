@@ -55,7 +55,7 @@ static void lock_awake_config(const char *value) {
 }
 
 static bool la_active(struct zt_server *server) {
-	return la_mode != LA_OFF && !retro_on(server) && server->width > 0;
+	return la_mode != LA_OFF && server->width > 0;
 }
 
 /* The line's top, screen points, the lock at rest: just over the clock block,

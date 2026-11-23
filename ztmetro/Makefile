@@ -32,13 +32,6 @@ sounds/ztos-sounds: sounds/ztos-sounds.c volume-streams.h
 IAL_FLAGS := $(shell pkg-config --exists ztos-ial 2>/dev/null && echo -DHAVE_ZTOS_IAL $$(pkg-config --cflags ztos-ial))
 IAL_LIBS := $(shell pkg-config --exists ztos-ial 2>/dev/null && pkg-config --libs --static ztos-ial)
 
-# ztRetrofit's styles beside Metro: retro/ (DotMatrix: the dot engine and its launcher)
-RETRO = retro/dotmatrix.c retro/dm-launcher.c retro/dm-chrome.c
-RETRO_DEPS = $(RETRO) core/zrnboard.h retro/dotmatrix.h retro/dm-launcher.h retro/dm-chrome.h retro/dm-glyphs.h
-# every cairo fill and stroke through retro/dm-wrap.c: the style's dots
-DM_WRAP = retro/dm-wrap.c
-DM_WRAP_LDFLAGS = -Wl,--wrap=cairo_fill,--wrap=cairo_fill_preserve,--wrap=cairo_stroke,--wrap=cairo_stroke_preserve,--wrap=cairo_paint
-
 # desktop mode (desktop/): the outputs after the panel, in the same session
 DESK_DEPS = desktop/desktop.c desktop/deco.c desktop/desktop.h desktop/wlr-layer-shell-unstable-v1-protocol.h \
 	desktop/zt-environment-v1-protocol.h $(ZTENV_CODE)
@@ -50,14 +43,9 @@ ZTENV_CODE = core/zt-environment-v1-protocol.c core/xdg-shell-protocol.c
 desktop/zt-environment-v1-protocol.h: $(ZTENV)
 	wayland-scanner server-header $< $@
 
-ztmetro: ztmetro.c core/zt-anim.h sleep-toggle.h shade-edit.h shade-edit.c lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+ztmetro: ztmetro.c core/zt-anim.h appearance.h wall-blur.h sleep-toggle.h shade-edit.h shade-edit.c lock-awake.c lock-awake.h lock-awake-parse.h rotation.h volume-streams.h core/zt-clock.h pods/pods-bar.h pods/pods-bar-state.h audio-state.h audio-sync.h osk-numeric.h auth/prompt.c auth/btpair.c auth/btpair-proto.h xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
 	$(CC) $(CFLAGS) $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o $@ ztmetro.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
-
-# the DotMatrix screens rendered offscreen to PNG files, to check them without a phone
-retro/dm-test: retro/dm-test.c $(RETRO_DEPS)
-	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags egl glesv2 cairo) -o $@ retro/dm-test.c $(RETRO) \
-		$(shell pkg-config --libs egl glesv2 cairo) -lm
+		-o $@ ztmetro.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 
 xdg-shell-protocol.h:
 	wayland-scanner server-header $(XDG) $@
@@ -70,12 +58,11 @@ apps/ztapps: apps/ztapps.c
 # ZrnMetroCore: the window, motion and widgets our own apps share
 VIEWPORTER := $(WP)/stable/viewporter/viewporter.xml
 CORE = core/zrnmetrocore.c core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c \
-	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c \
-	retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
-CORE_DEPS = $(CORE) core/zt-clock.h core/zt-anim.h core/zrnboard.h retro/dotmatrix.h retro/dm-chrome.h retro/dm-glyphs.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h \
+	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c
+CORE_DEPS = $(CORE) core/zt-clock.h core/zt-anim.h core/zrnboard.h core/zrnmetrocore.h core/zrnmetrogpu.h core/zrnmetrorender.h core/xdg-shell-client-protocol.h core/viewporter-client-protocol.h \
 	core/zt-environment-v1-client-protocol.h core/xdg-decoration-unstable-v1-client-protocol.h
 APP_BUILD = $(CC) $(CFLAGS) $(WARN) -Icore $(shell pkg-config --cflags $(APP_PKGS)) $(IAL_FLAGS)
-APP_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(APP_PKGS)) $(IAL_LIBS) -lm
+APP_LIBS = $(shell pkg-config --libs $(APP_PKGS)) $(IAL_LIBS) -lm
 
 # ztmirror: the screen and touch over USB (or QEMU's forwarded port)
 mirror/wlr-screencopy-client.h: mirror/wlr-screencopy-unstable-v1.xml
@@ -174,7 +161,7 @@ passcoded/zrn-passcode: passcoded/zrn-passcode.c passcoded/passcode-proto.h
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
 EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
 EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h sound/eq-drag.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
-settings/ztsettings: settings/ztsettings.c shade-edit.h settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h settings/wifi-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
+settings/ztsettings: settings/ztsettings.c shade-edit.h appearance.h settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h settings/wifi-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c mms/apnconf.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h devtest/devtest-power.c devtest/devtest-power.h power/battery-health.h $(CORE_DEPS)
@@ -537,28 +524,28 @@ clean:
 
 # Uses a private Wayland seat; does not touch the running compositor or display.
 .PHONY: check-arch check-keyboard
-check-keyboard: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+check-keyboard: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+		-o /tmp/ztmetro-keyboard-test tests/keyboard-trackpad.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-keyboard-test
 
 .PHONY: check-launch
-check-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+check-launch: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-launch-test tests/launch-state.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+		-o /tmp/ztmetro-launch-test tests/launch-state.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-launch-test
 
 # An Android app tapped while Android is not ready starts it (tests/waydroid-launch.c)
 .PHONY: check-waydroid-launch
-check-waydroid-launch: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+check-waydroid-launch: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-waydroid-launch-test tests/waydroid-launch.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+		-o /tmp/ztmetro-waydroid-launch-test tests/waydroid-launch.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-waydroid-launch-test
 
 .PHONY: check-auth
-check-auth: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+check-auth: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+		-o /tmp/ztmetro-auth-test tests/auth-prompt.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-auth-test
 
 # what the Bluetooth agent asks the shell, and the agent itself (no D-Bus, no phone)
@@ -572,7 +559,7 @@ check-bt-pair:
 .PHONY: check-bt-pair-sheet
 check-bt-pair-sheet: xdg-shell-protocol.h
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. $(shell pkg-config --cflags $(PKGS)) \
-		$(IAL_FLAGS) -o /tmp/ztmetro-bt-pair-sheet-test tests/bt-pair-sheet.c $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) \
+		$(IAL_FLAGS) -o /tmp/ztmetro-bt-pair-sheet-test tests/bt-pair-sheet.c \
 		$(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-bt-pair-sheet-test
 
@@ -618,15 +605,15 @@ check-csf:
 	$(CC) -std=gnu11 -Wall -Wno-unused-result -o /tmp/ztmetro-csf-test ../sensors/test-csf-failure.c
 	/tmp/ztmetro-csf-test && /tmp/ztmetro-csf-test reset-fails
 
-check-reload-hub: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+check-reload-hub: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-reload-hub-test tests/reload-hub.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+		-o /tmp/ztmetro-reload-hub-test tests/reload-hub.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-reload-hub-test
 
 .PHONY: check-location
-check-location: xdg-shell-protocol.h $(RETRO_DEPS) $(DM_WRAP) $(DESK_DEPS)
+check-location: xdg-shell-protocol.h core/zrnboard.h $(DESK_DEPS)
 	$(CC) -O0 -g $(WARN) -DWLR_USE_UNSTABLE -I. -Idesktop $(shell pkg-config --cflags $(PKGS)) $(IAL_FLAGS) \
-		-o /tmp/ztmetro-location-test tests/location-tile.c $(ZTENV_CODE) $(RETRO) $(DM_WRAP) $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
+		-o /tmp/ztmetro-location-test tests/location-tile.c $(ZTENV_CODE) $(shell pkg-config --libs $(PKGS)) $(IAL_LIBS) -lm -lpthread
 	/tmp/ztmetro-location-test
 
 .PHONY: check-bt-list
@@ -655,6 +642,18 @@ check-settings-config:
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-settings-config-test tests/settings-config.c
 	/tmp/ztmetro-settings-config-test
 
+# the appearance keys (appearance.h), and the config's move away from DotMatrix
+.PHONY: check-appearance
+check-appearance:
+	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-appearance-test tests/appearance.c
+	/tmp/ztmetro-appearance-test
+
+# Start's photo blurred for the frosted tiles and background (wall-blur.h)
+.PHONY: check-wall-blur
+check-wall-blur:
+	$(CC) -std=c11 -Wall -Wextra -Werror -o /tmp/ztmetro-wall-blur-test tests/wall-blur.c
+	/tmp/ztmetro-wall-blur-test
+
 .PHONY: check-led
 check-led: ledd/zrn-ledd
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -o /tmp/ztmetro-led-policy-test tests/led-policy.c
@@ -668,10 +667,10 @@ check-slider-gesture:
 	/tmp/ztmetro-slider-gesture-test
 
 # the real core, with Wayland and GL as stubs that count (tests/swipe-cost/)
-SWIPE_BUILD = $(CC) -std=gnu11 -O1 -g -w -Itests/swipe-cost -Icore -Iretro $(shell pkg-config --cflags $(APP_PKGS) json-c)
-SWIPE_LIBS = $(DM_WRAP_LDFLAGS) $(shell pkg-config --libs cairo pangocairo gdk-pixbuf-2.0 xkbcommon json-c) -lm -lpthread
+SWIPE_BUILD = $(CC) -std=gnu11 -O1 -g -w -Itests/swipe-cost -Icore $(shell pkg-config --cflags $(APP_PKGS) json-c)
+SWIPE_LIBS = $(shell pkg-config --libs cairo pangocairo gdk-pixbuf-2.0 xkbcommon json-c) -lm -lpthread
 SWIPE_CORE = core/zrnmetrogpu.c core/xdg-shell-protocol.c core/viewporter-protocol.c \
-	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c retro/dotmatrix.c retro/dm-chrome.c $(DM_WRAP)
+	core/zt-environment-v1-protocol.c core/xdg-decoration-unstable-v1-protocol.c
 .PHONY: check-slider-touch check-swipe-cost check-pivot-wheel
 check-pivot-wheel: $(CORE_DEPS)
 	$(SWIPE_BUILD) -o /tmp/ztmetro-pivot-wheel-test tests/pivot-wheel.c $(SWIPE_CORE) $(SWIPE_LIBS)

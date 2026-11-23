@@ -47,6 +47,25 @@ static inline bool config_only_changed(const struct config_key *keys, int n, con
 	return it;
 }
 
+/* True when something changed and every key that did passes `live` (the
+ * shell was told those already, so the file is for its next start). */
+static inline bool config_only_changed_if(const struct config_key *keys, int n, bool (*live)(const char *)) {
+	bool any = false;
+	for (int i = 0; i < n; i++) {
+		if (!keys[i].key || !config_key_changed(&keys[i])) continue;
+		if (!live(keys[i].key)) return false;
+		any = true;
+	}
+	return any;
+}
+
+/* Keys no version reads or writes any more: their lines go whenever the file
+ * is written. `style` and `dotmatrix_*` were the DotMatrix style's (removed in
+ * ROADMAP 8.70): whatever they say, the shell is Metro. */
+static inline bool config_key_retired(const char *name) {
+	return strcmp(name, "style") == 0 || strncmp(name, "dotmatrix_", 10) == 0;
+}
+
 /* The key a line sets, into `out`; false if it sets none. */
 static inline bool config_line_key(const char *line, char *out, size_t size) {
 	const char *eq = strchr(line, '=');
@@ -62,7 +81,8 @@ static inline bool config_line_key(const char *line, char *out, size_t size) {
 
 /* in (may be NULL: no file yet) copied to out, the changed keys' lines replaced:
  * in the place of the first, any repeats of it dropped, a key not there yet at
- * the end. Every other line goes through as it is. */
+ * the end. A retired key's lines are dropped. Every other line goes through
+ * as it is. */
 static inline void config_merge(FILE *in, FILE *out, struct config_key *keys, int n) {
 	char line[CONFIG_LINE_MAX], name[128];
 	bool written[n > 0 ? n : 1];
@@ -76,6 +96,7 @@ static inline void config_merge(FILE *in, FILE *out, struct config_key *keys, in
 				if (!written[i]) fprintf(out, "%s = %s\n", keys[i].key, keys[i].value);
 				written[i] = ours = true;
 			}
+			if (config_key_retired(name)) ours = true;	/* dropped */
 		}
 		size_t len = strlen(line);
 		ended = len > 0 && line[len - 1] == '\n';

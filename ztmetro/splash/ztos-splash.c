@@ -225,7 +225,6 @@ static bool passwd_user(const char *user, char *home, size_t n, int *uid, int *g
 struct prefs {
 	bool found;		/* the config was read */
 	bool light;		/* theme = light */
-	bool dotmatrix;		/* style = dotmatrix: the shell is dark whatever the theme */
 	float scale;		/* scale = N; 0: automatic */
 	float size_step;	/* display_size */
 };
@@ -247,8 +246,6 @@ static void read_prefs(const char *home, struct prefs *p) {
 		char *key = trim(line), *value = trim(eq + 1);
 		if (strcmp(key, "theme") == 0) {
 			p->light = strcmp(value, "light") == 0 || strcmp(value, "1") == 0;
-		} else if (strcmp(key, "style") == 0) {
-			p->dotmatrix = strcmp(value, "dotmatrix") == 0 || strcmp(value, "1") == 0;
 		} else if (strcmp(key, "scale") == 0) {
 			p->scale = strcmp(value, "auto") == 0 ? 0.0f : strtof(value, NULL);
 		} else if (strcmp(key, "display_size") == 0) {
@@ -919,7 +916,7 @@ static void ctx_layout(struct ctx *x, const struct prefs *p, int theme) {
 	x->scale = s;
 	x->w = (int)(x->pw / s);	/* wlr_output_effective_resolution */
 	x->h = (int)(x->ph / s);
-	x->light = theme >= 0 ? theme == 1 : (p->light && !p->dotmatrix);
+	x->light = theme >= 0 ? theme == 1 : p->light;
 	x->c = x->light ? (struct colours){ 1.0, 0.0, 0.38, 0.62, 0.55 }
 		: (struct colours){ 0.0, 1.0, 0.62, 0.38, 0.45 };
 

@@ -40,8 +40,8 @@ enum page {
 	PAGE_POWER,	/* battery + performance: power, then hardware */
 	PAGE_SYSTEM,	/* date + region, keyboard, developer, about */
 	PAGE_ANIMATION,	/* animation speeds */
-	PAGE_STYLE,	/* the shell's style: chosen, then applied with a warning */
-	PAGE_TILES,	/* Tiles Shell: the start screen's columns and background */
+	PAGE_TILES,	/* home screen: how Start's tiles and its background photo look */
+	PAGE_OVERLAYS,	/* app switcher + search: their backdrops' opacity, frost, brightness */
 	PAGE_LOCK,	/* Lock Screen: its photo, and whether waking shows it */
 	PAGE_APP_SCALE,	/* app scaling: a size for each app */
 	PAGE_LED,	/* the front LED: what lights it, and in what colour */
@@ -103,10 +103,10 @@ static const int PAGE_PARENTS[N_PAGES] = {
 	[PAGE_PASSCODE_KEY] = PAGE_PASSCODE,
 	[PAGE_AOD] = PAGE_DISPLAY,
 	[PAGE_DESKTOP] = PAGE_DISPLAY,
-	[PAGE_WALLS] = PAGE_TILES,	/* or Lock Screen: see page_parent */
+	[PAGE_WALLS] = PAGE_THEME,	/* customization's background row, for either photo */
 	[PAGE_ANIMATION] = PAGE_DISPLAY,
-	[PAGE_STYLE] = PAGE_THEME,
 	[PAGE_NAVIGATION] = PAGE_THEME,
+	[PAGE_OVERLAYS] = PAGE_THEME,
 	[PAGE_BOOST] = PAGE_POWER,
 	[PAGE_SOUND_EQ] = PAGE_AUDIO,
 	[PAGE_SOUND_FX] = PAGE_AUDIO,
@@ -144,9 +144,10 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 	{ "accents", PAGE_ACCENTS },
 	{ "wallpapers", PAGE_WALLS },
 	{ "animation", PAGE_ANIMATION },
+	{ "home-screen", PAGE_TILES },
 	{ "animations", PAGE_ANIMATION },
-	{ "style", PAGE_STYLE },
-	{ "tiles", PAGE_TILES },
+	{ "tiles", PAGE_TILES },	/* its old name (Tiles Shell) */
+	{ "switcher-search", PAGE_OVERLAYS },
 	{ "lock", PAGE_LOCK },
 	{ "passcode", PAGE_PASSCODE },
 	{ "passcode-entry", PAGE_PASSCODE_ENTRY },
@@ -202,7 +203,7 @@ static const struct { const char *name; enum page page; } PAGE_NAMES[] = {
 };
 #define N_PAGE_NAMES (int)(sizeof(PAGE_NAMES) / sizeof(PAGE_NAMES[0]))
 
-/* Whose photo the picker is choosing, and so where it goes back to. */
+/* Whose photo the picker is choosing (both go back to customization). */
 enum { WALL_TARGET_TILES = 1, WALL_TARGET_LOCK = 2 };
 
 /* Pages that are another module's, in a row. */
@@ -212,7 +213,7 @@ static inline bool page_is_devtest(int page) { return page >= PAGE_DEVTEST && pa
 
 /* Where back goes from a page. */
 static inline int page_parent(int page, int wall_target) {
-	if (page == PAGE_WALLS && wall_target == WALL_TARGET_LOCK) return PAGE_LOCK;
+	(void)wall_target;	/* (the picker went back to Lock Screen for its photo until 8.70) */
 	return page >= 0 && page < N_PAGES ? PAGE_PARENTS[page] : PAGE_NO_PARENT;
 }
 

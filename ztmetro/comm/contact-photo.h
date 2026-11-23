@@ -136,7 +136,7 @@ static inline size_t contact_one_char(const char *s, char *out)
 }
 
 /* The person's square: their photo, or the first letters of their first and
- * last words. Under DotMatrix the photo comes out as dots (zmc_picture). */
+ * last words. */
 static inline void contact_tile(cairo_t *cr, double x, double y, double size, const char *name,
 		const char *uid)
 {
