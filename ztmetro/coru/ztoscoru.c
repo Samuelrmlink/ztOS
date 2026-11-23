@@ -73,6 +73,7 @@
 #define CORU_CTL	"/run/ztoscoru.ctl"
 #endif
 #define PERIOD_S	60	/* (every look runs a program or two: not more often than this) */
+#define PERIOD_OFF_S	300	/* with the screen off: nobody reads the result before it comes on */
 #define QUIET_S		600	/* one report per piece in this long */
 #define START_GRACE_S	100	/* how long a unit may take to come up at first */
 #define SETTLE_S	4	/* a module's mark stays this long after it loads */
@@ -706,6 +707,22 @@ static int ctl_open(void)
 	return open(CORU_CTL, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 }
 
+/* zrnperfd's status says the screen is off (ROADMAP 8.48: fewer wake-ups) */
+static bool screen_off(void)
+{
+	char line[64];
+	bool off = false;
+	FILE *f = fopen("/run/zrnperfd.status", "r");
+
+	if (!f)
+		return false;
+	while (fgets(line, sizeof(line), f))
+		if (strncmp(line, "screen=off", 10) == 0)
+			off = true;
+	fclose(f);
+	return off;
+}
+
 static void look(bool first)
 {
 	units_look(first);
@@ -876,7 +893,8 @@ int main(int argc, char **argv)
 		long now = now_s();
 		if (!next_look)
 			/* closer together while things are still coming up */
-			next_look = now + (now - started_at < START_GRACE_S ? 6 : PERIOD_S);
+			next_look = now + (now - started_at < START_GRACE_S ? 6 :
+					   screen_off() ? PERIOD_OFF_S : PERIOD_S);
 		long wait_s = next_look - now;
 		if (hub_recovering() && wait_s > 1)
 			wait_s = 1;
