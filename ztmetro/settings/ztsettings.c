@@ -49,6 +49,7 @@
 #include "zt-clock.h"
 #include "../clock-theme-ids.h"
 #include "../background-apps.h"
+#include "../appearance.h"
 #include "config-merge.h"
 #include "page-tree.h"
 #include "../ledd/led-policy.h"
@@ -70,6 +71,9 @@ static const char *runtime_file(char *out, size_t size, const char *name) {
 }
 
 #define MAX_NETWORKS	24
+/* the appearance sliders and the switch: this + the key's index (appearance.h) */
+#define LOOK_ACTIONS	120000
+#define LOOK_ACTIONS_END	(LOOK_ACTIONS + N_LOOK)
 enum action {
 	ACT_PC_TOGGLE = 800, ACT_PC_CHANGE, ACT_PC_KEY, ACT_PC_BOX, ACT_PC_SUBMIT, ACT_PC_KIND, ACT_PC_ARCHIVE,
 	ACT_PC_KEY_DONE, ACT_PC_KEY_SAVE,
@@ -307,6 +311,7 @@ static struct {
 	int force_rel_ms;	/* the release ("pop out"): length, 0 none */
 	int force_rel_strength;	/* and strength, % of the heavy pulse, 0 none */
 	int haptic_group[N_HAPTIC_GROUPS];	/* percent of the strength; 0 off */
+	struct zt_look look;	/* the tiles', background's, switcher's and search's (appearance.h) */
 	int quick[SE_MAX];	/* indexes into QUICK_IDS: the first n_quick are the places */
 	int n_quick;
 } app = {
@@ -428,13 +433,16 @@ static void config_load(void) {
 	app.lock_awake = 1;
 	app.burnin_shift = true;
 	app.android_bt_remove_bond = true;
+	look_defaults(&app.look);
 	FILE *f = fopen(path, "r");
 	while (f && fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
 		if (line[0] == '#' || !eq) continue;
 		*eq = 0;
 		char *key = trim(line), *val = trim(eq + 1);
-		if (strcmp(key, "start_wallpaper") == 0) {
+		if (look_parse(&app.look, key, val)) {
+			/* the appearance keys: appearance.h */
+		} else if (strcmp(key, "start_wallpaper") == 0) {
 			snprintf(app.start_wall, sizeof(app.start_wall), "%s", val);
 		} else if (strcmp(key, "lock_wallpaper") == 0) {
 			snprintf(app.lock_wall, sizeof(app.lock_wall), "%s", val);
@@ -738,7 +746,7 @@ static void auto_load(void) {
 /* Every key Settings can write, as it would write it now. */
 /* room, not a count (config_n is the count): an exact number fell behind twice
  * as settings were added, and config_save dropped the last keys (the LEDs) */
-enum { N_CONFIG_KEYS = 64 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS };
+enum { N_CONFIG_KEYS = 64 + N_HAPTIC_GROUPS + LED_N_CONFIG_KEYS + N_LOOK };
 static struct config_key config_keys[N_CONFIG_KEYS];
 static int config_n;	/* how many config_format filled in: N_CONFIG_KEYS is only the room */
 
@@ -809,6 +817,11 @@ static void config_format(void) {
 	KEY("display_size", "%s", sizes[app.scale_idx]);
 	KEY("theme", "%s", app.theme ? "light" : "dark");
 	KEY("frost", "%d", app.frost ? 1 : 0);
+	for (int k = 0; k < N_LOOK; k++) {
+		char v[16];
+		look_format(&app.look, k, v, sizeof(v));
+		KEY(LOOK_DEFS[k].key, "%s", v);
+	}
 	static const int fs_bars_secs[] = { 2, 3, 5, 10 };
 	KEY("fullscreen_bars_secs", "%d", fs_bars_secs[app.fs_bars_idx]);
 	KEY("volume_media_controls", "%s", app.volume_media ? "on" : "off");
@@ -1549,35 +1562,41 @@ static int wall_pending;
 static cairo_surface_t *wall_atlas[MAX_CATS];
 static unsigned wall_atlas_revision[MAX_CATS];
 
+/* A photo as a WALL_PW x WALL_PH thumbnail: from the cache on disk, else made
+ * and put there. Any thread. NULL when it cannot be read. */
+static cairo_surface_t *wall_cached(const char *path) {
+	struct stat st = {0};
+	stat(path, &st);
+	char *identity = g_strdup_printf("v1:%s:%ld:%ld:%ld:%d:%d", path,
+		(long)st.st_mtime, (long)st.st_mtim.tv_nsec, (long)st.st_size, WALL_PW, WALL_PH);
+	char *key = g_compute_checksum_for_string(G_CHECKSUM_SHA256, identity, -1);
+	char *dir = g_build_filename(g_get_user_cache_dir(), "ztmetro", "wallpaper-thumbs", NULL);
+	char *file = g_strdup_printf("%s/%s.png", dir, key);
+	cairo_surface_t *surface = cairo_image_surface_create_from_png(file);
+	if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS ||
+			cairo_image_surface_get_width(surface) != WALL_PW ||
+			cairo_image_surface_get_height(surface) != WALL_PH) {
+		cairo_surface_destroy(surface);
+		surface = thumb_cover(path, WALL_PW, WALL_PH);
+		if (surface && g_mkdir_with_parents(dir, 0700) == 0) {
+			char *tmp = g_strdup_printf("%s.%ld.tmp", file, (long)getpid());
+			if (cairo_surface_write_to_png(surface, tmp) == CAIRO_STATUS_SUCCESS) rename(tmp, file);
+			unlink(tmp);
+			g_free(tmp);
+		}
+	}
+	g_free(identity); g_free(key); g_free(dir); g_free(file);
+	return surface;
+}
+
 static gpointer wall_worker(gpointer unused) {
 	(void)unused;
 	for (;;) {
 		int k = GPOINTER_TO_INT(g_async_queue_pop(wall_jobs)) - 1;
-		const char *path = wall_thumb_path[k][0] ? wall_thumb_path[k] : walls[k];
-		struct stat st = {0};
-		stat(path, &st);
-		char *identity = g_strdup_printf("v1:%s:%ld:%ld:%ld:%d:%d", path,
-			(long)st.st_mtime, (long)st.st_mtim.tv_nsec, (long)st.st_size, WALL_PW, WALL_PH);
-		char *key = g_compute_checksum_for_string(G_CHECKSUM_SHA256, identity, -1);
-		char *dir = g_build_filename(g_get_user_cache_dir(), "ztmetro", "wallpaper-thumbs", NULL);
-		char *file = g_strdup_printf("%s/%s.png", dir, key);
-		cairo_surface_t *surface = cairo_image_surface_create_from_png(file);
-		if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS ||
-				cairo_image_surface_get_width(surface) != WALL_PW ||
-				cairo_image_surface_get_height(surface) != WALL_PH) {
-			cairo_surface_destroy(surface);
-			surface = thumb_cover(path, WALL_PW, WALL_PH);
-			if (surface && g_mkdir_with_parents(dir, 0700) == 0) {
-				char *tmp = g_strdup_printf("%s.%ld.tmp", file, (long)getpid());
-				if (cairo_surface_write_to_png(surface, tmp) == CAIRO_STATUS_SUCCESS) rename(tmp, file);
-				unlink(tmp);
-				g_free(tmp);
-			}
-		}
+		cairo_surface_t *surface = wall_cached(wall_thumb_path[k][0] ? wall_thumb_path[k] : walls[k]);
 		struct wall_result *result = g_new(struct wall_result, 1);
 		*result = (struct wall_result){ k, surface };
 		g_async_queue_push(wall_results, result);
-		g_free(identity); g_free(key); g_free(dir); g_free(file);
 	}
 	return NULL;
 }
@@ -1820,7 +1839,7 @@ static double draw_wall_grid(cairo_t *cr, double y) {
 static double draw_wallpapers(cairo_t *cr) {
 	if (n_walls < 0) walls_scan();
 	double y = zmc_header(cr, wall_cat_open >= 0 ? cat_name[wall_cat_open] :
-		app.wall_target == WALL_TARGET_LOCK ? "lock screen" : "background");
+		app.wall_target == WALL_TARGET_LOCK ? "lock screen" : "start");
 	if (wall_cat_open < 0) {
 		y = draw_wall_categories(cr, y);
 		if (n_cats == 0) {
@@ -1834,12 +1853,52 @@ static double draw_wallpapers(cairo_t *cr) {
 	return y + 24;
 }
 
-/* a row with the photo it has now, opening the picker for it */
-static double draw_wall_row(cairo_t *cr, double y, const char *title, const char *current, int target) {
-	const char *slash = strrchr(current, '/');
-	char detail[96];
-	snprintf(detail, sizeof(detail), "%s", !current[0] ? "none" : slash ? slash + 1 : current);
-	return zmc_entry(cr, y, title, detail, ACT_WALL_OPEN, target);
+/* The photo a background row shows: the picker's own thumbnail of it, kept
+ * while the photo stays the same (one decode the first time, from the disk
+ * cache after that). */
+static cairo_surface_t *wall_preview(int which, const char *path) {
+	static cairo_surface_t *surface[2];
+	static char shown[2][256];
+	if (!path[0]) return NULL;
+	if (strcmp(shown[which], path) != 0) {
+		if (surface[which]) cairo_surface_destroy(surface[which]);
+		surface[which] = wall_cached(path);
+		snprintf(shown[which], sizeof(shown[which]), "%s", path);
+	}
+	return surface[which];
+}
+
+/* customization's background row: Start's photo and the lock screen's side by
+ * side, small, each with its name; tapped, the picker for that one */
+static double draw_wall_previews(cairo_t *cr, double y) {
+	static const char *const names[2] = { "Start", "Lock screen" };
+	const char *paths[2] = { app.start_wall, app.lock_wall };
+	static const int targets[2] = { WALL_TARGET_TILES, WALL_TARGET_LOCK };
+	zmc_fg(cr);
+	zmc_text(cr, "background", FONT_SEMILIGHT, 25.5, MARGIN, y, 0);
+	y += 40;
+	double gap = 12, col = (zmc.width - 2 * MARGIN - gap) / 2, tw = 54, th = tw * 16.0 / 9.0;
+	for (int i = 0; i < 2; i++) {
+		double x = MARGIN + i * (col + gap);
+		cairo_surface_t *img = wall_preview(i, paths[i]);
+		if (img) {
+			draw_wall_tile(cr, img, x, y, tw, th);
+		} else {
+			/* none: the theme's own background, edged */
+			cairo_set_source_rgb(cr, 0.35, 0.35, 0.35);
+			cairo_set_line_width(cr, 1);
+			cairo_rectangle(cr, x + 0.5, y + 0.5, tw - 1, th - 1);
+			cairo_stroke(cr);
+		}
+		const char *slash = strrchr(paths[i], '/');
+		zmc_fg(cr);
+		zmc_text(cr, names[i], FONT_REGULAR, 16, x + tw + 10, y + 4, 0);
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, !paths[i][0] ? "none" : slash ? slash + 1 : paths[i], FONT_REGULAR, 12,
+			x + tw + 10, y + 28, col - tw - 10);
+		zmc_add_hit(x, y - 4, col, th + 8, ACT_WALL_OPEN, targets[i]);
+	}
+	return y + th + 18;
 }
 
 /* The accent picker, as the phone's: four swatches a row, each row a strip
@@ -1934,52 +1993,8 @@ static double restart_warning(cairo_t *cr, double y, bool differs, int action) {
 	return y + 59;
 }
 
-static double draw_theme(cairo_t *cr) {
-	double y = zmc_header(cr, "customization");
-	char detail[128];
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Accent colour", FONT_REGULAR, 13.5, MARGIN, y, 0);
-	/* Windows Phone's list picker, collapsed: the box shows the choice and
-	 * opens the full-screen picker (UIXMobile!ListPicker in full mode) */
-	y += 20;
-	accent_box_y = y;
-	zmc_fg(cr);
-	cairo_set_line_width(cr, 2);
-	cairo_rectangle(cr, MARGIN + 1, y + 1, zmc.width - 2 * MARGIN - 2, 40);
-	cairo_stroke(cr);
-	zmc_set_rgb(cr, ACCENTS[app.accent].color);
-	cairo_rectangle(cr, MARGIN + 10, y + 10, 22, 22);
-	cairo_fill(cr);
-	zmc_fg(cr);
-	zmc_text(cr, ACCENTS[app.accent].name, FONT_REGULAR, 16, MARGIN + 42, y + 10, 0);
-	zmc_add_hit(0, y - 4, zmc.width, 50, ACT_ACCENT_OPEN, 0);
-	y += 62;
-	/* Metro's light or dark theme (the SDK's Z_THEME_DARK / Z_THEME_LIGHT):
-	 * the background and the text swap, the accent stays */
-	y = zmc_switch(cr, y, "Light mode", app.theme == ZMC_THEME_LIGHT, ACT_THEME);
-	/* the blur behind the shell's bars and the apps' (zrn-frosted-diffusion); off saves the GPU work */
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "bars show what is under them, blurred", FONT_REGULAR, 13.5, MARGIN, y, 0);
-	y += 22;
-	y = zmc_switch(cr, y, "Frosted diffusion", app.frost, ACT_FROST);
-	snprintf(detail, sizeof(detail), "%d %%%s", menu_speeds[app.menu_speed_idx], app.dev_slow ? ", slow motion" : "");
-	y = zmc_entry(cr, y, "animation speeds", detail, ACT_OPEN_PAGE, PAGE_ANIMATION);
-	y += 4;
-	snprintf(detail, sizeof(detail), "%d columns", app.columns);
-	y = zmc_entry(cr, y, "tiles shell", detail, ACT_OPEN_PAGE, PAGE_TILES);
-	y = zmc_entry(cr, y, "lock screen", app.dev_lock ? "Locks when the screen wakes" : "Wakes without locking",
-		ACT_OPEN_PAGE, PAGE_LOCK);
-	y = zmc_entry(cr, y, "navigation bar", "Choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
-	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
-		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
-	y = zmc_entry(cr, y, "quick tiles", detail, ACT_OPEN_PAGE, PAGE_QUICK);
-	return y + 20;
-}
-
-/* What the start screen looks like. Going through its photos on the home
- * screen itself is still to come (ROADMAP 7.8): this opens the picker. */
-static double draw_tiles(cairo_t *cr) {
-	double y = zmc_header(cr, "tiles shell");
+/* Start's columns, as three buttons (customization; Tiles Shell's until 8.70) */
+static double draw_columns(cairo_t *cr, double y) {
 	double gap = 8;
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Start screen columns", FONT_REGULAR, 13.5, MARGIN, y, 0);
@@ -2000,8 +2015,187 @@ static double draw_tiles(cairo_t *cr) {
 		zmc_text(cr, label, FONT_REGULAR, 13, bx + 10, y + 9, 0);
 		zmc_add_hit(bx, y, btn_w, 36, ACT_COLUMNS, c);
 	}
-	y += 60;
-	return draw_wall_row(cr, y, "background photo", app.start_wall, WALL_TARGET_TILES) + 20;
+	return y + 60;
+}
+
+/* ---- appearance: opacity, frost and brightness (appearance.h, 8.70) ----------
+ * Each slider tells the shell as it moves (`look KEY VALUE` on its control
+ * pipe) and is written to the file when let go, without the SIGHUP that
+ * reloads the whole shell. */
+
+static int ctl_fd = -1;
+
+/* a line to the shell's control pipe, kept open for a drag's lines and opened
+ * again if the shell has gone */
+static void ctl_tell(const char *line) {
+	size_t n = strlen(line);
+	signal(SIGPIPE, SIG_IGN);
+	for (int attempt = 0; attempt < 2; attempt++) {
+		if (ctl_fd < 0) {
+			char path[768];
+			ctl_fd = open(runtime_file(path, sizeof(path), "ztmetro.ctl"), O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+			if (ctl_fd < 0) return;
+		}
+		if (write(ctl_fd, line, n) == (ssize_t)n || errno != EPIPE) return;
+		close(ctl_fd);
+		ctl_fd = -1;
+	}
+}
+
+static void look_tell(int k) {
+	char line[96], value[16];
+	look_format(&app.look, k, value, sizeof(value));
+	snprintf(line, sizeof(line), "look %s %s\n", LOOK_DEFS[k].key, value);
+	ctl_tell(line);
+}
+
+static bool look_key_live(const char *key) {
+	return look_index(key) >= 0;
+}
+
+/* the file, when only appearance keys changed: no SIGHUP (the shell has them) */
+static void config_save_look(void) {
+	config_format();
+	config_no_hup = config_only_changed_if(config_keys, config_n, look_key_live);
+	config_save();
+	config_no_hup = false;
+}
+
+/* a slider for one key, with its caption and a line under it (the slider
+ * shows its own percent; 0 % of a frost or a blur is none) */
+static double look_slider(cairo_t *cr, double y, const char *what, int k, const char *about) {
+	zmc_slider(cr, MARGIN, y, zmc.width - 2 * MARGIN, app.look.v[k], what, LOOK_ACTIONS + k);
+	y += 58;
+	if (about) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		y += zmc_text(cr, about, FONT_REGULAR, 12.5, MARGIN, y - 6, zmc.width - 2 * MARGIN) + 10;
+	}
+	return y;
+}
+
+static double look_heading(cairo_t *cr, double y, const char *title) {
+	zmc_accent(cr);
+	zmc_text(cr, title, FONT_SEMIBOLD, 15, MARGIN, y + 6, 0);
+	return y + 34;
+}
+
+static const char *home_summary(char *out, size_t size) {
+	const struct zt_look *l = &app.look;
+	snprintf(out, size, "Tiles %d %%%s, %s", l->v[LOOK_TILE_OPACITY],
+		l->v[LOOK_TILE_FROST] ? ", frosted" : "",
+		l->v[LOOK_BG_SHOW] ? "photo behind them" : "photo in them");
+	return out;
+}
+
+static const char *overlays_summary(char *out, size_t size) {
+	const struct zt_look *l = &app.look;
+	if (l->v[LOOK_SWITCHER_OPACITY] >= 100 && l->v[LOOK_SEARCH_OPACITY] >= 100) {
+		snprintf(out, size, "Opaque");
+	} else {
+		snprintf(out, size, "Switcher %d %%, search %d %%", l->v[LOOK_SWITCHER_OPACITY], l->v[LOOK_SEARCH_OPACITY]);
+	}
+	return out;
+}
+
+/* home screen (Tiles Shell until 8.70): how Start's tiles and its photo look */
+static double draw_tiles(cairo_t *cr) {
+	double y = zmc_header(cr, "home screen");
+	bool photo = app.start_wall[0] != 0;
+	y = look_heading(cr, y, "tiles");
+	y = look_slider(cr, y, "Opacity", LOOK_TILE_OPACITY, "How much of what is behind them shows through");
+	y = look_slider(cr, y, "Frost", LOOK_TILE_FROST, photo ? "Start's photo, blurred, through the tiles" :
+		"Blurs Start's photo through the tiles: choose one under background");
+	y = look_slider(cr, y, "Brightness", LOOK_TILE_BRIGHTNESS, NULL);
+	y = look_heading(cr, y + 6, "background");
+	if (!photo) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		y += zmc_text(cr, "Start has no photo: choose one under customization, background.", FONT_REGULAR,
+			13.5, MARGIN, y, zmc.width - 2 * MARGIN) + 14;
+	}
+	y = zmc_switch(cr, y, "Photo behind the tiles", app.look.v[LOOK_BG_SHOW], LOOK_ACTIONS + LOOK_BG_SHOW);
+	if (app.look.v[LOOK_BG_SHOW]) {
+		y = look_slider(cr, y, "Brightness", LOOK_BG_BRIGHTNESS, "Dims the photo behind the tiles");
+		y = look_slider(cr, y, "Blur", LOOK_BG_BLUR, NULL);
+	} else {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		y += zmc_text(cr, "Off: the theme's background, the photo only in the tiles (Windows Phone's way)",
+			FONT_REGULAR, 12.5, MARGIN, y - 6, zmc.width - 2 * MARGIN) + 10;
+	}
+	return y + 20;
+}
+
+/* app switcher + search: their backdrops. At full opacity nothing shows
+ * through, so the photo, frost and brightness are shown only below it. With
+ * the photo on, what shows through is Start's photo, blurred by the frost. */
+static double draw_overlays(cairo_t *cr) {
+	double y = zmc_header(cr, "backdrops");
+	static const struct { const char *title; int opacity, frost, brightness, photo; } parts[2] = {
+		{ "app switcher", LOOK_SWITCHER_OPACITY, LOOK_SWITCHER_FROST, LOOK_SWITCHER_BRIGHTNESS, LOOK_SWITCHER_PHOTO },
+		{ "search", LOOK_SEARCH_OPACITY, LOOK_SEARCH_FROST, LOOK_SEARCH_BRIGHTNESS, LOOK_SEARCH_PHOTO },
+	};
+	for (int p = 0; p < 2; p++) {
+		y = look_heading(cr, y + (p ? 6 : 0), parts[p].title);
+		y = look_slider(cr, y, "Opacity", parts[p].opacity, app.look.v[parts[p].opacity] >= 100 ?
+			"Opaque: the theme's background. Lower it for a blurred background" : NULL);
+		if (app.look.v[parts[p].opacity] < 100) {
+			y = zmc_switch(cr, y, "Start's photo behind", app.look.v[parts[p].photo], LOOK_ACTIONS + parts[p].photo);
+			cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+			y += zmc_text(cr, app.look.v[parts[p].photo] ? "Start's background photo, blurred by the frost" :
+				"Off: what it opens over (Start or the app), blurred by the frost", FONT_REGULAR, 12.5,
+				MARGIN, y - 6, zmc.width - 2 * MARGIN) + 10;
+			y = look_slider(cr, y, "Frost (blur)", parts[p].frost, NULL);
+			y = look_slider(cr, y, "Brightness", parts[p].brightness, "Of what shows through");
+		}
+	}
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	y += zmc_text(cr, "Without the photo, frost is a blur the graphics chip makes each time these open; "
+		"opaque costs nothing.", FONT_REGULAR, 12.5, MARGIN, y + 4, zmc.width - 2 * MARGIN) + 14;
+	return y + 20;
+}
+
+static double draw_theme(cairo_t *cr) {
+	double y = zmc_header(cr, "customization");
+	char detail[128];
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "Accent colour", FONT_REGULAR, 13.5, MARGIN, y, 0);
+	/* Windows Phone's list picker, collapsed: the box shows the choice and
+	 * opens the full-screen picker (UIXMobile!ListPicker in full mode) */
+	y += 20;
+	accent_box_y = y;
+	zmc_fg(cr);
+	cairo_set_line_width(cr, 2);
+	cairo_rectangle(cr, MARGIN + 1, y + 1, zmc.width - 2 * MARGIN - 2, 40);
+	cairo_stroke(cr);
+	zmc_set_rgb(cr, ACCENTS[app.accent].color);
+	cairo_rectangle(cr, MARGIN + 10, y + 10, 22, 22);
+	cairo_fill(cr);
+	zmc_fg(cr);
+	zmc_text(cr, ACCENTS[app.accent].name, FONT_REGULAR, 16, MARGIN + 42, y + 10, 0);
+	zmc_add_hit(0, y - 4, zmc.width, 50, ACT_ACCENT_OPEN, 0);
+	y += 62;
+	y = draw_wall_previews(cr, y);
+	y = draw_columns(cr, y);
+	/* Metro's light or dark theme (the SDK's Z_THEME_DARK / Z_THEME_LIGHT):
+	 * the background and the text swap, the accent stays */
+	y = zmc_switch(cr, y, "Light mode", app.theme == ZMC_THEME_LIGHT, ACT_THEME);
+	/* the blur behind the shell's bars and the apps' (zrn-frosted-diffusion); off saves the GPU work */
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "bars show what is under them, blurred", FONT_REGULAR, 13.5, MARGIN, y, 0);
+	y += 22;
+	y = zmc_switch(cr, y, "Frosted diffusion", app.frost, ACT_FROST);
+	snprintf(detail, sizeof(detail), "%d %%%s", menu_speeds[app.menu_speed_idx], app.dev_slow ? ", slow motion" : "");
+	y = zmc_entry(cr, y, "animation speeds", detail, ACT_OPEN_PAGE, PAGE_ANIMATION);
+	y += 4;
+	y = zmc_entry(cr, y, "home screen", home_summary(detail, sizeof(detail)), ACT_OPEN_PAGE, PAGE_TILES);
+	y = zmc_entry(cr, y, "app switcher + search", overlays_summary(detail, sizeof(detail)),
+		ACT_OPEN_PAGE, PAGE_OVERLAYS);
+	y = zmc_entry(cr, y, "lock screen", app.dev_lock ? "Locks when the screen wakes" : "Wakes without locking",
+		ACT_OPEN_PAGE, PAGE_LOCK);
+	y = zmc_entry(cr, y, "navigation bar", "Choose the centre icon", ACT_OPEN_PAGE, PAGE_NAVIGATION);
+	snprintf(detail, sizeof(detail), "%s, %s, %s, %s\u2026", QUICK_NAMES[app.quick[0]],
+		QUICK_NAMES[app.quick[1]], QUICK_NAMES[app.quick[2]], QUICK_NAMES[app.quick[3]]);
+	y = zmc_entry(cr, y, "quick tiles", detail, ACT_OPEN_PAGE, PAGE_QUICK);
+	return y + 20;
 }
 
 /* What waking the phone shows. The separate list of its photos comes with the
@@ -2138,8 +2332,7 @@ static double draw_aod(cairo_t *cr) {
 
 static double draw_lock(cairo_t *cr) {
 	double y = zmc_header(cr, "lock screen");
-	y = draw_wall_row(cr, y, "background photo", app.lock_wall, WALL_TARGET_LOCK);
-	y = zmc_switch(cr, y + 6, "Lock screen on wake", app.dev_lock, ACT_DEV_LOCK);
+	y = zmc_switch(cr, y, "Lock screen on wake", app.dev_lock, ACT_DEV_LOCK);
 	/* upstream's passcode lock (zrn-passcoded): its own page, under this one */
 	y = zmc_entry(cr, y, "passcode", pc_summary(), ACT_OPEN_PAGE, PAGE_PASSCODE);
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
@@ -3977,6 +4170,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_APP_SCALE: return draw_app_scale(cr);
 	case PAGE_THEME: return draw_theme(cr);
 	case PAGE_TILES: return draw_tiles(cr);
+	case PAGE_OVERLAYS: return draw_overlays(cr);
 	case PAGE_LOCK: return draw_lock(cr);
 	case PAGE_AOD: return draw_aod(cr);
 	case PAGE_DESKTOP: return desktop_page_render(cr);
@@ -4070,6 +4264,17 @@ static void activate(int action, int arg) {
 	if (action >= DEVTEST_ACTIONS && action < DEVTEST_ACTIONS_END) { devtest_activate(action, arg); return; }
 	if (action >= DESKTOP_ACTIONS && action < DESKTOP_ACTIONS_END) { desktop_page_activate(action, arg); return; }
 	if (action == ACT_THERM_RETRY) { therm_retry(); return; }
+	if (action >= LOOK_ACTIONS && action < LOOK_ACTIONS_END) {
+		/* an appearance switch (the photo behind the tiles): live, then the file */
+		int k = action - LOOK_ACTIONS;
+		if (LOOK_DEFS[k].toggle) {
+			app.look.v[k] = !app.look.v[k];
+			look_tell(k);
+			config_save_look();
+			zmc_redraw();
+		}
+		return;
+	}
 	/* a picker's box opens or closes it; one of its options is the choice */
 	if (is_picker(action) && arg < 0) {
 		open_picker = open_picker == action ? 0 : action;
@@ -4790,6 +4995,26 @@ static void slide(int action, int value, bool done) {
 	char cmd[160];
 	if (action >= SOUND_ACTIONS && action < SOUND_ACTIONS_END) { sound_slide(action, value, done); return; }
 	if (action >= PODS_ACTIONS && action < PODS_ACTIONS_END) { pods_slide(action, value, done); return; }
+	if (action >= LOOK_ACTIONS && action < LOOK_ACTIONS_END) {
+		/* live to the shell, a line a frame (a blur's every 50 ms: it is made
+		 * again on the CPU); the lifted value always goes */
+		static uint32_t told;
+		int k = action - LOOK_ACTIONS, v = look_clamp(k, value);
+		bool blur = k == LOOK_TILE_FROST || k == LOOK_BG_BLUR ||
+			(k == LOOK_SWITCHER_FROST && app.look.v[LOOK_SWITCHER_PHOTO]) ||
+			(k == LOOK_SEARCH_FROST && app.look.v[LOOK_SEARCH_PHOTO]);
+		bool changed = v != app.look.v[k];
+		app.look.v[k] = v;
+		if (done || (changed && zmc_now_ms() - told >= (blur ? 50u : 16u))) {
+			told = zmc_now_ms();
+			look_tell(k);
+		}
+		if (done) {
+			config_save_look();
+			zmc_redraw();	/* (the page shows or hides the rows that depend on it) */
+		}
+		return;
+	}
 	if (action >= ACT_HAPTIC_GROUP && action % 1000 == ACT_HAPTIC_GROUP && action / 1000 < N_HAPTIC_GROUPS) {
 		/* one kind of touch's own strength; under 5 % is off */
 		int g = action / 1000;

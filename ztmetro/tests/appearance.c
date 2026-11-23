@@ -34,6 +34,7 @@ int main(void) {
 	assert(l.v[LOOK_BG_SHOW] == 0);
 	assert(l.v[LOOK_SWITCHER_OPACITY] == 100 && l.v[LOOK_SEARCH_OPACITY] == 100);
 	assert(l.v[LOOK_SWITCHER_BRIGHTNESS] == 100 && l.v[LOOK_SEARCH_BRIGHTNESS] == 100);
+	assert(l.v[LOOK_SWITCHER_PHOTO] == 0 && l.v[LOOK_SEARCH_PHOTO] == 0);
 	for (int k = 0; k < N_LOOK; k++) {
 		assert(LOOK_DEFS[k].def >= LOOK_DEFS[k].min && LOOK_DEFS[k].def <= LOOK_DEFS[k].max);
 		assert(look_index(LOOK_DEFS[k].key) == k);
@@ -74,6 +75,9 @@ int main(void) {
 	assert(look_line(&l, "switcher_opacity 40") == -1);	/* the same: nothing to do */
 	assert(look_line(&l, "background_blur 55") == LOOK_BG_BLUR);
 	assert(look_line(&l, "background_show on") == LOOK_BG_SHOW);
+	assert(look_line(&l, "switcher_photo on") == LOOK_SWITCHER_PHOTO);
+	assert(l.v[LOOK_SWITCHER_PHOTO] == 1);
+	assert(look_line(&l, "search_photo 1") == LOOK_SEARCH_PHOTO);
 	assert(look_line(&l, "nonsense 5") == -1);
 	assert(look_line(&l, "tile_opacity") == -1);
 	assert(look_line(&l, "tile_opacity x") == -1);

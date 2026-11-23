@@ -12,7 +12,7 @@ int main(void) {
 		{ PAGE_SYSTEM, PAGE_MAIN }, { PAGE_ANDROID, PAGE_MAIN },
 		{ PAGE_WIFI, PAGE_CONNECTIONS }, { PAGE_BLUETOOTH, PAGE_CONNECTIONS }, { PAGE_MOBILE, PAGE_CONNECTIONS },
 		{ PAGE_WIFI_NET, PAGE_WIFI }, { PAGE_WIFI_JOIN, PAGE_WIFI }, { PAGE_APN, PAGE_MOBILE },
-		{ PAGE_ACCENTS, PAGE_THEME }, { PAGE_ANIMATION, PAGE_THEME }, { PAGE_TILES, PAGE_THEME }, { PAGE_LOCK, PAGE_THEME }, { PAGE_NAVIGATION, PAGE_THEME }, { PAGE_QUICK, PAGE_THEME },
+		{ PAGE_ACCENTS, PAGE_THEME }, { PAGE_ANIMATION, PAGE_THEME }, { PAGE_TILES, PAGE_THEME }, { PAGE_OVERLAYS, PAGE_THEME }, { PAGE_LOCK, PAGE_THEME }, { PAGE_NAVIGATION, PAGE_THEME }, { PAGE_QUICK, PAGE_THEME },
 		{ PAGE_AUDIO, PAGE_SOUND_TOUCH }, { PAGE_HAPTICS, PAGE_SOUND_TOUCH }, { PAGE_LED, PAGE_SOUND_TOUCH },
 		{ PAGE_BATTERY, PAGE_POWER }, { PAGE_PERF, PAGE_POWER }, { PAGE_BOOST, PAGE_POWER },
 		{ PAGE_CPU, PAGE_POWER }, { PAGE_GPU, PAGE_POWER }, { PAGE_VM, PAGE_POWER },
@@ -35,9 +35,9 @@ int main(void) {
 	}
 	assert(page_parent(PAGE_MAIN, WALL_TARGET_TILES) == PAGE_NO_PARENT);
 
-	/* the picker has two parents, by whose photo it is choosing */
-	assert(page_parent(PAGE_WALLS, WALL_TARGET_TILES) == PAGE_TILES);
-	assert(page_parent(PAGE_WALLS, WALL_TARGET_LOCK) == PAGE_LOCK);
+	/* the picker, for either photo, goes back to customization's background row */
+	assert(page_parent(PAGE_WALLS, WALL_TARGET_TILES) == PAGE_THEME);
+	assert(page_parent(PAGE_WALLS, WALL_TARGET_LOCK) == PAGE_THEME);
 
 	/* the modules' pages are in their order, for page_is_*() and their first-page sums */
 	assert(PAGE_SOUND_FX == PAGE_SOUND_EQ + 1 && PAGE_SOUND_APPS == PAGE_SOUND_EQ + 3);
@@ -78,7 +78,8 @@ int main(void) {
 	static const char *const old[] = { "date", "main", "apps", "installed-apps", "theme", "accents",
 		"wallpapers", "display", "wifi", "bluetooth", "mobile", "audio", "battery", "cpu", "vm", "gpu",
 		"keyboard", "about", "perf", "boost", "dev", "haptics", "quick", "apn", "wifijoin", "wifinet", "app-scale",
-		"led", "equalizer", "effects", "audio-output", "app-volume", "airpods", "devtest" };
+		"led", "equalizer", "effects", "audio-output", "app-volume", "airpods", "devtest",
+		"tiles", "home-screen", "switcher-search" };
 	for (size_t i = 0; i < sizeof(old) / sizeof(old[0]); i++) {
 		int found = 0;
 		for (int n = 0; n < N_PAGE_NAMES; n++) found += !strcmp(PAGE_NAMES[n].name, old[i]);

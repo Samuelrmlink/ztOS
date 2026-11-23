@@ -13,7 +13,10 @@
  *     once it is on (the photo behind the tiles, dimmed and blurred);
  *   switcher_opacity 100, search_opacity 100: the theme's background over
  *     what is behind them, as before; frost and brightness apply once the
- *     opacity is lowered (what shows through, blurred and dimmed).
+ *     opacity is lowered (what shows through, blurred and dimmed);
+ *   switcher_photo, search_photo off: with one on, what shows through is
+ *     Start's photo instead, blurred by that frost (made once on the CPU,
+ *     like the tiles' frost: no blur on the GPU as it opens).
  *
  * Settings tells the shell a slider's value live with `look KEY VALUE` on the
  * control pipe, and writes the file when it is let go without a SIGHUP (the
@@ -32,6 +35,7 @@ enum look_key {
 	LOOK_BG_SHOW, LOOK_BG_BRIGHTNESS, LOOK_BG_BLUR,
 	LOOK_SWITCHER_OPACITY, LOOK_SWITCHER_FROST, LOOK_SWITCHER_BRIGHTNESS,
 	LOOK_SEARCH_OPACITY, LOOK_SEARCH_FROST, LOOK_SEARCH_BRIGHTNESS,
+	LOOK_SWITCHER_PHOTO, LOOK_SEARCH_PHOTO,
 	N_LOOK
 };
 
@@ -52,6 +56,8 @@ static const struct look_def {
 	[LOOK_SEARCH_OPACITY] = { "search_opacity", 100, 20, 100, false },
 	[LOOK_SEARCH_FROST] = { "search_frost", 100, 0, 100, false },
 	[LOOK_SEARCH_BRIGHTNESS] = { "search_brightness", 100, 0, 100, false },
+	[LOOK_SWITCHER_PHOTO] = { "switcher_photo", 0, 0, 1, true },
+	[LOOK_SEARCH_PHOTO] = { "search_photo", 0, 0, 1, true },
 };
 
 struct zt_look {
