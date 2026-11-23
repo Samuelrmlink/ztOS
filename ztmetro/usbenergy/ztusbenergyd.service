@@ -1,0 +1,13 @@
+[Unit]
+Description=ztOS USB accessory energy: what each USB accessory drew from the phone
+Documentation=file:///usr/local/share/doc/ztos/usb-energy.md
+
+[Service]
+ExecStart=/usr/local/bin/ztusbenergyd run
+Restart=on-failure
+RestartSec=5
+# reads sysfs, writes ~/.local/state/ztos/usb-energy.json only
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

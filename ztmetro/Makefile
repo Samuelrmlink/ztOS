@@ -22,7 +22,7 @@ all: auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps settings/ztse
 	coru/ztoscoru notifyd/ztnotifyd phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles splash/ztos-splash \
 	store/ztstore power/ztpower servicemode/ztservicemode usbview/ztusbview camera/ztcamera gallery/ztgallery sound/ztsound osial/ztosial mirror/ztmirror pods/ztos-podsd pods/ztpods ntfy/ztos-ntfyd ntfy/ztntfy \
 	acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd \
-	passcoded/zrn-passcoded passcoded/zrn-passcode
+	passcoded/zrn-passcoded passcoded/zrn-passcode usbenergy/ztusbenergyd
 
 sounds/ztos-sounds: sounds/ztos-sounds.c volume-streams.h
 	$(CC) $(CFLAGS) $(WARN) $(shell pkg-config --cflags libpulse) -o $@ $< $(shell pkg-config --libs libpulse) -lm
@@ -161,7 +161,7 @@ passcoded/zrn-passcode: passcoded/zrn-passcode.c passcoded/passcode-proto.h
 # Settings has the Sound, AirPods and ZrnDevTest pages as pages of its own
 EMBEDDED_PAGES = sound/sound-pages.c pods/pods-pages.c devtest/devtest-pages.c devtest/devtest-power.c desktop/desktop-page.c
 EMBEDDED_DEPS = $(EMBEDDED_PAGES) sound/sound-pages.h sound/eq-drag.h pods/pods-pages.h pods/pods-ui.h devtest/devtest-pages.h devtest/devtest-power.h power/battery-health.h desktop/desktop-page.h audio-apps.h audio-state.h audio-sync.h
-settings/ztsettings: settings/ztsettings.c shade-edit.h appearance.h settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h settings/wifi-list.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
+settings/ztsettings: settings/ztsettings.c shade-edit.h appearance.h settings/passcodepage.h passcoded/passcode-proto.h settings/therm-retry.h power/battery-health.h volume-streams.h pods/pods-bar-state.h settings/boostpage.h settings/config-merge.h settings/page-tree.h settings/bt-list.h settings/wifi-list.h usbenergy/usb-energy-ui.h usbenergy/usb-energy.h ledd/led-policy.h mms/apnconf.h mms/apnconf.c $(EMBEDDED_DEPS) $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags json-c) -Isound -Ipods -Idevtest -o $@ settings/ztsettings.c mms/apnconf.c $(EMBEDDED_PAGES) $(CORE) $(APP_LIBS) $(shell pkg-config --libs json-c)
 
 devtest/zrndevtest: devtest/zrndevtest.c devtest/devtest-pages.c devtest/devtest-pages.h devtest/devtest-power.c devtest/devtest-power.h power/battery-health.h $(CORE_DEPS)
@@ -188,7 +188,7 @@ power/ztpower: power/ztpower.c power/battery-health.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ power/ztpower.c $(CORE) $(APP_LIBS)
 
 # USBView: the USB tree from sysfs, read only (usbview/usb-tree.h)
-usbview/ztusbview: usbview/ztusbview.c usbview/usb-tree.h usbview/usb-ids.h $(CORE_DEPS)
+usbview/ztusbview: usbview/ztusbview.c usbview/usb-tree.h usbview/usb-ids.h usbenergy/usb-energy.h usbenergy/usb-energy-ui.h $(CORE_DEPS)
 	$(APP_BUILD) -o $@ usbview/ztusbview.c $(CORE) $(APP_LIBS)
 
 # ServiceMode: the modem's field test and menus, to look at (modemd/servicemode.h)
@@ -200,6 +200,17 @@ perfd/zrnperfd: perfd/zrnperfd.c perfd/wlpm.c perfd/wlpm.h perfd/tickle.c perfd/
 
 perfd/ztprofile: perfd/ztprofile.c perfd/wlpm.c perfd/wlpm.h
 	$(CC) $(CFLAGS) $(WARN) -o $@ perfd/ztprofile.c perfd/wlpm.c -lm
+
+# What each USB accessory drew from the phone: the user's daemon (usbenergy/README.md)
+UE_DEPS = usbenergy/usb-energy.h usbenergy/usb-energy-track.h
+usbenergy/ztusbenergyd: usbenergy/ztusbenergyd.c $(UE_DEPS)
+	$(CC) $(CFLAGS) $(WARN) -Wno-format-truncation -o $@ usbenergy/ztusbenergyd.c
+
+.PHONY: install-usbenergy
+install-usbenergy: usbenergy/ztusbenergyd
+	install -Dm755 usbenergy/ztusbenergyd /usr/local/bin/ztusbenergyd
+	install -Dm644 usbenergy/ztusbenergyd.service /usr/lib/systemd/user/ztusbenergyd.service
+	install -Dm644 usbenergy/README.md /usr/local/share/doc/ztos/usb-energy.md
 
 # Battery and data use per app: the root daemon, its command (acct/README.md)
 ACCT_DEPS = acct/acctd.h acct/acct-common.h acct/acct-bpf.h ztos-user.h
@@ -447,6 +458,9 @@ install: check-arch
 	install -Dm644 ntfy/ztntfy.svg /usr/local/share/icons/hicolor/scalable/apps/ztntfy.svg
 	install -Dm755 power/ztpower /usr/local/bin/ztpower
 	install -Dm755 usbview/ztusbview /usr/local/bin/ztusbview
+	install -Dm755 usbenergy/ztusbenergyd /usr/local/bin/ztusbenergyd
+	install -Dm644 usbenergy/ztusbenergyd.service /usr/lib/systemd/user/ztusbenergyd.service
+	install -Dm644 usbenergy/README.md /usr/local/share/doc/ztos/usb-energy.md
 	install -Dm644 usbview/ztusbview.desktop /usr/local/share/applications/ztusbview.desktop
 	install -Dm644 usbview/ztusbview.svg /usr/local/share/icons/hicolor/scalable/apps/ztusbview.svg
 	install -Dm755 servicemode/ztservicemode /usr/local/bin/ztservicemode
@@ -517,7 +531,7 @@ install: check-arch
 	install -Dm644 coru/ztoscoru.service /etc/systemd/system/ztoscoru.service
 
 clean:
-	rm -f servicemode/ztservicemode usbview/ztusbview ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd coru/ztoscoru passcoded/zrn-passcoded passcoded/zrn-passcode notifyd/ztnotifyd splash/ztos-splash \
+	rm -f servicemode/ztservicemode usbview/ztusbview usbenergy/ztusbenergyd ntfy/ztos-ntfyd ntfy/ztntfy pods/ztos-podsd pods/ztpods sound/ztsound osial/ztosial auth/ztos-polkit-agent sounds/ztos-sounds ztmetro apps/ztapps xdg-shell-protocol.h settings/ztsettings devtest/zrndevtest devices/ztdevices power/ztpower perfd/zrnperfd perfd/ztprofile ledd/zrn-ledd touchkeyd/ztos-touchkeyd sensord/ztoscsf-sensord modemd/ztoscorenetworkingd mms/ztmmsd coru/ztoscoru passcoded/zrn-passcoded passcoded/zrn-passcode notifyd/ztnotifyd splash/ztos-splash \
 		phone/ztphone messages/ztmessages contacts/ztcontacts files/ztfiles store/ztstore camera/ztcamera gallery/ztgallery core/viewporter-protocol.c core/viewporter-client-protocol.h \
 		core/xdg-shell-client-protocol.h core/xdg-shell-protocol.c mirror/ztmirror mirror/wlr-screencopy.c mirror/wlr-screencopy-client.h \
 		acct/ztacctd acct/ztacct acct/ztusage clock/ztclock clock/ztclockd
@@ -577,6 +591,13 @@ check-usbview:
 	$(CC) -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-format-truncation -g \
 		-o /tmp/ztmetro-usbview-test usbview/tests/test-usbtree.c
 	/tmp/ztmetro-usbview-test usbview/tests/expected.txt
+
+# ztusbenergyd's accounting on a fake phone: sysfs, uevents, the gauge (no USB, no root)
+.PHONY: check-usbenergy
+check-usbenergy:
+	$(CC) -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-format-truncation -g \
+		-o /tmp/ztmetro-usbenergy-test usbenergy/tests/test-usbenergy.c -lm
+	/tmp/ztmetro-usbenergy-test
 
 # ServiceMode (modemd/servicemode.h): what reaches the CP, which keys pass; no modem
 .PHONY: check-servicemode
